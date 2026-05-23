@@ -1,0 +1,166 @@
+import { fetchImsDataRaw } from "../services/ims.service.js";
+
+const IMS_PACK_DOC_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function formatImsPackDocdtToken(d) {
+  return `${d.getDate()}${IMS_PACK_DOC_MON[d.getMonth()]}${d.getFullYear()}`;
+}
+
+/** Indian FY "2025-2026" → 1 Apr 2025 … 31 Mar 2026 */
+export function parseIndianFinancialYearBounds(fyStr) {
+  const m = String(fyStr ?? "")
+    .trim()
+    .match(/^(\d{4})-(\d{4})$/);
+  if (!m) throw new Error("Invalid financial year (expected e.g. 2025-2026)");
+  const y1 = parseInt(m[1], 10);
+  const y2 = parseInt(m[2], 10);
+  if (!Number.isFinite(y1) || !Number.isFinite(y2) || y2 !== y1 + 1) {
+    throw new Error("Invalid financial year range");
+  }
+  const from = new Date(y1, 3, 1);
+  const to = new Date(y2, 2, 31);
+  from.setHours(0, 0, 0, 0);
+  to.setHours(0, 0, 0, 0);
+  return { from, to };
+}
+
+/** Same shape as IMS examples: `dailyprod.docdt >= '2Apr2026' and … and dailyprod.docno = 30637` */
+export function buildImsPackFilterForFinancialYearDocno(financialYear, docNo) {
+  const { from, to } = parseIndianFinancialYearBounds(financialYear);
+  const a = formatImsPackDocdtToken(from);
+  const b = formatImsPackDocdtToken(to);
+  const datePart = `dailyprod.docdt >= '${a}' and dailyprod.docdt <= '${b}'`;
+  const n = parseInt(String(docNo).trim(), 10);
+  const docClause = Number.isFinite(n)
+    ? `dailyprod.docno = ${n}`
+    : `dailyprod.docno = '${String(docNo).replace(/'/g, "''")}'`;
+  return `${datePart} and ${docClause}`;
+}
+
+/** True if row `doc_dt` (YYYY-MM-DD) falls in Indian FY `fyStr` (e.g. 2025-2026). */
+export function rowInIndianFinancialYear(row, fyStr) {
+  const iso = row?.doc_dt;
+  if (iso == null || String(iso).trim() === "") return false;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso).trim());
+  if (!m) return false;
+  const rowT = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10)).getTime();
+  let from;
+  let to;
+  try {
+    ({ from, to } = parseIndianFinancialYearBounds(fyStr));
+  } catch {
+    return false;
+  }
+  return rowT >= from.getTime() && rowT <= to.getTime();
+}
+
+function formatPackDocDateIso(raw) {
+  if (raw == null || raw === "") return null;
+  const s0 = String(raw).trim();
+  if (!s0) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
+    const [y, mo, d] = s0.split("-");
+    return `${y}-${mo}-${d}`;
+  }
+  const monTok = /^(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{4})$/i.exec(s0);
+  if (monTok) {
+    const day = parseInt(monTok[1], 10);
+    const year = parseInt(monTok[3], 10);
+    const monIdx = IMS_PACK_DOC_MON.findIndex((x) => x.toLowerCase() === monTok[2].toLowerCase());
+    if (monIdx >= 0 && year > 0 && day >= 1 && day <= 31) {
+      const dt = new Date(year, monIdx, day);
+      if (dt.getFullYear() === year && dt.getMonth() === monIdx && dt.getDate() === day) {
+        return `${year}-${String(monIdx + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      }
+    }
+  }
+  if (s0.includes("-")) {
+    const parts = s0.split("-").map((p) => p.trim());
+    if (parts.length === 3) {
+      const [p0, p1, p2] = parts;
+      if (p0.length === 4) return `${p0}-${p1.padStart(2, "0")}-${p2.padStart(2, "0")}`;
+      if (p2.length === 4) return `${p2}-${p1.padStart(2, "0")}-${p0.padStart(2, "0")}`;
+    }
+  }
+  return null;
+}
+
+export function normalizeImsPackRow(r) {
+  const docno = r.docno ?? r.doc_no ?? r.Doc_No ?? r["Doc No"] ?? r.DocNo;
+  const rawDate = r.docdt ?? r.doc_dt ?? r.Doc_Dt ?? r["Doc Dt"] ?? r.DocDt;
+  const itemdcode = r.itemdcode ?? r.ItemDcode ?? r.Itemdcode;
+  const acc_code = r.acc_code ?? r.Acc_Code ?? r.AccCode;
+  const jobcardno = r.jobcardno ?? r.job_card_no ?? r.Job_Card_No ?? r["Job Card No"] ?? r.JobCardNo;
+  const acc_name = r.acc_name ?? r.Acc_Name ?? r.AccName;
+  const item_code = r.item_code ?? r.Item_Code ?? r.ItemCode;
+  const itemdesc = r.itemdesc ?? r.ItemDesc ?? r.item_desc;
+  const qtyRaw = r.QTY ?? r.qty ?? r.Total_Qty ?? r.TotalQty ?? r.total_qty;
+  const QTY = qtyRaw != null && qtyRaw !== "" ? Number(qtyRaw) : null;
+  const doc_dt = formatPackDocDateIso(rawDate);
+  return {
+    docno,
+    docdt: rawDate != null ? String(rawDate) : null,
+    doc_dt: doc_dt,
+    jobcardno,
+    acc_code,
+    acc_name,
+    itemdcode,
+    item_code,
+    itemdesc,
+    QTY,
+  };
+}
+
+/**
+ * IMS `pack` with **strict** Indian FY + doc no only (no docno-only fallback — wrong FY data never returned).
+ * Rows with parseable `doc_dt` outside the selected FY are dropped as a safety net.
+ */
+export async function fetchPackRowsForFinancialYearDoc(financialYear, docNo) {
+  const filter = buildImsPackFilterForFinancialYearDocno(financialYear, docNo);
+  const json = await fetchImsDataRaw("pack", filter);
+  if (!json || typeof json !== "object") {
+    return { success: false, records: [], message: "Invalid IMS response", filter };
+  }
+  if (!json.success) {
+    return {
+      success: false,
+      records: [],
+      message: json.message || "IMS API failed",
+      filter,
+    };
+  }
+  const raw = Array.isArray(json.records) ? json.records : [];
+  let records = raw.map(normalizeImsPackRow);
+  const imsMetaMessage = json.message && String(json.message).trim() !== "" ? String(json.message).trim() : null;
+
+  records = records.filter((r) => !r.doc_dt || rowInIndianFinancialYear(r, financialYear));
+
+  if (records.length > 0) {
+    return {
+      success: true,
+      records,
+      message: imsMetaMessage || "Data loaded.",
+      filter,
+    };
+  }
+
+  if (raw.length > 0 && records.length === 0) {
+    return {
+      success: false,
+      records: [],
+      message:
+        "IMS returned a packing record, but the document date is outside the selected financial year. Choose the correct financial year.",
+      filter,
+      softMessage: true
+    };
+  }
+
+  return {
+    success: false,
+    records: [],
+    message:
+      "No pack row was found in IMS for this financial year and packing number. Check the financial year, packing number, and spelling.",
+    filter,
+    softMessage: true
+  };
+}
