@@ -87,6 +87,7 @@ export const findForwardingNotes = async (options = {}) => {
     const searchTerm = `%${search}%`;
     values.push(searchTerm);
     conditions.push(`(
+      f.fuid::text ILIKE $${i} OR
       f.po_number ILIKE $${i} OR
       f.transporter_name ILIKE $${i} OR
       f.vehicle_number ILIKE $${i} OR

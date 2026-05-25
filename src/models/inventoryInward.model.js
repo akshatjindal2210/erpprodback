@@ -1,6 +1,7 @@
 import dbQuery from "../config/db.js";
 import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
 import { logBoxTransactionSafe, singlePackingFromRows } from "../utils/logBoxTransaction.js";
+import { sqlBoxInHand } from "../utils/boxInventorySql.js";
 
 // ─── ALLOWED CONFIG ─────────────────────────
 const ALLOWED_FILTER_FIELDS = ["in_uid", "packing_number", "approved", "from_date", "to_date"];
@@ -298,4 +299,155 @@ export const resetBoxesForInward = async (in_uid, userId = null) => {
     });
   }
   return rows;
+};
+
+// ─── PACKING AREA (in-hand boxes, no location yet) ─────────────────────
+const PACKING_AREA_PN = `NULLIF(TRIM(b.packing_number::text), '')`;
+const PACKING_AREA_SORT = {
+  packing_number: "packing_number",
+  box_count: "box_count",
+  stock_qty: "stock_qty",
+};
+
+/**
+ * Packing area summary: in-hand boxes with no location assigned (grouped by packing no.).
+ * Dispatched / out-entry / stock-adjustment-out boxes are excluded via sqlBoxInHand.
+ */
+export const findPackingAreaByPacking = async (options = {}) => {
+  const { search, sort = {}, page = 1, limit = 1000 } = options;
+
+  const values = [];
+  let i = 1;
+  const conditions = [
+    "b.is_deleted = false",
+    sqlBoxInHand("b"),
+    "b.location_id IS NULL",
+    `${PACKING_AREA_PN} IS NOT NULL`,
+  ];
+
+  if (search) {
+    values.push(`%${search}%`);
+    conditions.push(`${PACKING_AREA_PN} ILIKE $${i++}`);
+  }
+
+  const where = `WHERE ${conditions.join(" AND ")}`;
+
+  const [{ count }] = await dbQuery(
+    `SELECT COUNT(*)::int AS count FROM (
+       SELECT ${PACKING_AREA_PN} AS packing_number
+       FROM box_table b
+       ${where}
+       GROUP BY ${PACKING_AREA_PN}
+     ) sub`,
+    values
+  );
+
+  const sortBy = PACKING_AREA_SORT[sort.by] || "packing_number";
+  const sortOrder = sort.order === "DESC" ? "DESC" : "ASC";
+
+  const safePage = Math.max(1, Number(page) || 1);
+  const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 100));
+  const offset = (safePage - 1) * safeLimit;
+
+  const queryValues = [...values, safeLimit, offset];
+
+  const rows = await dbQuery(
+    `SELECT
+       ${PACKING_AREA_PN} AS packing_number,
+       COUNT(*)::int AS box_count,
+       COALESCE(SUM(b.qty), 0)::bigint AS stock_qty
+     FROM box_table b
+     ${where}
+     GROUP BY ${PACKING_AREA_PN}
+     ORDER BY ${sortBy} ${sortOrder}
+     LIMIT $${i++} OFFSET $${i++}`,
+    queryValues
+  );
+
+  return {
+    data: rows,
+    total: Number(count),
+    page: safePage,
+    limit: safeLimit,
+    totalPages: Math.ceil(Number(count) / safeLimit) || 0,
+  };
+};
+
+const PACKING_AREA_BOX_WHERE = (alias = "b") => [
+  `${alias}.is_deleted = false`,
+  sqlBoxInHand(alias),
+  `${alias}.location_id IS NULL`,
+  `NULLIF(TRIM(${alias}.packing_number::text), '') IS NOT NULL`,
+];
+
+const PACKING_AREA_BOX_SORT = {
+  box_no_uid: "b.box_no_uid",
+  packing_number: "packing_number",
+  qty: "b.qty",
+  created_at: "b.created_at",
+};
+
+/**
+ * Individual boxes in packing area (in-hand, no location).
+ * Out/dispatched/SA-minus boxes are excluded via sqlBoxInHand — same as inventory report.
+ */
+export const findPackingAreaBoxes = async (options = {}) => {
+  const { search, packing_number, sort = {}, page = 1, limit = 1000 } = options;
+
+  const values = [];
+  let i = 1;
+  const conditions = [...PACKING_AREA_BOX_WHERE("b")];
+
+  if (packing_number) {
+    values.push(String(packing_number).trim());
+    conditions.push(`NULLIF(TRIM(b.packing_number::text), '') = $${i++}`);
+  }
+
+  if (search) {
+    values.push(`%${search}%`);
+    conditions.push(`(
+      b.box_no_uid ILIKE $${i} OR
+      NULLIF(TRIM(b.packing_number::text), '') ILIKE $${i}
+    )`);
+    i++;
+  }
+
+  const where = `WHERE ${conditions.join(" AND ")}`;
+  const pnExpr = `NULLIF(TRIM(b.packing_number::text), '')`;
+
+  const [{ count }] = await dbQuery(
+    `SELECT COUNT(*)::int AS count FROM box_table b ${where}`,
+    values
+  );
+
+  const sortCol = PACKING_AREA_BOX_SORT[sort.by] || "b.box_no_uid";
+  const sortOrder = sort.order === "DESC" ? "DESC" : "ASC";
+
+  const safePage = Math.max(1, Number(page) || 1);
+  const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 100));
+  const offset = (safePage - 1) * safeLimit;
+  const queryValues = [...values, safeLimit, offset];
+
+  const rows = await dbQuery(
+    `SELECT
+       b.box_uid,
+       b.box_no_uid,
+       ${pnExpr} AS packing_number,
+       COALESCE(b.qty, 0)::int AS qty,
+       COALESCE(b.is_loose, false) AS is_loose,
+       b.created_at
+     FROM box_table b
+     ${where}
+     ORDER BY ${sortCol} ${sortOrder}
+     LIMIT $${i++} OFFSET $${i++}`,
+    queryValues
+  );
+
+  return {
+    data: rows,
+    total: Number(count),
+    page: safePage,
+    limit: safeLimit,
+    totalPages: Math.ceil(Number(count) / safeLimit) || 0,
+  };
 };

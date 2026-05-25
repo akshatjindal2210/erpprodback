@@ -1,5 +1,5 @@
 import express from "express";
-import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, updateForwardingNoteBill, deleteForwardingNote, getAvailableBoxesByItem, getForwardingNoteItems, unlockForwardingNoteLock, getForwardingNotesViews, getForwardingNoteViewById, printForwardingNoteBill, getForwardingNoteTransportersViews } from "../controllers/forwardingNote.controller.js";
+import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, updateForwardingNoteBill, deleteForwardingNote, getAvailableBoxesByItem, getForwardingNoteItems, lockForwardingNoteLock, unlockForwardingNoteLock, getForwardingNotesViews, getForwardingNoteViewById, printForwardingNoteBill, getForwardingNoteTransportersViews } from "../controllers/forwardingNote.controller.js";
 
 import { authenticate, authorize } from "../middleware/auth.js";
 import { accessControl, dynamicAccessControl } from "../middleware/accessControl.js";
@@ -33,7 +33,8 @@ router.post("/delete", authenticate, accessControl("forwarding_note_master", "de
 // Get available boxes for an item (for forwarding note creation)
 router.post("/available-boxes", authenticate, accessControl("forwarding_note_master", "view"), getAvailableBoxesByItem);
 
-// Super-admin unlock for Out Entry lock
+// Super-admin manual lock / unlock for Out Entry lock
+router.post("/lock-lock", authenticate, authorize("super_admin"), lockForwardingNoteLock);
 router.post("/unlock-lock", authenticate, authorize("super_admin"), unlockForwardingNoteLock);
 
 // Views (Helper API)

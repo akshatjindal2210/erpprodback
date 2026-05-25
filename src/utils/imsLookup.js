@@ -138,10 +138,15 @@ export async function enrichRowsWithIMS(rows = [], options = {}) {
     const accCode = canonicalCode(row?.[accCodeField]);
     const item = itemCode ? itemMap.get(itemCode) : null;
     const accName = accCode ? ledgerMap.get(accCode) : null;
+    const rawOut = row?.[itemCodeOut];
+    const outLooksLikeDcode =
+      itemCode != null &&
+      rawOut != null &&
+      canonicalCode(rawOut) === itemCode;
 
     return {
       ...row,
-      [itemCodeOut]: item?.item_code ?? row?.[itemCodeOut] ?? null,
+      [itemCodeOut]: item?.item_code ?? (outLooksLikeDcode ? null : rawOut) ?? null,
       [itemDescOut]: item?.item_desc ?? row?.[itemDescOut] ?? null,
       [accNameOut]: accName ?? row?.[accNameOut] ?? null
     };

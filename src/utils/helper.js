@@ -82,12 +82,19 @@ export const buildStickerPreviewDocument = (cardHtml) => {
     padding: 0;
     width: 5.7in;
     height: 3.6in;
-    max-width: 100%;
     overflow: hidden;
     background: #fff;
     box-sizing: border-box;
   }
-  body { display: block; }
+  body {
+    display: block;
+    line-height: 0;
+  }
+  body > div {
+    width: 5.7in;
+    height: 3.6in;
+    box-sizing: border-box;
+  }
 </style>
 </head>
 <body>
@@ -364,7 +371,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
       const lineQty = Math.round(Number(line.total_qty || 0));
       if (Number.isFinite(lineQty)) grandTotal += lineQty;
       sumBoxCount += Number(line.box || 0) + Number(line.loose_box || 0);
-      const hpCode = escapeHtml(line.item_code || grp.item_code || "—");
+      const hpCode = escapeHtml(grp.item_code || line.item_code || "—");
       const pkgNo = escapeHtml(line.packing_number || "—");
       const pkgDate = fmtBillShortDate(line.created_at || line.updated_at);
       const qtyCell = fmtQtyPlain(line.total_qty);

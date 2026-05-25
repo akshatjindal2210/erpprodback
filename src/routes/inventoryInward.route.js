@@ -1,5 +1,5 @@
 import express from "express";
-import { getInventoryInwards, getInventoryInwardById, createInventoryInward, updateInventoryInward, deleteInventoryInward, getInventoryInwardsViews, validateInwardBoxAtLocation, batchScanInwardBoxes } from "../controllers/inventoryInward.controller.js";
+import { getInventoryInwards, getPackingAreaList, getPackingAreaBoxesList, getInventoryInwardById, createInventoryInward, updateInventoryInward, deleteInventoryInward, getInventoryInwardsViews, validateInwardBoxAtLocation, batchScanInwardBoxes } from "../controllers/inventoryInward.controller.js";
 
 import { authenticate } from "../middleware/auth.js";
 import { accessControl, dynamicAccessControl } from "../middleware/accessControl.js";
@@ -8,6 +8,10 @@ const router = express.Router();
 
 // List
 router.post("/list", authenticate, accessControl("inventory_inwards", "view"), getInventoryInwards);
+
+// Packing area (in-hand boxes without location, by packing number)
+router.post("/packing-area-list", authenticate, accessControl("inventory_inwards", "view"), getPackingAreaList);
+router.post("/packing-area-boxes", authenticate, accessControl("inventory_inwards", "view"), getPackingAreaBoxesList);
 
 // Get single
 router.post("/get", authenticate, accessControl("inventory_inwards", "view"), getInventoryInwardById);

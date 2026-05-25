@@ -117,10 +117,12 @@ export const findForwardingNoteItems = async (options = {}) => {
     const searchTerm = `%${search}%`;
     values.push(searchTerm);
     conditions.push(`(
+      fi.fuid::text ILIKE $${i} OR
       fi.item_dcode::text ILIKE $${i} OR 
       fnm.po_number ILIKE $${i} OR
       fnm.acc_code::text ILIKE $${i} OR
       fnm.vehicle_number ILIKE $${i} OR
+      fnm.bill_no ILIKE $${i} OR
       fi.packing_number ILIKE $${i}
     )`);
     i++;

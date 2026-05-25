@@ -95,14 +95,6 @@ export const APP_CONFIG_DEFINITIONS = [
     description:
       "Sticker QR opens this URL with ?id=box_uid. Leave empty to encode box UID only.",
   },
-  {
-    key: APP_CONFIG_KEYS.BOX_NO_UID_PREFIX,
-    section: "application",
-    label: "Box sticker UID prefix",
-    value_type: "box_no_uid_prefix",
-    description:
-      "Prepended to new sticker IDs, e.g. 2026 → 2026_30637_50_3. Use 26 for a short year prefix. Old stickers without a prefix still scan.",
-  },
 ];
 
 const DEF_BY_KEY = Object.fromEntries(APP_CONFIG_DEFINITIONS.map((d) => [d.key, d]));

@@ -1,17 +1,9 @@
-import { findInventoryInwards, findInventoryInward, insertInventoryInward, updateInventoryInwards, deleteInventoryInwards, resetBoxesForInward } from "../models/inventoryInward.model.js";
+import { findInventoryInwards, findInventoryInward, insertInventoryInward, updateInventoryInwards, deleteInventoryInwards, resetBoxesForInward, findPackingAreaByPacking, findPackingAreaBoxes } from "../models/inventoryInward.model.js";
 
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
-import {
-  getPackingNumberFromBox,
-  updateBoxesAfterInward,
-  getDistinctPackingNumbersFromBoxNoUids,
-  findInHandBoxesByScanCodes,
-  findBoxesByScanCodesAny,
-  matchBoxRowByScanCode,
-  inwardScanRejectMessage,
-} from "../models/box.model.js";
+import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByScanCode, inwardScanRejectMessage } from "../models/box.model.js";
 import { logInwardLinkBatch } from "../utils/logBoxTransaction.js";
 import { sanitizeSearch } from "../utils/helper.js";
 import { validateInwardLocationsAgainstBoxes, validateSingleBoxAtLocation, validateBoxesAtLocationBatch, isInwardLocationValidationEnabled } from "../utils/inwardLocationValidation.js";
@@ -69,6 +61,51 @@ export const getInventoryInwards = async (req, res) => {
       limit,
       fields: INWARD_CFG.listFields,
       permission: req.permission
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── PACKING AREA LIST (unassigned location, grouped by packing) ───
+export const getPackingAreaList = async (req, res) => {
+  try {
+    const { page, limit, sortBy, order, search } = extractListParams(req.body, {
+      sortBy: "packing_number",
+      order: "ASC",
+    });
+
+    const result = await findPackingAreaByPacking({
+      search: sanitizeSearch(search),
+      sort: { by: sortBy, order },
+      page,
+      limit,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── PACKING AREA BOXES (flat list, in-hand + no location) ───
+export const getPackingAreaBoxesList = async (req, res) => {
+  try {
+    const { page, limit, sortBy, order, search } = extractListParams(req.body, {
+      sortBy: "box_no_uid",
+      order: "ASC",
+    });
+    const packing_number =
+      req.body?.packing_number != null ? String(req.body.packing_number).trim() : "";
+
+    const result = await findPackingAreaBoxes({
+      search: sanitizeSearch(search),
+      packing_number: packing_number || undefined,
+      sort: { by: sortBy, order },
+      page,
+      limit,
     });
 
     res.json({ success: true, ...result });

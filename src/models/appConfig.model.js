@@ -1,5 +1,5 @@
 import dbQuery from "../config/db.js";
-import { BOX_NO_UID_PREFIX_FALLBACK, normalizeBoxNoUidPrefix } from "../global/boxUid.js";
+import { getBoxNoUidPrefixFromFinancialYear } from "../utils/indianFinancialYear.js";
 import { getCachedAppConfig, setCachedAppConfig, invalidateAppConfigCache } from "../utils/appConfigCache.js";
 
 /*
@@ -116,15 +116,9 @@ export async function getAppConfigValues(config_keys = []) {
   return out;
 }
 
-/** Prefix for new sticker `box_no_uid` values (e.g. `2026` or `26`). */
+/** Prefix for new sticker `box_no_uid` values — from current Indian FY (e.g. FY 2026-2027 → `26`). */
 export async function getBoxNoUidPrefix() {
-  try {
-    const raw = await getAppConfigValue(APP_CONFIG_KEYS.BOX_NO_UID_PREFIX);
-    const n = normalizeBoxNoUidPrefix(raw);
-    return n || BOX_NO_UID_PREFIX_FALLBACK;
-  } catch {
-    return BOX_NO_UID_PREFIX_FALLBACK;
-  }
+  return getBoxNoUidPrefixFromFinancialYear();
 }
 
 export async function getDefaultListViewSpanDays() {

@@ -1,4 +1,4 @@
-import { findForwardingNotes, findForwardingNote, insertForwardingNote, updateForwardingNotes, updateForwardingNoteBillNo, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters } from "../models/forwardingNote.model.js";
+import { findForwardingNotes, findForwardingNote, insertForwardingNote, updateForwardingNotes, updateForwardingNoteBillNo, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters } from "../models/forwardingNote.model.js";
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
@@ -30,13 +30,30 @@ async function enrichForwardingItemRows(rows = []) {
 async function enrichForwardingNoteDetail(data) {
   if (!data) return data;
   const [summary] = await enrichForwardingSummaryRows([data]);
-  const enrichedItems = await enrichForwardingItemRows(data.items || []);
+  const accCode = data.acc_code;
+
+  const enrichedGroups = [];
+  for (const grp of data.items || []) {
+    const rowsToEnrich = [
+      { ...grp, acc_code: accCode },
+      ...(grp.breakdowns || []).map((b) => ({ ...b, acc_code: accCode })),
+    ];
+    const enriched = await enrichForwardingItemRows(rowsToEnrich);
+    const [enrichedGrp, ...enrichedBreakdowns] = enriched;
+
+    enrichedGroups.push({
+      ...enrichedGrp,
+      itemdesc: enrichedGrp.itemdesc ?? enrichedGrp.item_desc ?? null,
+      breakdowns: enrichedBreakdowns.map((row) => ({
+        ...row,
+        itemdesc: row.itemdesc ?? row.item_desc ?? null,
+      })),
+    });
+  }
+
   return {
     ...(summary || data),
-    items: (enrichedItems || []).map((row) => ({
-      ...row,
-      itemdesc: row.itemdesc ?? row.item_desc ?? null
-    }))
+    items: enrichedGroups,
   };
 }
 
@@ -403,6 +420,37 @@ export const deleteForwardingNote = async (req, res) => {
   }
 };
 
+export const lockForwardingNoteLock = async (req, res) => {
+  try {
+    const { fuid } = req.body;
+    if (!fuid) return res.status(400).json({ success: false, message: "fuid required" });
+
+    const existing = await findForwardingNote({ fuid });
+    if (!existing) return res.status(404).json({ success: false, message: "Not found" });
+    if (existing.out_entry_locked) {
+      return res.status(409).json({ success: false, message: "This forwarding note is already locked." });
+    }
+
+    const locked = await lockForwardingNoteForOutEntry({ fuid, userId: req.user.id });
+    if (!locked) return res.status(404).json({ success: false, message: "Not found" });
+
+    await logActivity(req, {
+      action: "lock",
+      entity: "forwarding_note_master",
+      entity_id: fuid,
+      meta: { reason: "manual_super_admin_lock_out_entry_lock" }
+    });
+
+    return res.json({
+      success: true,
+      message: "Forwarding note locked successfully.",
+      data: locked
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const unlockForwardingNoteLock = async (req, res) => {
   try {
     const { fuid } = req.body;
@@ -546,7 +594,8 @@ export const printForwardingNoteBill = async (req, res) => {
     const data = await findForwardingNote({ fuid });
     if (!data) return res.status(404).json({ success: false, message: "Not found" });
 
-    const html = buildForwardingNoteBillDocument(data, sanitizePrintCompanyInfo(company_info));
+    const enriched = await enrichForwardingNoteDetail(data);
+    const html = buildForwardingNoteBillDocument(enriched, sanitizePrintCompanyInfo(company_info));
     res.json({ success: true, html });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
