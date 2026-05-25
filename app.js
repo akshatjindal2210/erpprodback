@@ -7,6 +7,7 @@ import config from "./src/config/config.js";
 import { initDB } from "./src/config/initDB.js";
 import { seedRootUser } from "./src/config/seed.js";
 import logger from "./src/utils/logger.js";
+import { startDbBackupCron } from "./src/jobs/dbBackup.js";
 
 const server = http.createServer(app);
 
@@ -56,6 +57,7 @@ async function startServer() {
     server.listen(config.port, () => {
       logger.info(`Server running on port ${config.port} (API v${config.app_version})`);
       console.log(`🚀 Server running on port ${config.port} — API v${config.app_version}`);
+      startDbBackupCron();
     });
   } catch (error) {
     logger.error(`Server failed to start: ${error.message}`);

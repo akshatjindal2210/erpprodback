@@ -44,3 +44,7 @@ next-env.d.ts
 /logs
 logs/
 *.log
+
+/backups
+backups/
+*.dump

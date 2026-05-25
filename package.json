@@ -1,11 +1,12 @@
 {
   "name": "backend",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "",
   "main": "app.js",
   "scripts": {
     "start": "node app",
-    "dev": "nodemon app"
+    "dev": "nodemon app",
+    "backup": "node scripts/db-backup.js"
   },
   "keywords": [],
   "author": "",

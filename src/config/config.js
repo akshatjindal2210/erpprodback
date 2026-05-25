@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import path from "path";
 import { APP_VERSION } from "./appVersion.js";
 
 dotenv.config();
@@ -10,6 +11,23 @@ const config = {
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     port: parseInt(process.env.DB_PORT) || 5432,
+  },
+  dbBackup: {
+    enabled: process.env.DB_BACKUP_ENABLED !== "false",
+    weeklyEnabled: process.env.DB_BACKUP_WEEKLY_ENABLED !== "false",
+    hourlyEnabled: process.env.DB_BACKUP_HOURLY_ENABLED !== "false",
+    
+    cron: process.env.DB_BACKUP_CRON || "0 * * * *",
+    
+    dir: process.env.DB_BACKUP_DIR || path.join(process.cwd(), "backups"),
+    weeklyDir: process.env.DB_BACKUP_WEEKLY_DIR || "weekly",
+    hourlyDir: process.env.DB_BACKUP_HOURLY_DIR || "hourly",
+
+    hourlyStartHour: parseInt(process.env.DB_BACKUP_HOURLY_START_HOUR, 10) || 8,
+    hourlyEndHour: parseInt(process.env.DB_BACKUP_HOURLY_END_HOUR, 10) || 19,
+    
+    pgDump: process.env.PG_DUMP_PATH || "pg_dump",
+    ssl: process.env.DB_SSL === "true",
   },
   mssql: {
     server: process.env.MSSQL_HOST,
