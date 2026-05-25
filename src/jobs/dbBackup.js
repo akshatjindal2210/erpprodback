@@ -157,17 +157,22 @@ export function startDbBackupCron() {
     return;
   }
 
-  cron.schedule(schedule, async () => {
+  const runScheduledBackup = async (label) => {
     if (running) return;
     running = true;
     try {
       await runDbBackup({ cronMode: true });
     } catch (err) {
-      logger.error(`DB backup failed: ${err.message}`);
+      logger.error(`DB backup failed (${label}): ${err.message}`);
     } finally {
       running = false;
     }
-  });
+  };
+
+  cron.schedule(schedule, () => runScheduledBackup("cron"));
+
+  // Cron only fires on the hour (e.g. :00); run once when the server starts.
+  void runScheduledBackup("startup");
 
   const { hourlyStartHour: s, hourlyEndHour: e, dir } = config.dbBackup;
   logger.info(
