@@ -1,6 +1,6 @@
 import { withTransaction } from "../config/db.js";
 import { findAdjustments, findAdjustmentById, insertAdjustment, updateAdjustments, insertAdjustmentTx, updateAdjustmentsTx } from "../models/stockAdjustment.model.js";
-import { findDailyProdByDocNo, findBoxesByUids } from "../models/box.model.js";
+import { findDailyProdByDocNo, findBoxesByUids, purgeSaStickerBoxesTx } from "../models/box.model.js";
 import { fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../services/ims.service.js";
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../config/crudModules.js";
@@ -9,10 +9,8 @@ import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval
 import { sanitizeSearch } from "../utils/helper.js";
 import { enrichRowsWithIMS } from "../utils/imsLookup.js";
 import { syncAdjustmentMetadataOnly } from "../utils/stockAdjustmentSync.js";
-import {
-  applyStockAdjustmentOnApproveTx,
-  revertStockAdjustmentOnUnapproveTx
-} from "../utils/stockAdjustmentApply.js";
+import { applyStockAdjustmentOnApproveTx, revertStockAdjustmentOnUnapproveTx } from "../utils/stockAdjustmentApply.js";
+import { purgeStockAdjustmentTransactionLogs } from "../utils/logBoxTransaction.js";
 import { isBoxAvailableForMinus } from "../utils/boxInventory.js";
 
 const STOCK_CFG = getCrudModuleConfig("stock_adjustment");
@@ -370,6 +368,9 @@ export const deleteAdjustment = async (req, res) => {
         { is_deleted: true, deleted_by: req.user.id, deleted_at: new Date() },
         { adjustment_id: id }
       );
+      await purgeStockAdjustmentTransactionLogs({ client, adjustmentId: id });
+      const pn = String(existing.packing_number ?? "").trim();
+      await purgeSaStickerBoxesTx(client, pn || null);
     });
 
     await logActivity(req, {

@@ -127,6 +127,8 @@ export async function resolvePackingStickerMetaForPrint(packing_number, hints = 
     : null;
 
   return {
+    packing_number: pn,
+    doc_no: pn,
     itemdcode,
     item_code: enriched?.item_code ?? hints.item_code ?? null,
     itemdesc:

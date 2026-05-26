@@ -15,6 +15,18 @@ export const findTransactionBoxes = async (options = {}, req_user = {}) => {
   let i = 1;
   const conditions = [];
 
+  /** Hide add/minus/revert/delete logs when the stock adjustment row was deleted. */
+  conditions.push(`NOT (
+    tb.source_module = 'stock_adjustment'
+    AND tb.source_id IS NOT NULL
+    AND TRIM(tb.source_id::text) <> ''
+    AND NOT EXISTS (
+      SELECT 1 FROM stock_adjustment sa
+      WHERE sa.adjustment_id::text = TRIM(tb.source_id::text)
+        AND sa.is_deleted = false
+    )
+  )`);
+
   if (permission?.can_view_days > 0) {
     conditions.push(`tb.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
   }

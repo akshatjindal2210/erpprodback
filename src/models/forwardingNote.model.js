@@ -397,29 +397,40 @@ export const findForwardingNoteTransporters = async ({ acc_code, search, limit =
 
 export const findAvailableBoxes = async (item_dcode) => {
   const query = `
-    SELECT 
-      b.box_uid, 
-      b.box_no_uid, 
-      b.packing_number, 
-      b.qty, 
-      b.location_id, 
+    SELECT
+      b.box_uid,
+      b.box_no_uid,
+      b.packing_number,
+      b.qty,
+      b.location_id,
       b.is_loose,
       b.override_cust,
-      dp.doc_no, 
-      dp.doc_dt, 
-      dp.job_card_no, 
-      dp.acc_code, 
-      dp.item_dcode AS itemdcode
-    FROM dailyprod dp
-    INNER JOIN box_table b 
-      ON dp.doc_no::text = b.packing_number::text 
-    WHERE 
-      dp.item_dcode::int = $1::int  
-      AND dp.sticker_generated = true 
+      dp.doc_no,
+      dp.doc_dt,
+      dp.job_card_no,
+      COALESCE(NULLIF(trim(b.override_cust::text), ''), dp.acc_code::text) AS acc_code,
+      CASE
+        WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL
+          THEN sa_adj.item_dcode
+        ELSE dp.item_dcode
+      END::int AS itemdcode
+    FROM box_table b
+    LEFT JOIN dailyprod dp ON b.packing_number::text = dp.doc_no::text
+    LEFT JOIN stock_adjustment sa_adj
+      ON b.sa_id = sa_adj.adjustment_id
+     AND b.sa_entry_type = 'stock_in'
+     AND sa_adj.is_deleted = false
+    WHERE
+      (
+        CASE
+          WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL
+            THEN sa_adj.item_dcode
+          ELSE dp.item_dcode
+        END
+      )::int = $1::int
       AND ${sqlBoxInHand("b")}
-    ORDER BY b.created_at ASC;
+    ORDER BY b.created_at ASC
   `;
 
-  // Number(item_dcode) ensures parameter is a number
   return await dbQuery(query, [Number(item_dcode)]);
 };

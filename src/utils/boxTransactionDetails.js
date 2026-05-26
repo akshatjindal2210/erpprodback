@@ -11,13 +11,15 @@ function isLooseRow(row) {
  */
 export function buildBoxLogDetails(rows = [], extra = {}) {
   const list = Array.isArray(rows) ? rows.filter(Boolean) : [];
-  const box_no_uids = [
-    ...new Set(
-      list
-        .map((r) => (r?.box_no_uid != null ? String(r.box_no_uid).trim() : ""))
-        .filter(Boolean)
-    ),
-  ];
+  const seenUids = new Set();
+  const box_sticker_entries = [];
+  for (const r of list) {
+    const uid = r?.box_no_uid != null ? String(r.box_no_uid).trim() : "";
+    if (!uid || seenUids.has(uid)) continue;
+    seenUids.add(uid);
+    box_sticker_entries.push({ box_no_uid: uid, is_loose: isLooseRow(r) });
+  }
+  const box_no_uids = box_sticker_entries.map((e) => e.box_no_uid);
   const box_uids = list.map((r) => r?.box_uid).filter((u) => u != null);
 
   let standard_count = 0;
@@ -74,6 +76,8 @@ export function buildBoxLogDetails(rows = [], extra = {}) {
     loose_count,
     total_qty: resolvedQty,
     box_no_uids,
+    box_sticker_entries,
+    is_loose_flags: box_sticker_entries.map((e) => e.is_loose),
     box_uids: box_uids.length ? box_uids : extra.box_uids,
   };
 
@@ -92,6 +96,187 @@ function parseDetails(raw) {
     }
   }
   return typeof raw === "object" ? raw : {};
+}
+
+function splitUidTokens(value) {
+  if (value == null || value === "") return [];
+  return String(value)
+    .split(/[\s,;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function normalizeBoxNoUidsField(raw) {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) return raw.flatMap((u) => splitUidTokens(u));
+  return splitUidTokens(raw);
+}
+
+function isLooseFlag(flag) {
+  return flag === true || flag === 1 || flag === "true";
+}
+
+function collectBoxNoUidsFromLogDetails(d, displayFallback = null) {
+  const seen = new Set();
+  const out = [];
+  const add = (uid) => {
+    const s = String(uid ?? "").trim();
+    if (!s || seen.has(s)) return;
+    seen.add(s);
+    out.push(s);
+  };
+
+  if (Array.isArray(d.box_sticker_entries)) {
+    for (const e of d.box_sticker_entries) add(e?.box_no_uid);
+  }
+  normalizeBoxNoUidsField(d.box_no_uids).forEach(add);
+  add(d.box_no_uid);
+  if (displayFallback) splitUidTokens(displayFallback).forEach(add);
+  return out;
+}
+
+function boxIndexFromUid(uid) {
+  const parts = String(uid ?? "")
+    .trim()
+    .split("_");
+  const n = Number(parts[parts.length - 1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function mergeUidListsOrdered(...lists) {
+  const seen = new Set();
+  const out = [];
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const uid of list) {
+      const s = String(uid ?? "").trim();
+      if (!s || seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
+function mergeLooseByUid(looseByUid, uid, isLoose) {
+  if (!uid) return;
+  if (!looseByUid.has(uid)) looseByUid.set(uid, isLoose);
+  else if (isLoose) looseByUid.set(uid, true);
+}
+
+/** Map `is_loose_flags` to UIDs using `box_no_uids` array order (group / bulk logs). */
+function applyFlagsToLooseMap(looseByUid, pnUids, flags) {
+  if (!Array.isArray(flags) || !pnUids.length) return;
+  pnUids.forEach((uid, i) => {
+    if (flags[i] !== undefined) mergeLooseByUid(looseByUid, uid, isLooseFlag(flags[i]));
+  });
+}
+
+function inferLooseAtIndex(i, total, d, looseByUid, uid, pnUids) {
+  if (looseByUid.has(uid)) return looseByUid.get(uid);
+
+  const flags = Array.isArray(d.is_loose_flags) ? d.is_loose_flags : [];
+  const idxInPn = pnUids.indexOf(uid);
+  if (idxInPn >= 0 && flags[idxInPn] !== undefined) return isLooseFlag(flags[idxInPn]);
+
+  const kind = String(d.box_kind || "");
+  if (kind === "Loose") return true;
+  if (kind === "Standard") return false;
+
+  const looseN = Number(d.loose_count) || 0;
+  const stdN = Number(d.standard_count) || 0;
+  const boxIdx = boxIndexFromUid(uid);
+
+  if (looseN > 0 && stdN > 0) {
+    const packTotal = Math.max(total, pnUids.length, boxIdx || 0);
+    if (packTotal === looseN + stdN) {
+      if (boxIdx != null) return boxIdx > stdN;
+      return i >= stdN;
+    }
+  }
+  if (looseN > 0 && total === looseN && stdN === 0) return true;
+  return false;
+}
+
+/** All sticker UIDs + loose flags from stored log JSON (handles array, CSV string, legacy rows). */
+export function buildBoxStickerEntriesFromLogDetails(detailsRaw, displayFallback = null) {
+  const d = parseDetails(detailsRaw);
+  const pnUids = normalizeBoxNoUidsField(d.box_no_uids);
+  const flags = Array.isArray(d.is_loose_flags) ? d.is_loose_flags : [];
+
+  const fromEntries = Array.isArray(d.box_sticker_entries)
+    ? d.box_sticker_entries
+        .map((e) => String(e?.box_no_uid ?? "").trim())
+        .filter(Boolean)
+    : [];
+
+  const fromCollect = collectBoxNoUidsFromLogDetails(d, displayFallback);
+  const fromDisplay = normalizeBoxNoUidsField(displayFallback);
+  const uids = mergeUidListsOrdered(fromEntries, pnUids, fromCollect, fromDisplay);
+
+  const looseByUid = new Map();
+  if (Array.isArray(d.box_sticker_entries)) {
+    for (const e of d.box_sticker_entries) {
+      const uid = String(e?.box_no_uid ?? "").trim();
+      if (uid) mergeLooseByUid(looseByUid, uid, isLooseRow(e));
+    }
+  }
+  applyFlagsToLooseMap(looseByUid, pnUids, flags);
+
+  return uids.map((uid, i) => ({
+    box_no_uid: uid,
+    is_loose: inferLooseAtIndex(i, uids.length, d, looseByUid, uid, pnUids),
+  }));
+}
+
+export function mergeStickerEntriesByUid(existing = [], incoming = []) {
+  const map = new Map();
+  for (const e of [...existing, ...incoming]) {
+    const uid = String(e?.box_no_uid ?? "").trim();
+    if (!uid) continue;
+    const loose = e?.is_loose === true || e?.is_loose === 1 || e?.is_loose === "true";
+    if (!map.has(uid)) map.set(uid, { box_no_uid: uid, is_loose: loose });
+    else if (loose) map.set(uid, { box_no_uid: uid, is_loose: true });
+  }
+  return [...map.values()];
+}
+
+/** Fill missing sticker UIDs for bulk logs that only stored `box_uids` in JSON. */
+export async function hydrateTransactionBoxStickerEntries(row, findBoxesByUids) {
+  const enriched = enrichTransactionBoxForList(row);
+  const d = parseDetails(row?.details);
+  const expected = Math.max(
+    Number(enriched.box_count) || 0,
+    Array.isArray(d.box_uids) ? d.box_uids.length : 0,
+    normalizeBoxNoUidsField(d.box_no_uids).length
+  );
+  const have = enriched.box_sticker_entries?.length || 0;
+  if (!expected || have >= expected || typeof findBoxesByUids !== "function") {
+    return enriched;
+  }
+
+  const boxUids = (Array.isArray(d.box_uids) ? d.box_uids : [])
+    .map((id) => Number(id))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (!boxUids.length) return enriched;
+
+  const boxes = await findBoxesByUids(boxUids.map(String));
+  const fromDb = (boxes || [])
+    .filter((b) => b?.box_no_uid)
+    .sort((a, b) => Number(a.box_uid) - Number(b.box_uid))
+    .map((b) => ({
+      box_no_uid: String(b.box_no_uid).trim(),
+      is_loose: isLooseRow(b),
+    }));
+
+  if (!fromDb.length) return enriched;
+
+  const merged = mergeStickerEntriesByUid(enriched.box_sticker_entries, fromDb);
+  return {
+    ...enriched,
+    box_sticker_entries: merged,
+    box_no_uids_display: merged.map((e) => e.box_no_uid).join(", "),
+  };
 }
 
 function resolveBoxKind(d) {
@@ -115,11 +300,8 @@ function resolveBoxKind(d) {
 /** Add list-view fields from `details` JSON (works for older log rows too). */
 export function enrichTransactionBoxForList(row) {
   const d = parseDetails(row?.details);
-  const box_no_uids = Array.isArray(d.box_no_uids)
-    ? d.box_no_uids.map((u) => String(u).trim()).filter(Boolean)
-    : d.box_no_uid
-      ? [String(d.box_no_uid).trim()]
-      : [];
+  const stickerEntries = buildBoxStickerEntriesFromLogDetails(row?.details, row?.box_no_uids_display);
+  const box_no_uids = stickerEntries.map((e) => e.box_no_uid);
 
   const count =
     d.count != null && d.count !== ""
@@ -141,6 +323,7 @@ export function enrichTransactionBoxForList(row) {
     box_count: Number.isFinite(count) ? count : null,
     total_qty: Number.isFinite(total_qty) ? total_qty : null,
     box_kind: resolveBoxKind(d),
+    box_sticker_entries: stickerEntries,
     box_no_uids_display: box_no_uids.length ? box_no_uids.join(", ") : null,
   };
 }

@@ -1,9 +1,6 @@
 import { fetchFromIMS, fetchPackRowsForFinancialYearDoc } from "../services/ims.service.js";
-import {
-  getProductionStickerPanelMetaByPackingNumbers,
-  getProductionStickerPackingDocNos,
-} from "../models/box.model.js";
-import { resolvePartyRateCustCodeFromIms } from "../utils/imsLookup.js";
+import { getProductionStickerPanelMetaByPackingNumbers, getProductionStickerPackingDocNos, findItemDcodesWithInHandStock } from "../models/box.model.js";
+import { enrichRowsWithIMS, resolvePartyRateCustCodeFromIms } from "../utils/imsLookup.js";
 import dbQuery from "../config/db.js";
 import { getDefaultListViewSpanDays } from "../models/appConfig.model.js";
 import { resolveStandardQtyPerBoxForPacking } from "../utils/stockAdjustmentPacking.js";
@@ -742,6 +739,9 @@ export const getItemsViews = async (req, res) => {
     const onlyStickerGenerated =
       filters?.sticker_generated === true ||
       String(filters?.sticker_generated || "").toLowerCase() === "true";
+    const onlyInHandInventory =
+      filters?.in_hand_inventory === true ||
+      String(filters?.in_hand_inventory || "").toLowerCase() === "true";
 
     if (onlyStickerGenerated) {
       const stickerRows = await dbQuery(
@@ -749,6 +749,29 @@ export const getItemsViews = async (req, res) => {
       );
       const allowed = new Set((stickerRows || []).map((r) => String(r.itemdcode)));
       filtered = filtered.filter((r) => allowed.has(String(r.itemdcode)));
+    }
+
+    if (onlyInHandInventory) {
+      const stockRows = await findItemDcodesWithInHandStock();
+      const allowed = new Set((stockRows || []).map((r) => String(r.itemdcode)));
+      filtered = filtered.filter((r) => allowed.has(String(r.itemdcode)));
+      const present = new Set(filtered.map((r) => String(r.itemdcode)));
+      for (const row of stockRows || []) {
+        const id = String(row.itemdcode);
+        if (!present.has(id)) {
+          filtered.push({
+            itemdcode: id,
+            item_code: id,
+            itemdesc: "",
+          });
+          present.add(id);
+        }
+      }
+      filtered = await enrichRowsWithIMS(filtered, {
+        itemCodeField: "itemdcode",
+        itemCodeOut: "item_code",
+        itemDescOut: "itemdesc",
+      });
     }
 
     // Natural IMS order (no sorting)

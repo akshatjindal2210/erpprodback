@@ -7,11 +7,12 @@ import { getDefaultListViewSpanDays, getBoxNoUidPrefix } from "../models/appConf
 import { formatStandardBoxNoUid, docNoFromStandardBoxNoUid } from "../global/boxUid.js";
 import { getImsMapsSafe, getImsPartyRateMapSafe, pickPartyRateCustCode, partyRateAccCandidates, enrichRowsWithIMS, resolvePartyRateCustCodeFromIms } from "../utils/imsLookup.js";
 import { findSuggestedInwardLocationByHierarchy } from "../models/locationMaster.model.js";
-import { isBoxInHand } from "../utils/boxInventory.js";
+import { isBoxInHand, isBoxEligibleForOverrideCustomer, overrideCustomerScanRejectMessage } from "../utils/boxInventory.js";
 import { resolvePackingStickerMetaForPrint } from "../utils/stickerPrintMeta.js";
 
 import { logActivity } from "../utils/activityLogger.js";
-import { buildPrintDocument, buildStickerPreviewDocument, buildStickerCardHtml, sanitizeSearch } from "../utils/helper.js";
+import { logOverrideCustomerBatch } from "../utils/logBoxTransaction.js";
+import { buildPrintDocument, buildStickerPreviewDocument, buildStickerCardHtml, buildStickerPrintDocumentTitle, resolveStickerPackingNumber, sanitizeSearch } from "../utils/helper.js";
 import { resolveBoxViewsSelectFields } from "../config/view-fields/box.js";
 import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
 import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval.js";
@@ -399,6 +400,13 @@ export const getBoxesViews = async (req, res) => {
       if (!boxRow || boxRow.is_deleted) {
         return res.json({ success: true, data: null });
       }
+      if (permission_module === "change_override_customer" && !isBoxEligibleForOverrideCustomer(boxRow)) {
+        return res.json({
+          success: true,
+          data: null,
+          reject_reason: overrideCustomerScanRejectMessage(boxRow),
+        });
+      }
       const [enrichedBox] = await enrichBoxRowsFromIMS([boxRow]);
       return res.json({
         success: true,
@@ -435,6 +443,9 @@ export const getBoxesViews = async (req, res) => {
     if (permission_module === "inventory_inwards" || permission_module === "stock_adjustment") {
       enriched = (enriched || []).filter((row) => isBoxInHand(row));
     }
+    if (permission_module === "change_override_customer") {
+      enriched = (enriched || []).filter((row) => isBoxEligibleForOverrideCustomer(row));
+    }
     if (include_suggested_inward_location && permission_module === "inventory_inwards" && permission_action === "view" && Array.isArray(enriched) && enriched.length) {
       enriched = await Promise.all(enriched.map((row) => attachSuggestedInwardLocationToBoxRow(row)));
     }
@@ -466,16 +477,21 @@ function normalizeStickerProductionPayload(p, fallbackDocNo) {
 }
 
 /** Merge IMS-enriched box row with optional sticker_meta from packing-entry UI. */
-function mergeStickerPrintRow(enrichedBox, sticker_meta = {}) {
+function mergeStickerPrintRow(enrichedBox, sticker_meta = {}, packingHint = null) {
   const meta = sticker_meta && typeof sticker_meta === "object" ? sticker_meta : {};
   const metaItemCode = meta.item_code ?? meta.itemdcode ?? null;
   const metaDesc = meta.itemdesc ?? meta.description ?? meta.item_desc ?? null;
   const metaJob = meta.job_no ?? meta.job_card_no ?? null;
   const metaAccName = meta.acc_name ?? null;
+  const packing_number = resolveStickerPackingNumber(
+    { ...enrichedBox, ...meta },
+    packingHint ?? enrichedBox?.packing_number ?? meta.packing_number ?? meta.doc_no
+  );
 
   return {
     ...enrichedBox,
     ...meta,
+    packing_number,
     item_code: enrichedBox?.item_code || metaItemCode || null,
     itemdesc: enrichedBox?.itemdesc || metaDesc || null,
     item_desc: enrichedBox?.item_desc || metaDesc || null,
@@ -1130,12 +1146,13 @@ export const renderSingleSticker = async (req, res) => {
       sticker_meta &&
       typeof sticker_meta === "object" &&
       Object.keys(sticker_meta).length > 0;
-    const card = await buildStickerCardHtml(
-      mergeStickerPrintRow(
-        enrichedBox,
-        hasClientStickerMeta ? { ...packingMeta, ...sticker_meta } : packingMeta
-      )
+    const printRow = mergeStickerPrintRow(
+      enrichedBox,
+      hasClientStickerMeta ? { ...packingMeta, ...sticker_meta } : packingMeta,
+      enrichedBox?.packing_number ?? sticker_meta?.packing_number ?? sticker_meta?.doc_no
     );
+    const card = await buildStickerCardHtml(printRow);
+    const printPackingNo = resolveStickerPackingNumber(printRow, enrichedBox?.packing_number);
 
     await insertDownloadLog({
       box_uid,
@@ -1147,9 +1164,11 @@ export const renderSingleSticker = async (req, res) => {
 
     await incrementDownloadCount(box_uid, req.user.id);
 
+    const print_title = buildStickerPrintDocumentTitle(printPackingNo);
     res.json({
       success: true,
-      html: buildPrintDocument([card], { packing_number: enrichedBox?.packing_number }),
+      html: buildPrintDocument([card], { packing_number: printPackingNo }),
+      print_title,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -1213,7 +1232,8 @@ export const renderBulkStickers = async (req, res) => {
         return buildStickerCardHtml(
           mergeStickerPrintRow(
             { ...box, box_no: idx + 1, total_boxes: totalBoxes },
-            mergedMeta
+            mergedMeta,
+            packingNo
           )
         );
       })
@@ -1231,9 +1251,11 @@ export const renderBulkStickers = async (req, res) => {
       download_source,
     });
 
+    const print_title = buildStickerPrintDocumentTitle(packingNo);
     res.json({
       success: true,
       html: buildPrintDocument(cards, { packing_number: packingNo }),
+      print_title,
       total: cards.length,
     });
 
@@ -1254,11 +1276,24 @@ export const overrideCustomer = async (req, res) => {
     const existing = await findBox({ box_uid });
     if (!existing)
       return res.status(404).json({ success: false, message: "Box not found" });
+    if (!isBoxEligibleForOverrideCustomer(existing)) {
+      return res.status(400).json({
+        success: false,
+        message: overrideCustomerScanRejectMessage(existing),
+      });
+    }
 
     const [updated] = await updateBoxes(
       { override_cust: new_cust, updated_by: req.user.id, updated_at: new Date() },
       { box_uid }
     );
+
+    logOverrideCustomerBatch({
+      user_id: req.user.id,
+      boxes: [existing],
+      from_customer: existing.override_cust ?? existing.prod_acc_code,
+      to_customer: new_cust,
+    });
 
     await logActivity(req, {
       action    : "override_customer",
@@ -1371,6 +1406,13 @@ export const createOverrideRequest = async (req, res) => {
     if (boxes.length !== box_uids.length) {
       return res.status(404).json({ success: false, message: "Boxes not found." });
     }
+    const blocked = boxes.find((b) => !isBoxEligibleForOverrideCustomer(b));
+    if (blocked) {
+      return res.status(400).json({
+        success: false,
+        message: overrideCustomerScanRejectMessage(blocked),
+      });
+    }
 
     const requestRow = await insertOverrideRequest({
       packing_number: boxes[0].packing_number,
@@ -1388,6 +1430,14 @@ export const createOverrideRequest = async (req, res) => {
       await updateBoxesByUids(box_uids, {
         override_cust: to_customer,
         updated_by: req.user.id,
+      });
+      logOverrideCustomerBatch({
+        request_id: requestRow?.request_id,
+        user_id: req.user.id,
+        boxes,
+        from_customer: boxes[0]?.override_cust ?? boxes[0]?.prod_acc_code ?? null,
+        to_customer,
+        remarks,
       });
     }
 
@@ -1440,14 +1490,47 @@ export const updateOverrideRequest = async (req, res) => {
       fields.status = "pending";
     }
 
+    const uidsToValidate =
+      box_uids !== undefined
+        ? box_uids
+        : fields.approved === true
+          ? fields.box_uids || existingReq.box_uids
+          : null;
+    if (Array.isArray(uidsToValidate) && uidsToValidate.length) {
+      const liveBoxes = await findBoxesByUids(uidsToValidate);
+      if (liveBoxes.length !== uidsToValidate.length) {
+        return res.status(404).json({ success: false, message: "Boxes not found." });
+      }
+      const blockedUpdate = liveBoxes.find((b) => !isBoxEligibleForOverrideCustomer(b));
+      if (blockedUpdate) {
+        return res.status(400).json({
+          success: false,
+          message: overrideCustomerScanRejectMessage(blockedUpdate),
+        });
+      }
+    }
+
     // 4. Update Override Request Table (History/Log)
     const updatedRow = await updateOverrideRequestModel(request_id, fields);
 
     // 5. Approve: only override_cust on boxes — never the box row `approved` flag
     if (fields.approved === true) {
-      await updateBoxesByUids(fields.box_uids || existingReq.box_uids, {
+      const applyUids = fields.box_uids || existingReq.box_uids;
+      const applyBoxes = await findBoxesByUids(applyUids || []);
+      await updateBoxesByUids(applyUids, {
         override_cust: fields.to_customer || existingReq.to_customer,
         updated_by: fields.updated_by,
+      });
+      logOverrideCustomerBatch({
+        request_id,
+        user_id: req.user.id,
+        boxes: applyBoxes,
+        from_customer:
+          existingReq.from_customer ??
+          applyBoxes[0]?.override_cust ??
+          applyBoxes[0]?.prod_acc_code,
+        to_customer: fields.to_customer || existingReq.to_customer,
+        remarks: fields.remarks ?? existingReq.remarks,
       });
     }
 
@@ -1492,9 +1575,32 @@ export const approveOverrideRequest = async (req, res) => {
     }
 
     if (approve) {
-      await updateBoxesByUids(requestRow.box_uids || [], {
+      const uids = requestRow.box_uids || [];
+      const liveBoxes = await findBoxesByUids(uids);
+      if (liveBoxes.length !== uids.length) {
+        return res.status(404).json({ success: false, message: "Boxes not found." });
+      }
+      const blockedApprove = liveBoxes.find((b) => !isBoxEligibleForOverrideCustomer(b));
+      if (blockedApprove) {
+        return res.status(400).json({
+          success: false,
+          message: overrideCustomerScanRejectMessage(blockedApprove),
+        });
+      }
+      await updateBoxesByUids(uids, {
         override_cust: requestRow.to_customer,
         updated_by: req.user.id,
+      });
+      logOverrideCustomerBatch({
+        request_id,
+        user_id: req.user.id,
+        boxes: liveBoxes,
+        from_customer:
+          requestRow.from_customer ??
+          liveBoxes[0]?.override_cust ??
+          liveBoxes[0]?.prod_acc_code,
+        to_customer: requestRow.to_customer,
+        remarks: requestRow.remarks,
       });
     }
 

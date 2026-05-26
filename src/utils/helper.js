@@ -1,7 +1,23 @@
 import QRCode from "qrcode";
 import fs from "fs";
 import path from "path";
+import { docNoFromStandardBoxNoUid } from "../global/boxUid.js";
 import { getAppConfigValue, getStickerCompanyInfo, APP_CONFIG_KEYS } from "../models/appConfig.model.js";
+
+export function resolveStickerPackingNumber(sticker = {}, fallback = null) {
+  const candidates = [
+    sticker?.packing_number,
+    sticker?.package_no,
+    sticker?.doc_no,
+    fallback,
+    docNoFromStandardBoxNoUid(sticker?.box_no_uid),
+  ];
+  for (const c of candidates) {
+    const s = c != null ? String(c).trim() : "";
+    if (s) return s;
+  }
+  return null;
+}
 
 const getLogoBase64 = () => {
   try {
@@ -25,13 +41,11 @@ const escapeHtmlText = (s) =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 
-/** Safe segment for browser Save-as-PDF filename (from `<title>`). */
 const sanitizePrintFilenamePart = (s) =>
   String(s ?? "")
     .trim()
     .replace(/[\\/:*?"<>|]/g, "-");
 
-/** Browser print / Save as PDF default filename uses `<title>` (e.g. `Packing No. 12345`). */
 export const buildStickerPrintDocumentTitle = (packingNumber) => {
   const pn = sanitizePrintFilenamePart(packingNumber);
   return pn ? `Packing No. ${pn}` : "Packing No.";
@@ -281,7 +295,7 @@ export const buildStickerCardHtml = async (sticker) => {
         <tr>
           <td style="font-weight:700; font-size:11px; padding:${detailPadY}px 6px; vertical-align:middle; white-space:nowrap;">PACKING NO.</td>
           <td style="font-weight:700; font-size:11px; padding:${detailPadY}px 0; text-align:center; vertical-align:middle;">:</td>
-          <td style="font-size:${detailValueSize}px; font-weight:500; padding:${detailPadY}px 8px; line-height:1.2; word-break:break-word; vertical-align:middle;">${sticker.packing_number || "--"}</td>
+          <td style="font-size:${detailValueSize}px; font-weight:500; padding:${detailPadY}px 8px; line-height:1.2; word-break:break-word; vertical-align:middle;">${resolveStickerPackingNumber(sticker) || "--"}</td>
         </tr>
 
         <!-- PACKING DT. -->

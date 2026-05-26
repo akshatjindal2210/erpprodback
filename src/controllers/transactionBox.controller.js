@@ -2,7 +2,10 @@ import { findTransactionBoxes } from "../models/transactionBox.model.js";
 import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
 import { getCrudModuleConfig } from "../config/crudModules.js";
 import { BOX_TX_TYPE_LABELS } from "../constants/boxTransactionTypes.js";
-import { enrichTransactionBoxForList } from "../utils/boxTransactionDetails.js";
+import {
+  hydrateTransactionBoxStickerEntries,
+} from "../utils/boxTransactionDetails.js";
+import { findBoxesByUids } from "../models/box.model.js";
 
 const CFG = getCrudModuleConfig("box_transaction_logs");
 
@@ -26,10 +29,14 @@ export const listTransactionBoxes = async (req, res) => {
       req.user
     );
 
+    const data = await Promise.all(
+      (result.data || []).map((row) => hydrateTransactionBoxStickerEntries(row, findBoxesByUids))
+    );
+
     res.json({
       success: true,
       ...result,
-      data: (result.data || []).map(enrichTransactionBoxForList),
+      data,
       typeLabels: BOX_TX_TYPE_LABELS,
     });
   } catch (err) {

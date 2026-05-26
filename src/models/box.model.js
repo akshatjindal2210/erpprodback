@@ -401,6 +401,33 @@ export const findInHandBoxesByPackingNumber = async (packing_number) => {
   );
 };
 
+export const findItemDcodesWithInHandStock = async () => {
+  return dbQuery(
+    `SELECT DISTINCT
+       (
+         CASE
+           WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL
+             THEN sa_adj.item_dcode
+           ELSE dp.item_dcode
+         END
+       )::int::text AS itemdcode
+     FROM box_table b
+     LEFT JOIN dailyprod dp ON b.packing_number::text = dp.doc_no::text
+     LEFT JOIN stock_adjustment sa_adj
+       ON b.sa_id = sa_adj.adjustment_id
+      AND b.sa_entry_type = 'stock_in'
+      AND sa_adj.is_deleted = false
+     WHERE ${sqlBoxInHand("b")}
+       AND (
+         CASE
+           WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL
+             THEN sa_adj.item_dcode
+           ELSE dp.item_dcode
+         END
+       ) IS NOT NULL`
+  );
+};
+
 /** Standard pcs-per-box from local `dailyprod` → `packing_standard` for this packing doc. */
 export const findStandardQtyPerBoxForPackingNumber = async (doc_no) => {
   if (doc_no == null || String(doc_no).trim() === "") return null;
@@ -888,6 +915,54 @@ const PRODUCTION_STICKER_BOX_FILTER = `
   AND NOT (b.sa_entry_type = 'stock_in' AND b.sa_id IS NOT NULL)
 `;
 
+/** Production sticker UI only — SA boxes use stock_adjustment module + `checkSaStockInBoxesExist`. */
+const SQL_SA_BOX_NO_UID_MATCH = `b.box_no_uid::text ~ '_SA[0-9]+_'`;
+const SQL_EXCLUDE_SA_BOX_NO_UID = `AND NOT (${SQL_SA_BOX_NO_UID_MATCH})`;
+
+function sqlSaTokenInBoxNoUid(adjustmentIdExpr, boxNoUidRef = "b.box_no_uid") {
+  return `position(('_SA' || ${adjustmentIdExpr}::text || '_') IN ${boxNoUidRef}::text) > 0`;
+}
+
+/**
+ * Remove SA sticker rows: adjustment deleted, or this packing has no active approved add.
+ * @param {string|null} [packing_number] — when set, also drops orphans on that packing only.
+ */
+export async function purgeSaStickerBoxesTx(client = null, packing_number = null) {
+  const pn = packing_number != null ? String(packing_number).trim() : "";
+  const params = [];
+  const clauses = [
+    `EXISTS (
+      SELECT 1 FROM stock_adjustment sa
+      WHERE sa.is_deleted = true AND ${sqlSaTokenInBoxNoUid("sa.adjustment_id")}
+    )`,
+  ];
+  if (pn) {
+    params.push(pn);
+    const p = `$${params.length}`;
+    clauses.push(`(
+      trim(b.packing_number::text) = trim(${p}::text)
+      AND NOT EXISTS (
+        SELECT 1 FROM stock_adjustment sa
+        WHERE sa.is_deleted = false
+          AND sa.approved = true
+          AND sa.entry_type = 'add'
+          AND trim(sa.packing_number::text) = trim(${p}::text)
+          AND ${sqlSaTokenInBoxNoUid("sa.adjustment_id")}
+      )
+    )`);
+  }
+  const sql = `DELETE FROM box_table b
+     WHERE b.is_deleted = false
+       AND ${SQL_SA_BOX_NO_UID_MATCH}
+       AND (${clauses.join(" OR ")})
+     RETURNING box_uid, box_no_uid, packing_number`;
+  if (client?.query) {
+    const { rows } = await client.query(sql, params);
+    return rows || [];
+  }
+  return (await dbQuery(sql, params)) || [];
+}
+
 /**
  * Panel DB meta for generated stickers: customer (`override_cust`), dailyprod snapshot, audit.
  * Used by daily-prod list so generated rows do not show ERP customer after sticker create.
@@ -1189,17 +1264,25 @@ export const updateStockAdjustmentAddBoxesQtyTx = async (client, { adjustmentId,
   });
 };
 
-/** Permanently delete stock-in boxes for an add adjustment. Set `skipLog` on approve re-apply cleanup. */
+/**
+ * Permanently remove all boxes created by an add adjustment, including `stock_out`
+ * rows left after a minus (box_no_uid contains `_SA{adjustmentId}_`).
+ * Set `skipLog` on approve re-apply cleanup.
+ */
 export const permanentlyDeleteStockAdjustmentAddBoxesTx = async (
   client,
   { adjustmentId, userId = null, skipLog = true }
 ) => {
+  const adjId = Number(adjustmentId);
   const { rows } = await client.query(
     `DELETE FROM box_table
-     WHERE sa_id = $1::integer
-       AND sa_entry_type = 'stock_in'
+     WHERE is_deleted = false
+       AND (
+         (sa_id = $1::integer AND sa_entry_type = 'stock_in')
+         OR ${sqlSaTokenInBoxNoUid("$1", "box_no_uid")}
+       )
      RETURNING box_uid, packing_number`,
-    [adjustmentId]
+    [adjId]
   );
   if (!skipLog && rows?.length) {
     await logBoxTransaction({
@@ -1625,6 +1708,7 @@ export const getDownloadSummaryByPacking = async (packing_number) => {
     WHERE b.packing_number::text = $1::text
       AND b.is_deleted = false
       AND NOT (b.sa_entry_type = 'stock_in' AND b.sa_id IS NOT NULL)
+      ${SQL_EXCLUDE_SA_BOX_NO_UID}
     GROUP BY b.box_uid
     ORDER BY b.box_uid ASC
   `, [String(packing_number)]);

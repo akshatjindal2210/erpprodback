@@ -3,7 +3,8 @@ import { findInventoryInwards, findInventoryInward, insertInventoryInward, updat
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
-import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByScanCode, inwardScanRejectMessage } from "../models/box.model.js";
+import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByScanCode, inwardScanRejectMessage, getProductionStickerPanelMetaByPackingNumbers } from "../models/box.model.js";
+import { enrichRowsWithIMS } from "../utils/imsLookup.js";
 import { logInwardLinkBatch } from "../utils/logBoxTransaction.js";
 import { sanitizeSearch } from "../utils/helper.js";
 import { validateInwardLocationsAgainstBoxes, validateSingleBoxAtLocation, validateBoxesAtLocationBatch, isInwardLocationValidationEnabled } from "../utils/inwardLocationValidation.js";
@@ -69,10 +70,67 @@ export const getInventoryInwards = async (req, res) => {
   }
 };
 
+/* Packing-area summary details from generated sticker boxes (box_table panel meta),
+ * not from a separate dailyprod list join on the packing query.
+ */
+async function enrichPackingAreaListRows(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return rows;
+
+  const panelMap = await getProductionStickerPanelMetaByPackingNumbers(
+    rows.map((r) => r.packing_number)
+  );
+
+  const merged = rows.map((row) => {
+    const pn = row.packing_number != null ? String(row.packing_number).trim() : "";
+    const panel = pn ? panelMap.get(pn) : undefined;
+
+    if (!panel) {
+      return {
+        ...row,
+        sticker_generated: false,
+        doc_no: pn || null,
+        acc_name: null,
+        item_code: null,
+        item_desc: null,
+      };
+    }
+
+    return {
+      ...row,
+      sticker_generated: true,
+      doc_no: pn || null,
+      doc_dt: panel.dailyprod_doc_dt ?? null,
+      job_card_no: panel.dailyprod_job_card_no ?? null,
+      total_qty: panel.dailyprod_total_qty ?? null,
+      item_dcode: panel.itemdcode ?? null,
+      acc_code: panel.acc_code ?? null,
+      acc_name: null,
+      item_code: null,
+      item_desc: null,
+    };
+  });
+
+  const stickerRows = merged.filter((r) => r.sticker_generated);
+  if (!stickerRows.length) return merged;
+
+  const enrichedSticker = await enrichRowsWithIMS(stickerRows, {
+    itemCodeField: "item_dcode",
+    accCodeField: "acc_code",
+  });
+  const enrichedByPn = new Map(
+    enrichedSticker.map((r) => [String(r.packing_number).trim(), r])
+  );
+
+  return merged.map((row) => {
+    if (!row.sticker_generated) return row;
+    return enrichedByPn.get(String(row.packing_number).trim()) || row;
+  });
+}
+
 // ─── PACKING AREA LIST (unassigned location, grouped by packing) ───
 export const getPackingAreaList = async (req, res) => {
   try {
-    const { page, limit, sortBy, order, search } = extractListParams(req.body, {
+    const { page, limit, sortBy, order, search, filters } = extractListParams(req.body, {
       sortBy: "packing_number",
       order: "ASC",
     });
@@ -82,7 +140,10 @@ export const getPackingAreaList = async (req, res) => {
       sort: { by: sortBy, order },
       page,
       limit,
+      filters,
     });
+
+    result.data = await enrichPackingAreaListRows(result.data);
 
     res.json({ success: true, ...result });
   } catch (err) {
@@ -93,7 +154,7 @@ export const getPackingAreaList = async (req, res) => {
 // ─── PACKING AREA BOXES (flat list, in-hand + no location) ───
 export const getPackingAreaBoxesList = async (req, res) => {
   try {
-    const { page, limit, sortBy, order, search } = extractListParams(req.body, {
+    const { page, limit, sortBy, order, search, filters } = extractListParams(req.body, {
       sortBy: "box_no_uid",
       order: "ASC",
     });
@@ -106,6 +167,7 @@ export const getPackingAreaBoxesList = async (req, res) => {
       sort: { by: sortBy, order },
       page,
       limit,
+      filters,
     });
 
     res.json({ success: true, ...result });

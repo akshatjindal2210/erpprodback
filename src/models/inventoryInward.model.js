@@ -309,12 +309,57 @@ const PACKING_AREA_SORT = {
   stock_qty: "stock_qty",
 };
 
+/** Expect YYYY-MM-DD from the client (DateRangeFilter). Avoid Date parsing (timezone drift). */
+function ymdFromPackingAreaFilter(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const m = String(value).trim().match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+}
+
+function appendPackingDocDtFilter(conditions, values, packingNoExpr, filters = {}) {
+  const fromYmd = ymdFromPackingAreaFilter(filters.from_date);
+  const toYmd = ymdFromPackingAreaFilter(filters.to_date);
+  if (!fromYmd && !toYmd) return;
+
+  let i = values.length + 1;
+  const dtParts = [];
+  if (fromYmd) {
+    values.push(fromYmd);
+    dtParts.push(`dp.doc_dt >= $${i++}::date`);
+  }
+  if (toYmd) {
+    values.push(toYmd);
+    dtParts.push(`dp.doc_dt <= $${i++}::date`);
+  }
+
+  conditions.push(`EXISTS (
+    SELECT 1 FROM dailyprod dp
+    WHERE dp.doc_no::text = ${packingNoExpr}
+      AND dp.doc_dt IS NOT NULL
+      AND ${dtParts.join(" AND ")}
+  )`);
+}
+
+/** Production stickers only (excludes SA add placeholder boxes). */
+const PACKING_AREA_HAS_PRODUCTION_STICKER = `
+  EXISTS (
+    SELECT 1
+    FROM box_table b2
+    WHERE NULLIF(TRIM(b2.packing_number::text), '') = ${PACKING_AREA_PN}
+      AND b2.is_deleted = false
+      AND (b2.sa_entry_type IS DISTINCT FROM 'stock_out')
+      AND NOT (b2.sa_entry_type = 'stock_in' AND b2.sa_id IS NOT NULL)
+      AND ${sqlBoxInHand("b2")}
+      AND b2.location_id IS NULL
+  )
+`;
+
 /**
  * Packing area summary: in-hand boxes with no location assigned (grouped by packing no.).
  * Dispatched / out-entry / stock-adjustment-out boxes are excluded via sqlBoxInHand.
  */
 export const findPackingAreaByPacking = async (options = {}) => {
-  const { search, sort = {}, page = 1, limit = 1000 } = options;
+  const { search, sort = {}, page = 1, limit = 1000, filters = {} } = options;
 
   const values = [];
   let i = 1;
@@ -323,12 +368,15 @@ export const findPackingAreaByPacking = async (options = {}) => {
     sqlBoxInHand("b"),
     "b.location_id IS NULL",
     `${PACKING_AREA_PN} IS NOT NULL`,
+    PACKING_AREA_HAS_PRODUCTION_STICKER,
   ];
 
   if (search) {
     values.push(`%${search}%`);
     conditions.push(`${PACKING_AREA_PN} ILIKE $${i++}`);
   }
+
+  appendPackingDocDtFilter(conditions, values, PACKING_AREA_PN, filters);
 
   const where = `WHERE ${conditions.join(" AND ")}`;
 
@@ -349,6 +397,8 @@ export const findPackingAreaByPacking = async (options = {}) => {
   const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 100));
   const offset = (safePage - 1) * safeLimit;
 
+  const limitIdx = values.length + 1;
+  const offsetIdx = values.length + 2;
   const queryValues = [...values, safeLimit, offset];
 
   const rows = await dbQuery(
@@ -360,7 +410,7 @@ export const findPackingAreaByPacking = async (options = {}) => {
      ${where}
      GROUP BY ${PACKING_AREA_PN}
      ORDER BY ${sortBy} ${sortOrder}
-     LIMIT $${i++} OFFSET $${i++}`,
+     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
     queryValues
   );
 
@@ -392,28 +442,30 @@ const PACKING_AREA_BOX_SORT = {
  * Out/dispatched/SA-minus boxes are excluded via sqlBoxInHand — same as inventory report.
  */
 export const findPackingAreaBoxes = async (options = {}) => {
-  const { search, packing_number, sort = {}, page = 1, limit = 1000 } = options;
+  const { search, packing_number, sort = {}, page = 1, limit = 1000, filters = {} } = options;
 
   const values = [];
   let i = 1;
   const conditions = [...PACKING_AREA_BOX_WHERE("b")];
+  const pnExpr = `NULLIF(TRIM(b.packing_number::text), '')`;
 
   if (packing_number) {
     values.push(String(packing_number).trim());
-    conditions.push(`NULLIF(TRIM(b.packing_number::text), '') = $${i++}`);
+    conditions.push(`${pnExpr} = $${i++}`);
   }
+
+  appendPackingDocDtFilter(conditions, values, pnExpr, filters);
 
   if (search) {
     values.push(`%${search}%`);
+    const searchIdx = values.length;
     conditions.push(`(
-      b.box_no_uid ILIKE $${i} OR
-      NULLIF(TRIM(b.packing_number::text), '') ILIKE $${i}
+      b.box_no_uid ILIKE $${searchIdx} OR
+      NULLIF(TRIM(b.packing_number::text), '') ILIKE $${searchIdx}
     )`);
-    i++;
   }
 
   const where = `WHERE ${conditions.join(" AND ")}`;
-  const pnExpr = `NULLIF(TRIM(b.packing_number::text), '')`;
 
   const [{ count }] = await dbQuery(
     `SELECT COUNT(*)::int AS count FROM box_table b ${where}`,
@@ -426,6 +478,8 @@ export const findPackingAreaBoxes = async (options = {}) => {
   const safePage = Math.max(1, Number(page) || 1);
   const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 100));
   const offset = (safePage - 1) * safeLimit;
+  const limitIdx = values.length + 1;
+  const offsetIdx = values.length + 2;
   const queryValues = [...values, safeLimit, offset];
 
   const rows = await dbQuery(
@@ -439,7 +493,7 @@ export const findPackingAreaBoxes = async (options = {}) => {
      FROM box_table b
      ${where}
      ORDER BY ${sortCol} ${sortOrder}
-     LIMIT $${i++} OFFSET $${i++}`,
+     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
     queryValues
   );
 

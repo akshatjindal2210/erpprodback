@@ -54,6 +54,21 @@ export function isBoxEligibleForInward(box) {
   return isBoxInHand(box);
 }
 
+// Customer override: allow in-hand and outward boxes; block deleted and SA minus (removed) only.
+export function isBoxEligibleForOverrideCustomer(box) {
+  if (!box || box.is_deleted) return false;
+  if (isStockAdjustmentOut(box) || isBoxStockAdjustmentOut(box)) return false;
+  return true;
+}
+
+export function overrideCustomerScanRejectMessage(box) {
+  if (!box || box.is_deleted) return "Box not found or was removed.";
+  if (isStockAdjustmentOut(box) || isBoxStockAdjustmentOut(box)) {
+    return "This box was removed via stock adjustment (minus) and cannot be used for customer override.";
+  }
+  return "Box is not available for customer override.";
+}
+
 /** Minus list: in-hand + this adjustment's stock_out (edit); hide out-entry outward. */
 export function isBoxVisibleForStockAdjustmentMinus(box, { adjustmentId = null } = {}) {
   if (!box || box.is_deleted) return false;

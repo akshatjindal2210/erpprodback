@@ -36,8 +36,6 @@ app.use(express.urlencoded({ extended: true }));
 app.use(morganMiddleware);
 app.use(requestLogger);
 
-app.options('*', cors({ origin: [...config.frontend_url], credentials: true }));
-
 // ── CORS ──────────────────────────────
 app.use(
   cors({

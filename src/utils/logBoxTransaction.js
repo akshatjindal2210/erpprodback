@@ -17,16 +17,7 @@ export function singlePackingFromRows(rows = []) {
  * source_id     = us record ki id (in_uid, out_uid, adjustment_id, packing no)
  * transaction_type = kya hua (inward_link, sa_stock_in, out_link, …)
  */
-export async function logBoxTransaction({
-  client = null,
-  transaction_type,
-  source_module,
-  source_id = null,
-  packing_number = null,
-  user_id = null,
-  details = {},
-  rows = [],
-}) {
+export async function logBoxTransaction({ client = null, transaction_type, source_module, source_id = null, packing_number = null, user_id = null, details = {}, rows = [] }) {
   if (!transaction_type || !source_module) return;
 
   const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
@@ -70,6 +61,48 @@ export function logInwardLinkBatch({ in_uid, userId, rowGroups = [] }) {
       in_uid,
       location_count: rowGroups.filter((g) => g?.length).length,
       packing_numbers: [...new Set(rows.map((r) => r.packing_number).filter(Boolean))],
+    },
+  });
+}
+
+/** Customer override applied on one or more boxes (sticker customer updated). */
+/** Remove all box-transaction rows for a stock adjustment (e.g. whole adjustment deleted). */
+export async function purgeStockAdjustmentTransactionLogs({ client = null, adjustmentId } = {}) {
+  const id = adjustmentId != null ? String(adjustmentId).trim() : "";
+  if (!id) return;
+
+  const sql = `DELETE FROM transaction_box
+     WHERE source_module = 'stock_adjustment'
+       AND source_id = $1::text`;
+
+  if (client?.query) {
+    await client.query(sql, [id]);
+  } else {
+    await dbQuery(sql, [id]);
+  }
+}
+
+export function logOverrideCustomerBatch({request_id = null, user_id = null, boxes = [], from_customer = null, to_customer = null, remarks = null}) {
+  const rows = Array.isArray(boxes) ? boxes.filter(Boolean) : [];
+  if (!rows.length) return;
+  logBoxTransactionSafe({
+    transaction_type: BOX_TX_TYPES.OVERRIDE_CUSTOMER,
+    source_module: "change_override_customer",
+    source_id: request_id != null && request_id !== "" ? String(request_id) : null,
+    packing_number: singlePackingFromRows(rows),
+    user_id,
+    rows,
+    details: {
+      from_customer:
+        from_customer != null && String(from_customer).trim() !== ""
+          ? String(from_customer).trim()
+          : null,
+      to_customer:
+        to_customer != null && String(to_customer).trim() !== ""
+          ? String(to_customer).trim()
+          : null,
+      remarks: remarks != null && String(remarks).trim() !== "" ? String(remarks).trim() : undefined,
+      request_id: request_id != null ? request_id : undefined,
     },
   });
 }
