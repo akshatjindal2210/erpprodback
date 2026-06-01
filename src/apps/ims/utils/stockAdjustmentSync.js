@@ -51,7 +51,7 @@ export async function syncAdjustmentMetadataOnly(client, { existing, body, userI
   }
 
   if (entryType === "minus" && body.removed_box_uids !== undefined) {
-    const uids = [...new Set(body.removed_box_uids.map((u) => Number(u)).filter((n) => Number.isFinite(n)))];
+    const uids = [...new Set((Array.isArray(body.removed_box_uids) ? body.removed_box_uids : []).map((u) => Number(u)).filter((n) => Number.isFinite(n)))];
     if (!uids.length) {
       const err = new Error("Select at least one box.");
       err.statusCode = 400;

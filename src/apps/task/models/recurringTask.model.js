@@ -1,5 +1,6 @@
 import dbQuery from "../shared/db.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
+import { asArray } from "../shared/utils/helper.js";
 
 const RecurringTask = {
   tableName: "task_recurring_tasks",
@@ -212,10 +213,11 @@ const RecurringTask = {
   },
 
   async addChatMessage(recurring_id, user_id, message = null, attachments = []) {
+    const list = asArray(attachments);
     return await dbQuery(
       `INSERT INTO task_recurring_task_chat (recurring_id, user_id, message, attachments)
        VALUES (?, ?, ?, ?)`,
-      [recurring_id, user_id, message, attachments.length ? JSON.stringify(attachments) : null]
+      [recurring_id, user_id, message, list.length ? JSON.stringify(list) : null]
     );
   },
 
@@ -287,9 +289,10 @@ const RecurringTask = {
   },
 
   async updateChatAttachments(chat_id, attachments) {
+    const list = asArray(attachments);
     return await dbQuery(
       `UPDATE task_recurring_task_chat SET attachments = ? WHERE chat_id = ?`,
-      [attachments.length > 0 ? JSON.stringify(attachments) : null, chat_id]
+      [list.length > 0 ? JSON.stringify(list) : null, chat_id]
     );
   },
 

@@ -8,12 +8,39 @@ export const isDbTrue = (val) =>
 
 export const toDbBool = (val) => !!val;
 
-// ── parseArr — FormData string → array
-export const parseArr = (val) => {
+/** Never null — safe for `.length` / `.map` / `for..of`. */
+export const asArray = (val) => (Array.isArray(val) ? val : []);
+
+/** FormData / JSON sub_users → always an array. */
+export const parseSubUsers = (val) => {
+  if (val == null || val === "") return [];
   if (Array.isArray(val)) return val;
-  if (!val) return [];
-  try { return JSON.parse(val); } catch { return []; }
+  if (typeof val === "string") {
+    try {
+      return asArray(JSON.parse(val));
+    } catch {
+      return [];
+    }
+  }
+  return [];
 };
+
+/** DB / JSON attachment column → always an array. */
+export const parseAttachmentsJson = (val) => {
+  if (val == null || val === "") return [];
+  if (Array.isArray(val)) return val;
+  if (typeof val === "string") {
+    try {
+      return asArray(JSON.parse(val));
+    } catch {
+      return [];
+    }
+  }
+  return [];
+};
+
+// ── parseArr — FormData string → array (recurrence fields)
+export const parseArr = (val) => parseSubUsers(val);
 
 // ── calcNextOccurrence
 export const calcNextOccurrence = (type, weekdays = [], monthDates = [], yearDates = []) => {

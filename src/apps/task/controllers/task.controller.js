@@ -1,7 +1,7 @@
 import RecurringTask from "../models/recurringTask.model.js";
 import Task from "../models/task.model.js";
 import User from "../../core/models/user.model.js";
-import { calculateNextOccurrence, chatMessage, ensureDir, saveAttachments, upsertRecurring, isDbTrue } from "../shared/index.js";
+import { calculateNextOccurrence, chatMessage, ensureDir, saveAttachments, upsertRecurring, isDbTrue, parseSubUsers, parseAttachmentsJson, asArray } from "../shared/index.js";
 import fs from "fs";
 import path from "path";
 const log = (task_id, user_id, performed_by, action, action_detail = null, assignment_id = null) => Task.addLog(task_id, user_id, performed_by, action, action_detail, assignment_id);
@@ -254,11 +254,7 @@ export async function createTask(req, res) {
     const recurringFlag      = [true, 1, "true", "1"].includes(is_recurring);
     const createTodayFlag    = [true, 1, "true", "1"].includes(create_today);
 
-    const parsedSubUsers = (() => {
-      if (!sub_users) return [];
-      try { return typeof sub_users === "string" ? JSON.parse(sub_users) : sub_users; }
-      catch { return []; }
-    })();
+    const parsedSubUsers = parseSubUsers(sub_users);
 
     let schedule_id   = null;
     let task_id       = null;
@@ -536,11 +532,11 @@ export async function updateTask(req, res) {
       }
 
       if (sub_users !== undefined) {
-        const parsedSubUsers = typeof sub_users === "string" ? JSON.parse(sub_users) : sub_users;
+        const subUserList = parseSubUsers(sub_users);
 
         const uniqueParsedSubUsers = [];
         const seen = new Set();
-        for (const su of parsedSubUsers) {
+        for (const su of subUserList) {
           const rawId = su.user_id ?? su.assigned_to;
           if (!rawId) continue;
           const suId = String(rawId);
@@ -655,8 +651,7 @@ export async function deleteTask(req, res) {
     const selfNoteFiles = await Task.getSelfNoteAttachments(id);
 
     [...chatFiles, ...selfNoteFiles].forEach(row => {
-      const files = typeof row.attachments === "string"
-        ? JSON.parse(row.attachments) : (row.attachments ?? []);
+      const files = parseAttachmentsJson(row.attachments);
       files.forEach(f => {
         try { if (fs.existsSync(f.file_path)) fs.unlinkSync(f.file_path); } catch {}
       });
@@ -889,7 +884,7 @@ export async function requestCompletion(req, res) {
       return res.status(403).json({ success: false, message: "You are not authorized to complete this task" });
 
     // Check pending sub-users
-    const pendingSubUsers = await Task.getPendingSubUsers(id);
+    const pendingSubUsers = asArray(await Task.getPendingSubUsers(id));
     if (pendingSubUsers.length > 0)
       return res.status(400).json({
       success: false,
@@ -945,7 +940,7 @@ export async function approveSubUser(req, res) {
     await log(id, user_id, user_name, "sub_user_completion_approved",
       `Sub-user assignment #${assignmentId} approved`, Number(assignmentId));
 
-    const remaining = await Task.getPendingSubUsers(id);
+    const remaining = asArray(await Task.getPendingSubUsers(id));
 
     if (remaining.length === 0) {
 

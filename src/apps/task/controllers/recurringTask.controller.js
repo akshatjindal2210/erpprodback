@@ -1,6 +1,6 @@
 import fs from "fs";
 import RecurringTask from "../models/recurringTask.model.js";
-import { chatMessage } from "../shared/index.js";
+import { chatMessage, parseSubUsers, parseAttachmentsJson, asArray } from "../shared/index.js";
 
 // Utility to parse numbers safely
 const parseNumber = (value) => {
@@ -192,7 +192,7 @@ export async function updateRecurringTask(req, res) {
 
     // Handle sub-users
     if (sub_users !== undefined) {
-      const normalizedSubUsers = sub_users
+      const normalizedSubUsers = parseSubUsers(sub_users)
         .map(s => ({ ...s, user_id: s.user_id ?? s.assigned_to }))
         .filter(s => s.user_id);
 
@@ -247,8 +247,9 @@ export async function updateRecurringTask(req, res) {
       const allChats = await RecurringTask.getChatAttachments(id);
 
       for (const chat of allChats) {
-        const files = chat.attachments ? (typeof chat.attachments === "string" ? JSON.parse(chat.attachments) : chat.attachments) : [];
-        const removedFiles = files.filter(f => !keepAttachments.includes(f.file_path));
+        const files = parseAttachmentsJson(chat.attachments);
+        const keepList = asArray(keepAttachments);
+        const removedFiles = files.filter((f) => !keepList.includes(f.file_path));
 
         if (removedFiles.length > 0) {
           for (const f of removedFiles) {
@@ -257,7 +258,7 @@ export async function updateRecurringTask(req, res) {
             } catch {}
           }
 
-          const remaining = files.filter(f => keepAttachments.includes(f.file_path));
+          const remaining = files.filter((f) => keepList.includes(f.file_path));
           await RecurringTask.updateChatAttachments(chat.chat_id, remaining);
         }
       }

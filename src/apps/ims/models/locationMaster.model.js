@@ -165,7 +165,7 @@ function normHierarchyCode(v) {
  * (1) customer + item on location, both match box
  * (2) customer-only on location (acc matches, item_dcode NULL on master)
  * (3) item-only on location (acc NULL, item matches)
- * (4) open racks (both NULL on master) — all matches up to cap
+ * (4) open racks (both NULL on master)  all matches up to cap
  * returns {{ rows: object[], match_tier: 1|2|3|4|null }}
  */
 export const findSuggestedInwardLocationByHierarchy = async ({ acc_code, item_dcode }) => {

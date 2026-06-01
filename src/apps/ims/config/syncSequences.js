@@ -22,10 +22,10 @@ export async function syncImsSequences() {
 
   for (const { table_name, column_name, seq_name } of rows) {
     try {
-      const [{ max_val }] = await dbQuery(
+      const maxRows = await dbQuery(
         `SELECT COALESCE(MAX(${column_name}), 0)::bigint AS max_val FROM ${table_name}`
       );
-      const maxN = Number(max_val) || 0;
+      const maxN = Number(maxRows[0]?.max_val) || 0;
       await dbQuery(`SELECT setval($1, GREATEST($2, 1), $3)`, [seq_name, maxN, maxN > 0]);
     } catch (err) {
       console.warn(`⚠️ Failed to sync sequence for ${table_name}.${column_name}:`, err.message);
