@@ -28,6 +28,32 @@ function buildLocationNo(rackNo, shelfNo) {
   return `${rackNo || ""}${(shelfNo || "").toString().toUpperCase()}`;
 }
 
+/** Map Postgres unique violations to the correct user-facing message. */
+function locationUniqueViolationMessage(err, locationNo = "") {
+  const constraint = err?.constraint || "";
+  const loc = locationNo ? ` "${locationNo}"` : "";
+
+  if (constraint === "ims_location_master_pkey") {
+    return "Could not save location: database ID is out of sync. Restart the backend server and try again.";
+  }
+  if (constraint === "location_master_rack_shelf_unique_active") {
+    return loc
+      ? `Location${loc} already exists for this rack and shelf.`
+      : "A location with this rack and shelf number already exists.";
+  }
+  if (constraint === "location_master_location_no_unique_active") {
+    return loc
+      ? `Location number${loc} is already in use.`
+      : "This location number is already in use. Use a different rack or shelf combination.";
+  }
+  if (err?.code === "23505") {
+    return loc
+      ? `Location${loc} could not be saved because a duplicate record exists.`
+      : "Could not save location because a duplicate record exists.";
+  }
+  return err?.message || "Could not save location.";
+}
+
 const log = (req, action, entity_id, details) =>
   logActivity(req, {
     action,
@@ -78,12 +104,13 @@ export const getLocationById = async (req, res) => {
 };
 
 export const createLocation = async (req, res) => {
+  let locationNo = "";
   try {
     const { rack_no, shelf_no, location_description, total_capacity, acc_code, item_dcode, approved } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
     const normalizedRackNo = rack_no?.toString().trim();
     const normalizedShelfNo = normalizeShelfNo(shelf_no);
-    const locationNo = buildLocationNo(normalizedRackNo, normalizedShelfNo);
+    locationNo = buildLocationNo(normalizedRackNo, normalizedShelfNo);
 
     if (!normalizedRackNo) {
       return res.status(400).json({ success: false, message: "rack_no required" });
@@ -142,10 +169,11 @@ export const createLocation = async (req, res) => {
 
     return res.status(201).json({ success: true, data: enriched ?? data, message: "Location created successfully" });
   } catch (err) {
+    console.log("Error creating location:", err);
     if (err?.code === "23505") {
       return res.status(409).json({
         success: false,
-        message: "Location already exists for this rack and shelf",
+        message: locationUniqueViolationMessage(err, locationNo),
       });
     }
     return res.status(500).json({ success: false, message: err.message });
@@ -153,6 +181,7 @@ export const createLocation = async (req, res) => {
 };
 
 export const updateLocation = async (req, res) => {
+  let locationNo = "";
   try {
     const { id, rack_no, shelf_no, location_description, total_capacity, acc_code, item_dcode, approved } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
@@ -209,6 +238,7 @@ export const updateLocation = async (req, res) => {
     const nextRackNo = fields.rack_no ?? existing.rack_no;
     const nextShelfNo = fields.shelf_no ?? existing.shelf_no;
     fields.location_no = buildLocationNo(nextRackNo, nextShelfNo);
+    locationNo = fields.location_no;
 
     if (rack_no !== undefined || shelf_no !== undefined) {
       const duplicate = await findLocationDuplicate({
@@ -233,10 +263,11 @@ export const updateLocation = async (req, res) => {
     const [enriched] = await enrichLocationRows(updated ? [updated] : []);
     return res.json({ success: true, data: enriched ?? updated, message: "Location updated successfully" });
   } catch (err) {
+    console.log("Error updating location:", err);
     if (err?.code === "23505") {
       return res.status(409).json({
         success: false,
-        message: "Location already exists for this rack and shelf",
+        message: locationUniqueViolationMessage(err, locationNo),
       });
     }
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });

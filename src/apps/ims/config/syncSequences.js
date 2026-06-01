@@ -1,10 +1,10 @@
 import dbQuery from "../../../config/db.js";
 
 /**
- * Keeps PostgreSQL SERIAL sequences aligned with MAX(id) on task_* tables.
+ * Keeps PostgreSQL SERIAL sequences aligned with MAX(id) on ims_* tables.
  * Prevents duplicate-key errors after data import / restore with explicit IDs.
  */
-export async function syncTaskSequences() {
+export async function syncImsSequences() {
   const rows = await dbQuery(`
     SELECT
       c.relname AS table_name,
@@ -14,7 +14,7 @@ export async function syncTaskSequences() {
     JOIN pg_namespace n ON n.oid = c.relnamespace
     JOIN pg_attribute a ON a.attrelid = c.oid
     WHERE n.nspname = 'public'
-      AND c.relname LIKE 'task_%'
+      AND c.relname LIKE 'ims_%'
       AND a.attnum > 0
       AND NOT a.attisdropped
       AND pg_get_serial_sequence(format('%I.%I', n.nspname, c.relname), a.attname) IS NOT NULL

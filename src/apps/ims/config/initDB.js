@@ -14,6 +14,7 @@ import { createCategoryTable } from "./tables/category.table.js";
 import { createStickerTypeTable } from "./tables/sticker_type.table.js";
 import { createAppConfigTable } from "./tables/app_config.table.js";
 import { createActivityLogsTable } from "./tables/activity_logs.table.js";
+import { syncImsSequences } from "./syncSequences.js";
 
 export async function initImsDB() {
   await createCategoryTable();
@@ -33,5 +34,8 @@ export async function initImsDB() {
   await createOutEntryScannedBoxTable();
   await createActivityLogsTable();
   await createTransactionBoxTable();
+
+  await syncImsSequences();
+
   console.log("✅ IMS tables ready");
 }
