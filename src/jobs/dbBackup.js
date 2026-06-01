@@ -13,7 +13,10 @@ let running = false;
 
 const pad = (n) => String(n).padStart(2, "0");
 
-const dateTimeStamp = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Matches one hourly slot: `db_2026-06-01_14.dump` or legacy `db_2026-06-01_14-30-45.dump`. */
+const hourlySlotFilePattern = (db, day, hour) => new RegExp(`^${escapeRegex(db)}_${escapeRegex(day)}_${pad(hour)}(?:-\\d{2}-\\d{2})?\\.dump$`);
 
 const formatSize = (bytes) => {
   const mb = bytes / 1024 / 1024;
@@ -37,6 +40,17 @@ const removeOldSlotFiles = (dir, prefix, keep) => {
   }
 };
 
+const removeOldHourlySlotFiles = (dir, db, day, hour, keep) => {
+  if (!fs.existsSync(dir)) return;
+  const pattern = hourlySlotFilePattern(db, day, hour);
+  for (const name of fs.readdirSync(dir)) {
+    if (name !== keep && pattern.test(name)) {
+      fs.unlinkSync(path.join(dir, name));
+      logger.info(`DB backup: removed previous hourly file — ${name}`);
+    }
+  }
+};
+
 const pgDump = (outFile, env) =>
   new Promise((resolve, reject) => {
     const { host, port, user, database } = config.db;
@@ -51,7 +65,7 @@ const pgDump = (outFile, env) =>
   }
 );
 
-const runOneBackup = async ({ targetDir, replacePrefix, fileName, label }) => {
+const runOneBackup = async ({ targetDir, replacePrefix, fileName, label, hourSlot }) => {
   const { password } = config.db;
   const outFile = path.join(targetDir, fileName);
   const tempFile = `${outFile}.tmp`;
@@ -65,7 +79,11 @@ const runOneBackup = async ({ targetDir, replacePrefix, fileName, label }) => {
     if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
     await pgDump(tempFile, env);
     fs.renameSync(tempFile, outFile);
-    removeOldSlotFiles(targetDir, replacePrefix, fileName);
+    if (hourSlot) {
+      removeOldHourlySlotFiles(targetDir, hourSlot.db, hourSlot.day, hourSlot.hour, fileName);
+    } else {
+      removeOldSlotFiles(targetDir, replacePrefix, fileName);
+    }
   } catch (e) {
     if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
     throw e;
@@ -83,7 +101,6 @@ const buildPlans = (root, cronMode) => {
     const h = now.getHours();
     const weeklyDir = path.join(root, config.dbBackup.weeklyDir);
 
-    // Weekly sirf cron + 00:00: kal ka poora din → Mon–Sun slot (max 7 files).
     // Manual (npm run backup) weekly nahi — warna beech din partial se purana slot overwrite ho jata.
     if (cronMode && h === WEEKLY_SNAPSHOT_HOUR) {
       const snapshotDay = new Date(now);
@@ -105,11 +122,11 @@ const buildPlans = (root, cronMode) => {
     const { hourlyStartHour: start, hourlyEndHour: end } = config.dbBackup;
     if (!cronMode || (h >= start && h <= end)) {
       const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-      const name = `${db}_${dateTimeStamp(now)}.dump`;
+      const name = `${db}_${day}_${pad(h)}.dump`;
       plans.push({
         targetDir: path.join(root, config.dbBackup.hourlyDir),
-        replacePrefix: `${db}_${day}_${pad(h)}-`,
         fileName: name,
+        hourSlot: { db, day, hour: h },
         label: `hourly/${name}`,
       });
     } else {
@@ -176,6 +193,6 @@ export function startDbBackupCron() {
 
   const { hourlyStartHour: s, hourlyEndHour: e, dir } = config.dbBackup;
   logger.info(
-    `DB backup cron enabled (${schedule}) — ${dir} | weekly: ${config.dbBackup.weeklyEnabled} (7 slots Mon–Sun at 00:00) | hourly: ${config.dbBackup.hourlyEnabled} (${pad(s)}:00-${pad(e)}:00)`,
+    `DB backup cron enabled (${schedule}) — ${dir} | weekly: ${config.dbBackup.weeklyEnabled} (7 slots Mon-Sun at 00:00) | hourly: ${config.dbBackup.hourlyEnabled} (${pad(s)}:00-${pad(e)}:00)`,
   );
 }

@@ -48,3 +48,6 @@ logs/
 /backups
 backups/
 *.dump
+
+/uploads
+uploads/

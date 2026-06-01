@@ -29,17 +29,6 @@ const config = {
     pgDump: process.env.PG_DUMP_PATH || "pg_dump",
     ssl: process.env.DB_SSL === "true",
   },
-  mssql: {
-    server: process.env.MSSQL_HOST,
-    user: process.env.MSSQL_USER,
-    password: process.env.MSSQL_PASSWORD,
-    database: process.env.MSSQL_DB,
-    port: parseInt(process.env.MSSQL_PORT) || 1433,
-    options: {
-      encrypt: false,
-      enableArithAbort: true
-    }
-  },
   root: {
     name: process.env.ROOT_NAME,
     email: process.env.ROOT_EMAIL,

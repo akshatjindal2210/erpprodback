@@ -5,9 +5,11 @@ import jwt from "jsonwebtoken";
 import app from "./src/index.js";
 import config from "./src/config/config.js";
 import { initDB } from "./src/config/initDB.js";
-import { seedRootUser } from "./src/config/seed.js";
+import { seedCoreRootUser } from "./src/apps/core/config/seed.js";
+import { seedImsData } from "./src/apps/ims/config/seed.js";
 import logger from "./src/utils/logger.js";
-import { startDbBackupCron } from "./src/jobs/dbBackup.js";
+import { initRecurringTasksCron, startDbBackupCron } from "./src/jobs/index.js";
+import { initSocket } from "./src/utils/socket.js";
 
 const server = http.createServer(app);
 
@@ -19,6 +21,8 @@ export const io = new Server(server, {
     credentials: true,
   },
 });
+
+initSocket(io);
 
 io.use((socket, next) => {
   try {
@@ -40,7 +44,7 @@ io.use((socket, next) => {
 });
 
 io.on("connection", (socket) => {
-  const userId = socket.user.id;
+  const userId = Number(socket.user.id);
   socket.join(`user_${userId}`);
   console.log(`User connected: ${userId}`);
 
@@ -52,7 +56,9 @@ io.on("connection", (socket) => {
 async function startServer() {
   try {
     await initDB();
-    await seedRootUser();
+    await seedCoreRootUser();
+    await seedImsData();
+    initRecurringTasksCron();
 
     server.listen(config.port, () => {
       logger.info(`Server running on port ${config.port} (API v${config.app_version})`);

@@ -3,11 +3,9 @@ import morgan from "morgan";
 import path from "path";
 import fs from "fs";
 
-// ─── Logs folder auto-create ─────────────────────────────────────
 const logDir = path.join(process.cwd(), "logs");
 if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
 
-// ─── Winston Logger ──────────────────────────────────────────────
 const logger = winston.createLogger({
   level: "info",
   format: winston.format.combine(
@@ -17,12 +15,10 @@ const logger = winston.createLogger({
     }),
   ),
   transports: [
-    // ── Error log (errors only) ───────────────────────────────
     new winston.transports.File({
       filename: path.join(logDir, "error.log"),
       level: "error",
     }),
-    // ── Combined log (all levels) ────────────────────────────
     new winston.transports.File({
       filename: path.join(logDir, "combined.log"),
     }),
@@ -32,7 +28,6 @@ const logger = winston.createLogger({
 const isLoginPost = (req) =>
   req.method === "POST" && req.originalUrl.endsWith("/login");
 
-// ─── Morgan → Winston ────────────────────────────────────────────
 export const morganMiddleware = morgan(
   ":method :url :status :res[content-length] - :response-time ms",
   {
@@ -43,7 +38,6 @@ export const morganMiddleware = morgan(
   },
 );
 
-// ─── Request Logger ──────────────────────────────────────────────
 export const requestLogger = (req, res, next) => {
   const start = Date.now();
 

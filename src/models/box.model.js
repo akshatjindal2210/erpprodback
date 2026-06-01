@@ -470,10 +470,11 @@ export const findBoxesByNoUids = async (box_no_uids = []) => {
   if (!uids.length) return [];
   return dbQuery(
     `SELECT b.*,
-            dp.acc_code AS prod_acc_code,
-            dp.item_dcode AS itemdcode
+            COALESCE(NULLIF(trim(b.override_cust::text), ''), dp.acc_code::text) AS prod_acc_code,
+            COALESCE(dp.item_dcode, sa_adj.item_dcode) AS itemdcode
      FROM box_table b
      LEFT JOIN dailyprod dp ON b.packing_number::TEXT = dp.doc_no::TEXT
+     LEFT JOIN stock_adjustment sa_adj ON b.sa_id = sa_adj.adjustment_id AND b.sa_entry_type = 'stock_in' AND sa_adj.is_deleted = false
      WHERE b.is_deleted = false
        AND b.box_no_uid::text = ANY($1::text[])
      ORDER BY b.box_uid ASC`,
@@ -489,11 +490,12 @@ export const findBoxesByUids = async (box_uids = []) => {
         b.*, 
         dp.doc_dt, 
         dp.job_card_no, 
-        dp.acc_code AS prod_acc_code, 
-        dp.item_dcode AS itemdcode, 
+        COALESCE(NULLIF(trim(b.override_cust::text), ''), dp.acc_code::text) AS prod_acc_code, 
+        COALESCE(dp.item_dcode, sa_adj.item_dcode) AS itemdcode, 
         dp.total_qty AS prod_total_qty
      FROM box_table b
      LEFT JOIN dailyprod dp ON b.packing_number::TEXT = dp.doc_no::TEXT
+     LEFT JOIN stock_adjustment sa_adj ON b.sa_id = sa_adj.adjustment_id AND b.sa_entry_type = 'stock_in' AND sa_adj.is_deleted = false
      WHERE b.box_uid::TEXT = ANY($1::TEXT[])
        AND b.is_deleted = false
      ORDER BY b.box_uid ASC`,

@@ -1,6 +1,5 @@
 const permissionsCache = new Map();
 
-// TTL (time-to-live) set to 1 hour for production
 const TTL = 60 * 60 * 1000; // 1 hour in ms
 
 /**
@@ -22,7 +21,6 @@ export const getCachedPermissions = (userId) => {
   const entry = permissionsCache.get(userId);
   if (!entry) return null;
 
-  // Expiry check
   if (Date.now() > entry.expiresAt) {
     permissionsCache.delete(userId);
     return null;
@@ -39,7 +37,6 @@ export const clearAllCachedPermissions = () => {
   permissionsCache.clear();
 };
 
-// Cleanup expired cache periodically (every 5 minutes)
 setInterval(() => {
   const now = Date.now();
   for (const [userId, { expiresAt }] of permissionsCache.entries()) {
