@@ -1,7 +1,8 @@
 import { findBoxes, findBox, findBoxByUidOrNoUid, findBoxByStickerScan, findBoxesByUids, insertBox, insertBulkBoxes, updateBoxes, updateBoxesByUids, deleteBoxes, getStickerHistory, getStickerHistoryFromLiveRow, checkProductionStickersExist, checkSaStockInBoxesExist, incrementDownloadCount, incrementDownloadCountBulk, insertDownloadLog, getDownloadLogByBox, getDownloadSummaryByPacking, getStickerManagementList, insertOverrideRequest, listOverrideRequests as listOverrideRequestsModel, getOverrideRequestById, updateOverrideRequest as updateOverrideRequestModel, updateDailyProdStickerStatus, findBoxesDetailed, findBoxDetailed, findBoxDetailedByUidOrNoUid, findBoxDetailedByStickerScan, permanentlyDeleteProductionBoxesForPackingNumber, resetDailyProdStickerGeneratedForDoc, findDailyProdByDocNo, findInHandBoxesByPackingNumber, findInHandBoxesByPackingForStockAdjustment, findStockAdjustmentMinusBoxesByPacking, findStockAdjustmentAddBoxesByPattern, findBoxesByPackingNumber } from "../models/box.model.js";
 import { findPackingStandard } from "../models/packingStandard.model.js";
-import { fetchFromIMS } from "../services/ims.service.js";
-import { imsPackRowToProduction, findImsPackByDocNo } from "../utils/imsPackRow.js";
+import { fetchFromIMS, fetchPackRowsForFinancialYearDoc } from "../services/ims.service.js";
+import { imsPackRowToProduction, findImsPackByDocNo, buildImsDocFilterMany } from "../utils/imsPackRow.js";
+import { findCustomerHintsForPackings } from "../models/inventoryReport.model.js";
 import { buildImsPackDocdtFilter } from "./master.controller.js";
 import { getDefaultListViewSpanDays, getBoxNoUidPrefix } from "../../core/models/appConfig.model.js";
 import { formatStandardBoxNoUid, docNoFromStandardBoxNoUid } from "../../../global/boxUid.js";
@@ -525,26 +526,120 @@ function mergeStickerPrintRow(enrichedBox, sticker_meta = {}, packingHint = null
   };
 }
 
-async function enrichBoxRowsFromIMS(rows = []) {
+async function enrichBoxRowsFromIMS(rows = [], maps = null) {
   if (!Array.isArray(rows) || rows.length === 0) return rows;
-  const { itemMap, ledgerMap } = await getImsMapsSafe();
+  const { itemMap, ledgerMap } = maps ?? (await getImsMapsSafe());
   return rows.map((row) => {
     const itemCodeRaw = row.itemdcode ?? row.item_dcode;
     const itemCode = canonicalCode(itemCodeRaw);
     const item = itemCode ? itemMap.get(itemCode) : null;
-    const accKeyRaw = row.override_cust ?? row.acc_code ?? row.acc_name;
-    const accKey = canonicalCode(accKeyRaw);
-    const accName = accKey ? ledgerMap.get(accKey) : null;
+    /** Same order as before: override → acc_code → acc_name (code in acc_name column on many list SQL). */
+    const accCode = canonicalCode(row.override_cust ?? row.acc_code ?? row.acc_name);
+    const accNameFromLedger = accCode ? ledgerMap.get(accCode) : null;
+    const custSnapshot =
+      row.cust_at_time != null && String(row.cust_at_time).trim() !== ""
+        ? String(row.cust_at_time).trim()
+        : null;
     return {
       ...row,
       item_code: item?.item_code ?? row.item_code ?? null,
       itemdesc: item?.item_desc ?? row.itemdesc ?? row.item_desc ?? null,
       item_desc: item?.item_desc ?? row.item_desc ?? row.itemdesc ?? null,
-      acc_name: accName ?? row.acc_name ?? null,
+      acc_code: canonicalCode(row.override_cust ?? row.acc_code) ?? row.acc_code ?? null,
+      acc_name: accNameFromLedger ?? custSnapshot ?? row.acc_name ?? null,
       party_rate_cust_code: null,
       from_customer_name: (row.from_customer != null ? ledgerMap.get(String(row.from_customer)) : null) ?? row.from_customer_name ?? null,
       to_customer_name: (row.to_customer != null ? ledgerMap.get(String(row.to_customer)) : null) ?? row.to_customer_name ?? null,
       item_name: item?.item_code ?? row.item_name ?? null
+    };
+  });
+}
+
+function accNameFromLedger(ledgerMap, accCodeRaw) {
+  const code = canonicalCode(accCodeRaw);
+  if (!code) return null;
+  return ledgerMap.get(code) ?? null;
+}
+
+/** Cache only for sticker download logs list (does not affect other screens). */
+const STICKER_MGMT_MAPS_TTL_MS = Math.max(60_000, Number(process.env.IMS_MAPS_CACHE_MS) || 300_000);
+let stickerMgmtMapsCache = null;
+let stickerMgmtMapsCacheAt = 0;
+
+async function getImsMapsForStickerMgmtList() {
+  const now = Date.now();
+  if (stickerMgmtMapsCache && now - stickerMgmtMapsCacheAt < STICKER_MGMT_MAPS_TTL_MS) {
+    return stickerMgmtMapsCache;
+  }
+  const maps = await getImsMapsSafe();
+  stickerMgmtMapsCache = maps;
+  stickerMgmtMapsCacheAt = now;
+  return maps;
+}
+
+/** Fast list enrichment: one DB batch + at most one IMS pack fetch (no per-row print meta). */
+async function enrichStickerManagementListRows(rows = []) {
+  const maps = await getImsMapsForStickerMgmtList();
+  const enriched = await enrichBoxRowsFromIMS(rows, maps);
+
+  const needResolve = enriched.filter(
+    (r) => r?.packing_number && !(r.acc_name != null && String(r.acc_name).trim() !== "")
+  );
+  if (!needResolve.length) return enriched;
+
+  const packingNums = [
+    ...new Set(needResolve.map((r) => String(r.packing_number).trim()).filter(Boolean)),
+  ];
+  const codeByPacking = new Map();
+
+  const hints = await findCustomerHintsForPackings(packingNums);
+  for (const h of hints || []) {
+    const pn = String(h.packing_number ?? "").trim();
+    const code = h.customer_code != null ? String(h.customer_code).trim() : "";
+    if (pn && code) codeByPacking.set(pn, code);
+  }
+
+  const hintByPn = new Map((hints || []).map((h) => [String(h.packing_number ?? "").trim(), h]));
+  const needFy = packingNums.filter((pn) => !codeByPacking.has(pn));
+  await Promise.all(
+    needFy.map(async (pn) => {
+      const fy = hintByPn.get(pn)?.financial_year;
+      if (fy == null || String(fy).trim() === "") return;
+      try {
+        const ims = await fetchPackRowsForFinancialYearDoc(String(fy).trim(), pn);
+        const acc = ims?.records?.[0]?.acc_code ?? ims?.records?.[0]?.Acc_Code;
+        if (acc != null && String(acc).trim() !== "") codeByPacking.set(pn, String(acc).trim());
+      } catch {
+        /* optional */
+      }
+    })
+  );
+
+  const needIms = packingNums.filter((pn) => !codeByPacking.has(pn));
+  if (needIms.length) {
+    try {
+      const filter = buildImsDocFilterMany(needIms);
+      const recs = filter ? await fetchFromIMS("pack", filter) : [];
+      for (const pn of needIms) {
+        const packRow = findImsPackByDocNo(recs, pn);
+        const acc = packRow?.acc_code ?? packRow?.Acc_Code ?? packRow?.acc_Code;
+        if (acc != null && String(acc).trim() !== "") codeByPacking.set(pn, String(acc).trim());
+      }
+    } catch {
+      /* optional IMS */
+    }
+  }
+
+  return enriched.map((row) => {
+    const pn = String(row.packing_number ?? "").trim();
+    if (!pn || (row.acc_name != null && String(row.acc_name).trim() !== "")) return row;
+    const code = codeByPacking.get(pn);
+    if (!code) return row;
+    const name = accNameFromLedger(maps.ledgerMap, code);
+    return {
+      ...row,
+      acc_code: row.acc_code ?? code,
+      acc_name: name ?? code,
     };
   });
 }
@@ -1055,10 +1150,12 @@ export const trackStickerDownload = async (req, res) => {
     if (!box)
       return res.status(404).json({ success: false, message: "Box not found" });
 
+    const [enrichedBox] = await enrichBoxRowsFromIMS([box]);
+
     // Log entry
     const log = await insertDownloadLog({
       box_uid,
-      cust_at_time : box.override_cust,
+      cust_at_time: enrichedBox?.acc_name || enrichedBox?.override_cust || box.override_cust,
       downloaded_by: req.user.id,
       download_type: "single",
       download_source,
@@ -1093,20 +1190,21 @@ export const trackBulkDownload = async (req, res) => {
     if (!boxes.length)
       return res.status(404).json({ success: false, message: "No matching boxes" });
 
-    const packingNo = String(boxes[0].packing_number ?? "").trim();
+    const enrichedBoxes = await enrichBoxRowsFromIMS(boxes);
+    const packingNo = String(enrichedBoxes[0]?.packing_number ?? "").trim();
     if (!packingNo)
       return res.status(400).json({ success: false, message: "packing_number missing on boxes" });
 
-    const uids = boxes.map((b) => Number(b.box_uid)).filter((n) => Number.isFinite(n) && n > 0);
+    const uids = enrichedBoxes.map((b) => Number(b.box_uid)).filter((n) => Number.isFinite(n) && n > 0);
     if (!uids.length)
       return res.status(400).json({ success: false, message: "No valid box_uid" });
-    const custRow = boxes[0];
+    const custRow = enrichedBoxes[0];
 
     const updatedRows = await incrementDownloadCountBulk(uids, req.user.id);
 
     await insertDownloadLog({
       box_uid: null,
-      cust_at_time: custRow.override_cust ?? custRow.acc_name ?? null,
+      cust_at_time: custRow?.acc_name || custRow?.override_cust || null,
       downloaded_by: req.user.id,
       download_type: "bulk_pack",
       bulk_packing_number: packingNo,
@@ -1381,7 +1479,7 @@ export const stickerManagementList = async (req, res) => {
       limit,
       list_mode,
     });
-    const enriched = await enrichBoxRowsFromIMS(result.data || []);
+    const enriched = await enrichStickerManagementListRows(result.data || []);
     const { data, ...rest } = result;
     return res.json({ success: true, ...rest, data: stripBoxRowsForClient(enriched || data) });
   } catch (err) {

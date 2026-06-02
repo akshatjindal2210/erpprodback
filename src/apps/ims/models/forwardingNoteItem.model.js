@@ -1,5 +1,6 @@
 import dbQuery from "../../../config/db.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
+import { applyForwardingOutEntryListFilter } from "../utils/forwardingNoteListFilters.js";
 
 // Master-level columns available for filters/search
 const ALLOWED_FILTER_FIELDS = ["id", "fuid", "item_dcode", "approved", "out_entry_locked", "from_date", "to_date", "po_number", "acc_code"];
@@ -22,6 +23,13 @@ const JOINS = `
   LEFT JOIN ${M.USERS} u_map      ON fnm.approved_by = u_map.id
   LEFT JOIN ${M.USERS} u_lock     ON fnm.out_entry_locked_by = u_lock.id
   LEFT JOIN ${M.USERS} u_bill     ON fnm.bill_updated_by = u_bill.id
+  LEFT JOIN LATERAL (
+    SELECT oe.out_uid, oe.scan_complete
+    FROM ims_out_entry oe
+    WHERE oe.fuid = fnm.fuid AND oe.is_deleted = false
+    ORDER BY oe.out_uid DESC
+    LIMIT 1
+  ) oe ON true
 `;
 
 const DEFAULT_FIELDS = [
@@ -55,6 +63,9 @@ const DEFAULT_FIELDS = [
   "fnm.out_entry_locked",
   "fnm.out_entry_locked_by",
   "fnm.out_entry_locked_at",
+  "oe.out_uid AS out_entry_uid",
+  "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
+  "(oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete",
   "fnm.created_by",
   "fnm.created_at",
   "fnm.updated_by",
@@ -104,6 +115,8 @@ export const findForwardingNoteItems = async (options = {}) => {
       continue;
     }
 
+    if (applyForwardingOutEntryListFilter(conditions, key, val)) continue;
+
     if (!ALLOWED_FILTER_FIELDS.includes(key)) continue;
     values.push(val);
     conditions.push(`fi.${key} = $${i++}`);
@@ -138,7 +151,7 @@ export const findForwardingNoteItems = async (options = {}) => {
   const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 10));
   const offset = (safePage - 1) * safeLimit;
 
-  // SORTING (always qualify ó fi and fnm share columns like fuid / created_at / qty)
+  // SORTING (always qualify ù fi and fnm share columns like fuid / created_at / qty)
   const SORT_COLUMN_MAP = {
     created_at: "fi.created_at",
     qty: "fi.qty",

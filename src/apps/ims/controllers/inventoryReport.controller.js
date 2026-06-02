@@ -3,20 +3,12 @@ import { extractListParams } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { getImsMapsSafe } from "../utils/imsLookup.js";
 import { fetchFromIMS, fetchPackRowsForFinancialYearDoc } from "../services/ims.service.js";
-import { findImsPackByDocNo } from "../utils/imsPackRow.js";
+import { findImsPackByDocNo, buildImsDocFilter } from "../utils/imsPackRow.js";
 
 function isMissingCustomerCode(code) {
   if (code == null) return true;
   const s = String(code).trim();
   return s === "" || s === "—" || s === "null";
-}
-
-function buildImsDocFilter(docNo) {
-  const pn = String(docNo ?? "").trim();
-  const n = parseInt(pn, 10);
-  return Number.isFinite(n)
-    ? `dailyprod.docno = ${n}`
-    : `dailyprod.docno = '${pn.replace(/'/g, "''")}'`;
 }
 
 /** Resolve customer acc_code for packings still missing after the report SQL. */
@@ -152,6 +144,8 @@ export const getInventoryReport = async (req, res) => {
       order: "DESC",
     });
 
+    const includeTotals = req.body?.includeTotals !== false && page === 1;
+
     const result = await findInventoryReportFiltered({
       search: sanitizeSearch(search),
       page,
@@ -159,13 +153,14 @@ export const getInventoryReport = async (req, res) => {
       sortBy,
       order,
       filters,
+      includeTotals,
     });
 
     const enrichedRows = await enrichInventoryRows(result.data || []);
     res.json({
       success: true,
       data: enrichedRows,
-      totals: result.totals,
+      totals: result.totals ?? null,
       total: result.total,
       page: result.page,
       limit: result.limit,

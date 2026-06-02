@@ -2073,6 +2073,7 @@ async function getStickerDownloadLogList(options = {}) {
       COALESCE(l.cust_at_time, '') ILIKE $${idx} OR
       COALESCE(dp.item_dcode::text, '') ILIKE $${idx} OR
       COALESCE(b.override_cust::text, '') ILIKE $${idx} OR
+      COALESCE(pack_box.pack_override_cust, '') ILIKE $${idx} OR
       COALESCE(dp.acc_code::text, '') ILIKE $${idx} OR
       COALESCE(l.download_source::text, '') ILIKE $${idx}
     )`);
@@ -2084,6 +2085,10 @@ async function getStickerDownloadLogList(options = {}) {
   /** Stickers included in one bulk_pack log row (matches incrementDownloadCountBulk). */
   const bulkPackStickerCountSql = `GREATEST(1, COALESCE(NULLIF(l.bulk_sticker_count, 0), ${packingBoxCountSql}))`;
 
+  const packingKeySql = `COALESCE(NULLIF(TRIM(b.packing_number::text), ''), NULLIF(TRIM(l.bulk_packing_number::text), ''))`;
+  const customerAccCodeSql = `COALESCE(NULLIF(TRIM(b.override_cust::text), ''), pack_box.pack_override_cust, NULLIF(TRIM(dp.acc_code::text), ''))`;
+  const customerDisplaySql = `COALESCE(NULLIF(TRIM(l.cust_at_time::text), ''), ${customerAccCodeSql})`;
+
   const SORT_MAP = {
     last_downloaded_at: "l.downloaded_at",
     last_download_type: "l.download_type",
@@ -2093,7 +2098,7 @@ async function getStickerDownloadLogList(options = {}) {
     created_at: "l.downloaded_at",
     event_sticker_count: `CASE WHEN l.download_type = 'bulk_pack' THEN (${bulkPackStickerCountSql})::int ELSE 1 END`,
     item_code: "dp.item_dcode",
-    acc_name: "COALESCE(l.cust_at_time, b.override_cust::text, dp.acc_code::text)",
+    acc_name: customerDisplaySql,
     download_source: "l.download_source",
   };
 
@@ -2109,12 +2114,16 @@ async function getStickerDownloadLogList(options = {}) {
     LEFT JOIN ${M.USERS} u ON u.id = l.downloaded_by
     LEFT JOIN ims_box_table b ON b.box_uid = l.box_uid AND b.is_deleted = false
     LEFT JOIN LATERAL (
+      SELECT MAX(NULLIF(TRIM(bt.override_cust::text), '')) AS pack_override_cust
+      FROM ims_box_table bt
+      WHERE bt.is_deleted = false
+        AND TRIM(COALESCE(bt.packing_number::text, '')) = TRIM(${packingKeySql})
+        AND TRIM(${packingKeySql}) <> ''
+    ) pack_box ON true
+    LEFT JOIN LATERAL (
       SELECT dp.*
       FROM ims_dailyprod dp
-      WHERE dp.doc_no::text = COALESCE(
-        NULLIF(TRIM(b.packing_number::text), ''),
-        NULLIF(TRIM(l.bulk_packing_number::text), '')
-      )
+      WHERE dp.doc_no::text = ${packingKeySql}
       LIMIT 1
     ) dp ON true
   `;
@@ -2134,7 +2143,9 @@ async function getStickerDownloadLogList(options = {}) {
         b.box_no_uid,
         COALESCE(b.packing_number, NULLIF(TRIM(l.bulk_packing_number::text), '')) AS packing_number,
         b.override_cust,
-        COALESCE(l.cust_at_time, b.override_cust::text, dp.acc_code::text) AS acc_name,
+        l.cust_at_time,
+        ${customerAccCodeSql} AS acc_code,
+        ${customerDisplaySql} AS acc_name,
         dp.item_dcode AS itemdcode,
         CASE
           WHEN l.download_type = 'bulk_pack' THEN (${bulkPackStickerCountSql})::int

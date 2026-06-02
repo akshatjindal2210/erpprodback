@@ -304,7 +304,15 @@ export async function getInventoryReportFilterOptions(filters = {}) {
 }
 
 export async function findInventoryReportFiltered(options = {}) {
-  const { search, page = 1, limit = 500, sortBy = "packing_number", order = "DESC", filters = {} } = options;
+  const {
+    search,
+    page = 1,
+    limit = 500,
+    sortBy = "packing_number",
+    order = "DESC",
+    filters = {},
+    includeTotals = true,
+  } = options;
 
   const safePage = Math.max(1, Number(page) || 1);
   const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 500));
@@ -331,7 +339,7 @@ export async function findInventoryReportFiltered(options = {}) {
     [...values, safeLimit, offset]
   );
 
-  const totals = await getInventoryReportTotals({ filters, search });
+  const totals = includeTotals ? await getInventoryReportTotals({ filters, search }) : null;
 
   return {
     data: rows,

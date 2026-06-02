@@ -129,9 +129,9 @@ export async function resolvePartyRateCustCodeFromIms({ itemdcode, item_code, ac
 export async function enrichRowsWithIMS(rows = [], options = {}) {
   if (!Array.isArray(rows) || rows.length === 0) return rows;
 
-  const { itemCodeField = "item_dcode", accCodeField = "acc_code", itemCodeOut = "item_code", itemDescOut = "item_desc", accNameOut = "acc_name" } = options;
+  const { itemCodeField = "item_dcode", accCodeField = "acc_code", itemCodeOut = "item_code", itemDescOut = "item_desc", accNameOut = "acc_name", maps: mapsIn = null } = options;
 
-  const { itemMap, ledgerMap } = await getImsMapsSafe();
+  const { itemMap, ledgerMap } = mapsIn ?? (await getImsMapsSafe());
 
   return rows.map((row) => {
     const itemCode = canonicalCode(row?.[itemCodeField]);

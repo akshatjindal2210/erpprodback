@@ -75,8 +75,11 @@ export const CRUD_MODULES = {
       "f.deleted_by", "f.deleted_at",
       "u_cr.name AS created_by_name", "u_upd.name AS updated_by_name", "u_dl.name  AS deleted_by_name", "u_ap.name  AS approved_by_name", "u_lock.name AS out_entry_locked_by_name", "u_bill.name AS bill_updated_by_name",
       "f.acc_code::text AS acc_name",
+      "oe.out_uid AS out_entry_uid",
+      "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
+      "(oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete",
     ],
-    filterFields: ["fuid", "acc_code", "po_number", "approved", "out_entry_locked", "out_entry_available", "from_date", "to_date"],
+    filterFields: ["fuid", "acc_code", "po_number", "approved", "out_entry_locked", "out_entry_available", "out_entry_complete", "from_date", "to_date"],
     searchFields: ["f.po_number", "f.transporter_name", "f.vehicle_number", "f.bill_no", "f.acc_code"]
   },
   forwarding_note_item_wise: {
@@ -85,6 +88,9 @@ export const CRUD_MODULES = {
       "fi.id", "fi.fuid", "fi.item_dcode", "fi.qty", 
       "fi.item_dcode::text AS item_code", "fi.item_dcode AS itemdcode", "NULL::text AS item_desc",
       "fnm.out_entry_locked", "fnm.out_entry_locked_by", "fnm.out_entry_locked_at", "u_lock.name AS out_entry_locked_by_name",
+      "oe.out_uid AS out_entry_uid",
+      "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
+      "(oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete",
       "fnm.approved", "fnm.approved_by", "fnm.approved_at",
       "fnm.created_by", "fnm.created_at",
       "fnm.updated_by", "fnm.updated_at",
@@ -93,7 +99,7 @@ export const CRUD_MODULES = {
       "u_mcr.name AS created_by_name", "u_mupd.name AS updated_by_name", "u_mdl.name  AS deleted_by_name", "u_map.name  AS approved_by_name",
       "u_bill.name AS bill_updated_by_name",
     ],
-    filterFields: ["id", "fuid", "item_dcode", "approved", "out_entry_locked", "from_date", "to_date"],
+    filterFields: ["id", "fuid", "item_dcode", "approved", "out_entry_locked", "out_entry_complete", "from_date", "to_date"],
     searchFields: ["fi.item_dcode", "fi.qty"]
   },
   out_entry: {

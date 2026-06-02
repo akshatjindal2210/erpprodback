@@ -1,4 +1,5 @@
 import { findForwardingNotes, findForwardingNote, insertForwardingNote, updateForwardingNotes, updateForwardingNoteBillNo, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters } from "../models/forwardingNote.model.js";
+import { buildForwardingAvailableBoxes, sumBoxQty } from "../utils/forwardingAvailableStock.js";
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
@@ -153,6 +154,10 @@ export const createForwardingNote = async (req, res) => {
     
     // 2. Insert Items (Item-wise breakdown)
     for (const item of items) {
+      if (!item.is_pre_calculated && item.selected_boxes?.length) {
+        await assertForwardingSelectionWithinRemaining(item.item_dcode, item.selected_boxes, null);
+      }
+
       if (item.is_pre_calculated) {
         // Direct insertion for pre-calculated items (from edit mode without changes)
         await insertForwardingNoteItem({
@@ -224,7 +229,7 @@ export const createForwardingNote = async (req, res) => {
 
     res.status(201).json({ success: true, data: enrichedData });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
 };
 
@@ -347,6 +352,10 @@ export const updateForwardingNote = async (req, res) => {
 
       // Insert new items
       for (const item of items) {
+        if (!item.is_pre_calculated && item.selected_boxes?.length) {
+          await assertForwardingSelectionWithinRemaining(item.item_dcode, item.selected_boxes, fuid);
+        }
+
         if (item.is_pre_calculated) {
           await insertForwardingNoteItem({
             fuid,
@@ -495,9 +504,25 @@ export const getForwardingNoteTransportersViews = async (req, res) => {
   }
 };
 
+async function assertForwardingSelectionWithinRemaining(item_dcode, selected_boxes = [], exclude_fuid = null) {
+  const clean = Number(item_dcode);
+  if (!Number.isFinite(clean) || !Array.isArray(selected_boxes) || !selected_boxes.length) return;
+
+  const physical = await findAvailableBoxes(clean);
+  const allowed = await buildForwardingAvailableBoxes(physical, clean, exclude_fuid);
+  const maxQty = sumBoxQty(allowed);
+  const pickQty = sumBoxQty(selected_boxes);
+
+  if (pickQty > maxQty + 0.0001) {
+    const err = new Error(`Dispatch qty exceeds remaining stock (max ${maxQty}).`);
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 export const getAvailableBoxesByItem = async (req, res) => {
   try {
-    let { item_dcode } = req.body;
+    let { item_dcode, exclude_fuid } = req.body;
 
     if (!item_dcode) {
       return res.status(400).json({ success: false, message: "item_dcode is required" });
@@ -507,11 +532,14 @@ export const getAvailableBoxesByItem = async (req, res) => {
     const clean_dcode = Number(item_dcode);
     
     if (isNaN(clean_dcode)) {
-       return res.status(400).json({ success: false, message: "item_dcode must be a valid number" });
+      return res.status(400).json({ success: false, message: "item_dcode must be a valid number" });
     }
 
+    const exclude = exclude_fuid != null && exclude_fuid !== "" && Number.isFinite(Number(exclude_fuid)) ? Number(exclude_fuid) : null;
+
     const rows = await findAvailableBoxes(clean_dcode);
-    res.json({ success: true, count: rows.length, data: rows });
+    const data = await buildForwardingAvailableBoxes(rows, clean_dcode, exclude);
+    res.json({ success: true, count: data.length, data });
   } catch (err) {
     res.status(500).json({ success: false, message: "Internal Server Error: " + err.message });
   }

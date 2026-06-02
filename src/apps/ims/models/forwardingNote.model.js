@@ -1,6 +1,7 @@
 import dbQuery from "../../../config/db.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { sqlBoxInHand } from "../utils/boxInventorySql.js";
+import { applyForwardingOutEntryListFilter } from "../utils/forwardingNoteListFilters.js";
 
 const ALLOWED_FILTER_FIELDS = ["fuid", "acc_code", "po_number", "approved", "out_entry_locked", "out_entry_available", "from_date", "to_date"];
 
@@ -20,6 +21,13 @@ const JOINS = `
   LEFT JOIN ${M.USERS} u_ap   ON f.approved_by = u_ap.id
   LEFT JOIN ${M.USERS} u_lock ON f.out_entry_locked_by = u_lock.id
   LEFT JOIN ${M.USERS} u_bill ON f.bill_updated_by = u_bill.id
+  LEFT JOIN LATERAL (
+    SELECT oe.out_uid, oe.scan_complete
+    FROM ims_out_entry oe
+    WHERE oe.fuid = f.fuid AND oe.is_deleted = false
+    ORDER BY oe.out_uid DESC
+    LIMIT 1
+  ) oe ON true
 `;
 
 const DEFAULT_FIELDS = [
@@ -30,7 +38,10 @@ const DEFAULT_FIELDS = [
   "u_dl.name  AS deleted_by_name",
   "u_ap.name  AS approved_by_name",
   "u_lock.name AS out_entry_locked_by_name",
-  "u_bill.name AS bill_updated_by_name"
+  "u_bill.name AS bill_updated_by_name",
+  "oe.out_uid AS out_entry_uid",
+  "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
+  "(oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete"
 ];
 
 export const findForwardingNotes = async (options = {}) => {
@@ -73,6 +84,8 @@ export const findForwardingNotes = async (options = {}) => {
       }
       continue;
     }
+
+    if (applyForwardingOutEntryListFilter(conditions, key, val)) continue;
 
     if (!ALLOWED_FILTER_FIELDS.includes(key)) continue;
     values.push(val);
@@ -259,7 +272,7 @@ export const updateForwardingNotes = async (fields = {}, filters = {}) => {
   return null;
 };
 
-/** Bill is entered after out entry — allowed even when `out_entry_locked` is true. */
+/** Bill is entered after out entry  allowed even when `out_entry_locked` is true. */
 export const updateForwardingNoteBillNo = async ({ fuid, bill_no, userId }) => {
   const normalized =
     bill_no === null || bill_no === undefined ? null : String(bill_no).trim() || null;
@@ -425,4 +438,35 @@ export const findAvailableBoxes = async (item_dcode) => {
   `;
 
   return await dbQuery(query, [Number(item_dcode)]);
+};
+
+/** Qty already on other forwarding notes for this item (per packing). Excludes `exclude_fuid` when editing. */
+export const findForwardedQtyByItemAndPacking = async (item_dcode, exclude_fuid = null) => {
+  const dcode = Number(item_dcode);
+  if (!Number.isFinite(dcode)) return {};
+
+  const exclude =
+    exclude_fuid != null && exclude_fuid !== "" && Number.isFinite(Number(exclude_fuid))
+      ? Number(exclude_fuid)
+      : null;
+
+  const rows = await dbQuery(
+    `SELECT TRIM(fi.packing_number::text) AS packing_number, COALESCE(SUM(fi.total_qty), 0)::float AS forwarded_qty
+     FROM ims_forwarding_note_item_wise fi
+     INNER JOIN ims_forwarding_note_master f
+       ON f.fuid = fi.fuid AND f.is_deleted = false
+     WHERE fi.is_deleted = false
+       AND fi.item_dcode::int = $1::int
+       AND ($2::bigint IS NULL OR fi.fuid <> $2::bigint)
+     GROUP BY TRIM(fi.packing_number::text)`,
+    [dcode, exclude]
+  );
+
+  const map = {};
+  for (const r of rows || []) {
+    const pn = String(r.packing_number ?? "").trim();
+    if (!pn) continue;
+    map[pn] = Number(r.forwarded_qty) || 0;
+  }
+  return map;
 };

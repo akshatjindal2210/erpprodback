@@ -1,5 +1,5 @@
 import { withTransaction } from "../../../config/db.js";
-import { findAdjustments, findAdjustmentById, insertAdjustment, updateAdjustments, insertAdjustmentTx, updateAdjustmentsTx } from "../models/stockAdjustment.model.js";
+import { findAdjustments, findAdjustmentById, insertAdjustment, updateAdjustments, insertAdjustmentTx, updateAdjustmentsTx, findFinancialYearForPacking } from "../models/stockAdjustment.model.js";
 import { findDailyProdByDocNo, findBoxesByUids, purgeSaStickerBoxesTx, resolveItemDcodeForMinusAdjustment } from "../models/box.model.js";
 import { boxBelongsToPackingNumber } from "../utils/boxInventory.js";
 import { fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../services/ims.service.js";
@@ -10,6 +10,7 @@ import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { enrichRowsWithIMS } from "../utils/imsLookup.js";
 import { syncAdjustmentMetadataOnly } from "../utils/stockAdjustmentSync.js";
+import { resolveStockAdjustmentPackingMeta } from "../utils/stockAdjustmentPacking.js";
 import { applyStockAdjustmentOnApproveTx, revertStockAdjustmentOnUnapproveTx } from "../utils/stockAdjustmentApply.js";
 import { purgeStockAdjustmentTransactionLogs } from "../utils/logBoxTransaction.js";
 import { isBoxAvailableForMinus } from "../utils/boxInventory.js";
@@ -209,6 +210,23 @@ export const createAdjustment = async (req, res) => {
   }
 };
 
+export const getStockAdjustmentPackingMeta = async (req, res) => {
+  try {
+    const { packing_number, adjustment_id, item_dcode, financial_year } = req.body || {};
+    const meta = await resolveStockAdjustmentPackingMeta(packing_number, {
+      adjustment_id,
+      item_dcode,
+      financial_year,
+    });
+    if (!meta) {
+      return res.status(400).json({ success: false, message: "packing_number required" });
+    }
+    res.json({ success: true, data: meta });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const getAdjustmentById = async (req, res) => {
   try {
     const { id } = req.body;
@@ -217,8 +235,36 @@ export const getAdjustmentById = async (req, res) => {
     const data = await findAdjustmentById(id);
     if (!data) return res.status(404).json({ success: false, message: "Adjustment not found" });
 
-    const [enriched] = await enrichAdjustments(data ? [data] : []);
-    res.json({ success: true, data: enriched || data });
+    const rowFy =
+      data.financial_year != null && String(data.financial_year).trim() !== ""
+        ? String(data.financial_year).trim()
+        : null;
+    const resolvedFy =
+      rowFy || (await findFinancialYearForPacking(data.packing_number)) || null;
+
+    const isPackingForm =
+      data?.packing_number &&
+      (data.entry_type === "add" || data.entry_type === "minus");
+
+    const [[enriched], packing_meta] = await Promise.all([
+      enrichAdjustments(data ? [data] : []),
+      isPackingForm
+        ? resolveStockAdjustmentPackingMeta(data.packing_number, {
+            adjustment_id: data.adjustment_id,
+            item_dcode: data.item_dcode,
+            financial_year: rowFy || resolvedFy,
+          })
+        : Promise.resolve(null),
+    ]);
+
+    const payload = enriched || data;
+    if (payload && resolvedFy) {
+      payload.resolved_financial_year = resolvedFy;
+    }
+    if (payload && packing_meta) {
+      payload.packing_meta = packing_meta;
+    }
+    res.json({ success: true, data: payload });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

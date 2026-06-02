@@ -1,5 +1,52 @@
 import { findDailyProdByDocNo, findLatestApprovedStandardQtyForItem, findStandardQtyPerBoxForPackingNumber, findInHandBoxesByPackingNumber } from "../models/box.model.js";
-import { fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../services/ims.service.js";
+import { findFinancialYearForPacking, findFinancialYearForSaId } from "../models/stockAdjustment.model.js";
+import { fetchFromIMS, fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../services/ims.service.js";
+import { buildImsDocFilter, findImsPackByDocNo, imsPackRowToProduction } from "./imsPackRow.js";
+import { enrichRowsWithIMS, getImsMapsSafe, getImsPartyRateMapSafe, pickPartyRateCustCode, partyRateAccCandidates } from "./imsLookup.js";
+
+const SA_PACKING_META_CACHE = new Map();
+const SA_PACKING_META_TTL_MS = 90_000;
+let saImsMapsCache = null;
+let saImsMapsCacheAt = 0;
+let saPartyRateCache = null;
+let saPartyRateCacheAt = 0;
+const SA_IMS_MAPS_TTL_MS = 120_000;
+
+function packingMetaCacheKey(pn, options) {
+  return [
+    pn,
+    options.adjustment_id ?? "",
+    options.item_dcode ?? "",
+    options.financial_year ?? "",
+  ].join("|");
+}
+
+async function getSaImsMapsCached() {
+  if (saImsMapsCache && Date.now() - saImsMapsCacheAt < SA_IMS_MAPS_TTL_MS) {
+    return saImsMapsCache;
+  }
+  saImsMapsCache = await getImsMapsSafe();
+  saImsMapsCacheAt = Date.now();
+  return saImsMapsCache;
+}
+
+async function getSaPartyRateMapCached() {
+  if (saPartyRateCache && Date.now() - saPartyRateCacheAt < SA_IMS_MAPS_TTL_MS) {
+    return saPartyRateCache;
+  }
+  saPartyRateCache = await getImsPartyRateMapSafe();
+  saPartyRateCacheAt = Date.now();
+  return saPartyRateCache;
+}
+
+function partyRateFromMap(map, { itemdcode, item_code, acc_code }) {
+  const cands = partyRateAccCandidates(acc_code);
+  return (
+    pickPartyRateCustCode(map, itemdcode, cands) ||
+    pickPartyRateCustCode(map, item_code, cands) ||
+    null
+  );
+}
 import { normalizeBoxNoUidPrefix } from "../../../global/boxUid.js";
 
 /*
@@ -48,7 +95,10 @@ export async function resolveStandardQtyPerBoxForPacking({ packingNumber, itemDc
 export async function resolveOverrideCustForPacking(packingNumber, options = {}) {
   const pn = String(packingNumber ?? "").trim();
   if (!pn) return null;
-  const dp = await findDailyProdByDocNo(pn);
+  const dp =
+    options.dailyProd !== undefined
+      ? options.dailyProd
+      : await findDailyProdByDocNo(pn);
   if (dp?.acc_code != null && String(dp.acc_code).trim() !== "") {
     return String(dp.acc_code).trim();
   }
@@ -70,6 +120,149 @@ export async function resolveOverrideCustForPacking(packingNumber, options = {})
     }
   }
   return null;
+}
+
+/**
+ * Item / customer / JC for SA drawer (add & minus) — uses stock_adjustment permission, not packing_entry.
+ */
+export async function resolveStockAdjustmentPackingMeta(packing_number, options = {}) {
+  const pn = String(packing_number ?? "").trim();
+  if (!pn) return null;
+
+  const cacheKey = packingMetaCacheKey(pn, options);
+  const cached = SA_PACKING_META_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.at < SA_PACKING_META_TTL_MS) {
+    return cached.data;
+  }
+
+  const adjustmentId =
+    options.adjustment_id != null && Number(options.adjustment_id) > 0
+      ? Number(options.adjustment_id)
+      : null;
+  const itemFromAdj =
+    options.item_dcode != null && String(options.item_dcode).trim() !== ""
+      ? parseInt(String(options.item_dcode), 10)
+      : null;
+  const fyOpt =
+    options.financial_year != null && String(options.financial_year).trim() !== ""
+      ? String(options.financial_year).trim()
+      : null;
+
+  const [dp, fyFromSa, fyFromPack] = await Promise.all([
+    findDailyProdByDocNo(pn),
+    adjustmentId ? findFinancialYearForSaId(adjustmentId) : Promise.resolve(null),
+    fyOpt ? Promise.resolve(null) : findFinancialYearForPacking(pn),
+  ]);
+
+  let itemdcode =
+    dp?.itemdcode ?? (Number.isFinite(itemFromAdj) ? itemFromAdj : null);
+  let acc_code = dp?.acc_code != null ? String(dp.acc_code).trim() : null;
+  let job_card_no = dp?.job_card_no ?? null;
+  let total_qty = dp?.total_qty ?? null;
+  let doc_dt = dp?.doc_dt ?? null;
+
+  const fy = fyOpt || fyFromSa || fyFromPack || null;
+
+  const needsAccFromBoxes = !acc_code;
+  const needsImsPackRow = !itemdcode || !acc_code;
+
+  const [accFromOverride, imsFy, imsFilterProd] = await Promise.all([
+    needsAccFromBoxes
+      ? resolveOverrideCustForPacking(pn, { financialYear: fy, dailyProd: dp })
+      : Promise.resolve(null),
+    fy
+      ? fetchPackRowsForFinancialYearDoc(fy, pn).catch(() => null)
+      : Promise.resolve(null),
+    needsImsPackRow
+      ? (async () => {
+          try {
+            const filter = buildImsDocFilter(pn);
+            const recs = filter ? await fetchFromIMS("pack", filter) : [];
+            return imsPackRowToProduction(findImsPackByDocNo(recs, pn));
+          } catch {
+            return null;
+          }
+        })()
+      : Promise.resolve(null),
+  ]);
+
+  if (!acc_code && accFromOverride) acc_code = accFromOverride;
+
+  if (imsFy?.records?.length) {
+    const first =
+      imsFy.records.find((r) => rowInIndianFinancialYear(r, fy)) ?? imsFy.records[0];
+    if (first) {
+      itemdcode = itemdcode ?? first.itemdcode ?? first.ItemDcode ?? null;
+      const acc = first.acc_code ?? first.Acc_Code;
+      if (acc != null && String(acc).trim() !== "") acc_code = String(acc).trim();
+      job_card_no = job_card_no ?? first.jobcardno ?? first.job_card_no ?? null;
+      if (first.QTY != null) total_qty = String(first.QTY);
+      doc_dt = doc_dt ?? first.doc_dt ?? first.docdt ?? null;
+    }
+  }
+
+  if (imsFilterProd) {
+    itemdcode = itemdcode ?? imsFilterProd.itemdcode ?? null;
+    if (imsFilterProd.acc_code != null && String(imsFilterProd.acc_code).trim() !== "") {
+      acc_code = String(imsFilterProd.acc_code).trim();
+    }
+    job_card_no = job_card_no ?? imsFilterProd.job_card_no ?? null;
+    total_qty = total_qty ?? imsFilterProd.total_qty ?? null;
+    doc_dt = doc_dt ?? imsFilterProd.doc_dt ?? null;
+  }
+
+  const effItemPre = itemdcode;
+  const imsMapsPromise = getSaImsMapsCached();
+
+  const [enrichedRows, standard_qty_per_box, partyRateMap] = await Promise.all([
+    imsMapsPromise.then((maps) =>
+      enrichRowsWithIMS([{ itemdcode, item_dcode: itemdcode, acc_code }], {
+        itemCodeField: "itemdcode",
+        accCodeField: "acc_code",
+        itemCodeOut: "item_code",
+        itemDescOut: "item_desc",
+        accNameOut: "acc_name",
+        maps,
+      })
+    ),
+    resolveStandardQtyPerBoxForPacking({
+      packingNumber: pn,
+      itemDcode: effItemPre,
+    }),
+    getSaPartyRateMapCached(),
+  ]);
+
+  const enriched = enrichedRows?.[0];
+  const effAcc = enriched?.acc_code ?? acc_code;
+  const effItem = enriched?.itemdcode ?? itemdcode;
+  let party_rate_cust_code = null;
+  if (effAcc && effItem && partyRateMap) {
+    party_rate_cust_code = partyRateFromMap(partyRateMap, {
+      itemdcode: effItem,
+      item_code: enriched?.item_code,
+      acc_code: effAcc,
+    });
+  }
+
+  const result = {
+    itemdcode: effItem,
+    acc_code: effAcc,
+    acc_name: enriched?.acc_name ?? null,
+    item_code: enriched?.item_code ?? null,
+    item_desc: enriched?.item_desc ?? null,
+    job_card_no,
+    total_qty,
+    doc_dt,
+    doc_no: pn,
+    party_rate_cust_code:
+      party_rate_cust_code != null && String(party_rate_cust_code).trim() !== ""
+        ? String(party_rate_cust_code).trim()
+        : null,
+    standard_qty_per_box,
+  };
+
+  SA_PACKING_META_CACHE.set(cacheKey, { at: Date.now(), data: result });
+  return result;
 }
 
 // Rows for `insertBulkBoxes` / `insertBulkBoxesTx` after an add adjustment is inserted.

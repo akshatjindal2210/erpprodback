@@ -69,3 +69,21 @@ export function findImsPackByDocNo(records, doc_no) {
     records.find((r) => String(imsPackDocNo(r) ?? "") === want) ?? null
   );
 }
+
+/** IMS `pack` filter for one packing / doc no. */
+export function buildImsDocFilter(docNo) {
+  const pn = String(docNo ?? "").trim();
+  if (!pn) return null;
+  const n = parseInt(pn, 10);
+  return Number.isFinite(n)
+    ? `dailyprod.docno = ${n}`
+    : `dailyprod.docno = '${pn.replace(/'/g, "''")}'`;
+}
+
+/** Single IMS request for many packings (`docno = 1 or docno = 2`). */
+export function buildImsDocFilterMany(docNos = []) {
+  const list = [...new Set(docNos.map((d) => String(d ?? "").trim()).filter(Boolean))];
+  if (!list.length) return null;
+  if (list.length === 1) return buildImsDocFilter(list[0]);
+  return list.map((pn) => buildImsDocFilter(pn)).join(" or ");
+}
