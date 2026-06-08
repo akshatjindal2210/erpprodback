@@ -16,6 +16,9 @@ export function resolveUserViewsSelectFields(options = {}) {
   if (mod === "users" && (act === "add" || act === "edit" || act === "authorize")) {
     return [...forModal];
   }
+  if (mod === "audit" && (act === "view" || act === "add" || act === "edit" || act === "authorize")) {
+    return [...forPicker];
+  }
 
   return null;
 }

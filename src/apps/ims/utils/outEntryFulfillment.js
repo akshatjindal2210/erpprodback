@@ -1,7 +1,12 @@
 import dbQuery from "../../../config/db.js";
-import { findBoxesByNoUids } from "../models/box.model.js";
+import {
+  findBoxesByNoUids,
+  findInHandBoxesByScanCodes,
+  findBoxesByScanCodesAny,
+  matchBoxRowByScanCode,
+} from "../models/box.model.js";
 import { findFuidDetailsForOutEntry } from "../models/outEntry.model.js";
-import { isBoxAvailableForOutEntryScan } from "./boxInventory.js";
+import { isBoxAvailableForOutEntryScan, isBoxInHand, isBoxStockAdjustmentOut } from "./boxInventory.js";
 
 function itemKeyFromRow(row) {
   const code = String(row?.item_dcode ?? "").trim();
@@ -170,12 +175,69 @@ export function validateFulfillmentAgainstRequirements(requirements = [], scanne
   return { ok: true };
 }
 
+export function outEntryOtherScanRejectMessage(box) {
+  if (!box || box.is_deleted) return "Box not found or was removed.";
+  if (isBoxStockAdjustmentOut(box)) {
+    return "This box was removed via stock adjustment and cannot be used.";
+  }
+  if (!isBoxInHand(box)) return "Box is not in stock — it may already be outward.";
+  const hasLocation = box.location_id != null && String(box.location_id).trim() !== "";
+  const hasInward = box.in_uid != null && String(box.in_uid).trim() !== "";
+  if (!hasLocation && !hasInward) return "Box is already in packing area.";
+  return null;
+}
+
+export function isBoxEligibleForOutEntryOther(box) {
+  return outEntryOtherScanRejectMessage(box) == null;
+}
+
+export function outEntryInventoryOutScanRejectMessage(box) {
+  if (!box || box.is_deleted) return "Box not found or was removed.";
+  if (isBoxStockAdjustmentOut(box)) {
+    return "This box was removed via stock adjustment and cannot be used.";
+  }
+  if (!isBoxInHand(box)) return "Box is not in stock.";
+  return null;
+}
+
+export function isBoxEligibleForOutEntryInventoryOut(box) {
+  return outEntryInventoryOutScanRejectMessage(box) == null;
+}
+
+export async function getOutEntryOtherScanSummary({ scanned_boxes = [] }) {
+  const uids = [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
+  const count = uids.length;
+  return {
+    scan_complete: count > 0,
+    boxes_required: 0,
+    boxes_scanned: count,
+    packing_count: 0,
+    item_count: 0,
+    item_line_count: 0,
+    packing_progress: [],
+    item_progress: [],
+    fulfillment: count
+      ? { ok: true }
+      : { ok: false, message: "Scan at least one box from store before submitting." },
+  };
+}
+
 export async function findScannedBoxUidsForOutEntry(out_uid) {
   if (!out_uid) return [];
   const [entry] = await dbQuery(
-    `SELECT approved FROM ims_out_entry WHERE out_uid = $1 AND is_deleted = false LIMIT 1`,
+    `SELECT approved, entry_type FROM ims_out_entry WHERE out_uid = $1 AND is_deleted = false LIMIT 1`,
     [out_uid]
   );
+  if (entry?.entry_type === "other" || entry?.entry_type === "packing_area") {
+    const draft = await dbQuery(
+      `SELECT box_no_uid::text AS box_no_uid
+       FROM ims_out_entry_scanned_box
+       WHERE out_uid = $1
+       ORDER BY box_no_uid ASC`,
+      [out_uid]
+    );
+    return (draft || []).map((r) => String(r.box_no_uid).trim()).filter(Boolean);
+  }
   if (entry?.approved) {
     const rows = await dbQuery(
       `SELECT box_no_uid::text AS box_no_uid
@@ -459,6 +521,224 @@ export async function resolveOutEntryBatchScan({fuid, forOutUid = null, items = 
       allowed: true,
       message: null,
       packing_number: hit.packing_number,
+    });
+  }
+
+  return { results };
+}
+
+/**
+ * Batch resolve out-entry "other" scans — any in-store box (location or inward link).
+ */
+export async function resolveOutEntryOtherBatchScan({
+  forOutUid = null,
+  items = [],
+  session_scanned = [],
+}) {
+  const scopedOut =
+    forOutUid != null && String(forOutUid).trim() !== "" && Number.isFinite(Number(forOutUid))
+      ? Number(forOutUid)
+      : null;
+
+  const normalizedItems = (items || []).map((item, index) => ({
+    id: item?.id != null ? String(item.id) : String(index),
+    code: item?.code != null ? String(item.code).trim() : "",
+  }));
+
+  const codes = normalizedItems.map((item) => item.code).filter(Boolean);
+  const [inHandRows, anyRows] = await Promise.all([
+    findInHandBoxesByScanCodes(codes),
+    findBoxesByScanCodesAny(codes),
+  ]);
+
+  const confirmed = new Set((session_scanned || []).map((u) => String(u).trim()).filter(Boolean));
+  const results = [];
+
+  for (const { id, code } of normalizedItems) {
+    if (!code) {
+      results.push({
+        id,
+        found: false,
+        box_no_uid: null,
+        allowed: false,
+        message: "Invalid box scan",
+      });
+      continue;
+    }
+
+    const inHand = matchBoxRowByScanCode(inHandRows, code);
+    const anyRow = matchBoxRowByScanCode(anyRows, code);
+    const canonical = inHand?.box_no_uid != null ? String(inHand.box_no_uid).trim() : null;
+
+    if (!canonical) {
+      const reject =
+        outEntryOtherScanRejectMessage(anyRow) ||
+        (anyRow ? "Box is not available for this out entry." : "Box not found.");
+      results.push({
+        id,
+        found: Boolean(anyRow),
+        box_no_uid: anyRow?.box_no_uid != null ? String(anyRow.box_no_uid).trim() : null,
+        allowed: false,
+        message: reject,
+      });
+      continue;
+    }
+
+    if (confirmed.has(canonical)) {
+      results.push({
+        id,
+        found: true,
+        box_no_uid: canonical,
+        allowed: false,
+        duplicate: true,
+        message: `Already scanned: ${canonical}`,
+      });
+      continue;
+    }
+
+    const dbRows = await findBoxesByNoUids([canonical]);
+    const dbRow = dbRows?.[0];
+    const eligibility = outEntryOtherScanRejectMessage(dbRow);
+    if (eligibility) {
+      results.push({
+        id,
+        found: true,
+        box_no_uid: canonical,
+        allowed: false,
+        message: eligibility,
+      });
+      continue;
+    }
+
+    if (!isBoxAvailableForOutEntryScan(dbRow, { forOutUid: scopedOut })) {
+      results.push({
+        id,
+        found: true,
+        box_no_uid: canonical,
+        allowed: false,
+        message: "Box is not available for outward.",
+      });
+      continue;
+    }
+
+    confirmed.add(canonical);
+    results.push({
+      id,
+      found: true,
+      box_no_uid: canonical,
+      allowed: true,
+      message: null,
+      packing_number: dbRow?.packing_number ?? inHand?.packing_number ?? null,
+      qty: Number(dbRow?.qty ?? inHand?.qty) || 0,
+      is_loose: dbRow?.is_loose === true || dbRow?.is_loose === 1,
+    });
+  }
+
+  return { results };
+}
+
+/** Batch resolve inventory-out scans — in-hand boxes linked via out_uid on approve. */
+export async function resolveOutEntryInventoryOutBatchScan({
+  forOutUid = null,
+  items = [],
+  session_scanned = [],
+}) {
+  const scopedOut =
+    forOutUid != null && String(forOutUid).trim() !== "" && Number.isFinite(Number(forOutUid))
+      ? Number(forOutUid)
+      : null;
+
+  const normalizedItems = (items || []).map((item, index) => ({
+    id: item?.id != null ? String(item.id) : String(index),
+    code: item?.code != null ? String(item.code).trim() : "",
+  }));
+
+  const codes = normalizedItems.map((item) => item.code).filter(Boolean);
+  const [inHandRows, anyRows] = await Promise.all([
+    findInHandBoxesByScanCodes(codes),
+    findBoxesByScanCodesAny(codes),
+  ]);
+
+  const confirmed = new Set((session_scanned || []).map((u) => String(u).trim()).filter(Boolean));
+  const results = [];
+
+  for (const { id, code } of normalizedItems) {
+    if (!code) {
+      results.push({
+        id,
+        found: false,
+        box_no_uid: null,
+        allowed: false,
+        message: "Invalid box scan",
+      });
+      continue;
+    }
+
+    const inHand = matchBoxRowByScanCode(inHandRows, code);
+    const anyRow = matchBoxRowByScanCode(anyRows, code);
+    const canonical = inHand?.box_no_uid != null ? String(inHand.box_no_uid).trim() : null;
+
+    if (!canonical) {
+      const reject =
+        outEntryInventoryOutScanRejectMessage(anyRow) ||
+        (anyRow ? "Box is not available for inventory out." : "Box not found.");
+      results.push({
+        id,
+        found: Boolean(anyRow),
+        box_no_uid: anyRow?.box_no_uid != null ? String(anyRow.box_no_uid).trim() : null,
+        allowed: false,
+        message: reject,
+      });
+      continue;
+    }
+
+    if (confirmed.has(canonical)) {
+      results.push({
+        id,
+        found: true,
+        box_no_uid: canonical,
+        allowed: false,
+        duplicate: true,
+        message: `Already scanned: ${canonical}`,
+      });
+      continue;
+    }
+
+    const dbRows = await findBoxesByNoUids([canonical]);
+    const dbRow = dbRows?.[0];
+    const eligibility = outEntryInventoryOutScanRejectMessage(dbRow);
+    if (eligibility) {
+      results.push({
+        id,
+        found: true,
+        box_no_uid: canonical,
+        allowed: false,
+        message: eligibility,
+      });
+      continue;
+    }
+
+    if (!isBoxAvailableForOutEntryScan(dbRow, { forOutUid: scopedOut })) {
+      results.push({
+        id,
+        found: true,
+        box_no_uid: canonical,
+        allowed: false,
+        message: "Box is not available for inventory out.",
+      });
+      continue;
+    }
+
+    confirmed.add(canonical);
+    results.push({
+      id,
+      found: true,
+      box_no_uid: canonical,
+      allowed: true,
+      message: null,
+      packing_number: dbRow?.packing_number ?? inHand?.packing_number ?? null,
+      qty: Number(dbRow?.qty ?? inHand?.qty) || 0,
+      is_loose: dbRow?.is_loose === true || dbRow?.is_loose === 1,
     });
   }
 

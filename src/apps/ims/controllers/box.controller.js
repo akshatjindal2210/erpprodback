@@ -9,6 +9,7 @@ import { formatStandardBoxNoUid, docNoFromStandardBoxNoUid } from "../../../glob
 import { getImsMapsSafe, getImsPartyRateMapSafe, pickPartyRateCustCode, partyRateAccCandidates, enrichRowsWithIMS, resolvePartyRateCustCodeFromIms } from "../utils/imsLookup.js";
 import { findSuggestedInwardLocationByHierarchy } from "../models/locationMaster.model.js";
 import { isBoxInHand, isBoxEligibleForOverrideCustomer, overrideCustomerScanRejectMessage } from "../utils/boxInventory.js";
+import { effectiveBoxCustomerAcc, isBoxCustomerOverridden } from "../utils/boxCustomerOverride.js";
 import { resolvePackingStickerMetaForPrint } from "../utils/stickerPrintMeta.js";
 
 import { logActivity } from "../utils/activityLogger.js";
@@ -50,7 +51,11 @@ function stripBoxRowsForClient(rows) {
 const NO_SUITABLE_LOCATION_MSG = "No suitable location found";
 
 async function resolveAccAndItemForLocationSuggestion(row) {
-  let effAcc = row.override_cust ?? row.party_rate_cust_code ?? row.prod_acc_code ?? row.acc_code;
+  let effAcc =
+    effectiveBoxCustomerAcc(row.override_cust, row.prod_acc_code ?? row.acc_code) ??
+    row.party_rate_cust_code ??
+    row.prod_acc_code ??
+    row.acc_code;
   let effItem = row.itemdcode ?? row.item_dcode;
 
   let missingItem = effItem == null || String(effItem).trim() === "";
@@ -145,6 +150,25 @@ function stripDownloadSummaryRow(row) {
 }
 
 const BOX_ACTIVITY_ENTITY = "boxes";
+const OVERRIDE_ACTIVITY_ENTITY = "change_override_customer";
+
+function buildOverrideActivityDetails({ requestRow, boxes, to_customer, from_customer, box_uids, approved, remarks }) {
+  const uids = box_uids ?? requestRow?.box_uids ?? [];
+  return {
+    packing_number: requestRow?.packing_number ?? boxes?.[0]?.packing_number ?? null,
+    from_customer:
+      from_customer ??
+      requestRow?.from_customer ??
+      boxes?.[0]?.override_cust ??
+      boxes?.[0]?.prod_acc_code ??
+      null,
+    to_customer: to_customer ?? requestRow?.to_customer ?? null,
+    box_count: Array.isArray(uids) ? uids.length : 0,
+    box_uids: uids,
+    approved: approved ?? requestRow?.approved ?? null,
+    remarks: remarks ?? requestRow?.remarks ?? null,
+  };
+}
 
 const ALLOWED_STICKER_DOWNLOAD_SOURCES = new Set([
   "sticker_creation",
@@ -283,7 +307,7 @@ export const createBox = async (req, res) => {
     const data = await insertBox({ box_no_uid, packing_number, qty, override_cust: override_cust || null, location_id, in_uid, out_uid, created_by: req.user.id });
 
     const saved = await findBox({ box_uid: data.box_uid });
-    await logActivity(req, { action: "create", entity: BOX_ACTIVITY_ENTITY, entity_id: data.box_uid });
+    await logActivity(req, { action: "create", entity: BOX_ACTIVITY_ENTITY, entity_id: data.box_uid, record: saved || data });
     res.status(201).json({ success: true, data: stripBoxAuditFromClientPayload(saved || data) });
 
   } catch (err) {
@@ -370,7 +394,7 @@ export const deleteBox = async (req, res) => {
       { deleted_by: req.user.id }
     );
 
-    await logActivity(req, { action: "delete", entity: BOX_ACTIVITY_ENTITY, entity_id: box_uid });
+    await logActivity(req, { action: "delete", entity: BOX_ACTIVITY_ENTITY, entity_id: box_uid, record: existing });
 
     res.json({ success: true, message: "Deleted successfully" });
   } catch (err) {
@@ -487,17 +511,33 @@ function normalizeStickerProductionPayload(p, fallbackDocNo) {
   if (!p || typeof p !== "object") return null;
   const dn = p.doc_no != null && String(p.doc_no).trim() !== "" ? String(p.doc_no).trim() : String(fallbackDocNo ?? "").trim();
   const itemdcode = p.itemdcode ?? p.item_dcode;
+  const item_code = p.item_code ?? null;
   if (!dn || itemdcode == null || String(itemdcode).trim() === "") return null;
   return {
     doc_no: dn,
     doc_dt: p.doc_dt ?? null,
     job_card_no: p.job_card_no ?? null,
     itemdcode,
+    item_code,
     total_qty: p.total_qty != null ? p.total_qty : "0",
     acc_code: p.acc_code ?? null,
     sticker_generated: !!p.sticker_generated,
     packing_standard_id: p.packing_standard_id ?? null
   };
+}
+
+/** Client sticker_meta packing fields only — customer is resolved per box at bulk print. */
+function packingLevelStickerHints(sticker_meta = {}) {
+  if (!sticker_meta || typeof sticker_meta !== "object") return {};
+  const {
+    acc_code: _acc,
+    acc_name: _name,
+    party_rate_cust_code: _pr,
+    box_no: _boxNo,
+    total_boxes: _totalBoxes,
+    ...rest
+  } = sticker_meta;
+  return rest;
 }
 
 /** Merge IMS-enriched box row with optional sticker_meta from packing-entry UI. */
@@ -533,8 +573,10 @@ async function enrichBoxRowsFromIMS(rows = [], maps = null) {
     const itemCodeRaw = row.itemdcode ?? row.item_dcode;
     const itemCode = canonicalCode(itemCodeRaw);
     const item = itemCode ? itemMap.get(itemCode) : null;
-    /** Same order as before: override → acc_code → acc_name (code in acc_name column on many list SQL). */
-    const accCode = canonicalCode(row.override_cust ?? row.acc_code ?? row.acc_name);
+    const packingAcc = canonicalCode(row.prod_acc_code ?? row.acc_code);
+    const accCode =
+      canonicalCode(effectiveBoxCustomerAcc(row.override_cust, packingAcc)) ??
+      canonicalCode(row.override_cust ?? row.acc_code ?? row.acc_name);
     const accNameFromLedger = accCode ? ledgerMap.get(accCode) : null;
     const custSnapshot =
       row.cust_at_time != null && String(row.cust_at_time).trim() !== ""
@@ -545,7 +587,7 @@ async function enrichBoxRowsFromIMS(rows = [], maps = null) {
       item_code: item?.item_code ?? row.item_code ?? null,
       itemdesc: item?.item_desc ?? row.itemdesc ?? row.item_desc ?? null,
       item_desc: item?.item_desc ?? row.item_desc ?? row.itemdesc ?? null,
-      acc_code: canonicalCode(row.override_cust ?? row.acc_code) ?? row.acc_code ?? null,
+      acc_code: accCode ?? row.acc_code ?? null,
       acc_name: accNameFromLedger ?? custSnapshot ?? row.acc_name ?? null,
       party_rate_cust_code: null,
       from_customer_name: (row.from_customer != null ? ledgerMap.get(String(row.from_customer)) : null) ?? row.from_customer_name ?? null,
@@ -646,19 +688,9 @@ async function enrichStickerManagementListRows(rows = []) {
 
 /** Which customer acc_code applies on sticker screen (box override after customer override, else packing row). */
 async function resolveStickerCustomerAccCode(docNo, fallbackAcc = null) {
-  const pn = String(docNo ?? "").trim();
   const fb =
     fallbackAcc != null && String(fallbackAcc).trim() !== "" ? String(fallbackAcc).trim() : null;
-  if (!pn) return fb;
-
-  const stickersExist = await checkProductionStickersExist(pn);
-  if (!stickersExist) return fb;
-
-  const boxes = await findBoxesByPackingNumber(pn);
-  for (const b of boxes || []) {
-    const oc = b?.override_cust;
-    if (oc != null && String(oc).trim() !== "") return String(oc).trim();
-  }
+  // Packing-level customer stays on production / ERP acc — per-box overrides are sticker-only.
   return fb;
 }
 
@@ -900,6 +932,7 @@ export const generateStickers = async (req, res) => {
     const {
       doc_no,
       itemdcode,
+      item_code,
       acc_name,
       acc_code,
       packing_config,
@@ -949,7 +982,7 @@ export const generateStickers = async (req, res) => {
         packing_number : String(doc_no),
         qty            : Number(isLoose ? loose_box_qty : qty_per_box),
         is_loose       : isLoose,
-        override_cust  : acc_code || null, 
+        override_cust  : null,
         created_by     : req.user.id
       });
     }
@@ -966,6 +999,7 @@ export const generateStickers = async (req, res) => {
       doc_dt,
       job_card_no,
       itemdcode,
+      item_code,
       acc_code,
       total_qty
     });
@@ -1164,8 +1198,6 @@ export const trackStickerDownload = async (req, res) => {
     // Count increment
     const updated = await incrementDownloadCount(box_uid, req.user.id);
 
-    await logActivity(req, { action: "view", entity: BOX_ACTIVITY_ENTITY, entity_id: String(box_uid) });
-
     res.json({
       success        : true,
       message        : "Download logged",
@@ -1247,14 +1279,17 @@ export const renderSingleSticker = async (req, res) => {
       return res.status(404).json({ success: false, message: "Box not found" });
 
     const [enrichedBox] = await enrichBoxRowsFromIMS(box ? [box] : []);
+    const clientPackingCustomerLocked =
+      sticker_meta?.acc_code != null && String(sticker_meta.acc_code).trim() !== "";
     const packingMeta = await resolvePackingStickerMetaForPrint(enrichedBox?.packing_number, {
       ...sticker_meta,
       itemdcode: sticker_meta.itemdcode ?? enrichedBox?.itemdcode,
-      acc_code:
-        sticker_meta.acc_code ??
-        enrichedBox?.override_cust ??
-        enrichedBox?.acc_code ??
-        enrichedBox?.prod_acc_code,
+      acc_code: clientPackingCustomerLocked
+        ? String(sticker_meta.acc_code).trim()
+        : sticker_meta.acc_code ??
+          enrichedBox?.override_cust ??
+          enrichedBox?.acc_code ??
+          enrichedBox?.prod_acc_code,
       acc_name: sticker_meta.acc_name ?? enrichedBox?.acc_name,
       sa_id: enrichedBox?.sa_id,
     });
@@ -1325,30 +1360,65 @@ export const renderBulkStickers = async (req, res) => {
     }
     const custRow = enrichedBoxes[0];
     const packingMeta = await resolvePackingStickerMetaForPrint(packingNo, {
-      ...sticker_meta,
+      ...packingLevelStickerHints(sticker_meta),
       itemdcode: sticker_meta.itemdcode ?? custRow?.itemdcode,
-      acc_code:
-        sticker_meta.acc_code ??
-        custRow?.override_cust ??
-        custRow?.acc_code ??
-        custRow?.prod_acc_code,
-      acc_name: sticker_meta.acc_name ?? custRow?.acc_name,
+      acc_code: sticker_meta.acc_code ?? custRow?.prod_acc_code ?? null,
+      acc_name: sticker_meta.acc_name ?? undefined,
       sa_id: custRow?.sa_id,
     });
     const hasClientStickerMeta =
       sticker_meta &&
       typeof sticker_meta === "object" &&
       Object.keys(sticker_meta).length > 0;
-    const mergedMeta = hasClientStickerMeta
-      ? { ...packingMeta, ...sticker_meta }
+    const sharedPackingMeta = hasClientStickerMeta
+      ? { ...packingMeta, ...packingLevelStickerHints(sticker_meta) }
       : packingMeta;
 
+    const packingAcc =
+      sharedPackingMeta.acc_code != null && String(sharedPackingMeta.acc_code).trim() !== ""
+        ? String(sharedPackingMeta.acc_code).trim()
+        : null;
+    const packingAccName =
+      sharedPackingMeta.acc_name != null && String(sharedPackingMeta.acc_name).trim() !== ""
+        ? String(sharedPackingMeta.acc_name).trim()
+        : null;
+
+    const clientPackingCustomerLocked =
+      sticker_meta?.acc_code != null && String(sticker_meta.acc_code).trim() !== "";
+
     const cards = await Promise.all(
-      enrichedBoxes.map((box, idx) => {
+      enrichedBoxes.map(async (box, idx) => {
+        const overridden = isBoxCustomerOverridden(box.override_cust, packingAcc);
+        const acc_code = clientPackingCustomerLocked
+          ? packingAcc ?? box.acc_code
+          : overridden
+            ? effectiveBoxCustomerAcc(box.override_cust, packingAcc) ?? box.acc_code
+            : packingAcc ?? box.acc_code;
+        const acc_name = clientPackingCustomerLocked
+          ? packingAccName ?? box.acc_name
+          : overridden
+            ? box.acc_name
+            : packingAccName ?? box.acc_name;
+        const party_rate_cust_code = acc_code
+          ? await resolvePartyRateCustCodeFromIms({
+              itemdcode: box.itemdcode ?? sharedPackingMeta.itemdcode,
+              item_code: box.item_code ?? sharedPackingMeta.item_code,
+              acc_code,
+            })
+          : null;
+        const perBoxMeta = {
+          ...sharedPackingMeta,
+          acc_code,
+          acc_name,
+          party_rate_cust_code:
+            party_rate_cust_code != null && String(party_rate_cust_code).trim() !== ""
+              ? String(party_rate_cust_code).trim()
+              : sharedPackingMeta.party_rate_cust_code,
+        };
         return buildStickerCardHtml(
           mergeStickerPrintRow(
             { ...box, box_no: idx + 1, total_boxes: totalBoxes },
-            mergedMeta,
+            perBoxMeta,
             packingNo
           )
         );
@@ -1411,10 +1481,17 @@ export const overrideCustomer = async (req, res) => {
     });
 
     await logActivity(req, {
-      action    : "override_customer",
-      entity    : BOX_ACTIVITY_ENTITY,
-      entity_id : box_uid,
-      meta      : { old_cust: existing.override_cust, new_cust }
+      action: "override_customer",
+      entity: OVERRIDE_ACTIVITY_ENTITY,
+      entity_id: box_uid,
+      record: existing,
+      details: {
+        packing_number: existing.packing_number,
+        from_customer: existing.override_cust ?? existing.prod_acc_code ?? null,
+        to_customer: new_cust,
+        box_count: 1,
+        box_uids: [box_uid],
+      },
     });
 
     res.json({
@@ -1554,6 +1631,22 @@ export const createOverrideRequest = async (req, res) => {
       });
     }
 
+    await logActivity(req, {
+      action: normalizedApproved === true ? "approve" : "create",
+      entity: OVERRIDE_ACTIVITY_ENTITY,
+      entity_id: String(requestRow?.request_id),
+      record: requestRow,
+      details: buildOverrideActivityDetails({
+        requestRow,
+        boxes,
+        to_customer,
+        from_customer: boxes[0]?.override_cust ?? boxes[0]?.prod_acc_code ?? null,
+        box_uids,
+        approved: normalizedApproved === true,
+        remarks,
+      }),
+    });
+
     res.status(201).json({ success: true, data: requestRow, message: normalizedApproved === true ? "Request approved & boxes updated" : "Request submitted for approval" });
     
   } catch (err) {
@@ -1647,11 +1740,20 @@ export const updateOverrideRequest = async (req, res) => {
     }
 
     // 6. Log Activity & Response
-    await logActivity(req, { 
-        action: "update_override_request", 
-        entity: "ims_box_override_request", 
-        entity_id: String(request_id), 
-        details: { updated_fields: fields } 
+    const logUids = fields.box_uids || existingReq.box_uids || [];
+    await logActivity(req, {
+      action: fields.approved === true ? "approve" : "update",
+      entity: OVERRIDE_ACTIVITY_ENTITY,
+      entity_id: String(request_id),
+      record: updatedRow,
+      details: buildOverrideActivityDetails({
+        requestRow: updatedRow || existingReq,
+        to_customer: fields.to_customer ?? existingReq.to_customer,
+        from_customer: existingReq.from_customer,
+        box_uids: logUids,
+        approved: fields.approved === true,
+        remarks: fields.remarks ?? existingReq.remarks,
+      }),
     });
 
     const msg = fields.approved
@@ -1724,9 +1826,18 @@ export const approveOverrideRequest = async (req, res) => {
     });
 
     await logActivity(req, {
-      action: approve ? "approve_override_request" : "reject_override_request",
-      entity: "ims_box_override_request",
+      action: approve ? "approve" : "reject",
+      entity: OVERRIDE_ACTIVITY_ENTITY,
       entity_id: String(request_id),
+      record: updatedReq || requestRow,
+      details: buildOverrideActivityDetails({
+        requestRow: updatedReq || requestRow,
+        to_customer: requestRow.to_customer,
+        from_customer: requestRow.from_customer,
+        box_uids: requestRow.box_uids,
+        approved: approve,
+        remarks: requestRow.remarks,
+      }),
     });
 
     res.json({ success: true, data: updatedReq, message: approve ? "Override approved" : "Override rejected" });

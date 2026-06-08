@@ -1,78 +1,95 @@
-import dbQuery from "../db.js";
+import ActivityLog from "../../../core/models/activityLog.model.js";
+import { buildMiddlewareLogPayload } from "../../../core/utils/activityLogPayload.js";
 
 const ACTION_LABELS = { POST: "CREATE", PUT: "UPDATE", PATCH: "MODIFY", DELETE: "DELETE" };
-const MODULES = {
-  users: "user",
-  task_tasks: "task",
-  task_categories: "category",
-  departments: "department",
-  designations: "designation",
-  holidays: "task_holiday",
-};
-
-function getModuleName(route) {
-  const segment = Object.keys(MODULES).find(key => route.includes(key));
-  return MODULES[segment] || "record";
-}
-
-function buildAction(method, route, resourceId, body) {
-  const module = getModuleName(route);
-  const identifier = body?.name || body?.title || "";
-  const label = identifier ? `: "${identifier}"` : "";
-  const idStr = resourceId ? ` #${resourceId}` : "";
-
-  const actions = {
-    POST: `Created a new ${module}${label}`,
-    PUT: `Updated ${module}${idStr}${label}`,
-    PATCH: `Modified ${module}${idStr}${label}`,
-    DELETE: route.includes("bulk") ? `Bulk deleted multiple ${module}s` : `Deleted ${module}${idStr}`
-  };
-  return actions[method] || `Performed ${method} on ${module}`;
-}
 
 export function activityLogger(req, res, next) {
   if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return next();
 
+  const url = req.originalUrl.toLowerCase();
+
+  const isExplicitRead = [
+    "list", "get", "fetch", "search", "filter", "stats", "me",
+    "views", "check", "preview", "details", "report", "export",
+    "download", "history", "summary", "meta", "helper",
+  ].some((pattern) => url.includes(pattern));
+
+  if (isExplicitRead) return next();
+
+  if (req.method === "POST") {
+    const writeKeywords = [
+      "create", "add", "insert", "save", "update", "edit", "modify",
+      "delete", "remove", "approve", "authorize", "generate",
+      "link", "unlink", "sync", "apply", "revert", "reset", "change",
+      "cancel", "reject", "submit", "process", "upload", "import",
+    ];
+    const isWriteAction = writeKeywords.some((pattern) => url.includes(pattern));
+    const isListBody =
+      req.body &&
+      (req.body.page !== undefined ||
+        req.body.limit !== undefined ||
+        req.body.filters !== undefined ||
+        req.body.search !== undefined);
+
+    if (!isWriteAction || (isListBody && !isWriteAction)) return next();
+  }
+
+  if (req._activityLogged) return next();
+
   const originalJson = res.json.bind(res);
 
   res.json = function (data) {
-    if (res.statusCode >= 200 && res.statusCode < 300 && data?.success) {
+    if (res.statusCode >= 200 && res.statusCode < 300 && data?.success && !req._activityLogged) {
       const userId = req.user?.id;
-      
       if (userId) {
-        const userType = req.user?.type ?? "user";
-        const resourceId = req.params?.id || data?.data?.id || null;
-        const module = getModuleName(req.originalUrl);
-        const description = buildAction(req.method, req.originalUrl, resourceId, req.body);
-        
-        let logDetails = null;
+        const routeUrl = req.originalUrl.toLowerCase();
+        let actionType = ACTION_LABELS[req.method] || req.method;
 
-        if (req.method === "DELETE") {
-          logDetails = { 
-            id: resourceId, 
-            type: "removal", 
-            bulk: req.originalUrl.includes("bulk"),
-            affected_ids: req.body?.ids || null 
-          };
-        } else {
-          const payload = { ...req.body };
-          ["password", "confirmPassword", "oldPassword", "token"].forEach(f => delete payload[f]);
-          logDetails = Object.keys(payload).length > 0 ? payload : null;
+        if (req.method === "POST") {
+          const isApproval =
+            req.body.approved === true ||
+            req.body.approve === true ||
+            req.body.is_approved === true ||
+            req.body.status === "approved" ||
+            req.body.status === "authorized" ||
+            routeUrl.includes("/approve") ||
+            routeUrl.includes("/authorize");
+
+          if (isApproval) actionType = "APPROVE";
+          else if (routeUrl.includes("/update") || routeUrl.includes("/edit") || routeUrl.includes("/modify")) {
+            actionType = "UPDATE";
+          } else if (routeUrl.includes("/delete") || routeUrl.includes("/remove")) {
+            actionType = "DELETE";
+          }
         }
 
-        // 1. Log to Task-specific table
-        dbQuery(
-          `INSERT INTO task_users_logs (user_id, action_type, module, description, user_type, log_data)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
-            userId, 
-            ACTION_LABELS[req.method] || req.method, 
-            module, 
-            description, 
-            userType, 
-            logDetails ? JSON.stringify(logDetails) : null
-          ]
-        ).catch(err => console.error("[Task ActivityLogger] DB Error:", err.message));
+        const parts = req.originalUrl.split("/").filter(Boolean);
+        const module = (parts[parts.length - 1] || "record").replace(/-/g, " ");
+        const resourceId = req.params?.id || data?.data?.id || req.body?.id || null;
+
+        const { description, log_data, entity_id } = buildMiddlewareLogPayload({
+          actionType,
+          module,
+          entityId: resourceId,
+          body: req.body,
+          responseData: data?.data,
+          route: routeUrl,
+        });
+
+        req._activityLogged = true;
+
+        ActivityLog.create({
+          user_id: userId,
+          app_type: "task",
+          module,
+          action_type: actionType,
+          description,
+          log_data,
+          ip_address: req.ip,
+          user_agent: req.get("User-Agent"),
+          entity: module,
+          entity_id,
+        }).catch((err) => console.error("[Task ActivityLogger] Error:", err.message));
       }
     }
     return originalJson(data);

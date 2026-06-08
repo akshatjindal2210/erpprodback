@@ -1,8 +1,25 @@
 import dotenv from "dotenv";
 import path from "path";
+import fs from "fs";
 import { APP_VERSION } from "./appVersion.js";
 
 dotenv.config();
+
+const getUploadPath = () => {
+  const envPath = process.env.UPLOAD_PATH;
+  let finalPath = "uploads";
+  
+  if (envPath && fs.existsSync(envPath)) {
+    finalPath = path.join(envPath, "uploads");
+  }
+  
+  // Ensure the base upload directory exists
+  if (!fs.existsSync(finalPath)) {
+    fs.mkdirSync(finalPath, { recursive: true });
+  }
+  
+  return finalPath;
+};
 
 const config = {
   db: {
@@ -25,6 +42,7 @@ const config = {
 
     hourlyStartHour: parseInt(process.env.DB_BACKUP_HOURLY_START_HOUR, 10) || 8,
     hourlyEndHour: parseInt(process.env.DB_BACKUP_HOURLY_END_HOUR, 10) || 19,
+    hourlyKeepCount: parseInt(process.env.DB_BACKUP_HOURLY_KEEP_COUNT, 10) || 4,
     
     pgDump: process.env.PG_DUMP_PATH || "pg_dump",
     ssl: process.env.DB_SSL === "true",
@@ -42,8 +60,9 @@ const config = {
   node_env: process.env.NODE_ENV || "development",
   domain: process.env.DOMAIN || "localhost",
   frontend_url: process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(",") : ["http://localhost:3000"],
+  uploadPath: getUploadPath(),
+  uploadPublicPath: "uploads",
   cookie_name: "auth_token",
-  cookie_max_age: 1 * 24 * 60 * 60 * 1000, // 1 days
 };
 
 if (config.node_env === "production" && !config.jwt_secret) {

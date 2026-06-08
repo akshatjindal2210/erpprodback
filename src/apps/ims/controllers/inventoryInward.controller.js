@@ -1,13 +1,17 @@
-import { findInventoryInwards, findInventoryInward, insertInventoryInward, updateInventoryInwards, deleteInventoryInwards, resetBoxesForInward, findPackingAreaByPacking, findPackingAreaBoxes } from "../models/inventoryInward.model.js";
+import { findInventoryInwards, findInventoryInward, insertInventoryInward, updateInventoryInwards, deleteInventoryInwards, resetBoxesForInward, findPackingAreaByPacking, findPackingAreaBoxes, fetchDailyprodDocMetaByPackings } from "../models/inventoryInward.model.js";
 
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByScanCode, inwardScanRejectMessage, getProductionStickerPanelMetaByPackingNumbers } from "../models/box.model.js";
-import { enrichRowsWithIMS } from "../utils/imsLookup.js";
+import { enrichRowsWithIMS, getImsMapsSafe } from "../utils/imsLookup.js";
 import { logInwardLinkBatch } from "../utils/logBoxTransaction.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { validateInwardLocationsAgainstBoxes, validateSingleBoxAtLocation, validateBoxesAtLocationBatch, isInwardLocationValidationEnabled } from "../utils/inwardLocationValidation.js";
+import { enrichInventoryRows } from "./inventoryReport.controller.js";
+import { resolveStockAdjustmentPackingMeta } from "../utils/stockAdjustmentPacking.js";
+import { withTransaction } from "../../../config/db.js";
+import { snapshotMetadataFromBoxUids, snapshotInwardMetadata } from "../utils/entryListMetadata.js";
 
 const INWARD_CFG = getCrudModuleConfig("inventory_inwards");
 
@@ -63,67 +67,118 @@ export const getInventoryInwards = async (req, res) => {
       permission: req.permission
     });
 
+    // Resolve aggregated item codes to alphanumeric values
+    if (result.data?.length) {
+      const { itemMap } = await getImsMapsSafe();
+      result.data = result.data.map(row => {
+        if (!row.item_codes) return row;
+        const codes = row.item_codes.split(' | ').map(c => {
+          const trimmed = c.trim();
+          const mapped = itemMap.get(trimmed);
+          return mapped?.item_code || trimmed;
+        });
+        return {
+          ...row,
+          item_codes: codes.join(' | ')
+        };
+      });
+    }
+
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-/* Packing-area summary details from generated sticker boxes (ims_box_table panel meta),
- * not from a separate ims_dailyprod list join on the packing query.
- */
-async function enrichPackingAreaListRows(rows = []) {
+function packingAreaPanelKey(pn, item, cust) {
+  const itemNorm = item === "—" ? "-" : item;
+  return `${pn}:${itemNorm}:${cust}`;
+}
+
+function hasPackingMetaValue(v) {
+  return v != null && String(v).trim() !== "" && String(v).trim() !== "—";
+}
+
+function pickPanelMeta(panelMap, pn, item, cust) {
+  if (!pn || !panelMap?.size) return undefined;
+  const itemStr = String(item ?? "").trim();
+  const itemAlt = itemStr === "—" ? "-" : itemStr;
+  const c = String(cust ?? "").trim();
+  const keys = [
+    packingAreaPanelKey(pn, itemStr, c),
+    packingAreaPanelKey(pn, itemAlt, c),
+    packingAreaPanelKey(pn, itemStr, c || "-"),
+    packingAreaPanelKey(pn, itemAlt, c || "-"),
+  ];
+  for (const key of keys) {
+    if (panelMap.has(key)) return panelMap.get(key);
+  }
+  const prefixes = [`${pn}:${itemStr}:`, `${pn}:${itemAlt}:`];
+  for (const [key, val] of panelMap.entries()) {
+    if (prefixes.some((p) => key.startsWith(p))) return val;
+  }
+  for (const [key, val] of panelMap.entries()) {
+    if (key.startsWith(`${pn}:`)) return val;
+  }
+  return undefined;
+}
+
+/** Item/customer + date/job card — shared by By Packing and By Box tabs. */
+async function enrichPackingAreaRows(rows = []) {
   if (!Array.isArray(rows) || !rows.length) return rows;
 
-  const panelMap = await getProductionStickerPanelMetaByPackingNumbers(
-    rows.map((r) => r.packing_number)
-  );
+  const [panelMap, dailyprodMap] = await Promise.all([
+    getProductionStickerPanelMetaByPackingNumbers(rows.map((r) => r.packing_number)),
+    fetchDailyprodDocMetaByPackings(rows.map((r) => r.packing_number)),
+  ]);
 
-  const merged = rows.map((row) => {
+  const mapped = rows.map((row) => ({
+    ...row,
+    customer_code: row.acc_code ?? row.customer_code ?? null,
+  }));
+  const enriched = await enrichInventoryRows(mapped);
+
+  const result = enriched.map((row, idx) => {
+    const sqlRow = mapped[idx] ?? row;
     const pn = row.packing_number != null ? String(row.packing_number).trim() : "";
-    const panel = pn ? panelMap.get(pn) : undefined;
+    const item = sqlRow.item_dcode != null ? String(sqlRow.item_dcode).trim() : "";
+    const sqlCust = String(sqlRow.customer_code ?? sqlRow.acc_code ?? "").trim();
+    const panel = pickPanelMeta(panelMap, pn, item, sqlCust);
+    const dp = pn
+      ? (dailyprodMap.get(pn)
+        ?? (/^\d+$/.test(pn) ? dailyprodMap.get(String(Number(pn))) : undefined))
+      : undefined;
 
-    if (!panel) {
-      return {
-        ...row,
-        sticker_generated: false,
-        doc_no: pn || null,
-        acc_name: null,
-        item_code: null,
-        item_desc: null,
-      };
-    }
+    const docDt = [sqlRow.doc_dt, row.doc_dt, panel?.dailyprod_doc_dt, dp?.doc_dt].find(hasPackingMetaValue) ?? null;
+    const jobCard = [sqlRow.job_card_no, row.job_card_no, panel?.dailyprod_job_card_no, dp?.job_card_no].find(hasPackingMetaValue) ?? null;
 
     return {
       ...row,
-      sticker_generated: true,
-      doc_no: pn || null,
-      doc_dt: panel.dailyprod_doc_dt ?? null,
-      job_card_no: panel.dailyprod_job_card_no ?? null,
-      total_qty: panel.dailyprod_total_qty ?? null,
-      item_dcode: panel.itemdcode ?? null,
-      acc_code: panel.acc_code ?? null,
-      acc_name: null,
-      item_code: null,
-      item_desc: null,
+      acc_code: row.customer_code ?? row.acc_code ?? null,
+      acc_name: row.customer_name ?? row.acc_name ?? null,
+      doc_dt: docDt,
+      job_card_no: jobCard,
+      sa_financial_year: panel?.sa_financial_year ?? sqlRow.sa_financial_year ?? null,
     };
   });
 
-  const stickerRows = merged.filter((r) => r.sticker_generated);
-  if (!stickerRows.length) return merged;
+  for (const row of result) {
+    if ((hasPackingMetaValue(row.doc_dt) && hasPackingMetaValue(row.job_card_no)) || !row.packing_number) continue;
+    try {
+      const fullMeta = await resolveStockAdjustmentPackingMeta(row.packing_number, {
+        item_dcode: row.item_dcode,
+        financial_year: row.sa_financial_year,
+      });
+      if (fullMeta) {
+        if (!hasPackingMetaValue(row.doc_dt)) row.doc_dt = fullMeta.doc_dt ?? null;
+        if (!hasPackingMetaValue(row.job_card_no)) row.job_card_no = fullMeta.job_card_no ?? null;
+      }
+    } catch (e) {
+      console.warn("[packing area] failed to resolve IMS metadata for", row.packing_number, e.message);
+    }
+  }
 
-  const enrichedSticker = await enrichRowsWithIMS(stickerRows, {
-    itemCodeField: "item_dcode",
-    accCodeField: "acc_code",
-  });
-  const enrichedByPn = new Map(
-    enrichedSticker.map((r) => [String(r.packing_number).trim(), r])
-  );
-
-  return merged.map((row) => {
-    if (!row.sticker_generated) return row;
-    return enrichedByPn.get(String(row.packing_number).trim()) || row;
-  });
+  return result;
 }
 
 export const getPackingAreaList = async (req, res) => {
@@ -140,9 +195,7 @@ export const getPackingAreaList = async (req, res) => {
       limit,
       filters,
     });
-
-    result.data = await enrichPackingAreaListRows(result.data);
-
+    result.data = await enrichPackingAreaRows(result.data);
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -157,15 +210,25 @@ export const getPackingAreaBoxesList = async (req, res) => {
     });
     const packing_number =
       req.body?.packing_number != null ? String(req.body.packing_number).trim() : "";
+    const item_dcode =
+      req.body?.item_dcode != null ? String(req.body.item_dcode).trim() : "";
+    const acc_code =
+      req.body?.acc_code != null ? String(req.body.acc_code).trim() : "";
 
     const result = await findPackingAreaBoxes({
       search: sanitizeSearch(search),
       packing_number: packing_number || undefined,
+      item_dcode: item_dcode || undefined,
+      acc_code: acc_code || undefined,
       sort: { by: sortBy, order },
       page,
       limit,
       filters,
     });
+
+    if (result.data?.length) {
+      result.data = await enrichPackingAreaRows(result.data);
+    }
 
     res.json({ success: true, ...result });
   } catch (err) {
@@ -214,9 +277,15 @@ export const createInventoryInward = async (req, res) => {
       return res.status(400).json({ success: false, message: "Packing number not found for these boxes" });
     }
 
+    const boxUids = uniqueBoxNoUidsFromLocations(locations);
+    const listMeta = await snapshotMetadataFromBoxUids(boxUids);
+
     // 2. Primary Record Insert
     const row = await insertInventoryInward({ 
-      packing_number: packingNumber, 
+      packing_number: packingNumber,
+      item_codes: listMeta.item_codes,
+      qtys: listMeta.qtys,
+      total_qty: listMeta.total_qty,
       remarks, 
       approved: true,
       approved_by: userId,
@@ -235,7 +304,7 @@ export const createInventoryInward = async (req, res) => {
     // 4. Fetch Full Created Object (for response consistency)
     const data = await findInventoryInward({ in_uid: row.in_uid });
 
-    await logActivity(req, { action: "create", entity: "inventory_inwards", entity_id: row.in_uid });
+    await logActivity(req, { action: "create", entity: "inventory_inwards", entity_id: row.in_uid, record: row });
 
     res.status(201).json({ success: true, data });
   } catch (err) {
@@ -272,32 +341,12 @@ export const updateInventoryInward = async (req, res) => {
       }
     }
 
-    const fields = {
-      ...(remarks !== undefined && { remarks }),
-      approved: true,
-      approved_by: userId,
-      approved_at: existing.approved_at || new Date(),
-      updated_by: userId,
-      updated_at: new Date()
-    };
-
-    // Recompute header packing when full location/box payload is sent (multi-packing support)
-    if (locations && locations.length > 0) {
-      const agg = await resolveAggregatePackingForLocations(locations);
-      if (agg) fields.packing_number = agg;
-    }
-
-    await updateInventoryInwards(fields, { in_uid });
-
     if (locations && locations.length > 0) {
       if (await isInwardLocationValidationEnabled()) {
         const locErr = await validateInwardLocationsAgainstBoxes(locations);
         if (locErr) return res.status(400).json({ success: false, message: locErr });
       }
-      // First, reset existing boxes for this in_uid (set in_uid and location_id to null)
       await resetBoxesForInward(in_uid, userId);
-
-      // Then, update new boxes
       const linkResults = await Promise.all(
         locations.map((loc) =>
           updateBoxesAfterInward(in_uid, loc.location_id, inwardBoxNoUids(loc.boxes), userId, { logEvent: false })
@@ -306,13 +355,34 @@ export const updateInventoryInward = async (req, res) => {
       logInwardLinkBatch({ in_uid, userId, rowGroups: linkResults });
     }
 
+    const fields = {
+      ...(remarks !== undefined && { remarks }),
+      approved: true,
+      approved_by: userId,
+      approved_at: existing.approved_at || new Date(),
+      updated_by: userId,
+      updated_at: new Date(),
+    };
+
+    if (locations && locations.length > 0) {
+      const agg = await resolveAggregatePackingForLocations(locations);
+      if (agg) fields.packing_number = agg;
+      const listMeta = await snapshotInwardMetadata(in_uid);
+      fields.item_codes = listMeta.item_codes;
+      fields.qtys = listMeta.qtys;
+      fields.total_qty = listMeta.total_qty;
+    }
+
+    await updateInventoryInwards(fields, { in_uid });
+
     const data = await findInventoryInward({ in_uid });
 
-    await logActivity(req, { 
-      action: "update", 
-      entity: "inventory_inwards", 
+    await logActivity(req, {
+      action: "update",
+      entity: "inventory_inwards",
       entity_id: in_uid,
-      details: { updated_fields: fields }
+      record: data,
+      details: { updated_fields: fields },
     });
 
     res.json({ success: true, data });
@@ -460,14 +530,20 @@ export const deleteInventoryInward = async (req, res) => {
       return res.status(404).json({ success: false, message: "Not found" });
     }
 
-    await deleteInventoryInwards(
-      { in_uid },
-      { deleted_by: req.user.id }
-    );
+    await withTransaction(async (client) => {
+      // 1. Reset boxes (unlink from location and inward)
+      await resetBoxesForInward(in_uid, req.user.id, { client });
 
-    await logActivity(req, { action: "delete", entity: "inventory_inwards", entity_id: in_uid });
+      // 2. Soft-delete the inward record
+      await deleteInventoryInwards(
+        { in_uid },
+        { client, deleted_by: req.user.id }
+      );
+    });
 
-    res.json({ success: true, message: "Deleted successfully" });
+    await logActivity(req, { action: "delete", entity: "inventory_inwards", entity_id: in_uid, record: existing });
+
+    res.json({ success: true, message: "Deleted successfully. Boxes have been moved back to packing area." });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

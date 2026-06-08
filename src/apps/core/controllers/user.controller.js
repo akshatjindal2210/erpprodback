@@ -334,6 +334,7 @@ export const createUser = async (req, res) => {
       entity: "users",
       entity_id: user.id,
       details: { name: user.name, username: user.username },
+      appType: "portal",
     });
     const { password: _, ...safeUser } = user;
     res.status(201).json({ success: true, data: safeUser, message: "User created successfully" });
@@ -478,7 +479,8 @@ export const updateUser = async (req, res) => {
       action: "update",
       entity: "users",
       entity_id: id,
-      details: { updated_fields: Object.keys(fields) },
+      details: { updated_fields: fields },
+      appType: "portal",
     });
 
     const { password: pw, ...safeUser } = existing;
@@ -502,7 +504,8 @@ export const deleteUser = async (req, res) => {
       action: "delete",
       entity: "users",
       entity_id: id,
-      details: { deleted_user: existing.username },
+      record: existing,
+      appType: "portal",
     });
     res.json({ success: true, message: "User deleted successfully" });
   } catch (err) {
@@ -527,6 +530,7 @@ export const loginUser = async (req, res) => {
         entity: "users",
         details: { username: normalizedUsername, reason: "User not found in local database" },
         success: false,
+        appType: "portal"
       });
       return res.status(401).json({
         success: false,
@@ -544,6 +548,7 @@ export const loginUser = async (req, res) => {
           entity: "users",
           details: { username: normalizedUsername, reason: "Invalid credentials" },
           success: false,
+          appType: "portal"
         });
         return res.status(401).json({ success: false, message: "Invalid credentials" });
       }
@@ -571,6 +576,7 @@ export const loginUser = async (req, res) => {
             reason: imsResult?.message || "Invalid credentials",
           },
           success: false,
+          appType: "portal"
         });
         return res.status(401).json({
           success: false,
@@ -583,6 +589,7 @@ export const loginUser = async (req, res) => {
         entity: "users",
         details: { username: normalizedUsername, reason: `Unsupported auth: ${credentialKind}` },
         success: false,
+        appType: "portal"
       });
       return res.status(501).json({
         success: false,
@@ -596,18 +603,29 @@ export const loginUser = async (req, res) => {
         entity: "users",
         details: { username: normalizedUsername, reason: "Account inactive" },
         success: false,
+        appType: "portal"
       });
       return res.status(403).json({ success: false, message: "Account is inactive" });
     }
 
-    const token = jwt.sign({ id: user.id, type: user.type }, config.jwt_secret, { expiresIn: "1d" });
+    // Calculate expiration: End of the next day (11:59:59 PM) to avoid logout during office hours.
+    // This ensures that if a user logs in today, they won't be logged out during office hours tomorrow.
+    const now = new Date();
+    const expirationDate = new Date(now);
+    expirationDate.setDate(now.getDate() + 1);
+    expirationDate.setHours(23, 59, 59, 999);
+    
+    const expiresInMs = expirationDate.getTime() - now.getTime();
+    const expiresInSeconds = Math.floor(expiresInMs / 1000);
+
+    const token = jwt.sign({ id: user.id, type: user.type }, config.jwt_secret, { expiresIn: expiresInSeconds });
 
     res.cookie(config.cookie_name, token, {
       httpOnly: true,
       secure: config.node_env === "production",
-      sameSite: config.node_env === "production" ? "strict" : "lax",
+      sameSite: "lax",
       path: "/",
-      maxAge: config.cookie_max_age,
+      maxAge: expiresInMs,
       ...(config.domain !== "localhost" ? { domain: config.domain } : {}),
     });
 
@@ -628,6 +646,8 @@ export const loginUser = async (req, res) => {
       entity: "users",
       entity_id: user.id,
       details: { username: user.username },
+      userId: user.id,
+      appType: "portal"
     });
 
     res.json({
@@ -666,7 +686,12 @@ export const logoutUser = async (req, res) => {
             id: decoded.id, 
             type: decoded.type || "user" 
           };
-          await logActivity(req, { action: "logout", entity: "users", entity_id: decoded.id });
+          await logActivity(req, { 
+            action: "logout", 
+            entity: "users", 
+            entity_id: decoded.id,
+            appType: "portal"
+          });
         }
       } catch (err) {
         // Token invalid/expired, ignore for logout
@@ -676,7 +701,7 @@ export const logoutUser = async (req, res) => {
     res.clearCookie(config.cookie_name, {
       httpOnly: true,
       secure: config.node_env === "production",
-      sameSite: config.node_env === "production" ? "strict" : "lax",
+      sameSite: "lax",
       path: "/",
       ...(config.domain !== "localhost" ? { domain: config.domain } : {}),
     });
@@ -803,6 +828,7 @@ export const changePassword = async (req, res) => {
       entity: "users",
       entity_id: user.id,
       details: { username: user.username, auth_source: authSource },
+      appType: "portal"
     });
 
     res.json({ success: true, message: "Password changed successfully" });

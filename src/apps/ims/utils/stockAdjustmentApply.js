@@ -36,12 +36,13 @@ export async function revertMinusAdjustmentBoxesTx(client, { adjustment, userId 
     ])
   ];
   if (allUids.length) {
-    await clearStockAdjustmentMinusMarksTx(client, {
+    return await clearStockAdjustmentMinusMarksTx(client, {
       adjustmentId: adjId,
       boxUids: allUids,
       userId
     });
   }
+  return [];
 }
 
 async function findBoxesBySaMinus(client, adjustmentId) {
@@ -54,7 +55,7 @@ async function findBoxesBySaMinus(client, adjustmentId) {
 }
 
 export async function revertAddAdjustmentBoxesTx(client, { adjustmentId, userId }) {
-  await permanentlyDeleteStockAdjustmentAddBoxesTx(client, { adjustmentId, userId, skipLog: false });
+  return await permanentlyDeleteStockAdjustmentAddBoxesTx(client, { adjustmentId, userId, skipLog: false });
 }
 
 /** Apply box changes when adjustment becomes approved (inventory reflects here). */
@@ -81,9 +82,9 @@ export async function applyStockAdjustmentOnApproveTx(client, { adjustment, user
     });
     const isLooseEach = isLooseBoxComparedToStandard(pb, standardPerBox);
     const boxNoUidPrefix = await getBoxNoUidPrefix();
-    const override_cust = await resolveOverrideCustForPacking(packingNumber, {
+    const override_cust = adjustment.acc_code || (await resolveOverrideCustForPacking(packingNumber, {
       financialYear: adjustment.financial_year,
-    });
+    }));
     const boxRows = buildStockAdjustmentAddBoxInsertRows({
       packingNumber,
       adjustmentId: adjId,
@@ -154,12 +155,13 @@ export async function applyStockAdjustmentOnApproveTx(client, { adjustment, user
 
 /** Undo box changes from an approved (or partially applied) adjustment — used on unapprove and delete. */
 export async function revertStockAdjustmentOnUnapproveTx(client, { adjustment, userId }) {
-  if (!adjustment) return;
+  if (!adjustment) return [];
   if (adjustment.entry_type === "add") {
-    await revertAddAdjustmentBoxesTx(client, { adjustmentId: adjustment.adjustment_id, userId });
+    return await revertAddAdjustmentBoxesTx(client, { adjustmentId: adjustment.adjustment_id, userId });
   } else if (adjustment.entry_type === "minus") {
-    await revertMinusAdjustmentBoxesTx(client, { adjustment, userId });
+    return await revertMinusAdjustmentBoxesTx(client, { adjustment, userId });
   }
+  return [];
 }
 
 /** Same inventory rollback as unapprove; delete controller soft-deletes the adjustment row after this. */

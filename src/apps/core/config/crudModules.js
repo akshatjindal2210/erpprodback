@@ -53,7 +53,7 @@ export const CRUD_MODULES = {
   inventory_inwards: {
     idField: "in_uid",
     listFields: [
-      "i.in_uid", "i.packing_number", "i.remarks", 
+      "i.in_uid", "i.packing_number", "i.item_codes", "i.qtys", "i.total_qty", "i.remarks", 
       "i.approved", "i.approved_by", "i.approved_at",
       "i.created_by", "i.created_at",
       "i.updated_by", "i.updated_at",
@@ -105,7 +105,10 @@ export const CRUD_MODULES = {
   out_entry: {
     idField: "out_uid",
     listFields: [
-      "o.out_uid", "o.fuid", "o.remarks", 
+      "o.out_uid", "o.fuid", "o.reason",
+      "o.entry_type",
+      "o.packing_numbers", "o.item_codes", "o.qtys", "o.total_qty",
+      "o.remarks", 
       "o.approved", "o.approved_by", "o.approved_at",
       "o.scan_complete", "o.boxes_required", "o.boxes_scanned",
       "o.created_by", "o.created_at",
@@ -114,7 +117,7 @@ export const CRUD_MODULES = {
       "u_upd.name AS updated_by_name", 
       "u_ap.name  AS approved_by_name"
     ],
-    filterFields: ["out_uid", "fuid", "approved", "scan_complete", "from_date", "to_date", "fromDate", "toDate"],
+    filterFields: ["out_uid", "fuid", "entry_type", "approved", "scan_complete", "from_date", "to_date", "fromDate", "toDate"],
     searchFields: ["o.remarks", "u_cr.name"]
   },
   stock_adjustment: {
@@ -149,6 +152,16 @@ export const CRUD_MODULES = {
     listFields: ["id", "name", "created_at", "updated_at"],
     filterFields: ["id", "name", "from_date", "to_date"],
     searchFields: ["name"]
+  },
+  audit: {
+    idField: "audit_id",
+    listFields: [
+      "am.audit_id", "am.assigned_user_id", "u_as.name AS assigned_user_name", "am.start_date", "am.end_date", "am.remarks", "am.status",
+      "am.approved", "am.approved_by", "am.approved_at", "am.created_by", "am.created_at", "am.updated_by", "am.updated_at",
+      "u_cr.name AS created_by_name", "u_up.name AS updated_by_name", "u_ap.name AS approved_by_name", "u_dl.name AS deleted_by_name"
+    ],
+    filterFields: ["audit_id", "assigned_user_id", "status", "approved", "from_date", "to_date"],
+    searchFields: ["am.remarks", "u_as.name"]
   },
 };
 

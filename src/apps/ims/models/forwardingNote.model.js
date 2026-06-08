@@ -14,6 +14,9 @@ const ALLOWED_UPDATE_FIELDS = [
   "approved", "approved_by", "approved_at", "updated_by", "updated_at"
 ];
 
+const queryRows = (result, client) => (client?.query ? result.rows : result);
+const firstQueryRow = (result, client) => queryRows(result, client)?.[0] ?? null;
+
 const JOINS = `
   LEFT JOIN ${M.USERS} u_cr   ON f.created_by  = u_cr.id
   LEFT JOIN ${M.USERS} u_upd  ON f.updated_by  = u_upd.id
@@ -272,7 +275,7 @@ export const updateForwardingNotes = async (fields = {}, filters = {}) => {
   return null;
 };
 
-/** Bill is entered after out entry  allowed even when `out_entry_locked` is true. */
+/** Bill is entered after out entry allowed even when `out_entry_locked` is true. */
 export const updateForwardingNoteBillNo = async ({ fuid, bill_no, userId }) => {
   const normalized =
     bill_no === null || bill_no === undefined ? null : String(bill_no).trim() || null;
@@ -291,6 +294,9 @@ export const updateForwardingNoteBillNo = async ({ fuid, bill_no, userId }) => {
 };
 
 export const deleteForwardingNotes = async (filters = {}, meta = {}) => {
+  const { client = null, deleted_by = null } = meta;
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+
   const keys = Object.keys(filters);
   const values = [];
   let i = 1;
@@ -302,14 +308,17 @@ export const deleteForwardingNotes = async (filters = {}, meta = {}) => {
     conditions.push(`${k} = $${i++}`);
   }
 
-  values.push(meta.deleted_by ?? null);
-  const [row] = await dbQuery(
-    `UPDATE ims_forwarding_note_master
-     SET is_deleted = true, deleted_at = NOW(), deleted_by = $${i}
-     WHERE ${conditions.join(" AND ")}
-       AND out_entry_locked = false
-     RETURNING fuid`,
-    values
+  values.push(deleted_by ?? null);
+  const row = firstQueryRow(
+    await run(
+      `UPDATE ims_forwarding_note_master
+       SET is_deleted = true, deleted_at = NOW(), deleted_by = $${i}
+       WHERE ${conditions.join(" AND ")}
+         AND out_entry_locked = false
+       RETURNING fuid`,
+      values
+    ),
+    client
   );
 
   if (row) return;
@@ -317,9 +326,12 @@ export const deleteForwardingNotes = async (filters = {}, meta = {}) => {
   const fuidFilterIndex = keys.findIndex((k) => k === "fuid");
   if (fuidFilterIndex >= 0) {
     const fuidValue = filters.fuid;
-    const [lockRow] = await dbQuery(
-      `SELECT out_entry_locked FROM ims_forwarding_note_master WHERE fuid = $1 LIMIT 1`,
-      [fuidValue]
+    const lockRow = firstQueryRow(
+      await run(
+        `SELECT out_entry_locked FROM ims_forwarding_note_master WHERE fuid = $1 LIMIT 1`,
+        [fuidValue]
+      ),
+      client
     );
     if (lockRow?.out_entry_locked) {
       const err = new Error("This forwarding note is locked because it is linked to an out entry.");
@@ -329,16 +341,20 @@ export const deleteForwardingNotes = async (filters = {}, meta = {}) => {
   }
 };
 
-export const lockForwardingNoteForOutEntry = async ({ fuid, userId }) => {
-  const [row] = await dbQuery(
-    `UPDATE ims_forwarding_note_master
-     SET out_entry_locked = true,
-         out_entry_locked_by = COALESCE(out_entry_locked_by, $2),
-         out_entry_locked_at = COALESCE(out_entry_locked_at, NOW())
-     WHERE fuid = $1
-       AND is_deleted = false
-     RETURNING fuid, out_entry_locked, out_entry_locked_at`,
-    [fuid, userId]
+export const lockForwardingNoteForOutEntry = async ({ fuid, userId }, { client = null } = {}) => {
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const row = firstQueryRow(
+    await run(
+      `UPDATE ims_forwarding_note_master
+       SET out_entry_locked = true,
+           out_entry_locked_by = COALESCE(out_entry_locked_by, $2),
+           out_entry_locked_at = COALESCE(out_entry_locked_at, NOW())
+       WHERE fuid = $1
+         AND is_deleted = false
+       RETURNING fuid, out_entry_locked, out_entry_locked_at`,
+      [fuid, userId]
+    ),
+    client
   );
   return row || null;
 };
@@ -355,16 +371,20 @@ export const isForwardingNoteLockedForOutEntry = async (fuid) => {
   return Boolean(row?.out_entry_locked);
 };
 
-export const unlockForwardingNoteForOutEntry = async ({ fuid }) => {
-  const [row] = await dbQuery(
-    `UPDATE ims_forwarding_note_master
-     SET out_entry_locked = false,
-         out_entry_locked_by = NULL,
-         out_entry_locked_at = NULL
-     WHERE fuid = $1
-       AND is_deleted = false
-     RETURNING fuid, out_entry_locked, out_entry_locked_at`,
-    [fuid]
+export const unlockForwardingNoteForOutEntry = async ({ fuid }, { client = null } = {}) => {
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const row = firstQueryRow(
+    await run(
+      `UPDATE ims_forwarding_note_master
+       SET out_entry_locked = false,
+           out_entry_locked_by = NULL,
+           out_entry_locked_at = NULL
+       WHERE fuid = $1
+         AND is_deleted = false
+       RETURNING fuid, out_entry_locked, out_entry_locked_at`,
+      [fuid]
+    ),
+    client
   );
   return row || null;
 };
@@ -420,7 +440,7 @@ export const findAvailableBoxes = async (item_dcode) => {
         ELSE dp.item_dcode
       END::int AS itemdcode
     FROM ims_box_table b
-    LEFT JOIN ims_dailyprod dp ON b.packing_number::text = dp.doc_no::text
+    LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '') = NULLIF(TRIM(dp.doc_no::text), '')
     LEFT JOIN ims_stock_adjustment sa_adj
       ON b.sa_id = sa_adj.adjustment_id
      AND b.sa_entry_type = 'stock_in'

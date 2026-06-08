@@ -34,6 +34,10 @@ export function resolveLedgerViewsSelectFields(options = {}) {
     return [...forPicker];
   } else if (mod === "customer_master" && (act === "add" || act === "edit" || act === "authorize")) {
     return [...forModal];
+  } else if (mod === "stock_adjustment" && act === "view") {
+    return [...forPicker];
+  } else if (mod === "stock_adjustment" && (act === "add" || act === "edit" || act === "authorize")) {
+    return [...forModal];
   }
 
   return null;

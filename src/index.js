@@ -7,6 +7,7 @@ import config from "./config/config.js";
 import { morganMiddleware, requestLogger } from "./utils/logger.js";
 import logger from "./utils/logger.js";
 import { imsMetaMiddleware } from "./apps/ims/utils/imsMeta.js";
+import { activityLogger } from "./apps/core/middleware/activityLogger.js";
 
 import imsRoutes from "./apps/ims/routes/index.js";
 import taskRoutes from "./apps/task/routes/index.js";
@@ -29,7 +30,7 @@ app.use(
 
 app.use(cookieParser());
 app.use(imsMetaMiddleware);
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+app.use(`/${config.uploadPublicPath}`, express.static(path.resolve(config.uploadPath)));
 
 app.get("/", (req, res) => {
   logger.info("Health check hit");
@@ -47,9 +48,9 @@ app.get("/api/version", (req, res) => {
   });
 });
 
-app.use("/api", imsRoutes);
-app.use("/api/task", taskRoutes);
-app.use("/api/core", coreRoutes);
+app.use("/api/core", activityLogger("portal"), coreRoutes);
+app.use("/api/task", activityLogger("task"), taskRoutes);
+app.use("/api", activityLogger("ims"), imsRoutes);
 
 app.use((req, res) => {
   logger.warn(`404 — ${req.method} ${req.originalUrl}`);

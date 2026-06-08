@@ -66,22 +66,6 @@ export function logInwardLinkBatch({ in_uid, userId, rowGroups = [] }) {
 }
 
 /** Customer override applied on one or more boxes (sticker customer updated). */
-/** Remove all box-transaction rows for a stock adjustment (e.g. whole adjustment deleted). */
-export async function purgeStockAdjustmentTransactionLogs({ client = null, adjustmentId } = {}) {
-  const id = adjustmentId != null ? String(adjustmentId).trim() : "";
-  if (!id) return;
-
-  const sql = `DELETE FROM ims_transaction_box
-     WHERE source_module = 'stock_adjustment'
-       AND source_id = $1::text`;
-
-  if (client?.query) {
-    await client.query(sql, [id]);
-  } else {
-    await dbQuery(sql, [id]);
-  }
-}
-
 export function logOverrideCustomerBatch({request_id = null, user_id = null, boxes = [], from_customer = null, to_customer = null, remarks = null}) {
   const rows = Array.isArray(boxes) ? boxes.filter(Boolean) : [];
   if (!rows.length) return;

@@ -1,6 +1,7 @@
 import { fetchFromIMS, fetchPackRowsForFinancialYearDoc } from "../services/ims.service.js";
 import { getProductionStickerPanelMetaByPackingNumbers, getProductionStickerPackingDocNos, findItemDcodesWithInHandStock } from "../models/box.model.js";
-import { enrichRowsWithIMS, resolvePartyRateCustCodeFromIms } from "../utils/imsLookup.js";
+import { pickProductionStickerPanelMeta } from "../utils/productionStickerPanelMeta.js";
+import { enrichRowsWithIMS, resolvePartyRateCustCodeFromIms, getImsMapsSafe } from "../utils/imsLookup.js";
 import dbQuery from "../../../config/db.js";
 import { getDefaultListViewSpanDays } from "../../core/models/appConfig.model.js";
 import { resolveStandardQtyPerBoxForPacking } from "../utils/stockAdjustmentPacking.js";
@@ -8,6 +9,9 @@ import { sanitizeSearch } from "../../core/utils/helper.js";
 import { resolveItemViewsSelectFields } from "../config/view-fields/item.js";
 import { resolveLedgerViewsSelectFields } from "../config/view-fields/ledger.js";
 import { extractListParams } from "../../core/utils/queryHelper.js";
+import { collectAccCodesForItemCustomers, filterLedgersForItemCustomers } from "../utils/packingEntryCustomers.js";
+
+const LEDGER_ITEM_CUSTOMER_MODULES = new Set(["packing_entry", "stock_adjustment"]);
 
 function mapItemRecord(r) {
   return {
@@ -521,24 +525,54 @@ export const getDailyProd = async (req, res) => {
       if (n) generatedMap.add(n);
     }
 
-    const panelMetaMap = generatedMap.size
-      ? await getProductionStickerPanelMetaByPackingNumbers([...generatedMap])
-      : new Map();
+    const generatedDocList = [...generatedMap];
+
+    const [panelMetaMap, dailyprodAccRows] = await Promise.all([
+      generatedMap.size
+        ? getProductionStickerPanelMetaByPackingNumbers(generatedDocList)
+        : Promise.resolve(new Map()),
+      generatedMap.size
+        ? dbQuery(
+            `SELECT trim(doc_no::text) AS doc_no, acc_code::text AS acc_code
+             FROM ims_dailyprod
+             WHERE trim(doc_no::text) = ANY($1::text[])`,
+            [generatedDocList.map(String)]
+          )
+        : Promise.resolve([]),
+    ]);
+
+    const dailyprodAccByDoc = new Map();
+    for (const r of dailyprodAccRows || []) {
+      const key = normalizePackingDocNo(r.doc_no);
+      const acc = r.acc_code != null ? String(r.acc_code).trim() : "";
+      if (key && acc) dailyprodAccByDoc.set(key, acc);
+    }
 
     const applyPanelMetaToDailyProdRow = (row) => {
       const docKey = normalizePackingDocNo(row.doc_no);
       const panel =
-        panelMetaMap.get(String(row.doc_no)) ?? (docKey ? panelMetaMap.get(docKey) : undefined);
+        pickProductionStickerPanelMeta(
+          panelMetaMap,
+          row.doc_no,
+          row.itemdcode,
+          row.acc_code
+        ) ??
+        (docKey ? panelMetaMap.get(docKey) : undefined);
       let next = { ...row };
 
-      if (row.sticker_generated && panel) {
-        if (panel.acc_code) {
-          const ledgerDetail = ledgerMap.get(String(panel.acc_code));
-          next.acc_code = panel.acc_code;
+      if (row.sticker_generated) {
+        // Packing entry customer = chosen at sticker generate (ims_dailyprod). Never per-box override (C3).
+        const stickerCustomer = docKey ? dailyprodAccByDoc.get(docKey) : null;
+        if (stickerCustomer) {
+          const ledgerDetail = ledgerMap.get(String(stickerCustomer));
+          next.acc_code = stickerCustomer;
           next.acc_name =
             ledgerDetail?.Acc_Name ??
-            (panel.acc_code != null ? `Customer ${panel.acc_code}` : next.acc_name);
+            (stickerCustomer != null ? `Customer ${stickerCustomer}` : next.acc_name);
         }
+      }
+
+      if (row.sticker_generated && panel) {
         if (panel.itemdcode) {
           const itemDetail = itemMap.get(String(panel.itemdcode));
           next.itemdcode = panel.itemdcode;
@@ -814,8 +848,9 @@ export const getItemViewById = async (req, res) => {
 
 export const getLedgersViews = async (req, res) => {
   try {
-    const { id, permission_module, permission_action } = req.body;
+    const { id, permission_module, permission_action, itemdcode, item_dcode } = req.body;
     const { page, limit, search } = extractListParams(req.body);
+    const itemFilter = itemdcode ?? item_dcode;
 
     const records = await fetchFromIMS("cust");
     const rows = (records || []).map(mapLedgerRecord);
@@ -838,6 +873,16 @@ export const getLedgersViews = async (req, res) => {
     }
 
     let filtered = rows;
+
+    if (
+      LEDGER_ITEM_CUSTOMER_MODULES.has(permission_module) &&
+      itemFilter != null &&
+      String(itemFilter).trim() !== ""
+    ) {
+      const accCodes = await collectAccCodesForItemCustomers(itemFilter, rows);
+      filtered = filterLedgersForItemCustomers(filtered, accCodes);
+    }
+
     const s = sanitizeSearch(search);
     if (s) filtered = filterBySearch(filtered, s, [(r) => r.acc_name, (r) => r.acc_code]);
     
@@ -847,7 +892,11 @@ export const getLedgersViews = async (req, res) => {
     const wantGroup = fields.some((f) => String(f).includes("group_code"));
     const wantCity = fields.some((f) => String(f).includes("city"));
     const miniData = out.data.map((ledger) => {
-      const row = { id: ledger.acc_code, acc_name: ledger.acc_name };
+      const row = {
+        id: ledger.id ?? ledger.acc_code,
+        acc_name: ledger.acc_name,
+        ...(ledger.acc_code !== undefined ? { acc_code: ledger.acc_code } : {}),
+      };
       if (wantGroup) row.group_code = ledger.group_code;
       if (wantCity) row.city = ledger.city;
       return row;

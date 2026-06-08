@@ -112,7 +112,7 @@ export const createPackingStandard = async (req, res) => {
     const data = await findPackingStandard({ standard_id: row.standard_id });
     const [enriched] = await enrichPackingRows(data ? [data] : []);
 
-    await logActivity(req, { action: "create", entity: "packing_standard", entity_id: row.standard_id });
+    await logActivity(req, { action: "create", entity: "packing_standard", entity_id: row.standard_id, record: row });
 
     res.status(201).json({ success: true, data: enriched ?? data });
   } catch (err) {
@@ -225,7 +225,7 @@ export const deletePackingStandard = async (req, res) => {
       { deleted_by: req.user.id }
     );
 
-    await logActivity(req, { action: "delete", entity: "packing_standard", entity_id: standard_id });
+    await logActivity(req, { action: "delete", entity: "packing_standard", entity_id: standard_id, record: existing });
 
     res.json({ success: true, message: "Deleted successfully" });
   } catch (err) {

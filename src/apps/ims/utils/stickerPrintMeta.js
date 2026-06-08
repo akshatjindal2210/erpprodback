@@ -10,6 +10,7 @@ import {
   enrichRowsWithIMS,
   resolvePartyRateCustCodeFromIms,
 } from "./imsLookup.js";
+import { effectiveBoxCustomerAcc } from "./boxCustomerOverride.js";
 
 async function fetchImsPackProductionByDocNo(doc_no) {
   const pn = String(doc_no ?? "").trim();
@@ -92,14 +93,14 @@ export async function resolvePackingStickerMetaForPrint(packing_number, hints = 
     }
   }
 
-  const customerAcc =
+  const packingAcc =
     hints.acc_code != null && String(hints.acc_code).trim() !== ""
       ? String(hints.acc_code).trim()
-      : hints.override_cust != null && String(hints.override_cust).trim() !== ""
-        ? String(hints.override_cust).trim()
-        : acc_code != null && String(acc_code).trim() !== ""
-          ? String(acc_code).trim()
-          : null;
+      : acc_code != null && String(acc_code).trim() !== ""
+        ? String(acc_code).trim()
+        : null;
+  const customerAcc =
+    effectiveBoxCustomerAcc(hints.override_cust, packingAcc) ?? packingAcc;
 
   const [enriched] = await enrichRowsWithIMS(
     [

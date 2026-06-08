@@ -20,7 +20,7 @@ export const authenticate = async (req, res, next) => {
     const token = getTokenFromRequest(req);
 
     if (!token)
-      return res.status(401).json({ success: false, message: "Unauthorized — no token" });
+      return res.status(401).json({ success: false, message: "Unauthorized no token" });
 
     const decoded = jwt.verify(token, config.jwt_secret);
 // console.log("__ auth __",decoded);
@@ -48,6 +48,6 @@ export const authenticate = async (req, res, next) => {
 
 export const authorize = (...allowedTypes) => (req, res, next) => {
   if (!req.user || !allowedTypes.includes(req.user.type))
-    return res.status(403).json({ success: false, message: "Forbidden — insufficient role" });
+    return res.status(403).json({ success: false, message: "Forbidden insufficient role" });
   next();
 };

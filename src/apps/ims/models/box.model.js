@@ -173,7 +173,7 @@ export const findBoxes = async (options = {}) => {
     ? fields.map(f => {
         if (f.includes(".")) return f;
         const lower = f.toLowerCase();
-        // "col AS alias" must still qualify "col" � otherwise joins (e.g. ims_dailyprod) make names like packing_number ambiguous
+        // "col AS alias" must still qualify "col" otherwise joins (e.g. ims_dailyprod) make names like packing_number ambiguous
         if (lower.includes(" as ")) {
           const m = f.match(/^(.+?)\s+AS\s+(.+)$/i);
           if (m) {
@@ -382,15 +382,15 @@ const IN_HAND_BOX_SELECT_SQL = `
        b.override_cust::text AS acc_name,
        lm.rack_no,
        lm.shelf_no,
-       COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no`;
+       COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '-')))) AS location_no`;
 
 /** Match packing on column and on SA box_no_uid (`{pn}_SA{id}_…`). */
 function sqlPackingNumberMatch(alias, paramRef) {
   return `(
     trim(${alias}.packing_number::text) = trim(${paramRef}::text)
     OR (
-      nullif(trim(${alias}.packing_number::text), '') ~ '^[0-9]+$'
-      AND nullif(trim(${paramRef}::text), '') ~ '^[0-9]+$'
+      nullif(trim(${alias}.packing_number::text), '-') ~ '^[0-9]+$'
+      AND nullif(trim(${paramRef}::text), '-') ~ '^[0-9]+$'
       AND trim(${alias}.packing_number::text)::numeric = trim(${paramRef}::text)::numeric
     )
   )`;
@@ -471,7 +471,7 @@ export const resolveItemDcodeForMinusAdjustment = async ({ packing_number, boxRo
        END
      ) AS itemdcode
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON b.packing_number::text = dp.doc_no::text
+     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '-') = NULLIF(TRIM(dp.doc_no::text), '-')
      LEFT JOIN ims_stock_adjustment sa_adj
        ON b.sa_id = sa_adj.adjustment_id
       AND sa_adj.is_deleted = false
@@ -587,7 +587,7 @@ export const findItemDcodesWithInHandStock = async () => {
          END
        )::int::text AS itemdcode
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON b.packing_number::text = dp.doc_no::text
+     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '-') = NULLIF(TRIM(dp.doc_no::text), '-')
      LEFT JOIN ims_stock_adjustment sa_adj
        ON b.sa_id = sa_adj.adjustment_id
       AND b.sa_entry_type = 'stock_in'
@@ -648,7 +648,7 @@ export const findBoxesByNoUids = async (box_no_uids = []) => {
             dp.acc_code AS prod_acc_code,
             dp.item_dcode AS itemdcode
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON b.packing_number::TEXT = dp.doc_no::TEXT
+     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::TEXT), '-') = NULLIF(TRIM(dp.doc_no::TEXT), '-')
      WHERE b.is_deleted = false
        AND b.box_no_uid::text = ANY($1::text[])
      ORDER BY b.box_uid ASC`,
@@ -668,7 +668,7 @@ export const findBoxesByUids = async (box_uids = []) => {
         COALESCE(dp.item_dcode, sa_adj.item_dcode) AS itemdcode, 
         dp.total_qty AS prod_total_qty
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON b.packing_number::TEXT = dp.doc_no::TEXT
+     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::TEXT), '-') = NULLIF(TRIM(dp.doc_no::TEXT), '-')
      LEFT JOIN ims_stock_adjustment sa_adj
        ON b.sa_id = sa_adj.adjustment_id
       AND sa_adj.is_deleted = false
@@ -784,7 +784,7 @@ export const deleteBoxes = async (filters = {}, meta = {}) => {
   }
 };
 
-/** Production packing-entry stickers only � SA `stock_in` rows for this packing are not deleted. */
+/** Production packing-entry stickers only SA `stock_in` rows for this packing are not deleted. */
 export const permanentlyDeleteProductionBoxesForPackingNumber = async ({
   packing_number,
   user_id = null,
@@ -814,7 +814,7 @@ export const permanentlyDeleteProductionBoxesForPackingNumber = async ({
   return rows;
 };
 
-/** @deprecated Use `permanentlyDeleteProductionBoxesForPackingNumber` � kept as alias. */
+/** @deprecated Use `permanentlyDeleteProductionBoxesForPackingNumber` kept as alias. */
 export const permanentlyDeleteBoxesForPackingNumber = permanentlyDeleteProductionBoxesForPackingNumber;
 
 /** After all live boxes for a doc are removed, allow packing entry to generate again from ERP. */
@@ -823,7 +823,7 @@ export const resetDailyProdStickerGeneratedForDoc = async (doc_no) => {
     `UPDATE ims_dailyprod
      SET sticker_generated = false,
          packing_standard_id = NULL
-     WHERE doc_no = trim(COALESCE($1::text, ''))::integer`,
+     WHERE doc_no = trim(COALESCE($1::text, '-'))::integer`,
     [String(doc_no)]
   );
 };
@@ -914,7 +914,7 @@ export const getStickerHistory = async (doc_no, category_id = null) => {
 
 /**
  * Same packing-standard matching as {@link getStickerHistory}, but `base` comes from IMS / API
- * (`live`), not `ims_dailyprod` � used before any local ims_dailyprod row exists.
+ * (`live`), not `ims_dailyprod` used before any local ims_dailyprod row exists.
  */
 export const getStickerHistoryFromLiveRow = async (live = {}, category_id = null) => {
   if (!live || live.doc_no == null || String(live.doc_no).trim() === "") return [];
@@ -941,13 +941,13 @@ export const getStickerHistoryFromLiveRow = async (live = {}, category_id = null
     WITH raw AS (
       SELECT
         $1::text AS doc_no,
-        NULLIF(trim($2::text), '') AS doc_dt,
-        NULLIF(trim($3::text), '') AS job_card_no,
-        NULLIF(trim($4::text), '') AS itemdcode,
-        COALESCE(NULLIF(trim($5::text), '')::numeric, 0)::numeric AS total_qty,
-        NULLIF(trim($6::text), '') AS acc_code,
+        NULLIF(trim($2::text), '-') AS doc_dt,
+        NULLIF(trim($3::text), '-') AS job_card_no,
+        NULLIF(trim($4::text), '-') AS itemdcode,
+        COALESCE(NULLIF(trim($5::text), '-')::numeric, 0)::numeric AS total_qty,
+        NULLIF(trim($6::text), '-') AS acc_code,
         COALESCE($7::boolean, false) AS sticker_generated,
-        CASE WHEN $8::text IS NULL OR trim($8::text) = '' THEN NULL ELSE trim($8::text)::bigint END AS packing_standard_id
+        CASE WHEN $8::text IS NULL OR trim($8::text) = '-' THEN NULL ELSE trim($8::text)::bigint END AS packing_standard_id
     ),
     base AS (
       SELECT
@@ -1075,7 +1075,7 @@ export const getProductionStickerPackingDocNos = async () => {
      FROM ims_box_table
      WHERE is_deleted = false
        AND packing_number IS NOT NULL
-       AND trim(packing_number::text) <> ''
+       AND trim(packing_number::text) <> '-'
        AND (sa_entry_type IS DISTINCT FROM 'stock_out')
        AND NOT (sa_entry_type = 'stock_in' AND sa_id IS NOT NULL)`
   );
@@ -1085,10 +1085,9 @@ export const getProductionStickerPackingDocNos = async () => {
 const PRODUCTION_STICKER_BOX_FILTER = `
   b.is_deleted = false
   AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')
-  AND NOT (b.sa_entry_type = 'stock_in' AND b.sa_id IS NOT NULL)
 `;
 
-/** Production sticker UI only � SA boxes use ims_stock_adjustment module + `checkSaStockInBoxesExist`. */
+/** Production sticker UI only SA boxes use ims_stock_adjustment module + `checkSaStockInBoxesExist`. */
 const SQL_SA_BOX_NO_UID_MATCH = `b.box_no_uid::text ~ '_SA[0-9]+_'`;
 const SQL_EXCLUDE_SA_BOX_NO_UID = `AND NOT (${SQL_SA_BOX_NO_UID_MATCH})`;
 
@@ -1098,7 +1097,7 @@ function sqlSaTokenInBoxNoUid(adjustmentIdExpr, boxNoUidRef = "b.box_no_uid") {
 
 /**
  * Remove SA sticker rows: adjustment deleted, or this packing has no active approved add.
- * @param {string|null} [packing_number] � when set, also drops orphans on that packing only.
+ * @param {string|null} [packing_number] when set, also drops orphans on that packing only.
  */
 export async function purgeSaStickerBoxesTx(client = null, packing_number = null) {
   const pn = packing_number != null ? String(packing_number).trim() : "";
@@ -1145,70 +1144,93 @@ export async function getProductionStickerPanelMetaByPackingNumbers(packingNumbe
   if (!nums.length) return new Map();
 
   const rows = await dbQuery(
-    `SELECT
-       b.packing_number::text AS packing_number,
+    `WITH box_with_meta AS (
+       SELECT
+         b.box_uid,
+         b.created_at,
+         b.updated_at,
+         b.created_by,
+         b.updated_by,
+         b.packing_number::text AS packing_number,
+         COALESCE(sa.item_dcode::text, dp.item_dcode::text, '-') AS item_dcode,
+         COALESCE(NULLIF(TRIM(dp.acc_code::text), ''), '-') AS acc_code,
+         dp.acc_code AS dailyprod_acc_code,
+         dp.item_dcode AS dailyprod_item_dcode,
+         dp.total_qty AS dailyprod_total_qty,
+         dp.job_card_no AS dailyprod_job_card_no,
+         dp.doc_dt AS dailyprod_doc_dt,
+         sa.financial_year AS sa_financial_year,
+         b.override_cust
+       FROM ims_box_table b
+       LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
+       LEFT JOIN LATERAL (
+         SELECT dp2.doc_dt, dp2.job_card_no, dp2.total_qty, dp2.item_dcode, dp2.acc_code
+         FROM ims_dailyprod dp2
+         WHERE NULLIF(TRIM(dp2.doc_no::text), '-') = NULLIF(TRIM(b.packing_number::text), '-')
+         ORDER BY
+           (CASE WHEN sa.item_dcode IS NOT NULL AND dp2.item_dcode = sa.item_dcode THEN 0 ELSE 1 END) ASC
+         LIMIT 1
+       ) dp ON true
+       WHERE b.packing_number::text = ANY($1::text[])
+         AND ${PRODUCTION_STICKER_BOX_FILTER}
+     )
+     SELECT
+       packing_number,
+       item_dcode,
+       acc_code,
        COUNT(*)::int AS sticker_count,
-       MIN(b.created_at) AS sticker_created_at,
-       MAX(b.updated_at) AS sticker_updated_at,
-       MAX(NULLIF(trim(b.override_cust::text), '')) AS override_cust,
-       MAX(dp.acc_code)::text AS dailyprod_acc_code,
-       MAX(dp.item_dcode)::text AS dailyprod_item_dcode,
-       MAX(dp.total_qty) AS dailyprod_total_qty,
-       MAX(dp.job_card_no) AS dailyprod_job_card_no,
-       MAX(dp.doc_dt) AS dailyprod_doc_dt,
+       MIN(created_at) AS sticker_created_at,
+       MAX(updated_at) AS sticker_updated_at,
+       MAX(NULLIF(trim(override_cust::text), '-')) AS override_cust,
+       MAX(dailyprod_acc_code)::text AS dailyprod_acc_code,
+       MAX(dailyprod_item_dcode)::text AS dailyprod_item_dcode,
+       MAX(dailyprod_total_qty) AS dailyprod_total_qty,
+       MAX(dailyprod_job_card_no) AS dailyprod_job_card_no,
+       MAX(dailyprod_doc_dt) AS dailyprod_doc_dt,
+       MAX(sa_financial_year)::text AS sa_financial_year,
        (
          SELECT u.name
-         FROM ims_box_table b0
-         INNER JOIN ${M.USERS} u ON u.id = b0.created_by
-         WHERE b0.packing_number::text = b.packing_number::text
-           AND b0.is_deleted = false
-           AND (b0.sa_entry_type IS DISTINCT FROM 'stock_out')
-           AND NOT (b0.sa_entry_type = 'stock_in' AND b0.sa_id IS NOT NULL)
-         ORDER BY b0.created_at ASC NULLS LAST
+         FROM box_with_meta bm
+         INNER JOIN ${M.USERS} u ON u.id = bm.created_by
+         WHERE bm.packing_number = b.packing_number
+           AND bm.item_dcode = b.item_dcode
+           AND bm.acc_code = b.acc_code
+         ORDER BY bm.created_at ASC NULLS LAST
          LIMIT 1
        ) AS sticker_created_by_name,
        (
          SELECT u.name
-         FROM ims_box_table b1
-         INNER JOIN ${M.USERS} u ON u.id = b1.updated_by
-         WHERE b1.packing_number::text = b.packing_number::text
-           AND b1.updated_by IS NOT NULL
-           AND b1.updated_at IS NOT NULL
-           AND b1.is_deleted = false
-           AND (b1.sa_entry_type IS DISTINCT FROM 'stock_out')
-           AND NOT (b1.sa_entry_type = 'stock_in' AND b1.sa_id IS NOT NULL)
-         ORDER BY b1.updated_at DESC NULLS LAST
+         FROM box_with_meta bm
+         INNER JOIN ${M.USERS} u ON u.id = bm.updated_by
+         WHERE bm.packing_number = b.packing_number
+           AND bm.item_dcode = b.item_dcode
+           AND bm.acc_code = b.acc_code
+           AND bm.updated_by IS NOT NULL
+         ORDER BY bm.updated_at DESC NULLS LAST
          LIMIT 1
        ) AS sticker_updated_by_name
-     FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON dp.doc_no::text = b.packing_number::text
-     WHERE b.packing_number::text = ANY($1::text[])
-       AND ${PRODUCTION_STICKER_BOX_FILTER}
-     GROUP BY b.packing_number`,
+     FROM box_with_meta b
+     GROUP BY packing_number, item_dcode, acc_code`,
     [nums]
   );
 
   const map = new Map();
   for (const r of rows || []) {
-    const key = String(r.packing_number).trim();
-    const overrideCust =
-      r.override_cust != null && String(r.override_cust).trim() !== ""
-        ? String(r.override_cust).trim()
-        : null;
-    const dpAcc =
-      r.dailyprod_acc_code != null && String(r.dailyprod_acc_code).trim() !== ""
-        ? String(r.dailyprod_acc_code).trim()
-        : null;
-    const acc_code = overrideCust ?? dpAcc;
+    const pn = String(r.packing_number).trim();
+    const item = String(r.item_dcode).trim();
+    const cust = String(r.acc_code).trim();
+    const key = `${pn}:${item}:${cust}`;
     const entry = {
       ...r,
-      acc_code,
+      acc_code: cust === "-" ? null : cust,
       itemdcode:
         r.dailyprod_item_dcode != null && String(r.dailyprod_item_dcode).trim() !== ""
           ? String(r.dailyprod_item_dcode).trim()
           : null,
     };
     map.set(key, entry);
+    const pnOnly = String(r.packing_number).trim();
+    if (pnOnly && !map.has(pnOnly)) map.set(pnOnly, entry);
   }
   return map;
 }
@@ -1397,7 +1419,7 @@ export const softDeleteStockAdjustmentAddBoxesByUidsTx = async (client, { adjust
     [adjustmentId, ids, userId]
   );
   if (rows.length !== ids.length) {
-    const err = new Error("Some boxes could not be removed � they may not belong to this adjustment.");
+    const err = new Error("Some boxes could not be removed they may not belong to this adjustment.");
     err.statusCode = 400;
     throw err;
   }
@@ -1453,7 +1475,7 @@ export const permanentlyDeleteStockAdjustmentAddBoxesTx = async (
          (sa_id = $1::integer AND sa_entry_type = 'stock_in')
          OR ${sqlSaTokenInBoxNoUid("$1", "box_no_uid")}
        )
-     RETURNING box_uid, packing_number`,
+     RETURNING box_uid, box_no_uid, packing_number, qty, is_loose`,
     [adjId]
   );
   if (!skipLog && rows?.length) {
@@ -1464,11 +1486,10 @@ export const permanentlyDeleteStockAdjustmentAddBoxesTx = async (
       source_id: String(adjustmentId),
       packing_number: singlePackingFromRows(rows),
       user_id: userId,
+      rows,
       details: {
         entry_type: "add",
         adjustment_id: adjustmentId,
-        count: rows.length,
-        box_uids: rows.map((r) => r.box_uid),
       },
     });
   }
@@ -1530,7 +1551,7 @@ export const markBoxesStockAdjustmentOutTx = async (client, { adjustmentId, boxU
   );
   if (rows.length !== ids.length) {
     const err = new Error(
-      "Some boxes could not be removed � they may be dispatched, already removed via adjustment, or deleted."
+      "Some boxes could not be removed they may be dispatched, already removed via adjustment, or deleted."
     );
     err.statusCode = 409;
     throw err;
@@ -1561,17 +1582,23 @@ export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, s
       ? String(snapshot.acc_code).trim()
       : null;
 
+  const snapItemCode =
+    snapshot?.item_code != null && String(snapshot.item_code).trim() !== ""
+      ? String(snapshot.item_code).trim()
+      : null;
+
   const updated = await dbQuery(
     `UPDATE ims_dailyprod
      SET sticker_generated = true,
          packing_standard_id = $2::bigint,
          acc_code = CASE
-           WHEN $3::text IS NOT NULL AND trim($3::text) <> '' THEN trim($3::text)::integer
+           WHEN $3::text IS NOT NULL AND trim($3::text) <> '-' THEN trim($3::text)::integer
            ELSE acc_code
-         END
-     WHERE doc_no = trim(COALESCE($1::text, ''))::integer
+         END,
+         item_code = COALESCE($4::text, item_code)
+     WHERE doc_no = trim(COALESCE($1::text, '-'))::integer
      RETURNING doc_no`,
-    [d, sid, snapAcc]
+    [d, sid, snapAcc, snapItemCode]
   );
 
   if (Array.isArray(updated) && updated.length > 0) return updated;
@@ -1582,27 +1609,30 @@ export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, s
   const job_card_no = snapshot.job_card_no ?? null;
   const acc_code = snapshot.acc_code ?? null;
   const itemdcode = snapshot.itemdcode ?? null;
+  const item_code = snapshot.item_code ?? null;
   const total_qty = snapshot.total_qty ?? 0;
 
   const sidStr = sid != null && sid !== "" ? String(sid) : "";
 
   return dbQuery(
-    `INSERT INTO ims_dailyprod (doc_no, doc_dt, job_card_no, acc_code, item_dcode, total_qty, sticker_generated, packing_standard_id)
+    `INSERT INTO ims_dailyprod (doc_no, doc_dt, job_card_no, acc_code, item_dcode, item_code, total_qty, sticker_generated, packing_standard_id)
      VALUES (
-       trim(COALESCE($1::text, ''))::integer,
-       CASE WHEN trim(COALESCE($2::text, '')) = '' THEN NULL::date ELSE trim($2::text)::date END,
-       NULLIF(trim(COALESCE($3::text, '')), ''),
-       CASE WHEN trim(COALESCE($4::text, '')) = '' THEN NULL::integer ELSE trim($4::text)::integer END,
-       CASE WHEN trim(COALESCE($5::text, '')) = '' THEN NULL::bigint ELSE trim($5::text)::bigint END,
-       COALESCE(NULLIF(trim(COALESCE($6::text, '')), '')::numeric, 0),
+       trim(COALESCE($1::text, '-'))::integer,
+       CASE WHEN trim(COALESCE($2::text, '-')) = '-' THEN NULL::date ELSE trim($2::text)::date END,
+       NULLIF(trim(COALESCE($3::text, '-')), '-'),
+       CASE WHEN trim(COALESCE($4::text, '-')) = '-' THEN NULL::integer ELSE trim($4::text)::integer END,
+       CASE WHEN trim(COALESCE($5::text, '-')) = '-' THEN NULL::bigint ELSE trim($5::text)::bigint END,
+       NULLIF(trim(COALESCE($6::text, '-')), '-'),
+       COALESCE(NULLIF(trim(COALESCE($7::text, '-')), '-')::numeric, 0),
        true,
-       CASE WHEN trim(COALESCE($7::text, '')) = '' THEN NULL::bigint ELSE trim($7::text)::bigint END
+       CASE WHEN trim(COALESCE($8::text, '-')) = '-' THEN NULL::bigint ELSE trim($8::text)::bigint END
      )
      ON CONFLICT (doc_no) DO UPDATE SET
        sticker_generated = true,
        packing_standard_id = EXCLUDED.packing_standard_id,
        acc_code = COALESCE(EXCLUDED.acc_code, ims_dailyprod.acc_code),
        item_dcode = COALESCE(EXCLUDED.item_dcode, ims_dailyprod.item_dcode),
+       item_code = COALESCE(EXCLUDED.item_code, ims_dailyprod.item_code),
        total_qty = COALESCE(EXCLUDED.total_qty, ims_dailyprod.total_qty),
        doc_dt = COALESCE(EXCLUDED.doc_dt, ims_dailyprod.doc_dt),
        job_card_no = COALESCE(EXCLUDED.job_card_no, ims_dailyprod.job_card_no)
@@ -1613,6 +1643,7 @@ export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, s
       job_card_no != null ? String(job_card_no) : "",
       acc_code != null ? String(acc_code) : "",
       itemdcode != null ? String(itemdcode) : "",
+      item_code != null ? String(item_code) : "",
       String(total_qty),
       sidStr
     ]
@@ -1632,7 +1663,7 @@ export const incrementDownloadCount = async (box_uid, updated_by) => {
   return row;
 };
 
-/** Single UPDATE � bulk �print all� without N log rows in ims_box_download_log. */
+/** Single UPDATE bulk print all without N log rows in ims_box_download_log. */
 export const incrementDownloadCountBulk = async (box_uids, updated_by) => {
   const ids = (Array.isArray(box_uids) ? box_uids : [])
     .map((u) => Number(u))
@@ -1657,7 +1688,7 @@ const FIND_BOX_DETAILED_SELECT = `
       NULL::text AS itemdesc,
       NULL::text AS acc_name,
       j.job_card_no AS job_no,
-      COALESCE(NULLIF(trim(b.override_cust::text), ''), j.acc_code::text) AS prod_acc_code,
+      j.acc_code::text AS prod_acc_code,
       j.acc_code,
       COALESCE(j.item_dcode, sa_adj.item_dcode) AS itemdcode,
       ps.unit,
@@ -1734,7 +1765,7 @@ export const findBoxesDetailed = async ({ box_uids, packing_number }) => {
       b.*, 
       NULL::text AS item_code, NULL::text AS itemdesc, NULL::text AS acc_name,
       j.job_card_no as job_no,
-      COALESCE(NULLIF(trim(b.override_cust::text), ''), j.acc_code::text) AS prod_acc_code,
+      j.acc_code::text AS prod_acc_code,
       j.acc_code,
       COALESCE(j.item_dcode, sa_adj.item_dcode) AS itemdcode,
       ps.unit,
@@ -1782,7 +1813,7 @@ export const insertDownloadLog = async ({
         ? Number(box_uid)
         : null;
   if (!isBulkPack && uid == null) {
-    throw new Error("insertDownloadLog: box_uid required for non�bulk_pack rows");
+    throw new Error("insertDownloadLog: box_uid required for non bulk_pack rows");
   }
 
   const src =
@@ -1900,7 +1931,7 @@ async function getStickerBoxManagementList(options = {}) {
         ev.downloaded_by_name,
         ev.download_type,
         ev.bulk_sticker_count
-      FROM (
+      FROM LATERAL (
         SELECT
           dl.downloaded_at,
           u.name AS downloaded_by_name,
@@ -2006,7 +2037,7 @@ async function getStickerBoxManagementList(options = {}) {
   const countResult = await dbQuery(
     `SELECT COUNT(*) AS count 
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON b.packing_number::text = dp.doc_no::text
+     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '-') = NULLIF(TRIM(dp.doc_no::text), '-')
      ${lastLogLateral}
      ${whereClause}`,
     countValues
@@ -2029,7 +2060,7 @@ async function getStickerBoxManagementList(options = {}) {
       last_log.download_type AS last_download_type,
       last_log.bulk_sticker_count AS last_bulk_sticker_count
     FROM ims_box_table b
-    LEFT JOIN ims_dailyprod dp ON b.packing_number::text = dp.doc_no::text
+    LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '-') = NULLIF(TRIM(dp.doc_no::text), '-')
     ${lastLogLateral}
     ${whereClause}
     ORDER BY ${sortByField} ${sortOrder} NULLS LAST
@@ -2067,32 +2098,32 @@ async function getStickerDownloadLogList(options = {}) {
     values.push(`%${search}%`);
     const idx = i++;
     conditions.push(`(
-      COALESCE(b.box_no_uid, '') ILIKE $${idx} OR
-      COALESCE(l.box_uid::text, '') ILIKE $${idx} OR
-      COALESCE(b.packing_number::text, TRIM(l.bulk_packing_number::text), '') ILIKE $${idx} OR
-      COALESCE(l.cust_at_time, '') ILIKE $${idx} OR
-      COALESCE(dp.item_dcode::text, '') ILIKE $${idx} OR
-      COALESCE(b.override_cust::text, '') ILIKE $${idx} OR
-      COALESCE(pack_box.pack_override_cust, '') ILIKE $${idx} OR
-      COALESCE(dp.acc_code::text, '') ILIKE $${idx} OR
-      COALESCE(l.download_source::text, '') ILIKE $${idx}
+      COALESCE(b.box_no_uid, '-') ILIKE $${idx} OR
+      COALESCE(l.box_uid::text, '-') ILIKE $${idx} OR
+      COALESCE(b.packing_number::text, TRIM(l.bulk_packing_number::text), '-') ILIKE $${idx} OR
+      COALESCE(l.cust_at_time, '-') ILIKE $${idx} OR
+      COALESCE(dp.item_dcode::text, '-') ILIKE $${idx} OR
+      COALESCE(b.override_cust::text, '-') ILIKE $${idx} OR
+      COALESCE(pack_box.pack_override_cust, '-') ILIKE $${idx} OR
+      COALESCE(dp.acc_code::text, '-') ILIKE $${idx} OR
+      COALESCE(l.download_source::text, '-') ILIKE $${idx}
     )`);
   }
 
   const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
-  const packingBoxCountSql = `(SELECT COUNT(*)::int FROM ims_box_table bt2 WHERE bt2.is_deleted = false AND TRIM(COALESCE(bt2.packing_number::text, '')) = TRIM(COALESCE(l.bulk_packing_number::text, '')))`;
+  const packingBoxCountSql = `(SELECT COUNT(*)::int FROM ims_box_table bt2 WHERE bt2.is_deleted = false AND TRIM(COALESCE(bt2.packing_number::text, '-')) = TRIM(COALESCE(l.bulk_packing_number::text, '-')))`;
   /** Stickers included in one bulk_pack log row (matches incrementDownloadCountBulk). */
   const bulkPackStickerCountSql = `GREATEST(1, COALESCE(NULLIF(l.bulk_sticker_count, 0), ${packingBoxCountSql}))`;
 
-  const packingKeySql = `COALESCE(NULLIF(TRIM(b.packing_number::text), ''), NULLIF(TRIM(l.bulk_packing_number::text), ''))`;
-  const customerAccCodeSql = `COALESCE(NULLIF(TRIM(b.override_cust::text), ''), pack_box.pack_override_cust, NULLIF(TRIM(dp.acc_code::text), ''))`;
-  const customerDisplaySql = `COALESCE(NULLIF(TRIM(l.cust_at_time::text), ''), ${customerAccCodeSql})`;
+  const packingKeySql = `COALESCE(NULLIF(TRIM(b.packing_number::text), '-'), NULLIF(TRIM(l.bulk_packing_number::text), '-'))`;
+  const customerAccCodeSql = `COALESCE(NULLIF(TRIM(b.override_cust::text), '-'), pack_box.pack_override_cust, NULLIF(TRIM(dp.acc_code::text), '-'))`;
+  const customerDisplaySql = `COALESCE(NULLIF(TRIM(l.cust_at_time::text), '-'), ${customerAccCodeSql})`;
 
   const SORT_MAP = {
     last_downloaded_at: "l.downloaded_at",
     last_download_type: "l.download_type",
-    packing_number: "COALESCE(b.packing_number, NULLIF(TRIM(l.bulk_packing_number::text), ''))",
+    packing_number: "COALESCE(b.packing_number, NULLIF(TRIM(l.bulk_packing_number::text), '-'))",
     box_no_uid: "b.box_no_uid",
     box_uid: "l.box_uid",
     created_at: "l.downloaded_at",
@@ -2114,11 +2145,11 @@ async function getStickerDownloadLogList(options = {}) {
     LEFT JOIN ${M.USERS} u ON u.id = l.downloaded_by
     LEFT JOIN ims_box_table b ON b.box_uid = l.box_uid AND b.is_deleted = false
     LEFT JOIN LATERAL (
-      SELECT MAX(NULLIF(TRIM(bt.override_cust::text), '')) AS pack_override_cust
+      SELECT MAX(NULLIF(TRIM(bt.override_cust::text), '-')) AS pack_override_cust
       FROM ims_box_table bt
       WHERE bt.is_deleted = false
-        AND TRIM(COALESCE(bt.packing_number::text, '')) = TRIM(${packingKeySql})
-        AND TRIM(${packingKeySql}) <> ''
+        AND TRIM(COALESCE(bt.packing_number::text, '-')) = TRIM(${packingKeySql})
+        AND TRIM(${packingKeySql}) <> '-'
     ) pack_box ON true
     LEFT JOIN LATERAL (
       SELECT dp.*
@@ -2141,7 +2172,7 @@ async function getStickerDownloadLogList(options = {}) {
         l.log_id,
         l.box_uid,
         b.box_no_uid,
-        COALESCE(b.packing_number, NULLIF(TRIM(l.bulk_packing_number::text), '')) AS packing_number,
+        COALESCE(b.packing_number, NULLIF(TRIM(l.bulk_packing_number::text), '-')) AS packing_number,
         b.override_cust,
         l.cust_at_time,
         ${customerAccCodeSql} AS acc_code,
@@ -2157,7 +2188,7 @@ async function getStickerDownloadLogList(options = {}) {
         l.bulk_sticker_count AS last_bulk_sticker_count,
         l.download_source,
         CASE
-          WHEN b.box_no_uid IS NOT NULL AND TRIM(b.box_no_uid::text) <> '' THEN b.box_no_uid
+          WHEN b.box_no_uid IS NOT NULL AND TRIM(b.box_no_uid::text) <> '-' THEN b.box_no_uid
           WHEN l.download_type = 'bulk_pack' THEN 'ALL'
           ELSE COALESCE(l.box_uid::text, CONCAT('log-', l.log_id::text))
         END AS primary_label
@@ -2341,7 +2372,7 @@ export const updateBoxesAfterInward = async (in_uid, location_id, boxes, userId,
         updated_at = NOW() 
     WHERE box_no_uid = ANY($4)
       AND is_deleted = false
-      AND (out_uid IS NULL OR NULLIF(TRIM(out_uid::text), '') IS NULL)
+      AND (out_uid IS NULL OR NULLIF(TRIM(out_uid::text), '-') IS NULL)
       AND (sa_entry_type IS DISTINCT FROM 'stock_out')
     RETURNING *`;
 
@@ -2382,7 +2413,7 @@ export const getDistinctPackingNumbersFromBoxNoUids = async (boxNoUids = []) => 
      WHERE is_deleted = false
        AND box_no_uid = ANY($1::text[])
        AND packing_number IS NOT NULL
-       AND TRIM(packing_number::text) <> ''`,
+       AND TRIM(packing_number::text) <> '-'`,
     [uniq]
   );
   const seen = [...new Set((rows || []).map((r) => String(r.pn).trim()).filter(Boolean))];

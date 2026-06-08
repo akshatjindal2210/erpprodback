@@ -1,19 +1,20 @@
+import { buildImsDocFilter, findImsPackByDocNo, imsPackRowToProduction } from "../utils/imsPackRow.js";
 import { withTransaction } from "../../../config/db.js";
 import { findAdjustments, findAdjustmentById, insertAdjustment, updateAdjustments, insertAdjustmentTx, updateAdjustmentsTx, findFinancialYearForPacking } from "../models/stockAdjustment.model.js";
 import { findDailyProdByDocNo, findBoxesByUids, purgeSaStickerBoxesTx, resolveItemDcodeForMinusAdjustment } from "../models/box.model.js";
 import { boxBelongsToPackingNumber } from "../utils/boxInventory.js";
-import { fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../services/ims.service.js";
+import { fetchFromIMS, fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../services/ims.service.js";
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { enrichRowsWithIMS } from "../utils/imsLookup.js";
+import { enrichRowsWithIMS, getImsMapsSafe, getImsPartyRateMapSafe, pickPartyRateCustCode, canonicalCode } from "../utils/imsLookup.js";
 import { syncAdjustmentMetadataOnly } from "../utils/stockAdjustmentSync.js";
 import { resolveStockAdjustmentPackingMeta } from "../utils/stockAdjustmentPacking.js";
 import { applyStockAdjustmentOnApproveTx, revertStockAdjustmentOnUnapproveTx } from "../utils/stockAdjustmentApply.js";
-import { purgeStockAdjustmentTransactionLogs } from "../utils/logBoxTransaction.js";
 import { isBoxAvailableForMinus } from "../utils/boxInventory.js";
+import { findCustomerHintsForPackings } from "../models/inventoryReport.model.js";
 
 const STOCK_CFG = getCrudModuleConfig("stock_adjustment");
 
@@ -26,12 +27,84 @@ function canUserRemoveInventoryBoxes(req) {
 }
 
 async function enrichAdjustments(rows = []) {
-  return enrichRowsWithIMS(rows, {
-    itemCodeField: "item_dcode",
-    accCodeField: "acc_code",
-    itemCodeOut: "item_code",
-    itemDescOut: "item_desc",
-    accNameOut: "acc_name"
+  const [{ itemMap, ledgerMap }, partyRateMap] = await Promise.all([
+    getImsMapsSafe(),
+    getImsPartyRateMapSafe()
+  ]);
+  
+  const packingNums = [...new Set(rows.map(r => String(r.packing_number || "").trim()).filter(Boolean))];
+  const hints = packingNums.length > 0 ? await findCustomerHintsForPackings(packingNums) : [];
+  const hintMap = new Map(hints.map(h => [String(h.packing_number), h.customer_code]));
+  const fyHintMap = new Map(hints.map(h => [String(h.packing_number), h.financial_year]));
+
+  // Identify rows that still lack a customer code after local hints
+  const missingAccRows = rows.filter(r => {
+    const pn = String(r.packing_number || "").trim();
+    return pn && !r.acc_code && !hintMap.get(pn);
+  });
+
+  if (missingAccRows.length > 0) {
+    // Fetch from IMS for unique (packing_number, financial_year) pairs
+    const uniqueMissing = [...new Map(missingAccRows.map(r => {
+      const fy = String(r.financial_year || fyHintMap.get(String(r.packing_number || "").trim()) || "").trim();
+      return [String(r.packing_number).trim(), { pn: r.packing_number, fy }];
+    })).values()].filter(x => x.pn);
+
+    await Promise.all(uniqueMissing.map(async ({ pn, fy }) => {
+      try {
+        let acc = null;
+        // 1. Try strict FY + PN if FY is available
+        if (fy) {
+          const imsRes = await fetchPackRowsForFinancialYearDoc(fy, pn);
+          if (imsRes?.success && imsRes.records?.length > 0) {
+            acc = imsRes.records[0].acc_code;
+          }
+        }
+
+        // 2. Fallback: Broad IMS search (no FY) if still missing
+        if (!acc) {
+          const filter = buildImsDocFilter(pn);
+          const records = filter ? await fetchFromIMS("pack", filter) : [];
+          const matched = findImsPackByDocNo(records, pn);
+          const prod = imsPackRowToProduction(matched);
+          if (prod?.acc_code) {
+            acc = prod.acc_code;
+          }
+        }
+
+        if (acc) {
+          hintMap.set(String(pn).trim(), String(acc).trim());
+        }
+      } catch (err) {
+        // silent fail for background enrichment
+      }
+    }));
+  }
+  
+  return rows.map(row => {
+    const itemDcode = canonicalCode(row.item_dcode);
+    const pn = String(row.packing_number || "").trim();
+    // Prioritize stored acc_code, fallback to hint from packing (local or IMS-fetched)
+    const rawAccCode = row.acc_code || hintMap.get(pn);
+    const accCode = canonicalCode(rawAccCode);
+    
+    const item = itemDcode ? itemMap.get(itemDcode) : null;
+    const ledgerName = accCode ? ledgerMap.get(accCode) : null;
+    
+    const partyRate = pickPartyRateCustCode(partyRateMap, itemDcode || row.item_code, [accCode]);
+
+    const existingName = row.acc_name && String(row.acc_name).trim() !== "" && String(row.acc_name).trim() !== "—" 
+      ? String(row.acc_name).trim() 
+      : null;
+
+    return {
+      ...row,
+      item_code: item?.item_code ?? row.item_code ?? null,
+      item_desc: item?.item_desc ?? row.item_desc ?? null,
+      acc_code: rawAccCode, 
+      acc_name: ledgerName ?? existingName ?? (accCode ? `Customer ${accCode}` : null),
+      party_rate_cust_code: partyRate ?? row.party_rate_cust_code ?? null
+    };
   });
 }
 
@@ -60,9 +133,10 @@ export const createAdjustment = async (req, res) => {
   try {
     const normalizedApproved = normalizeApprovedInput(req.body.approved);
     const { item_dcode: bodyItemDcode, qty: bodyQty, unit, remarks, entry_type, packing_number: rawPacking, financial_year,
-      per_box_qty, box_count_impact, no_of_boxes, removed_box_uids } = req.body;
+      per_box_qty, box_count_impact, no_of_boxes, removed_box_uids, acc_code: bodyAccCode } = req.body;
 
     let item_dcode = bodyItemDcode;
+    let acc_code = bodyAccCode;
     let qty = bodyQty;
     let packing_number = rawPacking != null ? String(rawPacking).trim() : "";
     let per_box_qty_v = per_box_qty !== undefined && per_box_qty !== null && per_box_qty !== "" ? parseInt(per_box_qty, 10) : null;
@@ -167,7 +241,16 @@ export const createAdjustment = async (req, res) => {
       qty = parseInt(qty, 10);
     }
 
-    const data = { item_dcode, qty, unit: unit ?? "PCS", remarks, created_by: req.user.id };
+    const data = { 
+      item_dcode, 
+      qty, 
+      unit: unit ?? "PCS", 
+      remarks, 
+      created_by: req.user.id 
+    };
+    if (acc_code !== undefined) {
+      data.acc_code = acc_code;
+    }
 
     if (entry_type === "add" || entry_type === "minus") {
       data.entry_type = entry_type;
@@ -200,9 +283,15 @@ export const createAdjustment = async (req, res) => {
       }
     }
 
-    await logActivity(req, { action: "create", entity: "stock_adjustment", entity_id: adjustment.adjustment_id, details: data });
-    
     const saved = await findAdjustmentById(adjustment.adjustment_id);
+
+    await logActivity(req, {
+      action: "create",
+      entity: "stock_adjustment",
+      entity_id: adjustment.adjustment_id,
+      record: saved || adjustment,
+      details: data,
+    });
     const [enriched] = await enrichAdjustments(saved ? [saved] : [adjustment]);
     res.status(201).json({ success: true, data: enriched || saved || adjustment, message: "Adjustment created" });
   } catch (err) {
@@ -272,7 +361,7 @@ export const getAdjustmentById = async (req, res) => {
 
 export const updateAdjustment = async (req, res) => {
   try {
-    const { id, approved, removed_box_uids, remove_add_box_uids, add_extra_boxes, no_of_boxes, ...incoming } = req.body;
+    const { id, approved, removed_box_uids, remove_add_box_uids, add_extra_boxes, no_of_boxes, acc_code, ...incoming } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
     if (!id) return res.status(400).json({ success: false, message: "ID required" });
 
@@ -341,7 +430,14 @@ export const updateAdjustment = async (req, res) => {
       no_of_boxes
     };
 
-    const fields = { ...incoming, updated_by: req.user.id, updated_at: new Date() };
+    const fields = { 
+      ...incoming, 
+      updated_by: req.user.id, 
+      updated_at: new Date() 
+    };
+    if (acc_code !== undefined) {
+      fields.acc_code = acc_code;
+    }
     const wasApproved = !!existing.approved;
     const hasBusinessChanges =
       Object.keys(incoming).length > 0 || wantsPackingBoxSync;
@@ -387,9 +483,16 @@ export const updateAdjustment = async (req, res) => {
       }
     });
 
-    await logActivity(req, { action: "update", entity: "stock_adjustment", entity_id: id, details: fields });
-
     const saved = await findAdjustmentById(id);
+
+    await logActivity(req, {
+      action: fields.approved === true ? "approve" : "update",
+      entity: "stock_adjustment",
+      entity_id: id,
+      record: saved || updated || existing,
+      details: fields,
+    });
+
     const [enriched] = await enrichAdjustments(saved ? [saved] : updated ? [updated] : []);
     res.json({ success: true, data: enriched || saved || updated, message: "Adjustment updated" });
   } catch (err) {
@@ -409,9 +512,10 @@ export const deleteAdjustment = async (req, res) => {
       return res.status(404).json({ success: false, message: "Adjustment not found." });
     }
 
+    let affectedBoxes = [];
     await withTransaction(async (client) => {
       // Undo inventory impact: add → hard-delete SA boxes; minus → restore boxes to in-hand.
-      await revertStockAdjustmentOnUnapproveTx(client, {
+      affectedBoxes = await revertStockAdjustmentOnUnapproveTx(client, {
         adjustment: existing,
         userId: req.user.id
       });
@@ -420,7 +524,6 @@ export const deleteAdjustment = async (req, res) => {
         { is_deleted: true, deleted_by: req.user.id, deleted_at: new Date() },
         { adjustment_id: id }
       );
-      await purgeStockAdjustmentTransactionLogs({ client, adjustmentId: id });
       const pn = String(existing.packing_number ?? "").trim();
       await purgeSaStickerBoxesTx(client, pn || null);
     });
@@ -429,7 +532,12 @@ export const deleteAdjustment = async (req, res) => {
       action: "delete",
       entity: "stock_adjustment",
       entity_id: id,
-      details: { entry_type: existing.entry_type, approved: existing.approved }
+      record: existing,
+      details: {
+        entry_type: existing.entry_type,
+        approved: existing.approved,
+        affected_boxes: (affectedBoxes || []).map((b) => b.box_no_uid || b.box_uid),
+      },
     });
 
     const message =

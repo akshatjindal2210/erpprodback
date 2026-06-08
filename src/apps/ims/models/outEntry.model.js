@@ -3,12 +3,18 @@ import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
 import { logBoxTransactionSafe, singlePackingFromRows } from "../utils/logBoxTransaction.js";
 
-const ALLOWED_FILTER_FIELDS = ["out_uid", "fuid", "approved", "scan_complete", "from_date", "to_date"];
+const ALLOWED_FILTER_FIELDS = ["out_uid", "fuid", "reason", "entry_type", "approved", "scan_complete", "from_date", "to_date"];
 
 const ALLOWED_SORT_FIELDS = ["created_at", "approved_at", "updated_at", "out_uid"];
 
 const ALLOWED_UPDATE_FIELDS = [
   "fuid",
+  "reason",
+  "entry_type",
+  "packing_numbers",
+  "item_codes",
+  "qtys",
+  "total_qty",
   "remarks",
   "approved",
   "approved_by",
@@ -28,7 +34,10 @@ const JOINS = `
 `;
 
 const DEFAULT_FIELDS = [
-  "o.out_uid", "o.fuid", "o.remarks",
+  "o.out_uid", "o.fuid", "o.reason",
+  "o.entry_type",
+  "o.packing_numbers", "o.item_codes", "o.qtys", "o.total_qty",
+  "o.remarks",
   "o.approved", "o.approved_by", "o.approved_at",
   "o.scan_complete", "o.boxes_required", "o.boxes_scanned",
   "o.created_by", "o.created_at",
@@ -52,6 +61,7 @@ export const findOutEntries = async (options = {}) => {
         if (f === "updated_by_name") return "u_upd.name AS updated_by_name";
         if (f === "approved_by_name") return "u_ap.name AS approved_by_name";
         if (f === "deleted_by_name") return "u_dl.name AS deleted_by_name";
+        if (f.includes('.')) return f;
         return `o.${f}`;
       }).join(", ")
     : DEFAULT_FIELDS.join(", ");
@@ -107,7 +117,7 @@ export const findOutEntries = async (options = {}) => {
   const queryValues = [...values, safeLimit, offset];
 
   const rows = await dbQuery(
-    `SELECT ${fields.length ? fields.join(", ") : DEFAULT_FIELDS.join(", ")}
+    `SELECT ${safeFields}
      FROM ims_out_entry o
      ${JOINS}
      ${where}
@@ -151,53 +161,43 @@ export const findOutEntry = async (filters = {}) => {
   return row ?? null;
 };
 
-export const insertOutEntry = async (data) => {
-  const {
-    fuid,
-    remarks,
-    created_by,
-    scan_complete = false,
-    boxes_required = 0,
-    boxes_scanned = 0,
-  } = data;
-  const [row] = await dbQuery(
-    `INSERT INTO ims_out_entry (fuid, remarks, created_by, scan_complete, boxes_required, boxes_scanned)
-     VALUES ($1, $2, $3, $4, $5, $6)
+export const insertOutEntry = async (data, { client = null } = {}) => {
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const keys = Object.keys(data);
+  const values = Object.values(data);
+  const placeholders = keys.map((_, idx) => `$${idx + 1}`).join(", ");
+  
+  const row = await run(
+    `INSERT INTO ims_out_entry (${keys.join(", ")}) 
+     VALUES (${placeholders}) 
      RETURNING *`,
-    [fuid, remarks, created_by, !!scan_complete, Number(boxes_required) || 0, Number(boxes_scanned) || 0]
+    values
   );
-  return row;
+  return client?.query ? row.rows[0] : row[0];
 };
 
-export const updateOutEntries = async (fields = {}, filters = {}) => {
-  const safeFields = {};
-  const safeFilters = {};
-
-  for (const k in fields) {
-    if (ALLOWED_UPDATE_FIELDS.includes(k)) safeFields[k] = fields[k];
-  }
-  for (const k in filters) {
-    if (k === "out_uid" || ALLOWED_FILTER_FIELDS.includes(k)) safeFilters[k] = filters[k];
-  }
-
-  safeFields.updated_at = new Date();
-  const fieldKeys = Object.keys(safeFields);
-  const filterKeys = Object.keys(safeFilters);
+export const updateOutEntries = async (fields = {}, filters = {}, { client = null } = {}) => {
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const fieldKeys = Object.keys(fields).filter(k => ALLOWED_UPDATE_FIELDS.includes(k));
+  const filterKeys = Object.keys(filters).filter(k => k === "out_uid" || ALLOWED_FILTER_FIELDS.includes(k));
 
   if (!fieldKeys.length || !filterKeys.length) throw new Error("Invalid update request");
 
-  const values = [...Object.values(safeFields), ...Object.values(safeFilters)];
-  const setClause = fieldKeys.map((k, i) => `${k} = $${i + 1}`).join(", ");
-  const whereClause = filterKeys.map((k, i) => `${k} = $${fieldKeys.length + i + 1}`).join(" AND ");
+  const setClause = fieldKeys.map((k, idx) => `${k} = $${idx + 1}`).join(", ");
+  const whereClause = filterKeys.map((k, idx) => `${k} = $${fieldKeys.length + idx + 1}`).join(" AND ");
+  const values = [...fieldKeys.map(k => fields[k]), ...filterKeys.map(k => filters[k])];
 
-  const [row] = await dbQuery(
+  const row = await run(
     `UPDATE ims_out_entry SET ${setClause} WHERE ${whereClause} RETURNING *`,
     values
   );
-  return row;
+  return client?.query ? row.rows[0] : row[0];
 };
 
 export const deleteOutEntries = async (filters = {}, meta = {}) => {
+  const { client = null, deleted_by = null } = meta;
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+
   const keys = Object.keys(filters);
   const values = [];
   let i = 1;
@@ -209,8 +209,8 @@ export const deleteOutEntries = async (filters = {}, meta = {}) => {
     conditions.push(`${k} = $${i++}`);
   }
 
-  values.push(meta.deleted_by ?? null);
-  await dbQuery(
+  values.push(deleted_by ?? null);
+  await run(
     `UPDATE ims_out_entry SET is_deleted = true, deleted_at = NOW(), deleted_by = $${i}
      WHERE ${conditions.join(" AND ")}`,
     values
@@ -266,12 +266,12 @@ const OUT_ENTRY_BOX_JSON_AGG = `
       'is_out_current', CASE
         WHEN $3::INTEGER IS NOT NULL AND EXISTS (
           SELECT 1 FROM ims_out_entry_scanned_box d
-          WHERE d.out_uid = $3 AND d.box_no_uid = b.box_no_uid::text
+          WHERE d.out_uid = $3::INTEGER AND d.box_no_uid = b.box_no_uid::text
         ) THEN true
-        WHEN $3::INTEGER IS NOT NULL AND b.out_uid = $3 AND b.sa_entry_type IS DISTINCT FROM 'stock_out'
+        WHEN $3::INTEGER IS NOT NULL AND b.out_uid::text = $3::text AND b.sa_entry_type IS DISTINCT FROM 'stock_out'
           AND EXISTS (
             SELECT 1 FROM ims_out_entry o
-            WHERE o.out_uid = $3 AND o.approved = true AND o.is_deleted = false
+            WHERE o.out_uid::text = $3::text AND o.approved = true AND o.is_deleted = false
           ) THEN true
         ELSE false
       END
@@ -288,7 +288,7 @@ const OUT_ENTRY_BOX_AVAILABILITY_SQL = `
       $3::INTEGER IS NOT NULL
       AND EXISTS (
         SELECT 1 FROM ims_out_entry_scanned_box d
-        WHERE d.out_uid = $3 AND d.box_no_uid = b.box_no_uid::text
+        WHERE d.out_uid = $3::INTEGER AND d.box_no_uid = b.box_no_uid::text
       )
     )
     OR (
@@ -296,10 +296,10 @@ const OUT_ENTRY_BOX_AVAILABILITY_SQL = `
       AND b.sa_entry_type IS DISTINCT FROM 'stock_out'
       AND EXISTS (
         SELECT 1 FROM ims_out_entry o
-        WHERE o.out_uid = b.out_uid
+        WHERE o.out_uid::text = b.out_uid::text
           AND o.approved = true
           AND o.is_deleted = false
-          AND (o.fuid = $2 OR ($3::INTEGER IS NOT NULL AND o.out_uid = $3))
+          AND (o.fuid = $2 OR ($3::INTEGER IS NOT NULL AND o.out_uid::text = $3::text))
       )
     )
   )
@@ -380,9 +380,10 @@ export const findOutEntryDraftBoxUids = async (out_uid) => {
   return (rows || []).map((r) => String(r.box_no_uid).trim()).filter(Boolean);
 };
 
-export const replaceOutEntryDraftScans = async ({ out_uid, scanned_boxes = [] }) => {
+export const replaceOutEntryDraftScans = async ({ out_uid, scanned_boxes = [] }, { client = null } = {}) => {
   if (!out_uid) return [];
-  await dbQuery(`DELETE FROM ims_out_entry_scanned_box WHERE out_uid = $1`, [out_uid]);
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  await run(`DELETE FROM ims_out_entry_scanned_box WHERE out_uid = $1`, [out_uid]);
   const uids = [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
   if (!uids.length) return [];
   const values = [];
@@ -390,25 +391,43 @@ export const replaceOutEntryDraftScans = async ({ out_uid, scanned_boxes = [] })
     values.push(out_uid, uid);
     return `($${i * 2 + 1}, $${i * 2 + 2})`;
   });
-  await dbQuery(
+  await run(
     `INSERT INTO ims_out_entry_scanned_box (out_uid, box_no_uid) VALUES ${placeholders.join(", ")}`,
     values
   );
   return uids;
 };
 
-export const clearOutEntryDraftScans = async (out_uid) => {
+export const clearOutEntryDraftScans = async (out_uid, { client = null } = {}) => {
   if (!out_uid) return;
-  await dbQuery(`DELETE FROM ims_out_entry_scanned_box WHERE out_uid = $1`, [out_uid]);
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  await run(`DELETE FROM ims_out_entry_scanned_box WHERE out_uid = $1`, [out_uid]);
 };
 
-/** Boxes saved for this out entry — draft table or approved ims_box_table links. */
+/** Boxes saved for this out entry   draft table or approved ims_box_table links. */
 export const findOutEntryLinkedBoxes = async (out_uid) => {
   if (!out_uid) return [];
   const [entry] = await dbQuery(
-    `SELECT approved FROM ims_out_entry WHERE out_uid = $1 AND is_deleted = false LIMIT 1`,
+    `SELECT approved, entry_type FROM ims_out_entry WHERE out_uid = $1 AND is_deleted = false LIMIT 1`,
     [out_uid]
   );
+  if (entry?.entry_type === "other" || entry?.entry_type === "packing_area") {
+    return dbQuery(
+      `SELECT d.box_no_uid::text AS box_no_uid,
+              b.packing_number,
+              b.is_loose,
+              NULL::integer AS out_uid,
+              b.sa_id,
+              b.sa_entry_type,
+              b.qty,
+              b.location_id
+       FROM ims_out_entry_scanned_box d
+       INNER JOIN ims_box_table b ON b.box_no_uid::text = d.box_no_uid AND b.is_deleted = false
+       WHERE d.out_uid = $1
+       ORDER BY d.box_no_uid ASC`,
+      [out_uid]
+    );
+  }
   if (entry?.approved) {
     return dbQuery(
       `SELECT b.box_no_uid::text AS box_no_uid,
@@ -438,55 +457,103 @@ export const findOutEntryLinkedBoxes = async (out_uid) => {
   );
 };
 
+/** Other out entry: remove store location and return boxes to packing area. */
+export const applyOutEntryOtherReturn = async ({ out_uid, userId, scanned_boxes = [] }, { client = null } = {}) => {
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const uids = [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
+  if (!out_uid || !uids.length) return [];
+
+  await replaceOutEntryDraftScans({ out_uid, scanned_boxes: uids }, { client });
+
+  const rows = await run(
+    `UPDATE ims_box_table
+     SET location_id = NULL,
+         in_uid = NULL,
+         updated_by = $1,
+         updated_at = NOW()
+     WHERE box_no_uid = ANY($2::text[])
+       AND is_deleted = false
+       AND out_uid IS NULL
+       AND sa_entry_type IS DISTINCT FROM 'stock_out'
+     RETURNING box_uid, box_no_uid, packing_number, qty, is_loose, location_id`,
+    [userId, uids]
+  );
+
+  const resultRows = client?.query ? rows.rows : rows;
+
+  if (resultRows?.length) {
+    logBoxTransactionSafe({
+      client,
+      transaction_type: BOX_TX_TYPES.OUT_OTHER_RETURN_TO_PACKING,
+      source_module: "out_entry",
+      source_id: String(out_uid),
+      packing_number: singlePackingFromRows(resultRows),
+      user_id: userId,
+      rows: resultRows,
+      details: {
+        out_uid,
+        entry_type: "packing_area",
+        packing_numbers: [...new Set(resultRows.map((r) => r.packing_number).filter(Boolean))],
+        box_count: resultRows.length,
+      },
+    });
+  }
+  return resultRows;
+};
+
 /** Apply stock: link boxes on ims_box_table. Call only when out entry is approved. */
-export const applyOutEntryApprovedStock = async ({ out_uid, userId, scanned_boxes = [] }) => {
-  await clearOutEntryDraftScans(out_uid);
-  await resetBoxesForOutEntry(out_uid, userId);
+export const applyOutEntryApprovedStock = async ({ out_uid, userId, scanned_boxes = [] }, { client = null } = {}) => {
+  await clearOutEntryDraftScans(out_uid, { client });
+  await resetBoxesForOutEntry(out_uid, userId, { client });
   if (scanned_boxes?.length) {
-    await linkBoxesToOutEntry({ out_uid, userId, scanned_boxes });
+    await linkBoxesToOutEntry({ out_uid, userId, scanned_boxes }, { client });
   }
 };
 
 /** Draft save: scans stored without out_uid on boxes (stock unchanged). */
-export const saveOutEntryDraftScans = async ({ out_uid, userId, scanned_boxes = [] }) => {
-  await resetBoxesForOutEntry(out_uid, userId);
-  return replaceOutEntryDraftScans({ out_uid, scanned_boxes });
+export const saveOutEntryDraftScans = async ({ out_uid, userId, scanned_boxes = [] }, { client = null } = {}) => {
+  await resetBoxesForOutEntry(out_uid, userId, { client });
+  return replaceOutEntryDraftScans({ out_uid, scanned_boxes }, { client });
 };
 
-export const linkBoxesToOutEntry = async ({ out_uid, userId, scanned_boxes = [] }) => {
+export const linkBoxesToOutEntry = async ({ out_uid, userId, scanned_boxes = [] }, { client = null } = {}) => {
   if (!out_uid || !Array.isArray(scanned_boxes) || scanned_boxes.length === 0) return [];
-  const rows = await dbQuery(
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const rows = await run(
     `UPDATE ims_box_table
      SET out_uid = $1,
          updated_by = $2,
          updated_at = NOW()
-     WHERE box_no_uid = ANY($3)
+     WHERE box_no_uid = ANY($3::text[])
        AND is_deleted = false
        AND out_uid IS NULL
        AND sa_entry_type IS DISTINCT FROM 'stock_out'
      RETURNING box_uid, box_no_uid, packing_number, qty, is_loose`,
     [out_uid, userId, scanned_boxes]
   );
-  if (rows?.length) {
+  const resultRows = client?.query ? rows.rows : rows;
+  if (resultRows?.length) {
     logBoxTransactionSafe({
+      client,
       transaction_type: BOX_TX_TYPES.OUT_LINK,
       source_module: "out_entry",
       source_id: String(out_uid),
-      packing_number: singlePackingFromRows(rows),
+      packing_number: singlePackingFromRows(resultRows),
       user_id: userId,
-      rows,
+      rows: resultRows,
       details: {
         out_uid,
-        packing_numbers: [...new Set(rows.map((r) => r.packing_number).filter(Boolean))],
+        packing_numbers: [...new Set(resultRows.map((r) => r.packing_number).filter(Boolean))],
       },
     });
   }
-  return rows;
+  return resultRows;
 };
 
-export const resetBoxesForOutEntry = async (out_uid, userId = null) => {
+export const resetBoxesForOutEntry = async (out_uid, userId = null, { client = null } = {}) => {
   if (!out_uid) return [];
-  const rows = await dbQuery(
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const rows = await run(
     `UPDATE ims_box_table
      SET out_uid = NULL,
          updated_at = NOW()
@@ -495,21 +562,25 @@ export const resetBoxesForOutEntry = async (out_uid, userId = null) => {
      RETURNING box_uid, box_no_uid, packing_number, qty, is_loose`,
     [out_uid]
   );
-  if (rows?.length) {
+
+  const resultRows = client?.query ? rows.rows : rows;
+
+  if (resultRows?.length) {
     logBoxTransactionSafe({
+      client,
       transaction_type: BOX_TX_TYPES.OUT_UNLINK,
       source_module: "out_entry",
       source_id: String(out_uid),
-      packing_number: singlePackingFromRows(rows),
+      packing_number: singlePackingFromRows(resultRows),
       user_id: userId,
-      rows,
+      rows: resultRows,
       details: {
         out_uid,
-        packing_numbers: [...new Set(rows.map((r) => r.packing_number).filter(Boolean))],
+        packing_numbers: [...new Set(resultRows.map((r) => r.packing_number).filter(Boolean))],
       },
     });
   }
-  return rows;
+  return resultRows;
 };
 
 // Strict rule: one FUID can be linked to only one out entry ever.
@@ -532,4 +603,33 @@ export const findAnyOutEntryByFuid = async ({ fuid, excludeOutUid } = {}) => {
     values
   );
   return row ?? null;
+};
+
+/** Distinct reasons used on inventory out / packing area entries (dropdown suggestions). */
+export const findDistinctOutEntryReasons = async ({ search, limit = 200 } = {}) => {
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
+  const values = [];
+  let i = 1;
+  const conditions = [
+    "is_deleted = false",
+    "BTRIM(reason) <> ''",
+    "entry_type IN ('inventory_out', 'packing_area', 'other')",
+  ];
+
+  if (search && String(search).trim()) {
+    values.push(`%${String(search).trim().slice(0, 100)}%`);
+    conditions.push(`reason ILIKE $${i++}`);
+  }
+
+  const rows = await dbQuery(
+    `SELECT reason, MAX(created_at) AS last_used_at
+     FROM ims_out_entry
+     WHERE ${conditions.join(" AND ")}
+     GROUP BY reason
+     ORDER BY last_used_at DESC, reason ASC
+     LIMIT $${i}`,
+    [...values, safeLimit]
+  );
+
+  return rows || [];
 };

@@ -15,8 +15,8 @@ const pad = (n) => String(n).padStart(2, "0");
 
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Matches one hourly slot: `db_2026-06-01_14.dump` or legacy `db_2026-06-01_14-30-45.dump`. */
-const hourlySlotFilePattern = (db, day, hour) => new RegExp(`^${escapeRegex(db)}_${escapeRegex(day)}_${pad(hour)}(?:-\\d{2}-\\d{2})?\\.dump$`);
+/** Matches any hourly backup: `db_2026-06-01_14.dump` or legacy `db_2026-06-01_14-30-45.dump`. */
+const anyHourlyFilePattern = (db) => new RegExp(`^${escapeRegex(db)}_\\d{4}-\\d{2}-\\d{2}_\\d{2}(?:-\\d{2}-\\d{2})?\\.dump$`);
 
 const formatSize = (bytes) => {
   const mb = bytes / 1024 / 1024;
@@ -40,13 +40,22 @@ const removeOldSlotFiles = (dir, prefix, keep) => {
   }
 };
 
-const removeOldHourlySlotFiles = (dir, db, day, hour, keep) => {
+const removeOldHourlySlotFiles = (dir, db) => {
   if (!fs.existsSync(dir)) return;
-  const pattern = hourlySlotFilePattern(db, day, hour);
-  for (const name of fs.readdirSync(dir)) {
-    if (name !== keep && pattern.test(name)) {
-      fs.unlinkSync(path.join(dir, name));
-      logger.info(`DB backup: removed previous hourly file — ${name}`);
+  const pattern = anyHourlyFilePattern(db);
+  const files = fs.readdirSync(dir)
+    .filter((name) => pattern.test(name))
+    .map((name) => ({
+      name,
+      mtime: fs.statSync(path.join(dir, name)).mtime.getTime(),
+    }))
+    .sort((a, b) => b.mtime - a.mtime); // Newest first
+
+  const max = config.dbBackup.hourlyKeepCount;
+  if (files.length > max) {
+    for (let i = max; i < files.length; i++) {
+      fs.unlinkSync(path.join(dir, files[i].name));
+      logger.info(`DB backup: removed old hourly file — ${files[i].name}`);
     }
   }
 };
@@ -74,13 +83,20 @@ const runOneBackup = async ({ targetDir, replacePrefix, fileName, label, hourSlo
 
   fs.mkdirSync(targetDir, { recursive: true });
 
+  // Pre-cleanup: Backup shuru hone se pehle hi purani extra files hata do
+  // taaki agar backup fail bhi ho, to folder cluttered na rahe.
+  if (hourSlot) {
+    removeOldHourlySlotFiles(targetDir, hourSlot.db);
+  }
+
   logger.info(`DB backup started (${label}) — ${outFile}`);
   try {
     if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
     await pgDump(tempFile, env);
     fs.renameSync(tempFile, outFile);
     if (hourSlot) {
-      removeOldHourlySlotFiles(targetDir, hourSlot.db, hourSlot.day, hourSlot.hour, fileName);
+      // Post-cleanup: Naya backup aane ke baad phir se clean karo taaki count exactly max rahe.
+      removeOldHourlySlotFiles(targetDir, hourSlot.db);
     } else {
       removeOldSlotFiles(targetDir, replacePrefix, fileName);
     }

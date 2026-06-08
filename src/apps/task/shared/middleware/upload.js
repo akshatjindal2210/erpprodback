@@ -1,6 +1,7 @@
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import config from "../../../../config/config.js";
 
 // Helper to create folder if it doesn't exist
 const ensureDir = (dir) => {
@@ -30,7 +31,9 @@ const chatStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     // Check if task is recurring
     const isRecurring = req.body.is_recurring === true || req.body.is_recurring === "true" || req.body.is_recurring === 1;
-    const dir = isRecurring ? "uploads/task_recurring_tasks/chat" : "uploads/task_tasks/chat";
+    const dir = isRecurring 
+      ? path.join(config.uploadPath, "task_recurring_tasks/chat") 
+      : path.join(config.uploadPath, "task_tasks/chat");
     ensureDir(dir);
     cb(null, dir);
   },
@@ -49,7 +52,7 @@ export const chatUpload = multer({
 // ── Self-note upload ──
 const selfStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const dir = "uploads/task_tasks/self";
+    const dir = path.join(config.uploadPath, "task_tasks/self");
     ensureDir(dir);
     cb(null, dir);
   },

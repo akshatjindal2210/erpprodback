@@ -45,7 +45,7 @@ export const findModules = async (options = {}) => {
   // WHERE clause (baseline so empty filter/search still yields valid SQL)
   const conditions = ["TRUE"];
 
-  // Permission-based date restriction (can_view_days) — bound param, capped (no string interpolation)
+  // Permission-based date restriction (can_view_days) bound param, capped (no string interpolation)
   const viewDays = Math.min(3650, Math.max(0, parseInt(options.permission?.can_view_days, 10) || 0));
   if (viewDays > 0) {
     values.push(Math.max(0, viewDays - 1));
@@ -90,7 +90,7 @@ export const findModules = async (options = {}) => {
 
   const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
-  // ORDER BY — default: DB `sort_order` (manual), then label
+  // ORDER BY default: DB `sort_order` (manual), then label
   const rawSortBy =
     sort.by != null && String(sort.by).trim() !== "" ? String(sort.by).trim() : "sort_order";
   const safeSortBy = ALLOWED_SORT_FIELDS.includes(rawSortBy) ? rawSortBy : "sort_order";

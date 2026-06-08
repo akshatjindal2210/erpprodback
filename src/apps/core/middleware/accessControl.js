@@ -14,7 +14,7 @@ export const accessControl = (moduleName, actions) => {
       const user = req.user;
 
       if (!user) {
-        return res.status(401).json({ success: false, message: "Unauthorized — user not found" });
+        return res.status(401).json({ success: false, message: "Unauthorized user not found" });
       }
 
       // Super admin bypass
@@ -141,7 +141,7 @@ export const accessControlAny = (alternatives) => {
       const user = req.user;
 
       if (!user) {
-        return res.status(401).json({ success: false, message: "Unauthorized — user not found" });
+        return res.status(401).json({ success: false, message: "Unauthorized user not found" });
       }
 
       const userType = String(user.type || user.role || "").toLowerCase().trim();
@@ -247,4 +247,16 @@ export const dynamicAccessControl = () => {
 
     accessControl(moduleName, action)(req, res, next);
   };
+};
+
+export const superAdminOnly = (req, res, next) => {
+  const user = req.user;
+  if (!user) {
+    return res.status(401).json({ success: false, message: "Unauthorized user not found" });
+  }
+  const userType = String(user.type || user.role || "").toLowerCase().trim();
+  if (userType !== "super_admin") {
+    return res.status(403).json({ success: false, message: "Only super admin can perform this action" });
+  }
+  next();
 };

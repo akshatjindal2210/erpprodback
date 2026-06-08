@@ -2,6 +2,7 @@ import cron from "node-cron";
 import fs from "fs";
 import path from "path";
 import dbQuery from "../config/db.js";
+import config from "../config/config.js";
 
 export function initRecurringTasksCron() {
   cron.schedule("0 0 * * *", async () => {
@@ -92,16 +93,21 @@ export function initRecurringTasksCron() {
           if (chat.attachments) {
             try {
               const files = typeof chat.attachments === "string" ? JSON.parse(chat.attachments) : chat.attachments;
-              const newDir = path.join("uploads", "task_tasks", "chat");
+              const newDir = path.join(config.uploadPath, "task_tasks", "chat");
               if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
 
               for (const f of files) {
-                const oldPath = f.file_path;
-                const newPath = path.join(newDir, path.basename(oldPath));
+                const oldPathRelative = f.file_path.startsWith(`${config.uploadPublicPath}/`)
+                  ? f.file_path.slice(config.uploadPublicPath.length + 1)
+                  : f.file_path;
+                const oldPath = path.join(config.uploadPath, oldPathRelative);
+
+                const newPathRelative = path.join("task_tasks", "chat", path.basename(oldPath));
+                const newPath = path.join(config.uploadPath, newPathRelative);
 
                 if (fs.existsSync(oldPath)) {
                   fs.copyFileSync(oldPath, newPath);
-                  attachments.push({ ...f, file_path: newPath });
+                  attachments.push({ ...f, file_path: path.join(config.uploadPublicPath, newPathRelative).replace(/\\/g, "/") });
                 }
               }
             } catch (e) {

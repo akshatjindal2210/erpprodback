@@ -1,5 +1,6 @@
 import dbQuery from "../../../config/db.js";
 import { getAppConfigValue, APP_CONFIG_KEYS } from "../../core/models/appConfig.model.js";
+import { effectiveBoxCustomerAcc } from "./boxCustomerOverride.js";
 import { sqlBoxInHand } from "./boxInventorySql.js";
 
 /**
@@ -39,7 +40,7 @@ function normCode(v) {
 }
 
 function effectiveBoxCustomer(override_cust, prod_acc_code) {
-  return normCode(override_cust) ?? normCode(prod_acc_code);
+  return effectiveBoxCustomerAcc(override_cust, prod_acc_code);
 }
 
 function effectiveBoxItem(itemdcode) {

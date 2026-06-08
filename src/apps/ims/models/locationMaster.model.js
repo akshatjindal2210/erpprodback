@@ -98,7 +98,7 @@ export const findLocations = async (options = {}) => {
   switch (sortByField) {
     case "acc_name": orderByClause = "lm.acc_code::text"; break;
     case "item_code": orderByClause = "lm.item_dcode::text"; break;
-    case "location_no": orderByClause = "COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, ''))))"; break;
+    case "location_no": orderByClause = "NULLIF(regexp_replace(lm.rack_no, '\\D', '', 'g'), '')::bigint, lm.shelf_no"; break;
     default: orderByClause = `lm.${sortByField}`;
   }
 
@@ -123,7 +123,8 @@ export const findLocations = async (options = {}) => {
   };
 };
 
-export const findLocation = async (filters = {}) => {
+export const findLocation = async (filters = {}, options = {}) => {
+  const { fields = [] } = options;
   const keys = Object.keys(filters);
   if (!keys.length) return null;
 
@@ -138,7 +139,7 @@ export const findLocation = async (filters = {}) => {
   }
 
   const [row] = await dbQuery(
-    `SELECT ${DEFAULT_FIELDS.join(", ")}
+    `SELECT ${fields.length ? fields.join(", ") : DEFAULT_FIELDS.join(", ")}
      FROM ims_location_master lm
      ${JOINS}
      WHERE ${conditions.join(" AND ")}
@@ -165,7 +166,7 @@ function normHierarchyCode(v) {
  * (1) customer + item on location, both match box
  * (2) customer-only on location (acc matches, item_dcode NULL on master)
  * (3) item-only on location (acc NULL, item matches)
- * (4) open racks (both NULL on master)  all matches up to cap
+ * (4) open racks (both NULL on master) all matches up to cap
  * returns {{ rows: object[], match_tier: 1|2|3|4|null }}
  */
 export const findSuggestedInwardLocationByHierarchy = async ({ acc_code, item_dcode }) => {

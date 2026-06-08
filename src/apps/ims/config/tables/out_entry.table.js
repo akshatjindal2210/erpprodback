@@ -5,7 +5,12 @@ export async function createOutEntryTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.OUT_ENTRY} (
       out_uid           SERIAL PRIMARY KEY,
-      fuid              INTEGER NOT NULL REFERENCES ${T.FORWARDING_NOTE_MASTER}(fuid) ON DELETE CASCADE,
+      fuid              INTEGER REFERENCES ${T.FORWARDING_NOTE_MASTER}(fuid) ON DELETE CASCADE,
+      entry_type        VARCHAR(20) DEFAULT 'forwarding_note',
+      packing_numbers   TEXT,
+      item_codes        TEXT,
+      qtys              TEXT,
+      total_qty         INTEGER DEFAULT 0,
       remarks           TEXT,
       approved          BOOLEAN DEFAULT false,
       approved_by       INTEGER REFERENCES ${C.USERS}(id),
@@ -19,7 +24,8 @@ export async function createOutEntryTable() {
       updated_at        TIMESTAMP,
       scan_complete     BOOLEAN DEFAULT false,
       boxes_required    INTEGER DEFAULT 0,
-      boxes_scanned     INTEGER DEFAULT 0
+      boxes_scanned     INTEGER DEFAULT 0,
+      reason            VARCHAR(200)
     );
   `);
 }

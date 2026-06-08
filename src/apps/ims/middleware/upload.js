@@ -1,6 +1,7 @@
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import config from "../../../config/config.js";
 
 // Helper to create folder if it doesn't exist
 const ensureDir = (dir) => {
@@ -28,7 +29,7 @@ const fileFilter = (req, file, cb) => {
 // ── Chat upload ──
 const chatStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const dir = "uploads/tasks/chat";
+    const dir = path.join(config.uploadPath, "tasks/chat");
     ensureDir(dir);
     cb(null, dir);
   },
@@ -47,7 +48,7 @@ export const chatUpload = multer({
 // ── Self-note upload ──
 const selfStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const dir = "uploads/tasks/self";
+    const dir = path.join(config.uploadPath, "tasks/self");
     ensureDir(dir);
     cb(null, dir);
   },

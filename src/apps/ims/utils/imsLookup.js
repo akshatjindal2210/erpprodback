@@ -1,7 +1,7 @@
 import { fetchFromIMS } from "../services/ims.service.js";
 
 const normKey = (v) => (v == null ? null : String(v).trim());
-const canonicalCode = (v) => {
+export const canonicalCode = (v) => {
   const s = normKey(v);
   if (!s) return null;
   if (/^-?\d+(\.\d+)?$/.test(s)) {

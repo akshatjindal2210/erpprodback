@@ -9,10 +9,10 @@ import inventoryInwardRoutes from "./inventoryInward.route.js";
 import forwardingNoteRoutes from "./forwardingNote.route.js";
 import outEntryRoutes from "./outEntry.route.js";
 import stockAdjustmentRoutes from "./stockAdjustment.route.js";
-import activityLogRoutes from "./activityLog.routes.js";
 import transactionBoxRoutes from "./transactionBox.routes.js";
 import inventoryReportRoutes from "./inventoryReport.route.js";
 import appConfigRoutes from "./appConfig.route.js";
+// import auditRoutes from "./audit.routes.js";
 
 const router = Router();
 
@@ -25,9 +25,9 @@ router.use("/inventory-inwards", inventoryInwardRoutes);
 router.use("/forwarding-notes", forwardingNoteRoutes);
 router.use("/out-entries", outEntryRoutes);
 router.use("/stock-adjustment", stockAdjustmentRoutes);
-router.use("/activity-logs", activityLogRoutes);
 router.use("/box-transaction-logs", transactionBoxRoutes);
 router.use("/inventory-report", inventoryReportRoutes);
 router.use("/app-config", appConfigRoutes);
+// router.use("/audit", auditRoutes);
 
 export default router;

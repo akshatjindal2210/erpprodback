@@ -1,5 +1,5 @@
 import express from "express";
-import { getOutEntries, getOutEntryById, createOutEntry, updateOutEntry, deleteOutEntry, verifyBoxSticker, batchScanOutEntryBoxes, getFuidDetailsForOutEntry, lockFuidForOutEntry, getOutEntriesViews } from "../controllers/outEntry.controller.js";
+import { getOutEntries, getOutEntryById, createOutEntry, updateOutEntry, deleteOutEntry, verifyBoxSticker, batchScanOutEntryBoxes, getFuidDetailsForOutEntry, lockFuidForOutEntry, getOutEntriesViews, getOutEntryReasonsViews } from "../controllers/outEntry.controller.js";
 import { authenticate } from "../middleware/auth.js";
 import { accessControl, dynamicAccessControl } from "../../core/middleware/accessControl.js";
 
@@ -32,5 +32,6 @@ router.post("/batch-scan-boxes", authenticate, accessControl("out_entry", ["view
 
 // Views (Helper API)
 router.post("/helper", authenticate, dynamicAccessControl(), getOutEntriesViews);
+router.post("/reason-helper", authenticate, accessControl("out_entry", "view"), getOutEntryReasonsViews);
 
 export default router;

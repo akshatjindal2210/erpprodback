@@ -1,22 +1,47 @@
-import { createLog } from "../models/activityLog.model.js";
+import ActivityLog from "../../core/models/activityLog.model.js";
+import { buildActivityLogPayload } from "../../core/utils/activityLogPayload.js";
 
 export const logActivity = async (
   req,
-  { action, entity, entity_id = null, details = {}, success = true }
+  {
+    action,
+    entity,
+    entity_id = null,
+    record = null,
+    details = {},
+    meta = null,
+    success = true,
+    userId = null,
+    appType = "ims",
+  }
 ) => {
   try {
-    await createLog({
-      user_id: req.user?.id ?? null,
-      user_type: req.user?.type ?? "user",
+    if (req) req._activityLogged = true;
+
+    const { description, log_data, entity_id: numericEntityId } = buildActivityLogPayload({
       action,
       entity,
       entity_id,
-      details: { ...details, success },
-      ip_address: req.ip || req.headers["x-forwarded-for"] || null,
-      user_agent: req.headers["user-agent"] || null,
-      created_by: req.user?.id ?? null,
+      record,
+      details,
+      meta,
+    });
+
+    log_data.success = success;
+
+    await ActivityLog.create({
+      user_id: userId || req?.user?.id || null,
+      app_type: appType,
+      module: entity,
+      action_type: String(action).toUpperCase(),
+      description,
+      log_data,
+      ip_address: req?.ip || req?.headers?.["x-forwarded-for"] || null,
+      user_agent: req?.headers?.["user-agent"] || null,
+      entity,
+      entity_id: numericEntityId,
     });
   } catch (err) {
-    console.error("IMS activity log error:", err.message);
+    console.error("Activity log error:", err.message);
   }
 };

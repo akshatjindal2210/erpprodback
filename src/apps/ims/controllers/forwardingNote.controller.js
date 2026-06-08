@@ -221,10 +221,11 @@ export const createForwardingNote = async (req, res) => {
     const enrichedData = await enrichForwardingNoteDetail(data);
 
     await logActivity(req, {
-      action    : "create",
-      entity    : "forwarding_note_master",
-      entity_id : row.fuid,
-      meta      : { po_number: rest.po_number, item_count: items.length }
+      action: "create",
+      entity: "forwarding_note_master",
+      entity_id: row.fuid,
+      record: enrichedData,
+      meta: { po_number: rest.po_number, item_count: items.length },
     });
 
     res.status(201).json({ success: true, data: enrichedData });
@@ -419,7 +420,7 @@ export const deleteForwardingNote = async (req, res) => {
     }
 
     await deleteForwardingNotes({ fuid }, { deleted_by: req.user.id });
-    await logActivity(req, { action: "delete", entity: "forwarding_note_master", entity_id: fuid });
+    await logActivity(req, { action: "delete", entity: "forwarding_note_master", entity_id: fuid, record: existing });
 
     res.json({ success: true, message: "Deleted successfully" });
   } catch (err) {

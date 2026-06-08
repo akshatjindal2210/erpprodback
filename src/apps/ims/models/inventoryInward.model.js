@@ -2,13 +2,24 @@ import dbQuery from "../../../config/db.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
 import { logBoxTransactionSafe, singlePackingFromRows } from "../utils/logBoxTransaction.js";
-import { sqlBoxInHand } from "../utils/boxInventorySql.js";
+import {
+  sqlBoxInHand,
+  sqlBoxPackingNumber,
+  sqlBoxItemDcodeReport,
+  sqlBoxCustomerCodeReport,
+  sqlDailyprodLateralForBox,
+  sqlDailyprodDocNoMatch,
+} from "../utils/boxInventorySql.js";
+import { findPackingAreaSummary } from "./inventoryReport.model.js";
 
 const ALLOWED_FILTER_FIELDS = ["in_uid", "packing_number", "approved", "from_date", "to_date"];
 
 const ALLOWED_SORT_FIELDS = ["created_at", "approved_at", "updated_at", "packing_number", "in_uid"];
 
-const ALLOWED_UPDATE_FIELDS = ["packing_number", "remarks", "approved", "approved_by", "approved_at", "updated_by", "updated_at"];
+const ALLOWED_UPDATE_FIELDS = [
+  "packing_number", "item_codes", "qtys", "total_qty",
+  "remarks", "approved", "approved_by", "approved_at", "updated_by", "updated_at",
+];
 
 // Join users for creator/updater/deleter/approver display names
 const JOINS = `
@@ -19,7 +30,7 @@ const JOINS = `
 `;
 
 const DEFAULT_FIELDS = [
-  "i.in_uid", "i.packing_number", "i.remarks",
+  "i.in_uid", "i.packing_number", "i.item_codes", "i.qtys", "i.total_qty", "i.remarks",
   "i.approved", "i.approved_by", "i.approved_at",
   "i.created_by", "i.created_at",
   "i.updated_by", "i.updated_at",
@@ -188,14 +199,24 @@ export const findInventoryInward = async (filters = {}) => {
 };
 
 export const insertInventoryInward = async (data) => {
-  const { packing_number, remarks, created_by, approved = true, approved_by = null, approved_at = null } = data;
+  const {
+    packing_number,
+    item_codes = null,
+    qtys = null,
+    total_qty = 0,
+    remarks,
+    created_by,
+    approved = true,
+    approved_by = null,
+    approved_at = null,
+  } = data;
 
   const [row] = await dbQuery(
     `INSERT INTO ims_inventory_inwards
-     (packing_number, remarks, approved, approved_by, approved_at, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6)
+     (packing_number, item_codes, qtys, total_qty, remarks, approved, approved_by, approved_at, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
-    [packing_number, remarks, approved, approved_by, approved_at, created_by]
+    [packing_number, item_codes, qtys, total_qty, remarks, approved, approved_by, approved_at, created_by]
   );
 
   return row;
@@ -238,6 +259,9 @@ export const updateInventoryInwards = async (fields = {}, filters = {}) => {
 };
 
 export const deleteInventoryInwards = async (filters = {}, meta = {}) => {
+  const { client = null, deleted_by = null } = meta;
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+
   const keys = Object.keys(filters);
   if (!keys.length) throw new Error("No filters provided");
 
@@ -253,9 +277,9 @@ export const deleteInventoryInwards = async (filters = {}, meta = {}) => {
 
   if (!conditions.length) throw new Error("Invalid filters");
 
-  values.push(meta.deleted_by ?? null);
+  values.push(deleted_by);
 
-  await dbQuery(
+  await run(
     `UPDATE ims_inventory_inwards
      SET is_deleted = true,
          deleted_at = NOW(),
@@ -265,9 +289,11 @@ export const deleteInventoryInwards = async (filters = {}, meta = {}) => {
   );
 };
 
-export const resetBoxesForInward = async (in_uid, userId = null) => {
+export const resetBoxesForInward = async (in_uid, userId = null, { client = null } = {}) => {
   if (!in_uid) return [];
-  const rows = await dbQuery(
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+
+  const rows = await run(
     `UPDATE ims_box_table
      SET in_uid = NULL,
          location_id = NULL,
@@ -276,29 +302,61 @@ export const resetBoxesForInward = async (in_uid, userId = null) => {
      RETURNING box_uid, box_no_uid, packing_number, qty, is_loose`,
     [in_uid]
   );
-  if (rows?.length) {
+
+  const resultRows = client?.query ? rows.rows : rows;
+
+  if (resultRows?.length) {
     logBoxTransactionSafe({
+      client,
       transaction_type: BOX_TX_TYPES.INWARD_UNLINK,
       source_module: "inventory_inward",
       source_id: String(in_uid),
-      packing_number: singlePackingFromRows(rows),
+      packing_number: singlePackingFromRows(resultRows),
       user_id: userId,
-      rows,
+      rows: resultRows,
       details: {
         in_uid,
-        packing_numbers: [...new Set(rows.map((r) => r.packing_number).filter(Boolean))],
+        packing_numbers: [...new Set(resultRows.map((r) => r.packing_number).filter(Boolean))],
       },
     });
   }
-  return rows;
+  return resultRows;
 };
 
-const PACKING_AREA_PN = `NULLIF(TRIM(b.packing_number::text), '')`;
-const PACKING_AREA_SORT = {
-  packing_number: "packing_number",
-  box_count: "box_count",
-  stock_qty: "stock_qty",
-};
+/** Same rows/qty as inventory report `packing_area_qty` column. */
+export const findPackingAreaByPacking = findPackingAreaSummary;
+
+/** doc_dt / job_card_no from ims_dailyprod for packing numbers (By Box fallback). */
+export async function fetchDailyprodDocMetaByPackings(packingNumbers = []) {
+  const nums = [...new Set((packingNumbers || []).map((n) => String(n).trim()).filter(Boolean))];
+  if (!nums.length) return new Map();
+
+  const rows = await dbQuery(
+    `SELECT
+       TRIM(doc_no::text) AS packing_number,
+       doc_dt,
+       job_card_no
+     FROM ims_dailyprod
+     WHERE doc_no::text = ANY($1::text[])
+        OR TRIM(doc_no::text) = ANY($1::text[])`,
+    [nums]
+  );
+
+  const map = new Map();
+  for (const r of rows || []) {
+    const pn = String(r.packing_number).trim();
+    map.set(pn, r);
+    if (/^\d+$/.test(pn)) map.set(String(Number(pn)), r);
+  }
+  for (const num of nums) {
+    if (map.has(num)) continue;
+    const n = String(num).trim();
+    if (/^\d+$/.test(n) && map.has(String(Number(n)))) {
+      map.set(n, map.get(String(Number(n))));
+    }
+  }
+  return map;
+}
 
 /** Expect YYYY-MM-DD from the client (DateRangeFilter). Avoid Date parsing (timezone drift). */
 function ymdFromPackingAreaFilter(value) {
@@ -314,111 +372,36 @@ function appendPackingDocDtFilter(conditions, values, packingNoExpr, filters = {
 
   let i = values.length + 1;
   const dtParts = [];
+  const boxParts = [];
   if (fromYmd) {
     values.push(fromYmd);
-    dtParts.push(`dp.doc_dt >= $${i++}::date`);
+    const p = i++;
+    dtParts.push(`dp.doc_dt >= $${p}::date`);
+    boxParts.push(`b.created_at >= $${p}::timestamp`);
   }
   if (toYmd) {
     values.push(toYmd);
-    dtParts.push(`dp.doc_dt <= $${i++}::date`);
+    const p = i++;
+    dtParts.push(`dp.doc_dt <= $${p}::date`);
+    boxParts.push(`b.created_at <= $${p}::timestamp + INTERVAL '1 day'`);
   }
 
-  conditions.push(`EXISTS (
-    SELECT 1 FROM ims_dailyprod dp
-    WHERE dp.doc_no::text = ${packingNoExpr}
-      AND dp.doc_dt IS NOT NULL
-      AND ${dtParts.join(" AND ")}
+  conditions.push(`(
+    EXISTS (
+      SELECT 1 FROM ims_dailyprod dp
+      WHERE dp.doc_no::text = ${packingNoExpr}
+        AND dp.doc_dt IS NOT NULL
+        AND ${dtParts.join(" AND ")}
+    )
+    OR (${boxParts.join(" AND ")})
   )`);
 }
-
-/** Production stickers only (excludes SA add placeholder boxes). */
-const PACKING_AREA_HAS_PRODUCTION_STICKER = `
-  EXISTS (
-    SELECT 1
-    FROM ims_box_table b2
-    WHERE NULLIF(TRIM(b2.packing_number::text), '') = ${PACKING_AREA_PN}
-      AND b2.is_deleted = false
-      AND (b2.sa_entry_type IS DISTINCT FROM 'stock_out')
-      AND NOT (b2.sa_entry_type = 'stock_in' AND b2.sa_id IS NOT NULL)
-      AND ${sqlBoxInHand("b2")}
-      AND b2.location_id IS NULL
-  )
-`;
-
-/**
- * Packing area summary: in-hand boxes with no location assigned (grouped by packing no.).
- * Dispatched / out-entry / stock-adjustment-out boxes are excluded via sqlBoxInHand.
- */
-export const findPackingAreaByPacking = async (options = {}) => {
-  const { search, sort = {}, page = 1, limit = 1000, filters = {} } = options;
-
-  const values = [];
-  let i = 1;
-  const conditions = [
-    "b.is_deleted = false",
-    sqlBoxInHand("b"),
-    "b.location_id IS NULL",
-    `${PACKING_AREA_PN} IS NOT NULL`,
-    PACKING_AREA_HAS_PRODUCTION_STICKER,
-  ];
-
-  if (search) {
-    values.push(`%${search}%`);
-    conditions.push(`${PACKING_AREA_PN} ILIKE $${i++}`);
-  }
-
-  appendPackingDocDtFilter(conditions, values, PACKING_AREA_PN, filters);
-
-  const where = `WHERE ${conditions.join(" AND ")}`;
-
-  const [{ count }] = await dbQuery(
-    `SELECT COUNT(*)::int AS count FROM (
-       SELECT ${PACKING_AREA_PN} AS packing_number
-       FROM ims_box_table b
-       ${where}
-       GROUP BY ${PACKING_AREA_PN}
-     ) sub`,
-    values
-  );
-
-  const sortBy = PACKING_AREA_SORT[sort.by] || "packing_number";
-  const sortOrder = sort.order === "DESC" ? "DESC" : "ASC";
-
-  const safePage = Math.max(1, Number(page) || 1);
-  const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 100));
-  const offset = (safePage - 1) * safeLimit;
-
-  const limitIdx = values.length + 1;
-  const offsetIdx = values.length + 2;
-  const queryValues = [...values, safeLimit, offset];
-
-  const rows = await dbQuery(
-    `SELECT
-       ${PACKING_AREA_PN} AS packing_number,
-       COUNT(*)::int AS box_count,
-       COALESCE(SUM(b.qty), 0)::bigint AS stock_qty
-     FROM ims_box_table b
-     ${where}
-     GROUP BY ${PACKING_AREA_PN}
-     ORDER BY ${sortBy} ${sortOrder}
-     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
-    queryValues
-  );
-
-  return {
-    data: rows,
-    total: Number(count),
-    page: safePage,
-    limit: safeLimit,
-    totalPages: Math.ceil(Number(count) / safeLimit) || 0,
-  };
-};
 
 const PACKING_AREA_BOX_WHERE = (alias = "b") => [
   `${alias}.is_deleted = false`,
   sqlBoxInHand(alias),
   `${alias}.location_id IS NULL`,
-  `NULLIF(TRIM(${alias}.packing_number::text), '') IS NOT NULL`,
+  `NULLIF(TRIM(${alias}.packing_number::text), '-') IS NOT NULL`,
 ];
 
 const PACKING_AREA_BOX_SORT = {
@@ -430,36 +413,55 @@ const PACKING_AREA_BOX_SORT = {
 
 /**
  * Individual boxes in packing area (in-hand, no location).
- * Out/dispatched/SA-minus boxes are excluded via sqlBoxInHand — same as inventory report.
+ * Out/dispatched/SA-minus boxes are excluded via sqlBoxInHand   same as inventory report.
  */
 export const findPackingAreaBoxes = async (options = {}) => {
-  const { search, packing_number, sort = {}, page = 1, limit = 1000, filters = {} } = options;
+  const { search, packing_number, item_dcode, acc_code, sort = {}, page = 1, limit = 1000, filters = {} } = options;
 
   const values = [];
   let i = 1;
   const conditions = [...PACKING_AREA_BOX_WHERE("b")];
-  const pnExpr = `NULLIF(TRIM(b.packing_number::text), '')`;
+  const pnExpr = sqlBoxPackingNumber("b");
+  const itemExpr = sqlBoxItemDcodeReport("sa", "dp");
+  const custExpr = sqlBoxCustomerCodeReport("b", "dp");
+  const dpJoin = sqlDailyprodLateralForBox("b", "sa", pnExpr);
 
   if (packing_number) {
     values.push(String(packing_number).trim());
     conditions.push(`${pnExpr} = $${i++}`);
   }
 
-  appendPackingDocDtFilter(conditions, values, pnExpr, filters);
+  if (item_dcode) {
+    values.push(String(item_dcode).trim());
+    const itemIdx = i++;
+    conditions.push(`${itemExpr} = $${itemIdx}`);
+  }
+
+  if (acc_code) {
+    values.push(String(acc_code).trim());
+    const custIdx = i++;
+    conditions.push(`${custExpr} = $${custIdx}`);
+  }
+
+  // appendPackingDocDtFilter(conditions, values, pnExpr, filters);
 
   if (search) {
     values.push(`%${search}%`);
     const searchIdx = values.length;
     conditions.push(`(
       b.box_no_uid ILIKE $${searchIdx} OR
-      NULLIF(TRIM(b.packing_number::text), '') ILIKE $${searchIdx}
+      NULLIF(TRIM(b.packing_number::text), '-') ILIKE $${searchIdx}
     )`);
   }
 
   const where = `WHERE ${conditions.join(" AND ")}`;
 
   const [{ count }] = await dbQuery(
-    `SELECT COUNT(*)::int AS count FROM ims_box_table b ${where}`,
+    `SELECT COUNT(*)::int AS count 
+     FROM ims_box_table b
+     LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
+     ${dpJoin}
+     ${where}`,
     values
   );
 
@@ -473,15 +475,28 @@ export const findPackingAreaBoxes = async (options = {}) => {
   const offsetIdx = values.length + 2;
   const queryValues = [...values, safeLimit, offset];
 
+  const dpDocMatch = sqlDailyprodDocNoMatch("dp_meta.doc_no", pnExpr);
+
   const rows = await dbQuery(
     `SELECT
        b.box_uid,
        b.box_no_uid,
        ${pnExpr} AS packing_number,
+       ${itemExpr} AS item_dcode,
+       ${custExpr} AS acc_code,
        COALESCE(b.qty, 0)::int AS qty,
        COALESCE(b.is_loose, false) AS is_loose,
-       b.created_at
+       b.created_at,
+       COALESCE(dp_meta.doc_dt, dp.doc_dt) AS doc_dt,
+       COALESCE(dp_meta.job_card_no, dp.job_card_no) AS job_card_no,
+       sa.financial_year AS sa_financial_year
      FROM ims_box_table b
+     LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
+     ${dpJoin}
+     LEFT JOIN ims_dailyprod dp_meta ON (
+       TRIM(b.packing_number::text) = TRIM(dp_meta.doc_no::text)
+       OR (${dpDocMatch})
+     )
      ${where}
      ORDER BY ${sortCol} ${sortOrder}
      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,

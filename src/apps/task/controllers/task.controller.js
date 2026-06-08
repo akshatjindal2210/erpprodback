@@ -4,6 +4,7 @@ import User from "../../core/models/user.model.js";
 import { calculateNextOccurrence, chatMessage, ensureDir, saveAttachments, upsertRecurring, isDbTrue, parseSubUsers, parseAttachmentsJson, asArray } from "../shared/index.js";
 import fs from "fs";
 import path from "path";
+import config from "../../../config/config.js";
 const log = (task_id, user_id, performed_by, action, action_detail = null, assignment_id = null) => Task.addLog(task_id, user_id, performed_by, action, action_detail, assignment_id);
 
 function canManageTask(reqUser, task) {
@@ -169,7 +170,7 @@ export async function createSelfTask(req, res) {
 
       // Always seed default chat message for new/clone recurring task
       const recurringAttachments = req.files?.length > 0
-        ? await saveAttachments(req.files, "uploads/task_recurring_tasks/chat")
+        ? await saveAttachments(req.files, path.join(config.uploadPath, "task_recurring_tasks/chat"))
         : null;
       const recurringChatMsg = chatMessage(title, description);
       await RecurringTask.addChatMessage(schedule_id, user_id, recurringChatMsg, recurringAttachments);
@@ -207,7 +208,7 @@ export async function createSelfTask(req, res) {
 
       // Always seed default chat message for new/clone task
       const normalAttachments = req.files?.length > 0
-        ? await saveAttachments(req.files, "uploads/task_tasks/chat")
+        ? await saveAttachments(req.files, path.join(config.uploadPath, "task_tasks/chat"))
         : null;
       const normalChatMsg = chatMessage(title, description);
       await Task.addChatMessage(task_id, user_id, normalChatMsg, normalAttachments);
@@ -281,7 +282,7 @@ export async function createTask(req, res) {
 
       // Always seed default chat message for new/clone recurring task
       const recurringAttachments = req.files?.length > 0
-        ? await saveAttachments(req.files, "uploads/task_recurring_tasks/chat")
+        ? await saveAttachments(req.files, path.join(config.uploadPath, "task_recurring_tasks/chat"))
         : null;
       const recurringChatMsg = chatMessage(title, description);
       await RecurringTask.addChatMessage(schedule_id, created_by, recurringChatMsg, recurringAttachments);
@@ -362,7 +363,7 @@ export async function createTask(req, res) {
 
       // Always seed default chat message for new/clone task
       const normalAttachments = req.files?.length > 0
-        ? await saveAttachments(req.files, "uploads/task_tasks/chat")
+        ? await saveAttachments(req.files, path.join(config.uploadPath, "task_tasks/chat"))
         : null;
       const chatMsg = chatMessage(title, description);
       await Task.addChatMessage(task_id, created_by, chatMsg, normalAttachments);
@@ -617,7 +618,7 @@ export async function updateTask(req, res) {
     if (req.files?.length > 0 || note?.trim()) {
       const attachments = req.files?.map(f => ({
         file_name: f.originalname,
-        file_path: `uploads/task_tasks/chat/${f.filename}`,
+        file_path: `${config.uploadPublicPath}/task_tasks/chat/${f.filename}`,
         file_size: f.size, mime_type: f.mimetype,
       }));
       await Task.addChatMessage(id, user_id, note?.trim() || null, attachments);
@@ -653,7 +654,13 @@ export async function deleteTask(req, res) {
     [...chatFiles, ...selfNoteFiles].forEach(row => {
       const files = parseAttachmentsJson(row.attachments);
       files.forEach(f => {
-        try { if (fs.existsSync(f.file_path)) fs.unlinkSync(f.file_path); } catch {}
+        try {
+          const relativePath = f.file_path.startsWith(`${config.uploadPublicPath}/`)
+            ? f.file_path.slice(config.uploadPublicPath.length + 1)
+            : f.file_path;
+          const fullPath = path.join(config.uploadPath, relativePath);
+          if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+        } catch {}
       });
     });
 

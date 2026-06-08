@@ -1,5 +1,7 @@
 import Task from "../models/task.model.js";
 import fs   from "fs";
+import path from "path";
+import config from "../../../config/config.js";
 
 const log = (task_id, user_id, performed_by, action, action_detail = null, assignment_id = null) => Task.addLog(task_id, user_id, performed_by, action, action_detail, assignment_id);
 
@@ -53,12 +55,15 @@ export async function sendMessage(req, res) {
         return res.status(400).json({ success: false, message: "Invalid reply_to_id" });
     }
 
-    const attachments = files.map((f) => ({
-      file_name: f.originalname,
-      file_path: f.path.replace(/\\/g, "/"),
-      file_size: f.size,
-      mime_type: f.mimetype,
-    }));
+    const attachments = files.map((f) => {
+      const relativePath = path.relative(path.resolve(config.uploadPath), f.path);
+      return {
+        file_name: f.originalname,
+        file_path: path.join(config.uploadPublicPath, relativePath).replace(/\\/g, "/"),
+        file_size: f.size,
+        mime_type: f.mimetype,
+      };
+    });
 
     const result  = await Task.sendChatMessage(id, user_id, message, reply_to_id, attachments);
     const chat_id = result.insertId;
@@ -108,7 +113,13 @@ export async function deleteMessage(req, res) {
       ? (typeof msg.attachments === "string" ? JSON.parse(msg.attachments) : msg.attachments)
       : [];
     files.forEach((f) => {
-      try { if (fs.existsSync(f.file_path)) fs.unlinkSync(f.file_path); } catch {}
+      try {
+        const relativePath = f.file_path.startsWith(`${config.uploadPublicPath}/`)
+          ? f.file_path.slice(config.uploadPublicPath.length + 1)
+          : f.file_path;
+        const fullPath = path.join(config.uploadPath, relativePath);
+        if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+      } catch {}
     });
 
     await Task.deleteChatMessage(chatId);

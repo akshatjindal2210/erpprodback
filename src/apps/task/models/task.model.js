@@ -20,7 +20,7 @@ async function roleFilter(userRole, userId, report = false) {
   }
 
   if (report) {
-    // executive_assistant role ù cross-department access
+    // executive_assistant role cross-department access
     if (userRole === "executive_assistant") {
       return { clause: null, values: [] };
     }
@@ -63,7 +63,7 @@ async function roleFilter(userRole, userId, report = false) {
   };
 }
 
-/** Tasks visible under "Assigned To Me" ù L1, current holder, or active assignee (incl. forward) */
+/** Tasks visible under "Assigned To Me" L1, current holder, or active assignee (incl. forward) */
 function assignedToViewClause(userId) {
   return {
     sql: `(
@@ -80,7 +80,7 @@ function assignedToViewClause(userId) {
 
 const Task = {
 
-  // GET ALL ù paginated list
+  // GET ALL   paginated list
   async getAll({
     page = 1, limit = 10, search = "", sortBy = "t.task_id", order = "DESC", status, priority, category_id, view, userId, userRole, task_type, reminder, overdue, 
     upcoming_due, new_today, creator_pending, action_required_today, include_closed, department_id, user_id, assigned_by_id, report = false
@@ -110,7 +110,7 @@ const Task = {
       params.push(assigned_by_id); 
     }
 
-    // Assigned To (User) Filter ù L1, current holder, or active assignee
+    // Assigned To (User) Filter L1, current holder, or active assignee
     if (user_id) {
       const { sql, params: viewParams } = assignedToViewClause(user_id);
       where.push(sql);
@@ -257,7 +257,7 @@ const Task = {
       params.push(assigned_by_id); 
     }
 
-    // Assigned To (User) Filter ù L1, current holder, or active assignee
+    // Assigned To (User) Filter L1, current holder, or active assignee
     if (user_id) {
       const { sql, params: viewParams } = assignedToViewClause(user_id);
       where.push(sql);
@@ -357,7 +357,7 @@ const Task = {
       params.push(assigned_by_id);
     }
 
-    // Assigned To (User) Filter ó L1, current holder, or active assignee
+    // Assigned To (User) Filter L1, current holder, or active assignee
     if (filter_user_id) {
       const { sql, params: viewParams } = assignedToViewClause(filter_user_id);
       where.push(sql);
@@ -429,7 +429,7 @@ const Task = {
     return rows[0];
   },
 
-  // GET BY ID ù full detail
+  // GET BY ID   full detail
   async getById(id) {
     const rows = await dbQuery(
       `SELECT
@@ -551,7 +551,7 @@ const Task = {
     );
   },
 
-  // UPDATE ù general fields
+  // UPDATE general fields
   async update(id, { title, description, category_id, priority, status, due_date, reminder_date, self_reminder_date, is_recurring, recurrence_type }) {
     return dbQuery(
       `UPDATE task_tasks SET
@@ -606,7 +606,7 @@ const Task = {
     );
   },
 
-  // UPDATE CURRENT HOLDER ù on forward
+  // UPDATE CURRENT HOLDER on forward
   async updateCurrentHolder(task_id, {
     first_assigned_to,
     current_holder_id,
@@ -845,7 +845,7 @@ const Task = {
     );
   },
 
-  // APPROVE ALL L1 ù creator approved, mark L1 done
+  // APPROVE ALL L1 creator approved, mark L1 done
   async approveAllL1(task_id, approved_by) {
     return dbQuery(
       `UPDATE task_assignments SET
@@ -879,7 +879,7 @@ const Task = {
     );
   },
 
-  // CHAT ù get all messages
+  // CHAT get all messages
   async getChatMessages(task_id, current_user_id) {
     return dbQuery(
       `SELECT
@@ -902,7 +902,7 @@ const Task = {
     );
   },
 
-  // CHAT ù get single message
+  // CHAT get single message
   async getChatMessageById(chat_id, task_id) {
     const rows = await dbQuery(
       `SELECT c.*, u.name AS sender_name, u.type AS sender_type
@@ -914,7 +914,7 @@ const Task = {
     return rows[0] ?? null;
   },
 
-  // CHAT ù validate reply_to_id
+  // CHAT validate reply_to_id
   async getChatById(chat_id, task_id) {
     const rows = await dbQuery(
       "SELECT chat_id FROM task_chat WHERE chat_id = ? AND task_id = ?",
@@ -923,12 +923,12 @@ const Task = {
     return rows[0] ?? null;
   },
 
-  // CHAT ù delete message
+  // CHAT delete message
   async deleteChatMessage(chat_id) {
     return dbQuery("DELETE FROM task_chat WHERE chat_id = ?", [chat_id]);
   },
 
-  // SELF NOTE ù get
+  // SELF NOTE get
   async getSelfNote(task_id, user_id) {
     const rows = await dbQuery(
       `SELECT
@@ -942,7 +942,7 @@ const Task = {
     return rows[0] ?? null;
   },
 
-  // SELF NOTE ù upsert
+  // SELF NOTE upsert
   async upsertSelfNote(task_id, user_id, note, reminder_at, attachments) {
     const attachJson = attachments?.length > 0
       ? JSON.stringify(attachments) : null;
@@ -958,7 +958,7 @@ const Task = {
     );
   },
 
-  // SELF NOTE ù delete
+  // SELF NOTE delete
   async deleteSelfNote(task_id, user_id) {
     return dbQuery(
       "DELETE FROM task_self_notes WHERE task_id = ? AND user_id = ?",
@@ -974,7 +974,7 @@ const Task = {
     return rows[0] ?? null;
   },
 
-  // GET USER BY ID ù active user
+  // GET USER BY ID active user
   async getUserById(user_id) {
     const rows = await dbQuery(
       `SELECT id, name, type FROM ${M.USERS} WHERE id = ? AND status = 'active'`,
@@ -1056,7 +1056,7 @@ const Task = {
   //   );
   // },
 
-  // Activity log ù paginated
+  // Activity log paginated
   async getLogCount(taskId) {
     const result = await dbQuery(
       `SELECT COUNT(*) as total FROM task_log WHERE task_id = ?`, 

@@ -6,6 +6,9 @@ export async function createInventoryInwardsTable() {
     CREATE TABLE IF NOT EXISTS ${T.INVENTORY_INWARDS} (
       in_uid           SERIAL PRIMARY KEY,
       packing_number   TEXT,
+      item_codes       TEXT,
+      qtys             TEXT,
+      total_qty        INTEGER DEFAULT 0,
       remarks          TEXT,
       approved         BOOLEAN DEFAULT false,
       approved_by      INTEGER REFERENCES ${C.USERS}(id),

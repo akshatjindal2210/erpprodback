@@ -100,7 +100,7 @@ async function enrichInventoryFilterOptions(options = {}) {
   };
 }
 
-async function enrichInventoryRows(rows = []) {
+export async function enrichInventoryRows(rows = []) {
   if (!Array.isArray(rows) || rows.length === 0) return rows;
 
   const missingPackings = rows
@@ -170,6 +170,7 @@ export const getInventoryReport = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Could not load inventory report. Please try again.",
+      error: err.message, // Add error message for debugging
     });
   }
 };

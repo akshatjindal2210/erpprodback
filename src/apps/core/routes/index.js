@@ -6,6 +6,7 @@ import moduleRoutes from "./module.route.js";
 import permissionRoutes from "./permission.route.js";
 import departmentRoutes from "./department.route.js";
 import designationRoutes from "./designation.route.js";
+import activityLogRoutes from "./activityLog.route.js";
 
 const router = Router();
 
@@ -14,6 +15,7 @@ router.use("/auth/modules", moduleRoutes);
 router.use("/auth/permissions", permissionRoutes);
 router.use("/auth/departments", departmentRoutes);
 router.use("/auth/designations", designationRoutes);
+router.use("/activity-logs", activityLogRoutes);
 router.use("/training", trainingRoutes);
 router.use("/sop", sopRoutes);
 

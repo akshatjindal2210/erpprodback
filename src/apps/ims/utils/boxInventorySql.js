@@ -48,13 +48,69 @@ export function sqlBoxCountedAsOut(alias = "b") {
         NOT ${sqlBoxOutUidEmpty(alias)}
         AND EXISTS (
           SELECT 1 FROM ims_out_entry o
-          WHERE o.out_uid = ${alias}.out_uid::integer
+          WHERE o.out_uid::text = ${alias}.out_uid::text
             AND o.approved = true
             AND o.is_deleted = false
         )
       )
     )
   `.trim();
+}
+
+/** Normalized packing number on ims_box_table. */
+export function sqlBoxPackingNumber(alias = "b") {
+  return `NULLIF(TRIM(${alias}.packing_number::text), '-')`;
+}
+
+/** Item dcode resolved per box (SA first, then dailyprod). */
+export function sqlBoxItemDcode(saAlias = "sa", dpAlias = "dp") {
+  return `COALESCE(${saAlias}.item_dcode::text, ${dpAlias}.item_dcode::text, '-')`;
+}
+
+/** Item dcode — inventory report / box_agg grouping (em-dash fallback). */
+export function sqlBoxItemDcodeReport(saAlias = "sa", dpAlias = "dp") {
+  return `COALESCE(${saAlias}.item_dcode::text, ${dpAlias}.item_dcode::text, '—')`;
+}
+
+/** Customer code per box — same priority as inventory report. */
+export function sqlBoxCustomerCode(boxAlias = "b", dpAlias = "dp") {
+  return `COALESCE(NULLIF(TRIM(${dpAlias}.acc_code::text), ''), NULLIF(TRIM(${boxAlias}.override_cust::text), ''), '-')`;
+}
+
+/** Customer code — inventory report / box_agg grouping (no dash fallback). */
+export function sqlBoxCustomerCodeReport(boxAlias = "b", dpAlias = "dp") {
+  return `COALESCE(NULLIF(TRIM(${dpAlias}.acc_code::text), ''), NULLIF(TRIM(${boxAlias}.override_cust::text), ''))`;
+}
+
+/** Match ims_dailyprod.doc_no to a packing number (text or numeric). */
+export function sqlDailyprodDocNoMatch(dpDocCol, packingExpr) {
+  return `(
+    NULLIF(TRIM(${dpDocCol}::text), '') = NULLIF(TRIM(${packingExpr}::text), '')
+    OR NULLIF(TRIM(${dpDocCol}::text), '-') = NULLIF(TRIM(${packingExpr}::text), '-')
+    OR (
+      NULLIF(TRIM(${dpDocCol}::text), '') ~ '^[0-9]+$'
+      AND NULLIF(TRIM(${packingExpr}::text), '') ~ '^[0-9]+$'
+      AND TRIM(${dpDocCol}::text)::numeric = TRIM(${packingExpr}::text)::numeric
+    )
+  )`;
+}
+
+/**
+ * Dailyprod lateral for a box row: prefers SA item match, then override_cust match.
+ * @param {string} pnExpr packing number expression (must match the box alias)
+ */
+export function sqlDailyprodLateralForBox(boxAlias = "b", saAlias = "sa", pnExpr) {
+  const pn = pnExpr || sqlBoxPackingNumber(boxAlias);
+  return `LEFT JOIN LATERAL (
+    SELECT dp2.doc_dt, dp2.job_card_no, dp2.item_dcode, dp2.acc_code, dp2.total_qty
+    FROM ims_dailyprod dp2
+    WHERE ${sqlDailyprodDocNoMatch("dp2.doc_no", pn)}
+    ORDER BY
+      (CASE WHEN ${saAlias}.item_dcode IS NOT NULL AND dp2.item_dcode = ${saAlias}.item_dcode THEN 0 ELSE 1 END) ASC,
+      (CASE WHEN NULLIF(TRIM(${boxAlias}.override_cust::text), '') IS NOT NULL
+                 AND TRIM(dp2.acc_code::text) = TRIM(${boxAlias}.override_cust::text) THEN 0 ELSE 1 END) ASC
+    LIMIT 1
+  ) dp ON true`;
 }
 
 /** Case 3 — dispatched via approved out entry only (stock reflects on authorize). */
@@ -71,7 +127,7 @@ export function sqlBoxOutwardDispatch(alias = "b") {
     )
     AND EXISTS (
       SELECT 1 FROM ims_out_entry o
-      WHERE o.out_uid = ${alias}.out_uid::integer
+      WHERE o.out_uid::text = ${alias}.out_uid::text
         AND o.approved = true
         AND o.is_deleted = false
     )

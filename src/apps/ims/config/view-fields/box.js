@@ -23,6 +23,8 @@ export function resolveBoxViewsSelectFields(options = {}) {
     return [...forOverridePicker];
   } else if (mod === "change_override_customer" && (act === "add" || act === "edit" || act === "authorize")) {
     return [...forModal];
+  } else if (mod === "audit" && (act === "view" || act === "add" || act === "edit" || act === "authorize")) {
+    return [...forModal];
   } else if (mod === "stock_adjustment" && act === "view") {
     return [
       "b.box_uid",

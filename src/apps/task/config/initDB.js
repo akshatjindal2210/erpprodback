@@ -7,7 +7,6 @@ import { createTaskChatTable } from "./tables/task_chat.table.js";
 import { createTaskSelfNotesTable } from "./tables/task_self_notes.table.js";
 import { createTaskLogTable } from "./tables/task_log.table.js";
 import { createTaskUpdatedAtTriggers } from "./tables/triggers.table.js";
-import { createTaskUsersLogsTable } from "./tables/users_logs.table.js";
 import { syncTaskSequences } from "./syncSequences.js";
 
 export async function initTaskDB() {
@@ -16,7 +15,6 @@ export async function initTaskDB() {
     await createTaskHolidayTable();
 
     await createTaskTasksTable();
-    await createTaskUsersLogsTable();
 
     await createTaskRecurringTasksTable();
     await createTaskRecurringTaskAssignmentsTable();

@@ -1,5 +1,6 @@
 import Task from "../models/task.model.js";
 import fs   from "fs";
+import config from "../../../config/config.js";
 
 export async function getSelfNote(req, res) {
   try {
@@ -44,7 +45,7 @@ export async function upsertSelfNote(req, res) {
     // New file uploads
     const newAttachments = (req.files ?? []).map(f => ({
       file_name: f.originalname,
-      file_path: `uploads/task_tasks/self/${f.filename}`,
+      file_path: `${config.uploadPublicPath}/task_tasks/self/${f.filename}`,
       file_size: f.size,
       mime_type: f.mimetype,
     }));
@@ -77,7 +78,13 @@ export async function deleteSelfNote(req, res) {
         ? JSON.parse(note.attachments)
         : (note.attachments ?? []);
       files.forEach(f => {
-        try { if (fs.existsSync(f.file_path)) fs.unlinkSync(f.file_path); } catch {}
+        try {
+          const relativePath = f.file_path.startsWith(`${config.uploadPublicPath}/`)
+            ? f.file_path.slice(config.uploadPublicPath.length + 1)
+            : f.file_path;
+          const fullPath = path.join(config.uploadPath, relativePath);
+          if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+        } catch {}
       });
     }
 

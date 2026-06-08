@@ -54,12 +54,13 @@ function locationUniqueViolationMessage(err, locationNo = "") {
   return err?.message || "Could not save location.";
 }
 
-const log = (req, action, entity_id, details) =>
+const log = (req, action, entity_id, details, record = null) =>
   logActivity(req, {
     action,
     entity: "location_master",
     entity_id,
-    details
+    details,
+    record,
   }).catch(() => {});
 
 export const getLocations = async (req, res) => {
@@ -97,7 +98,13 @@ export const getLocationById = async (req, res) => {
     }
 
     const [enriched] = await enrichLocationRows([data]);
-    return res.json({ success: true, data: enriched });
+    return res.json({ 
+      success: true, 
+      data: {
+        ...enriched,
+        id: enriched.location_id
+      } 
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -165,7 +172,7 @@ export const createLocation = async (req, res) => {
     const data = await findLocation({ location_id: row.location_id });
     const [enriched] = await enrichLocationRows(data ? [data] : []);
 
-    await log(req, "create", row.location_id, { rack_no: normalizedRackNo, shelf_no: normalizedShelfNo, location_no: locationNo });
+    await log(req, "create", row.location_id, { rack_no: normalizedRackNo, shelf_no: normalizedShelfNo, location_no: locationNo }, row);
 
     return res.status(201).json({ success: true, data: enriched ?? data, message: "Location created successfully" });
   } catch (err) {
@@ -258,7 +265,7 @@ export const updateLocation = async (req, res) => {
 
     const updated = await updateLocations(fields, { location_id: id });
 
-    await log(req, "update", id, { updated_fields: Object.keys(fields) });
+    await log(req, "update", id, { updated_fields: fields });
 
     const [enriched] = await enrichLocationRows(updated ? [updated] : []);
     return res.json({ success: true, data: enriched ?? updated, message: "Location updated successfully" });
@@ -292,7 +299,7 @@ export const deleteLocation = async (req, res) => {
       { deleted_by: req.user.id }
     );
     
-    await log(req, "delete", id, { rack_no: existing.rack_no });
+    await log(req, "delete", id, { rack_no: existing.rack_no, shelf_no: existing.shelf_no }, existing);
 
     return res.json({ success: true, message: "Location deleted successfully" });
   } catch (err) {
@@ -303,10 +310,11 @@ export const deleteLocation = async (req, res) => {
 export const getLocationsViews = async (req, res) => {
   try {
     const { id } = req.body;
-    const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, { sortBy: "location_id", order: "DESC" });
+    const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, { sortBy: "location_no", order: "ASC" });
 
     if (id) {
-      const location = await findLocation({ location_id: id, approved: true, is_deleted: false });
+      const fields = resolveLocationViewsSelectFields({ permission_module: req.body.permission_module, permission_action: req.body.permission_action });
+      const location = await findLocation({ location_id: id, approved: true, is_deleted: false }, { fields: fields || DEFAULT_FIELDS });
       if (!location) return res.json({ success: true, data: null });
       const [enriched] = await enrichLocationRows([location]);
       return res.json({
@@ -320,7 +328,8 @@ export const getLocationsViews = async (req, res) => {
           acc_name: enriched.acc_name,
           item_code: enriched.item_code,
           item_desc: enriched.item_desc,
-          total_capacity: enriched.total_capacity
+          total_capacity: enriched.total_capacity,
+          box_count: enriched.box_count
         }
       });
     }

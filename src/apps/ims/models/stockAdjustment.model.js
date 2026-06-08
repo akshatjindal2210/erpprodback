@@ -3,21 +3,21 @@ import { MST_TABLES as M } from "../../../config/dbTables.js";
 
 // --- Configuration ---
 const ALLOWED_SELECT_FIELDS = [
-  "adjustment_id", "item_dcode", "item_code", "qty", "unit", "remarks", "approved",
+  "adjustment_id", "item_dcode", "item_code", "qty", "unit", "remarks", "approved", "acc_code",
   "entry_type", "packing_number", "financial_year", "per_box_qty", "box_count_impact", "removed_box_ids",
   "created_at", "updated_at", "approved_at", "created_by", "updated_by", "approved_by",
   "created_by_name", "updated_by_name", "approved_by_name"
 ];
 
-const ALLOWED_FILTER_FIELDS = ["adjustment_id", "item_dcode", "approved", "is_deleted", "from_date", "to_date", "entry_type", "packing_number"];
+const ALLOWED_FILTER_FIELDS = ["adjustment_id", "item_dcode", "approved", "is_deleted", "from_date", "to_date", "entry_type", "packing_number", "acc_code"];
 
 const ALLOWED_UPDATE_FIELDS = [
   "item_dcode", "qty", "unit", "remarks", "approved", "approved_by", "approved_at",
-  "updated_by", "updated_at", "is_deleted", "deleted_by", "deleted_at",
+  "updated_by", "updated_at", "is_deleted", "deleted_by", "deleted_at", "acc_code",
   "entry_type", "packing_number", "financial_year", "per_box_qty", "box_count_impact", "removed_box_ids"
 ];
 
-const ALLOWED_SORT_FIELDS = ["adjustment_id", "item_dcode", "qty", "created_at", "approved", "entry_type", "packing_number"];
+const ALLOWED_SORT_FIELDS = ["adjustment_id", "item_dcode", "qty", "created_at", "approved", "entry_type", "packing_number", "acc_code"];
 
 const JOINS = `
   LEFT JOIN ${M.USERS} u_cr ON s.created_by = u_cr.id

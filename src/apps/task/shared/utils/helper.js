@@ -1,6 +1,7 @@
 import dbQuery from "../../shared/db.js";
 import fs from "fs";
 import path from "path";
+import config from "../../../../config/config.js";
 
 /** PostgreSQL boolean columns may come back as true/false, 1/0, or 't'/'f'. */
 export const isDbTrue = (val) =>
@@ -290,9 +291,11 @@ export const saveAttachments = async (files, folder) => {
     // Copy file from multer temp location
     fs.copyFileSync(f.path, filePath);
 
+    const relativePath = path.relative(path.resolve(config.uploadPath), filePath);
+
     attachments.push({
       file_name: f.originalname,
-      file_path: filePath,
+      file_path: path.join(config.uploadPublicPath, relativePath).replace(/\\/g, "/"),
       file_size: f.size,
       mime_type: f.mimetype,
     });

@@ -151,7 +151,7 @@ export const findForwardingNoteItems = async (options = {}) => {
   const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 10));
   const offset = (safePage - 1) * safeLimit;
 
-  // SORTING (always qualify ù fi and fnm share columns like fuid / created_at / qty)
+  // SORTING (always qualify fi and fnm share columns like fuid / created_at / qty)
   const SORT_COLUMN_MAP = {
     created_at: "fi.created_at",
     qty: "fi.qty",

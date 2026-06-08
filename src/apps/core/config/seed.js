@@ -34,7 +34,7 @@ export async function seedCoreRootUser() {
     );
     console.log("Root user created");
   } else {
-    console.log("Root user already exists — skipping");
+    console.log("Root user already exists skipping");
   }
 
   // Ensure super_admin has local auth

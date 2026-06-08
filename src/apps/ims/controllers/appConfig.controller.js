@@ -4,24 +4,38 @@ import { normalizeBoxNoUidPrefix } from "../../../global/boxUid.js";
 const LIST_VIEW_SPAN_MIN = 1;
 const LIST_VIEW_SPAN_MAX = 3650;
 
-/** UI sections — all stored in DB (`ims_app_config`), not in server `config.js`. */
+/** UI sections â€” values stored in `ims_app_config` (global keys apply org-wide). */
 export const APP_CONFIG_SECTIONS = [
   {
     id: "company",
+    scope: "global",
     title: "Company details",
-    description: "Branding on stickers — editable after go-live.",
+    description: "Core organisation profile used across apps (e.g. sticker branding).",
   },
   {
     id: "application",
+    scope: "ims",
     title: "Application settings",
-    description: "App behaviour for all users (not server env / .env).",
+    description: "IMS behaviour for all users (not server env / .env).",
   },
 ];
+
+const VALID_SCOPES = new Set(["global", "ims", "task"]);
+
+export function resolveAppConfigScope(raw) {
+  const key = String(raw ?? "").trim().toLowerCase();
+  if (key === "admin-console" || key === "admin_console" || key === "core" || key === "global") {
+    return "global";
+  }
+  if (VALID_SCOPES.has(key)) return key;
+  return "global";
+}
 
 /** Admin UI metadata (English). Values are stored in `ims_app_config`. */
 export const APP_CONFIG_DEFINITIONS = [
   {
     key: APP_CONFIG_KEYS.COMPANY_NAME,
+    scope: "global",
     section: "company",
     label: "Company name",
     value_type: "text",
@@ -29,6 +43,7 @@ export const APP_CONFIG_DEFINITIONS = [
   },
   {
     key: APP_CONFIG_KEYS.COMPANY_ADDRESS,
+    scope: "global",
     section: "company",
     label: "Street address",
     value_type: "text",
@@ -36,6 +51,7 @@ export const APP_CONFIG_DEFINITIONS = [
   },
   {
     key: APP_CONFIG_KEYS.COMPANY_STATE,
+    scope: "global",
     section: "company",
     label: "State",
     value_type: "text",
@@ -43,6 +59,7 @@ export const APP_CONFIG_DEFINITIONS = [
   },
   {
     key: APP_CONFIG_KEYS.COMPANY_PINCODE,
+    scope: "global",
     section: "company",
     label: "Pincode",
     value_type: "text",
@@ -50,6 +67,7 @@ export const APP_CONFIG_DEFINITIONS = [
   },
   {
     key: APP_CONFIG_KEYS.COMPANY_PHONE,
+    scope: "global",
     section: "company",
     label: "Phone",
     value_type: "text",
@@ -57,6 +75,7 @@ export const APP_CONFIG_DEFINITIONS = [
   },
   {
     key: APP_CONFIG_KEYS.COMPANY_EMAIL,
+    scope: "global",
     section: "company",
     label: "Email",
     value_type: "text",
@@ -64,13 +83,15 @@ export const APP_CONFIG_DEFINITIONS = [
   },
   {
     key: APP_CONFIG_KEYS.COMPANY_GSTIN,
+    scope: "global",
     section: "company",
     label: "GSTIN",
     value_type: "text",
-    description: "Optional — printed when provided.",
+    description: "Optional printed when provided.",
   },
   {
     key: APP_CONFIG_KEYS.INWARD_LOCATION_VALIDATION,
+    scope: "ims",
     section: "application",
     label: "Inward location validation",
     value_type: "boolean",
@@ -79,6 +100,7 @@ export const APP_CONFIG_DEFINITIONS = [
   },
   {
     key: APP_CONFIG_KEYS.DEFAULT_LIST_VIEW_SPAN_DAYS,
+    scope: "ims",
     section: "application",
     label: "Default list date span (days)",
     value_type: "number",
@@ -89,6 +111,7 @@ export const APP_CONFIG_DEFINITIONS = [
   },
   {
     key: APP_CONFIG_KEYS.BOX_QR_PUBLIC_BASE_URL,
+    scope: "ims",
     section: "application",
     label: "Box QR public URL base",
     value_type: "url",
@@ -126,7 +149,7 @@ function normalizeConfigValue(key, raw) {
   if (def.value_type === "box_no_uid_prefix") {
     const n = normalizeBoxNoUidPrefix(str);
     if (!n) {
-      return { ok: false, message: "Use 1–8 letters or digits (e.g. 2026 or 26)" };
+      return { ok: false, message: "Use 1-8 letters or digits (e.g. 2026 or 26)" };
     }
     return { ok: true, value: n };
   }
@@ -147,9 +170,17 @@ function normalizeConfigValue(key, raw) {
   return { ok: true, value: str };
 }
 
-function mergeDefinitionsWithRows(rows = []) {
+function definitionsForScope(scope) {
+  return APP_CONFIG_DEFINITIONS.filter((def) => def.scope === scope);
+}
+
+function sectionsForScope(scope) {
+  return APP_CONFIG_SECTIONS.filter((section) => section.scope === scope);
+}
+
+function mergeDefinitionsWithRows(rows = [], scope = "global") {
   const byKey = Object.fromEntries(rows.map((r) => [r.config_key, r]));
-  return APP_CONFIG_DEFINITIONS.map((def) => {
+  return definitionsForScope(scope).map((def) => {
     const row = byKey[def.key];
     return {
       ...def,
@@ -160,14 +191,16 @@ function mergeDefinitionsWithRows(rows = []) {
   });
 }
 
-/** Super admin: list all known keys with current values. */
+/** Super admin: list keys for a scope (global admin console or per-app). */
 export const getAppConfigList = async (req, res) => {
   try {
+    const scope = resolveAppConfigScope(req.body?.app ?? req.body?.scope);
     const rows = await getAllAppConfig();
     res.json({
       success: true,
-      sections: APP_CONFIG_SECTIONS,
-      data: mergeDefinitionsWithRows(rows),
+      scope,
+      sections: sectionsForScope(scope),
+      data: mergeDefinitionsWithRows(rows, scope),
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

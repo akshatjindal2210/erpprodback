@@ -1,6 +1,7 @@
 import fs from "fs";
 import RecurringTask from "../models/recurringTask.model.js";
 import { chatMessage, parseSubUsers, parseAttachmentsJson, asArray } from "../shared/index.js";
+import config from "../../../config/config.js";
 
 // Utility to parse numbers safely
 const parseNumber = (value) => {
@@ -234,7 +235,7 @@ export async function updateRecurringTask(req, res) {
     if (req.files?.length > 0 || note?.trim()) {
       const attachments = req.files?.map(f => ({
         file_name: f.originalname,
-        file_path: `uploads/task_recurring_tasks/chat/${f.filename}`,
+        file_path: `${config.uploadPublicPath}/task_recurring_tasks/chat/${f.filename}`,
         file_size: f.size,
         mime_type: f.mimetype,
       })) ?? [];
@@ -254,7 +255,11 @@ export async function updateRecurringTask(req, res) {
         if (removedFiles.length > 0) {
           for (const f of removedFiles) {
             try {
-              if (fs.existsSync(f.file_path)) fs.unlinkSync(f.file_path);
+              const relativePath = f.file_path.startsWith(`${config.uploadPublicPath}/`)
+                ? f.file_path.slice(config.uploadPublicPath.length + 1)
+                : f.file_path;
+              const fullPath = path.join(config.uploadPath, relativePath);
+              if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
             } catch {}
           }
 
@@ -335,8 +340,12 @@ export async function removeAttachmentFromRecurringTask(req, res) {
 
       // Delete from disk
       try {
-        if (fs.existsSync(file_path)) {
-          fs.unlinkSync(file_path);
+        const relativePath = file_path.startsWith(`${config.uploadPublicPath}/`)
+          ? file_path.slice(config.uploadPublicPath.length + 1)
+          : file_path;
+        const fullPath = path.join(config.uploadPath, relativePath);
+        if (fs.existsSync(fullPath)) {
+          fs.unlinkSync(fullPath);
         }
       } catch (err) {
         console.warn("File delete failed:", err);

@@ -39,6 +39,7 @@ export const MODULES = {
     { name: "activity_logs", label: "Activity Logs" },
     { name: "box_transaction_logs", label: "Box Transaction Logs" },
     { name: "sticker_download_logs", label: "Sticker Download Logs" },
+    { name: "audit", label: "Inventory Audit" },
   ],
   task: [],
 };
@@ -65,5 +66,6 @@ export const SEED_MODULES = [
   { name: "sticker_download_logs",        label: "Sticker Download Logs",           sort_order: 19,       app_type: "ims" },
   { name: "departments",                  label: "Departments",                     sort_order: 20,       app_type: "core" },
   { name: "designations",                 label: "Designations",                    sort_order: 21,       app_type: "core" },
+  { name: "audit",                        label: "Inventory Audit",                 sort_order: 22,       app_type: "ims" },
 ];
 

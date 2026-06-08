@@ -194,7 +194,7 @@ export async function resolveStockAdjustmentPackingMeta(packing_number, options 
     if (first) {
       itemdcode = itemdcode ?? first.itemdcode ?? first.ItemDcode ?? null;
       const acc = first.acc_code ?? first.Acc_Code;
-      if (acc != null && String(acc).trim() !== "") acc_code = String(acc).trim();
+      if (!acc_code && acc != null && String(acc).trim() !== "") acc_code = String(acc).trim();
       job_card_no = job_card_no ?? first.jobcardno ?? first.job_card_no ?? null;
       if (first.QTY != null) total_qty = String(first.QTY);
       doc_dt = doc_dt ?? first.doc_dt ?? first.docdt ?? null;
@@ -203,7 +203,7 @@ export async function resolveStockAdjustmentPackingMeta(packing_number, options 
 
   if (imsFilterProd) {
     itemdcode = itemdcode ?? imsFilterProd.itemdcode ?? null;
-    if (imsFilterProd.acc_code != null && String(imsFilterProd.acc_code).trim() !== "") {
+    if (!acc_code && imsFilterProd.acc_code != null && String(imsFilterProd.acc_code).trim() !== "") {
       acc_code = String(imsFilterProd.acc_code).trim();
     }
     job_card_no = job_card_no ?? imsFilterProd.job_card_no ?? null;

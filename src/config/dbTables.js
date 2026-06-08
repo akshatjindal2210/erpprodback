@@ -30,6 +30,7 @@ export const DB_TABLES = {
     "mst_module_sops",
     "mst_departments",
     "mst_designations",
+    "mst_activity_logs",
   ],
 
   /** IMS application tables. */
@@ -49,15 +50,16 @@ export const DB_TABLES = {
     "ims_box_download_log",
     "ims_box_override_request",
     "ims_dailyprod",
-    "ims_activity_logs",
     "ims_transaction_box",
+    "ims_audit_master",
+    "ims_audit_locations",
+    "ims_audit_scans",
   ],
 
   /** Task application tables. */
   task: [
     "task_categories",
     "task_holiday",
-    "task_users_logs",
     "task_tasks",
     "task_recurring_tasks",
     "task_recurring_task_assignments",
