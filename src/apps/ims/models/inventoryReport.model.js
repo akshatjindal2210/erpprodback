@@ -33,27 +33,34 @@ const BOX_AGG_ITEM = sqlBoxItemDcodeReport("sa", "dp");
 const BOX_AGG_CUSTOMER = sqlBoxCustomerCodeReport("b", "dp");
 const BOX_AGG_DP_JOIN = sqlDailyprodLateralForBox("b", "sa", PN_B);
 
-const BOX_AGG_CTE = `
+function buildBoxAggCte(locationParamIndex = null) {
+  const inStoreScoped = locationParamIndex
+    ? `${SQL_IN_HAND} AND b.location_id IS NOT NULL AND b.location_id::text = ANY($${locationParamIndex}::text[])`
+    : SQL_IN_STORE;
+  const inHandScoped = locationParamIndex ? inStoreScoped : SQL_IN_HAND;
+  const packingAreaScoped = locationParamIndex ? "FALSE" : SQL_PACKING_AREA;
+
+  return `
   box_agg AS (
     SELECT
       ${PN_B} AS packing_number,
       ${BOX_AGG_ITEM} AS item_dcode,
       ${BOX_AGG_CUSTOMER} AS customer_code,
-      SUM(CASE WHEN ${SQL_IN_HAND} THEN COALESCE(b.qty, 0) ELSE 0 END)::bigint AS in_hand_qty,
-      SUM(CASE WHEN ${SQL_IN_STORE} THEN COALESCE(b.qty, 0) ELSE 0 END)::bigint AS in_store_qty,
-      SUM(CASE WHEN ${SQL_PACKING_AREA} THEN COALESCE(b.qty, 0) ELSE 0 END)::bigint AS packing_area_qty,
+      SUM(CASE WHEN ${inHandScoped} THEN COALESCE(b.qty, 0) ELSE 0 END)::bigint AS in_hand_qty,
+      SUM(CASE WHEN ${inStoreScoped} THEN COALESCE(b.qty, 0) ELSE 0 END)::bigint AS in_store_qty,
+      SUM(CASE WHEN ${packingAreaScoped} THEN COALESCE(b.qty, 0) ELSE 0 END)::bigint AS packing_area_qty,
       SUM(CASE WHEN ${SQL_OUT} THEN COALESCE(b.qty, 0) ELSE 0 END)::bigint AS out_qty,
-      COUNT(CASE WHEN ${SQL_IN_STORE} THEN 1 END)::int AS in_store_boxes,
-      COUNT(CASE WHEN ${SQL_PACKING_AREA} THEN 1 END)::int AS packing_area_boxes,
+      COUNT(CASE WHEN ${inStoreScoped} THEN 1 END)::int AS in_store_boxes,
+      COUNT(CASE WHEN ${packingAreaScoped} THEN 1 END)::int AS packing_area_boxes,
       STRING_AGG(
         DISTINCT NULLIF(
           TRIM(COALESCE(lm.location_no, CONCAT(lm.rack_no::text, UPPER(COALESCE(lm.shelf_no::text, ''))))),
           ''
         ),
         ', '
-      ) FILTER (WHERE ${SQL_IN_STORE}) AS location_details,
+      ) FILTER (WHERE ${inStoreScoped}) AS location_details,
       COALESCE(
-        ARRAY_AGG(DISTINCT b.location_id::text) FILTER (WHERE ${SQL_IN_STORE}),
+        ARRAY_AGG(DISTINCT b.location_id::text) FILTER (WHERE ${inStoreScoped}),
         ARRAY[]::text[]
       ) AS in_store_location_ids
     FROM ims_box_table b
@@ -64,16 +71,19 @@ const BOX_AGG_CTE = `
     GROUP BY ${PN_B}, ${BOX_AGG_ITEM}, ${BOX_AGG_CUSTOMER}
   )
 `;
+}
+
+function buildActiveStockWhere(locationParamIndex = null) {
+  if (locationParamIndex) {
+    return `COALESCE(a.in_store_qty, 0) > 0`;
+  }
+  return `(COALESCE(a.in_store_qty, 0) > 0 OR COALESCE(a.packing_area_qty, 0) > 0)`;
+}
 
 const BOX_AGG_JOIN = `
   a.packing_number = b.packing_number
   AND a.item_dcode = b.item_dcode
   AND COALESCE(NULLIF(TRIM(a.customer_code::text), ''), '—') = COALESCE(NULLIF(TRIM(b.customer_code::text), ''), '—')
-`;
-
-/** Hide rows with no in-hand stock (not in store and not in packing area). */
-const SQL_HAS_ACTIVE_STOCK = `
-  (COALESCE(a.in_store_qty, 0) > 0 OR COALESCE(a.packing_area_qty, 0) > 0)
 `;
 
 const PACKING_AREA_SORT = {
@@ -128,6 +138,7 @@ function buildBaseCte({ filters = {}, search } = {}) {
   const packingNos = toList(filters.packing_numbers);
   const locationIds = toList(filters.location_ids);
   const values = [];
+  let locationParamIndex = null;
 
   const dpWhere = [
     `(
@@ -152,7 +163,7 @@ function buildBaseCte({ filters = {}, search } = {}) {
     const p = values.length;
     dpWhere.push(`dp.acc_code::text = ANY($${p}::text[])`);
     boxWhere.push(`(
-      COALESCE(NULLIF(TRIM(dp.acc_code::text), ''), NULLIF(TRIM(b.override_cust::text), '')) = ANY($${p}::text[])
+      COALESCE(NULLIF(TRIM(b.override_cust::text), ''), NULLIF(TRIM(dp.acc_code::text), '')) = ANY($${p}::text[])
     )`);
   }
   if (packingNos.length) {
@@ -163,6 +174,7 @@ function buildBaseCte({ filters = {}, search } = {}) {
   }
   if (locationIds.length) {
     values.push(locationIds);
+    locationParamIndex = values.length;
     const p = values.length;
     dpWhere.push(`
       EXISTS (
@@ -221,8 +233,8 @@ function buildBaseCte({ filters = {}, search } = {}) {
         COALESCE(sa.item_dcode::text, dp.item_dcode::text, '—') AS item_code,
         '—'::text AS item_desc,
         COALESCE(
-          NULLIF(TRIM(dp.acc_code::text), ''),
-          NULLIF(TRIM(b.override_cust::text), '')
+          NULLIF(TRIM(b.override_cust::text), ''),
+          NULLIF(TRIM(dp.acc_code::text), '')
         ) AS customer_code,
         '—'::text AS customer_name
       FROM ims_box_table b
@@ -235,36 +247,24 @@ function buildBaseCte({ filters = {}, search } = {}) {
         LIMIT 1
       ) dp ON true
       ${boxWhereSql}
-      GROUP BY ${PN_B}, COALESCE(sa.item_dcode::text, dp.item_dcode::text, '—'), COALESCE(NULLIF(TRIM(dp.acc_code::text), ''), NULLIF(TRIM(b.override_cust::text), ''))
+      GROUP BY ${PN_B}, COALESCE(sa.item_dcode::text, dp.item_dcode::text, '—'), COALESCE(NULLIF(TRIM(b.override_cust::text), ''), NULLIF(TRIM(dp.acc_code::text), ''))
     ),
     base AS (
-      SELECT
-        fd.packing_number,
-        fd.item_dcode,
-        fd.item_code,
-        fd.item_desc,
-        COALESCE(
-          NULLIF(TRIM(fd.customer_code::text), ''),
-          NULLIF(TRIM(fd.customer_code::text), '—'),
-          NULLIF(TRIM(fb.customer_code::text), ''),
-          NULLIF(TRIM(fb.customer_code::text), '—')
-        ) AS customer_code,
-        '—'::text AS customer_name
-      FROM from_dailyprod fd
-      LEFT JOIN from_boxes fb ON trim(fd.packing_number::text) = trim(fb.packing_number::text) AND COALESCE(fd.item_dcode, '—') = fb.item_dcode
+      SELECT fb.packing_number, fb.item_dcode, fb.item_code, fb.item_desc, fb.customer_code, fb.customer_name
+      FROM from_boxes fb
 
       UNION
 
-      SELECT fb.packing_number, fb.item_dcode, fb.item_code, fb.item_desc, fb.customer_code, fb.customer_name
-      FROM from_boxes fb
+      SELECT fd.packing_number, fd.item_dcode, fd.item_code, fd.item_desc, fd.customer_code, fd.customer_name
+      FROM from_dailyprod fd
       WHERE NOT EXISTS (
-        SELECT 1 FROM from_dailyprod fd 
+        SELECT 1 FROM from_boxes fb
         WHERE trim(fd.packing_number::text) = trim(fb.packing_number::text)
           AND COALESCE(fd.item_dcode, '—') = fb.item_dcode
       )
     )`;
 
-  return { values, baseCteSql };
+  return { values, baseCteSql, locationParamIndex };
 }
 
 /** DB hints for packings whose customer_code is missing in the report CTE. */
@@ -276,8 +276,8 @@ export async function findCustomerHintsForPackings(packingNumbers = []) {
     `SELECT
        trim(x.pn::text) AS packing_number,
        COALESCE(
-         NULLIF(trim(dp.acc_code::text), ''),
-         NULLIF(trim(boxes.override_cust::text), '')
+         NULLIF(trim(boxes.override_cust::text), ''),
+         NULLIF(trim(dp.acc_code::text), '')
        ) AS customer_code,
        sa_fy.financial_year
      FROM unnest($1::text[]) AS x(pn)
@@ -330,34 +330,75 @@ function safeSortKey(sortBy) {
   return Object.prototype.hasOwnProperty.call(SORT_COLUMNS, sortBy) ? sortBy : "packing_number";
 }
 
-export async function getInventoryReportFilterOptions(filters = {}) {
-  const { values, baseCteSql } = buildBaseCte({ filters });
-  const withBase = `WITH ${baseCteSql}`;
+const FILTER_OPTION_FIELDS = new Set(["items", "customers", "locations", "packings"]);
 
-  const [items, customers, packings, locations] = await Promise.all([
-    dbQuery(
+export async function getInventoryReportFilterOptions(filters = {}, { fields = null } = {}) {
+  const requested = fields?.length
+    ? fields.filter((f) => FILTER_OPTION_FIELDS.has(f))
+    : [...FILTER_OPTION_FIELDS];
+  if (!requested.length) {
+    return { items: [], customers: [], locations: [], packings: [] };
+  }
+
+  const { values, baseCteSql, locationParamIndex } = buildBaseCte({ filters });
+  const boxAggCte = buildBoxAggCte(locationParamIndex);
+  const activeStockWhere = buildActiveStockWhere(locationParamIndex);
+  const withBase = `WITH ${baseCteSql}, ${boxAggCte}`;
+
+  const queries = {};
+  if (requested.includes("items")) {
+    queries.items = dbQuery(
       `${withBase}
        SELECT DISTINCT rb.item_dcode::text AS id, rb.item_code, NULL::text AS item_desc
        FROM base rb ORDER BY rb.item_code ASC NULLS LAST`,
       values
-    ),
-    dbQuery(
+    );
+  }
+  if (requested.includes("customers")) {
+    queries.customers = dbQuery(
       `${withBase}
-       SELECT id, acc_name FROM (
-         SELECT DISTINCT rb.customer_code::text AS id, rb.customer_name AS acc_name, rb.customer_code
-         FROM base rb
-         WHERE rb.customer_code IS NOT NULL AND NULLIF(TRIM(rb.customer_code::text), '') IS NOT NULL
+       SELECT kind, id, acc_name, packing_number FROM (
+         SELECT DISTINCT
+           'known'::text AS kind,
+           NULLIF(TRIM(a.customer_code::text), '')::text AS id,
+           COALESCE(NULLIF(TRIM(b.customer_name::text), ''), '—')::text AS acc_name,
+           NULL::text AS packing_number
+         FROM base b
+         INNER JOIN box_agg a ON ${BOX_AGG_JOIN}
+         WHERE ${activeStockWhere}
+           AND NULLIF(TRIM(a.customer_code::text), '') IS NOT NULL
+           AND TRIM(a.customer_code::text) <> '—'
+
+         UNION ALL
+
+         SELECT DISTINCT
+           'resolve'::text AS kind,
+           NULL::text AS id,
+           '—'::text AS acc_name,
+           b.packing_number::text AS packing_number
+         FROM base b
+         INNER JOIN box_agg a ON ${BOX_AGG_JOIN}
+         WHERE ${activeStockWhere}
+           AND (
+             a.customer_code IS NULL
+             OR NULLIF(TRIM(a.customer_code::text), '') IS NULL
+             OR TRIM(a.customer_code::text) = '—'
+           )
        ) t
-       ORDER BY customer_code ASC NULLS LAST`,
+       ORDER BY kind, id NULLS LAST, packing_number ASC NULLS LAST`,
       values
-    ),
-    dbQuery(
+    );
+  }
+  if (requested.includes("packings")) {
+    queries.packings = dbQuery(
       `${withBase}
        SELECT DISTINCT rb.packing_number::text AS id, rb.packing_number
        FROM base rb ORDER BY rb.packing_number DESC LIMIT 5000`,
       values
-    ),
-    dbQuery(
+    );
+  }
+  if (requested.includes("locations")) {
+    queries.locations = dbQuery(
       `${withBase}
        SELECT id, location_no FROM (
          SELECT DISTINCT lm.location_id::text AS id,
@@ -370,10 +411,20 @@ export async function getInventoryReportFilterOptions(filters = {}) {
        ) t
        ORDER BY NULLIF(regexp_replace(rack_no, '\\D', '', 'g'), '')::bigint ASC NULLS LAST, shelf_no ASC NULLS LAST`,
       values
-    ),
-  ]);
+    );
+  }
 
-  return { items, customers, locations, packings };
+  const entries = await Promise.all(
+    Object.entries(queries).map(async ([key, promise]) => [key, await promise])
+  );
+
+  return {
+    items: [],
+    customers: [],
+    locations: [],
+    packings: [],
+    ...Object.fromEntries(entries),
+  };
 }
 
 export async function findInventoryReportFiltered(options = {}) {
@@ -391,27 +442,29 @@ export async function findInventoryReportFiltered(options = {}) {
   const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 500));
   const offset = (safePage - 1) * safeLimit;
 
-  const { values, baseCteSql } = buildBaseCte({ filters, search });
+  const { values, baseCteSql, locationParamIndex } = buildBaseCte({ filters, search });
+  const boxAggCte = buildBoxAggCte(locationParamIndex);
+  const activeStockWhere = buildActiveStockWhere(locationParamIndex);
   const sortCol = SORT_COLUMNS[safeSortKey(sortBy)];
   const sortDir = String(order).toUpperCase() === "ASC" ? "ASC" : "DESC";
 
   const [{ count = 0 } = {}] = await dbQuery(
-    `WITH ${baseCteSql}, ${BOX_AGG_CTE}
+    `WITH ${baseCteSql}, ${boxAggCte}
      SELECT COUNT(*)::int AS count
      FROM base b
      LEFT JOIN box_agg a ON ${BOX_AGG_JOIN}
-     WHERE ${SQL_HAS_ACTIVE_STOCK}`,
+     WHERE ${activeStockWhere}`,
     values
   );
 
   const limitIdx = values.length + 1;
   const offsetIdx = values.length + 2;
   const rows = await dbQuery(
-    `WITH ${baseCteSql}, ${BOX_AGG_CTE}
+    `WITH ${baseCteSql}, ${boxAggCte}
      SELECT ${ROW_SELECT}
      FROM base b
      LEFT JOIN box_agg a ON ${BOX_AGG_JOIN}
-     WHERE ${SQL_HAS_ACTIVE_STOCK}
+     WHERE ${activeStockWhere}
      ORDER BY ${sortCol} ${sortDir} NULLS LAST
      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
     [...values, safeLimit, offset]
@@ -429,10 +482,12 @@ export async function findInventoryReportFiltered(options = {}) {
 }
 
 export async function getInventoryReportTotals({ filters = {}, search } = {}) {
-  const { values, baseCteSql } = buildBaseCte({ filters, search });
+  const { values, baseCteSql, locationParamIndex } = buildBaseCte({ filters, search });
+  const boxAggCte = buildBoxAggCte(locationParamIndex);
+  const activeStockWhere = buildActiveStockWhere(locationParamIndex);
 
   const [row] = await dbQuery(
-    `WITH ${baseCteSql}, ${BOX_AGG_CTE}
+    `WITH ${baseCteSql}, ${boxAggCte}
      SELECT
        COALESCE(SUM(COALESCE(a.in_hand_qty, 0)), 0)::bigint AS fg_stock_qty,
        COALESCE(SUM(COALESCE(a.in_store_qty, 0)), 0)::bigint AS in_store_qty,
@@ -440,7 +495,7 @@ export async function getInventoryReportTotals({ filters = {}, search } = {}) {
        COALESCE(SUM(COALESCE(a.out_qty, 0)), 0)::bigint AS out_qty
      FROM base b
      LEFT JOIN box_agg a ON ${BOX_AGG_JOIN}
-     WHERE ${SQL_HAS_ACTIVE_STOCK}`,
+     WHERE ${activeStockWhere}`,
     values
   );
 
@@ -463,12 +518,13 @@ export async function findPackingAreaSummary(options = {}) {
   const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 100));
   const offset = (safePage - 1) * safeLimit;
 
-  const { values, baseCteSql } = buildBaseCte({ filters, search });
+  const { values, baseCteSql, locationParamIndex } = buildBaseCte({ filters, search });
+  const boxAggCte = buildBoxAggCte(locationParamIndex);
   const sortBy = PACKING_AREA_SORT[sort.by] || "b.packing_number";
   const sortOrder = sort.order === "DESC" ? "DESC" : "ASC";
 
   const [{ count = 0 } = {}] = await dbQuery(
-    `WITH ${baseCteSql}, ${BOX_AGG_CTE}
+    `WITH ${baseCteSql}, ${boxAggCte}
      SELECT COUNT(*)::int AS count
      FROM base b
      INNER JOIN box_agg a ON ${BOX_AGG_JOIN}
@@ -480,7 +536,7 @@ export async function findPackingAreaSummary(options = {}) {
   const offsetIdx = values.length + 2;
 
   const rows = await dbQuery(
-    `WITH ${baseCteSql}, ${BOX_AGG_CTE}
+    `WITH ${baseCteSql}, ${boxAggCte}
      SELECT
        b.packing_number,
        b.item_dcode,

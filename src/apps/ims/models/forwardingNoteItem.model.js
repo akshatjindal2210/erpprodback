@@ -109,9 +109,14 @@ export const findForwardingNoteItems = async (options = {}) => {
     }
 
     // Filters on master (fnm) columns
-    if (key === "po_number" || key === "acc_code" || key === "out_entry_locked") {
+    if (key === "po_number" || key === "acc_code") {
       values.push(val);
       conditions.push(`fnm.${key} = $${i++}`);
+      continue;
+    }
+    if (key === "out_entry_locked") {
+      const locked = val === true || val === "true";
+      conditions.push(`COALESCE(fnm.out_entry_locked, false) = ${locked ? "true" : "false"}`);
       continue;
     }
 

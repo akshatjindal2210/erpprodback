@@ -1,10 +1,12 @@
-import { findAudits, findAudit, insertAudit, updateAudit, deleteAudit, insertAuditScan, updateAuditLocationStatus, deleteAuditScan, countIncompleteAuditLocations, getAuditComparisonReport } from "../models/audit.model.js";
+import { findAudits, findAudit, insertAudit, updateAudit, deleteAudit, appendAuditScannedBoxes, deleteAuditScan, evaluateAuditLocationProgress, syncAuditMasterStatus, getAuditComparisonReport, reopenAuditLocation, reassignAuditLocation } from "../models/audit.model.js";
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval.js";
 import { withTransaction } from "../../../config/db.js";
+import { canAccessAuditRecord, isWithinAuditDateRange } from "../utils/auditAccess.js";
+import { isLocationClosed } from "../utils/auditBoxSnapshot.js";
 
 const CFG = getCrudModuleConfig("audit");
 
@@ -16,6 +18,40 @@ const log = (req, action, entity_id, details, record = null) =>
     details,
     record,
   }).catch(() => {});
+
+function validateAuditAssignments(assignments) {
+  if (!Array.isArray(assignments) || !assignments.length) {
+    return { ok: false, message: "At least one assignment row required" };
+  }
+
+  const seenUsers = new Set();
+  const seenLocations = new Set();
+
+  for (const row of assignments) {
+    if (!row?.assigned_user_id) {
+      return { ok: false, message: "Each row must have an assigned user" };
+    }
+    const userKey = String(row.assigned_user_id);
+    if (seenUsers.has(userKey)) {
+      return { ok: false, message: "Duplicate user in assignment rows" };
+    }
+    seenUsers.add(userKey);
+
+    const locIds = Array.isArray(row.location_ids) ? row.location_ids : [];
+    if (!locIds.length) {
+      return { ok: false, message: "Each user must have at least one location" };
+    }
+    for (const locId of locIds) {
+      const locKey = String(locId);
+      if (seenLocations.has(locKey)) {
+        return { ok: false, message: "Same location cannot be assigned to multiple users" };
+      }
+      seenLocations.add(locKey);
+    }
+  }
+
+  return { ok: true };
+}
 
 export const getAudits = async (req, res) => {
   try {
@@ -46,20 +82,8 @@ export const getAuditById = async (req, res) => {
     const data = await findAudit({ audit_id: id });
     if (!data) return res.status(404).json({ success: false, message: "Not found" });
 
-    // Visibility check
-    const user = req.user;
-    const isSuperAdmin = user.type === 'super_admin';
-    const canAuthorize = Boolean(req.permission?.can_authorize);
-    const isCreator = data.created_by === user.id;
-    const isAssigned = data.assigned_user_id === user.id;
-
-    if (!isSuperAdmin && !canAuthorize && !isCreator) {
-      if (isAssigned && !data.approved) {
-        return res.status(403).json({ success: false, message: "Audit is not yet approved" });
-      }
-      if (!isAssigned && !data.approved) {
-        return res.status(403).json({ success: false, message: "Access denied" });
-      }
+    if (!canAccessAuditRecord(data, req.user, req.permission)) {
+      return res.status(403).json({ success: false, message: "Access denied" });
     }
 
     return res.json({ success: true, data });
@@ -70,28 +94,47 @@ export const getAuditById = async (req, res) => {
 
 export const createAudit = async (req, res) => {
   try {
-    const { assigned_user_id, start_date, end_date, remarks, location_ids } = req.body;
+    const { start_date, end_date, remarks, assignments, approved } = req.body;
+    const normalizedApproved = normalizeApprovedInput(approved ?? false);
 
-    if (!assigned_user_id) return res.status(400).json({ success: false, message: "assigned_user_id required" });
     if (!start_date) return res.status(400).json({ success: false, message: "start_date required" });
     if (!end_date) return res.status(400).json({ success: false, message: "end_date required" });
-    if (!location_ids || !location_ids.length) return res.status(400).json({ success: false, message: "At least one location required" });
+
+    const hasAssignments = Array.isArray(assignments) && assignments.length > 0;
+    if (!hasAssignments) {
+      return res.status(400).json({ success: false, message: "At least one user assignment row required" });
+    }
+
+    const validation = validateAuditAssignments(assignments);
+    if (!validation.ok) {
+      return res.status(400).json({ success: false, message: validation.message });
+    }
+
+    const approvalFields = {};
+    applyApprovalWorkflow({
+      req,
+      fields: approvalFields,
+      incomingApproved: normalizedApproved,
+      hasBusinessChanges: false,
+    });
 
     const row = await withTransaction(async (client) => {
       const audit = await insertAudit({
-        assigned_user_id,
         start_date,
         end_date,
         remarks,
-        location_ids,
-        created_by: req.user.id
+        assignments,
+        created_by: req.user.id,
+        approved: approvalFields.approved ?? false,
+        approved_by: approvalFields.approved_by ?? null,
+        approved_at: approvalFields.approved_at ?? null,
       }, { client });
 
       return audit;
     });
 
     const data = await findAudit({ audit_id: row.audit_id });
-    await log(req, "create", row.audit_id, { assigned_user_id, start_date, end_date }, row);
+    await log(req, "create", row.audit_id, { start_date, end_date, assignments: hasAssignments ? assignments.length : 1 }, row);
 
     return res.status(201).json({ success: true, data, message: "Audit created successfully" });
   } catch (err) {
@@ -101,7 +144,7 @@ export const createAudit = async (req, res) => {
 
 export const updateAuditController = async (req, res) => {
   try {
-    const { id, assigned_user_id, start_date, end_date, remarks, location_ids, approved, status } = req.body;
+    const { id, start_date, end_date, remarks, assignments, approved, status } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
 
     if (!id) return res.status(400).json({ success: false, message: "ID required" });
@@ -109,14 +152,19 @@ export const updateAuditController = async (req, res) => {
     const existing = await findAudit({ audit_id: id });
     if (!existing) return res.status(404).json({ success: false, message: "Not found" });
 
-    const hasBusinessChanges = assigned_user_id !== undefined || start_date !== undefined || end_date !== undefined || remarks !== undefined || location_ids !== undefined;
+    const hasAssignments = Array.isArray(assignments) && assignments.length > 0;
+    if (hasAssignments) {
+      const validation = validateAuditAssignments(assignments);
+      if (!validation.ok) {
+        return res.status(400).json({ success: false, message: validation.message });
+      }
+    }
 
     const fields = {
-      ...(assigned_user_id !== undefined && { assigned_user_id }),
       ...(start_date !== undefined && { start_date }),
       ...(end_date !== undefined && { end_date }),
       ...(remarks !== undefined && { remarks }),
-      ...(location_ids !== undefined && { location_ids }),
+      ...(hasAssignments && { assignments }),
       updated_by: req.user.id,
       updated_at: new Date(),
     };
@@ -126,18 +174,24 @@ export const updateAuditController = async (req, res) => {
       return res.status(403).json({ success: false, message: "Verified audits cannot be edited" });
     }
 
-    applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges });
+    if (existing.approved === true) {
+      return res.status(403).json({
+        success: false,
+        message: "Active audits cannot be edited. Delete and recreate if changes are needed.",
+      });
+    }
 
-    // Manager authorization is separate from audit execution status.
-    if (fields.approved === true) {
-      if (existing.status === "approved") {
-        fields.status = "pending";
-      }
-    } else if (normalizedApproved === false || (hasBusinessChanges && existing.approved)) {
-      fields.approved = false;
-      if (["pending", "approved"].includes(existing.status)) {
-        fields.status = "pending";
-      }
+    if (normalizedApproved !== undefined) {
+      applyApprovalWorkflow({
+        req,
+        fields,
+        incomingApproved: normalizedApproved,
+        hasBusinessChanges: false,
+      });
+    }
+
+    if (fields.approved === true && existing.status === "approved") {
+      fields.status = "pending";
     } else if (status !== undefined) {
       fields.status = status;
     }
@@ -185,54 +239,82 @@ export const submitAuditScan = async (req, res) => {
     const audit = await findAudit({ audit_id });
     if (!audit) return res.status(404).json({ success: false, message: "Audit not found" });
 
-    if (audit.assigned_user_id !== userId && req.user.type !== 'super_admin') {
-      return res.status(403).json({ success: false, message: "You are not assigned to this audit" });
+    const locRow = (audit.locations || []).find(
+      (loc) => Number(loc.location_id) === Number(location_id) && loc.is_active !== false
+    );
+    if (!locRow) {
+      return res.status(404).json({ success: false, message: "Audit location not found" });
     }
 
-    if (!audit.approved && req.user.type !== 'super_admin') {
-      return res.status(403).json({ success: false, message: "Audit must be approved before it can be started" });
+    if (req.user.type !== "super_admin") {
+      if (Number(locRow.assigned_user_id) !== Number(userId)) {
+        return res.status(403).json({ success: false, message: "You are not assigned to this audit location" });
+      }
     }
 
-    const now = new Date();
-    const startDate = new Date(audit.start_date);
-    const endDate = new Date(audit.end_date);
-    endDate.setHours(23, 59, 59, 999);
+    if (!audit.approved && req.user.type !== "super_admin") {
+      return res.status(403).json({ success: false, message: "Audit must be active before it can be started" });
+    }
 
-    if (now < startDate || now > endDate) {
+    if (!isWithinAuditDateRange(audit) && req.user.type !== "super_admin") {
       return res.status(403).json({ success: false, message: "Audit is outside of allowed date range" });
     }
 
-    if ((audit.status === 'submitted' || audit.status === 'verified') && req.user.type !== 'super_admin') {
+    if ((audit.status === "submitted" || audit.status === "verified") && req.user.type !== "super_admin") {
       return res.status(403).json({ success: false, message: "Cannot modify a submitted or verified audit" });
     }
 
+    if (req.user.type !== "super_admin" && isLocationClosed(locRow)) {
+      return res.status(403).json({
+        success: false,
+        message: "This location is completed and cannot be edited",
+      });
+    }
+
+    let progress;
     await withTransaction(async (client) => {
       if (box_no_uids.length > 0) {
-        for (const box_no_uid of box_no_uids) {
-          await insertAuditScan({
-            audit_id,
-            location_id,
-            box_no_uid,
-            scanned_by: userId
-          }, { client });
-        }
+        await appendAuditScannedBoxes({
+          audit_id,
+          location_id,
+          box_no_uids,
+          scanned_by: userId,
+        }, { client });
       }
 
-      if (complete_location) {
-        await updateAuditLocationStatus(audit_id, location_id, 'completed', { client });
+      if (complete_location || box_no_uids.length > 0) {
+        progress = await evaluateAuditLocationProgress(audit_id, location_id, {
+          forceComplete: Boolean(complete_location),
+          client,
+        });
       } else {
-        await updateAuditLocationStatus(audit_id, location_id, 'pending', { client });
-      }
-
-      const incompleteCount = await countIncompleteAuditLocations(audit_id, { client });
-      if (incompleteCount === 0) {
-        await updateAudit({ status: 'submitted' }, { audit_id }, { client });
-      } else {
-        await updateAudit({ status: 'in_progress' }, { audit_id }, { client });
+        const auditStatus = await syncAuditMasterStatus(audit_id, { client });
+        progress = { location_status: locRow.status, audit_status: auditStatus, auto_completed: false };
       }
     });
 
-    return res.json({ success: true, message: complete_location ? "Location completed successfully" : "Scans saved successfully" });
+    let message = "Scans saved successfully";
+    if (progress?.auto_completed) {
+      message = "All boxes matched — location completed automatically";
+    } else if (progress?.location_status === "mismatch") {
+      message = "Location saved — boxes missing, admin review required";
+    } else if (progress?.location_status === "completed") {
+      message = "Location complete";
+    } else if (complete_location) {
+      message = "Location marked as pending review";
+    }
+
+    if (progress?.audit_status === "verified") {
+      message = "All locations matched — audit completed automatically";
+    } else if (progress?.audit_status === "submitted") {
+      message = "Audit submitted for admin review (mismatch detected)";
+    }
+
+    return res.json({
+      success: true,
+      message,
+      data: progress,
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -250,12 +332,28 @@ export const removeAuditScan = async (req, res) => {
     const audit = await findAudit({ audit_id });
     if (!audit) return res.status(404).json({ success: false, message: "Audit not found" });
 
-    if (audit.assigned_user_id !== userId && req.user.type !== 'super_admin') {
-      return res.status(403).json({ success: false, message: "You are not assigned to this audit" });
+    const locRow = (audit.locations || []).find(
+      (loc) => Number(loc.location_id) === Number(location_id) && loc.is_active !== false
+    );
+    if (!locRow) {
+      return res.status(404).json({ success: false, message: "Audit location not found" });
+    }
+
+    if (req.user.type !== "super_admin") {
+      if (Number(locRow.assigned_user_id) !== Number(userId)) {
+        return res.status(403).json({ success: false, message: "You are not assigned to this audit location" });
+      }
     }
 
     if (audit.status === 'submitted' || audit.status === 'verified') {
       return res.status(403).json({ success: false, message: "Cannot remove scans from a submitted audit" });
+    }
+
+    if (req.user.type !== "super_admin" && isLocationClosed(locRow)) {
+      return res.status(403).json({
+        success: false,
+        message: "This location is completed and cannot be edited",
+      });
     }
 
     await deleteAuditScan(audit_id, location_id, box_no_uid);
@@ -266,21 +364,168 @@ export const removeAuditScan = async (req, res) => {
   }
 };
 
-const canViewAuditRecord = (req, audit) => {
-  const user = req.user;
-  const isSuperAdmin = user.type === "super_admin";
-  const canAuthorize = Boolean(req.permission?.can_authorize);
-  const isCreator = audit.created_by === user.id;
-  const isAssigned = audit.assigned_user_id === user.id;
+const canViewAuditRecord = (req, audit) => canAccessAuditRecord(audit, req.user, req.permission);
 
-  if (isSuperAdmin || canAuthorize || isCreator) return true;
-  if (isAssigned && audit.approved) return true;
-  return false;
+function assertCanManageAudit(req, audit) {
+  if (audit.status === "cancelled") {
+    return { ok: false, status: 400, message: "Cancelled audit cannot be modified" };
+  }
+  if (audit.status === "verified" && req.user.type !== "super_admin") {
+    return { ok: false, status: 403, message: "Only super admin can modify verified audits" };
+  }
+  const canManage =
+    req.user.type === "super_admin" ||
+    req.permission?.can_edit ||
+    req.permission?.can_authorize ||
+    Number(audit.created_by) === Number(req.user.id);
+  if (!canManage) {
+    return { ok: false, status: 403, message: "Access denied" };
+  }
+  return { ok: true };
+}
+
+export const reopenAuditLocationController = async (req, res) => {
+  try {
+    const { audit_id, location_id } = req.body;
+    if (!audit_id || !location_id) {
+      return res.status(400).json({ success: false, message: "audit_id and location_id required" });
+    }
+
+    const audit = await findAudit({ audit_id });
+    if (!audit) return res.status(404).json({ success: false, message: "Audit not found" });
+
+    const access = assertCanManageAudit(req, audit);
+    if (!access.ok) {
+      return res.status(access.status).json({ success: false, message: access.message });
+    }
+
+    const locRow = (audit.locations || []).find(
+      (loc) => Number(loc.location_id) === Number(location_id) && loc.is_active !== false
+    );
+    if (!locRow) {
+      return res.status(404).json({ success: false, message: "Audit location not found" });
+    }
+
+    if (!isLocationClosed(locRow)) {
+      return res.status(400).json({ success: false, message: "Location is not closed" });
+    }
+
+    const result = await withTransaction(async (client) =>
+      reopenAuditLocation(audit_id, location_id, { client })
+    );
+
+    await log(req, "reopen_location", audit_id, { location_id, ...result });
+
+    return res.json({
+      success: true,
+      message: "Location reopened — assigned user can continue audit",
+      data: result,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const reassignAuditLocationController = async (req, res) => {
+  try {
+    const { audit_id, location_id, assigned_user_id } = req.body;
+    if (!audit_id || !location_id || !assigned_user_id) {
+      return res.status(400).json({
+        success: false,
+        message: "audit_id, location_id and assigned_user_id required",
+      });
+    }
+
+    const audit = await findAudit({ audit_id });
+    if (!audit) return res.status(404).json({ success: false, message: "Audit not found" });
+
+    const access = assertCanManageAudit(req, audit);
+    if (!access.ok) {
+      return res.status(access.status).json({ success: false, message: access.message });
+    }
+
+    const locRow = (audit.locations || []).find(
+      (loc) => Number(loc.location_id) === Number(location_id) && loc.is_active !== false
+    );
+    if (!locRow) {
+      return res.status(404).json({ success: false, message: "Audit location not found" });
+    }
+
+    const result = await withTransaction(async (client) =>
+      reassignAuditLocation(audit_id, location_id, assigned_user_id, { client })
+    );
+
+    await log(req, "reassign_location", audit_id, { location_id, ...result });
+
+    const message = result.replaced
+      ? "Location reassigned to the new user"
+      : "Location reassigned — previous scans preserved in history";
+
+    return res.json({
+      success: true,
+      message,
+      data: result,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+const ADJUSTMENT_TYPES = new Set(["not_scanned", "extra_scan"]);
+
+/** Log adjustment intent from comparison UI (no stock logic yet). */
+export const logAuditComparisonAdjustment = async (req, res) => {
+  try {
+    const audit_id = Number(req.body?.audit_id ?? req.body?.id);
+    const location_id = req.body?.location_id != null ? Number(req.body.location_id) : null;
+    const adjustment_type = String(req.body?.adjustment_type || "").trim();
+    const box_no_uids = Array.isArray(req.body?.box_no_uids)
+      ? [...new Set(req.body.box_no_uids.map((u) => String(u ?? "").trim()).filter(Boolean))]
+      : [];
+
+    if (!Number.isFinite(audit_id)) {
+      return res.status(400).json({ success: false, message: "audit_id required" });
+    }
+    if (!ADJUSTMENT_TYPES.has(adjustment_type)) {
+      return res.status(400).json({
+        success: false,
+        message: "adjustment_type must be not_scanned or extra_scan",
+      });
+    }
+
+    const audit = await findAudit({ audit_id });
+    if (!audit) return res.status(404).json({ success: false, message: "Not found" });
+    if (!canViewAuditRecord(req, audit)) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    const payload = {
+      audit_id,
+      location_id,
+      adjustment_type,
+      box_count: box_no_uids.length,
+      box_no_uids,
+      triggered_by: req.user?.id ?? null,
+      triggered_at: new Date().toISOString(),
+    };
+
+    console.info("[audit-comparison-adjustment]", JSON.stringify(payload));
+
+    log(req, "comparison_adjustment_intent", audit_id, payload, audit);
+
+    return res.json({
+      success: true,
+      message: "Adjustment intent logged",
+      data: { audit_id, location_id, adjustment_type, box_count: box_no_uids.length },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 export const getAuditComparisonReportController = async (req, res) => {
   try {
-    const { id } = req.body;
+    const { id, location_id } = req.body;
     if (!id) return res.status(400).json({ success: false, message: "ID required" });
 
     const audit = await findAudit({ audit_id: id });
@@ -288,6 +533,24 @@ export const getAuditComparisonReportController = async (req, res) => {
 
     if (!canViewAuditRecord(req, audit)) {
       return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    if (location_id != null) {
+      const locRow = (audit.locations || []).find(
+        (loc) => Number(loc.location_id) === Number(location_id) && loc.is_active !== false
+      );
+      if (!locRow) {
+        return res.status(404).json({ success: false, message: "Audit location not found" });
+      }
+      if (!isLocationClosed(locRow.status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Comparison is available only after the location is submitted",
+        });
+      }
+
+      const data = await getAuditComparisonReport(id, { locationId: location_id });
+      return res.json({ success: true, data });
     }
 
     if (!["submitted", "verified"].includes(audit.status)) {

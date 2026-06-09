@@ -9,7 +9,7 @@ import { sanitizeSearch } from "../../core/utils/helper.js";
 import { resolveItemViewsSelectFields } from "../config/view-fields/item.js";
 import { resolveLedgerViewsSelectFields } from "../config/view-fields/ledger.js";
 import { extractListParams } from "../../core/utils/queryHelper.js";
-import { collectAccCodesForItemCustomers, filterLedgersForItemCustomers } from "../utils/packingEntryCustomers.js";
+import { findPackingEntryCustomerByAccCode, listPackingEntryCustomersForItem } from "../utils/packingEntryCustomers.js";
 
 const LEDGER_ITEM_CUSTOMER_MODULES = new Set(["packing_entry", "stock_adjustment"]);
 
@@ -856,11 +856,26 @@ export const getLedgersViews = async (req, res) => {
     const rows = (records || []).map(mapLedgerRecord);
 
     if (id) {
+      const itemScopedLookup =
+        LEDGER_ITEM_CUSTOMER_MODULES.has(permission_module) &&
+        itemFilter != null &&
+        String(itemFilter).trim() !== "";
+
+      if (itemScopedLookup) {
+        const match = await findPackingEntryCustomerByAccCode(itemFilter, id, rows);
+        if (match) {
+          return res.json({
+            success: true,
+            data: { id: match.acc_code, acc_code: match.acc_code, acc_name: match.acc_name },
+          });
+        }
+      }
+
       const ledger = rows.find((r) => String(r.acc_code) === String(id));
       if (!ledger) return res.json({ success: true, data: null });
       return res.json({
         success: true,
-        data: { id: ledger.acc_code, acc_code: ledger.acc_code, acc_name: ledger.acc_name }
+        data: { id: ledger.acc_code, acc_code: ledger.acc_code, acc_name: ledger.acc_name },
       });
     }
 
@@ -872,21 +887,20 @@ export const getLedgersViews = async (req, res) => {
       });
     }
 
-    let filtered = rows;
-
-    if (
+    const itemScopedCustomer =
       LEDGER_ITEM_CUSTOMER_MODULES.has(permission_module) &&
       itemFilter != null &&
-      String(itemFilter).trim() !== ""
-    ) {
-      const accCodes = await collectAccCodesForItemCustomers(itemFilter, rows);
-      filtered = filterLedgersForItemCustomers(filtered, accCodes);
+      String(itemFilter).trim() !== "";
+
+    let filtered = rows;
+
+    if (itemScopedCustomer) {
+      filtered = await listPackingEntryCustomersForItem(itemFilter, rows);
     }
 
     const s = sanitizeSearch(search);
     if (s) filtered = filterBySearch(filtered, s, [(r) => r.acc_name, (r) => r.acc_code]);
-    
-    // Natural IMS order (no sorting)
+
     const out = slicePage(filtered, page || 1, limit || filtered.length || 1000);
 
     const wantGroup = fields.some((f) => String(f).includes("group_code"));

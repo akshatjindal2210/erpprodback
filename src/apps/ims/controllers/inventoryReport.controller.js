@@ -2,13 +2,61 @@ import { findInventoryReportFiltered, getInventoryReportFilterOptions, findCusto
 import { extractListParams } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { getImsMapsSafe } from "../utils/imsLookup.js";
+import {
+  buildPartyRateAccNameMap,
+  lookupPartyRateAccName,
+  lookupPartyRateAccNameAnyItem,
+} from "../utils/packingEntryCustomers.js";
 import { fetchFromIMS, fetchPackRowsForFinancialYearDoc } from "../services/ims.service.js";
-import { findImsPackByDocNo, buildImsDocFilter } from "../utils/imsPackRow.js";
+import { findImsPackByDocNo, buildImsDocFilterMany } from "../utils/imsPackRow.js";
+
+function isMissingDocDt(value) {
+  return value == null || String(value).trim() === "";
+}
+
+/** IMS pack: docno → docdt (batched IMS calls to avoid timeouts). */
+async function resolvePackDocDateMap(packingNumbers = []) {
+  const unique = [...new Set(packingNumbers.map((p) => String(p ?? "").trim()).filter(Boolean))];
+  if (!unique.length) return new Map();
+
+  const map = new Map();
+  const CHUNK = 35;
+
+  try {
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK);
+      const filter = buildImsDocFilterMany(chunk);
+      if (!filter) continue;
+      const recs = await fetchFromIMS("pack", filter);
+      for (const pn of chunk) {
+        const packRow = findImsPackByDocNo(recs, pn);
+        if (!packRow) continue;
+        const raw =
+          packRow.docdt ??
+          packRow.doc_dt ??
+          packRow["Doc Dt"] ??
+          packRow.Doc_Dt ??
+          packRow.DocDt;
+        if (!isMissingDocDt(raw)) map.set(pn, String(raw).trim());
+      }
+    }
+  } catch {
+    /* optional IMS */
+  }
+
+  return map;
+}
 
 function isMissingCustomerCode(code) {
   if (code == null) return true;
   const s = String(code).trim();
   return s === "" || s === "—" || s === "null";
+}
+
+function toFilterIdList(val) {
+  if (val == null) return [];
+  if (Array.isArray(val)) return val.map((v) => String(v).trim()).filter(Boolean);
+  return String(val).split(",").map((v) => v.trim()).filter(Boolean);
 }
 
 /** Resolve customer acc_code for packings still missing after the report SQL. */
@@ -62,42 +110,117 @@ async function resolveCustomerCodeMap(packingNumbers = []) {
   return map;
 }
 
-async function enrichInventoryFilterOptions(options = {}) {
-  const { items = [], customers = [], locations = [], packings = [] } = options;
-  const { itemMap, ledgerMap } = await getImsMapsSafe();
+const FILTER_OPTION_FIELDS = new Set(["items", "customers", "locations", "packings"]);
 
-  const missingCustPackings = (customers || [])
-    .filter((row) => isMissingCustomerCode(row?.id))
-    .map((row) => row?.id);
-  const customerCodeMap = await resolveCustomerCodeMap(missingCustPackings);
+async function enrichInventoryFilterOptions(options = {}, { fields = null, filters = {} } = {}) {
+  const requested = fields?.length
+    ? fields.filter((f) => FILTER_OPTION_FIELDS.has(f))
+    : [...FILTER_OPTION_FIELDS];
 
-  const enrichedItems = (items || []).map((row) => {
-    const item = row?.id != null ? itemMap.get(String(row.id)) : null;
-    return {
-      ...row,
-      item_code: item?.item_code ?? row.item_code ?? String(row.id ?? ""),
-      item_desc: item?.item_desc ?? row.item_desc ?? null
-    };
-  });
-
-  const enrichedCustomers = (customers || []).map((row) => {
-    const id = row?.id != null ? String(row.id).trim() : "";
-    const resolvedId = !isMissingCustomerCode(id) ? id : (customerCodeMap.get(id) ?? id);
-    return {
-      ...row,
-      id: resolvedId || id,
-      acc_name: resolvedId
-        ? (ledgerMap.get(resolvedId) ?? row.acc_name ?? resolvedId)
-        : (row.acc_name ?? null)
-    };
-  });
-
-  return {
-    items: enrichedItems,
-    customers: enrichedCustomers,
-    locations,
-    packings
+  const result = {
+    items: [],
+    customers: [],
+    locations: [],
+    packings: [],
   };
+
+  const needItems = requested.includes("items");
+  const needCustomers = requested.includes("customers");
+  let itemMap;
+  let ledgerMap;
+
+  if (needItems || needCustomers) {
+    const maps = await getImsMapsSafe();
+    itemMap = maps.itemMap;
+    ledgerMap = maps.ledgerMap;
+  }
+
+  if (needItems) {
+    result.items = (options.items || []).map((row) => {
+      const item = row?.id != null ? itemMap.get(String(row.id)) : null;
+      return {
+        ...row,
+        item_code: item?.item_code ?? row.item_code ?? String(row.id ?? ""),
+        item_desc: item?.item_desc ?? row.item_desc ?? null,
+      };
+    });
+  }
+
+  if (needCustomers) {
+    const rows = options.customers || [];
+    const knownRows = rows.filter(
+      (row) =>
+        row?.kind === "known" ||
+        (!row?.kind && row?.id != null && !isMissingCustomerCode(row.id))
+    );
+    const resolvePackings = [
+      ...new Set(
+        rows
+          .filter((row) => row?.kind === "resolve" || (row?.id != null && isMissingCustomerCode(row.id)))
+          .map((row) => String(row?.packing_number ?? row?.id ?? "").trim())
+          .filter(Boolean)
+      ),
+    ];
+
+    const customerCodeMap = resolvePackings.length
+      ? await resolveCustomerCodeMap(resolvePackings)
+      : new Map();
+
+    const partyRateAccNameMap = await buildPartyRateAccNameMap();
+    const itemDcodes = toFilterIdList(filters.item_dcodes);
+
+    const resolveCustomerLabel = (code) => {
+      const id = String(code ?? "").trim();
+      if (!id) return null;
+      const fromLedger = ledgerMap.get(id);
+      if (fromLedger) return fromLedger;
+      for (const itemD of itemDcodes) {
+        const fromItem = lookupPartyRateAccName(partyRateAccNameMap, id, itemD);
+        if (fromItem) return fromItem;
+      }
+      return lookupPartyRateAccNameAnyItem(partyRateAccNameMap, id);
+    };
+
+    const byId = new Map();
+
+    /** Customers from current inventory scope only (boxes with active stock), not full DB / party-rate master. */
+    for (const row of knownRows) {
+      const id = row?.id != null ? String(row.id).trim() : "";
+      if (!id || isMissingCustomerCode(id)) continue;
+      byId.set(id, {
+        id,
+        acc_name: resolveCustomerLabel(id) ?? row.acc_name ?? null,
+      });
+    }
+
+    for (const pn of resolvePackings) {
+      const code = customerCodeMap.get(pn);
+      if (!code || isMissingCustomerCode(code)) continue;
+      if (!byId.has(code)) {
+        byId.set(code, {
+          id: code,
+          acc_name: resolveCustomerLabel(code) ?? null,
+        });
+      }
+    }
+
+    result.customers = [...byId.values()]
+      .filter((row) => row.acc_name != null && String(row.acc_name).trim() !== "")
+      .sort((a, b) =>
+        String(a.acc_name || a.id).localeCompare(String(b.acc_name || b.id), undefined, {
+          sensitivity: "base",
+        })
+      );
+  }
+
+  if (requested.includes("locations")) {
+    result.locations = options.locations || [];
+  }
+  if (requested.includes("packings")) {
+    result.packings = options.packings || [];
+  }
+
+  return result;
 }
 
 export async function enrichInventoryRows(rows = []) {
@@ -106,9 +229,17 @@ export async function enrichInventoryRows(rows = []) {
   const missingPackings = rows
     .filter((row) => isMissingCustomerCode(row?.customer_code))
     .map((row) => row.packing_number);
-  const customerCodeMap = await resolveCustomerCodeMap(missingPackings);
+  const allPackings = [...new Set(rows.map((r) => String(r.packing_number ?? "").trim()).filter(Boolean))];
 
-  const { itemMap, ledgerMap } = await getImsMapsSafe();
+  const [customerCodeMap, docDtMap] = await Promise.all([
+    resolveCustomerCodeMap(missingPackings),
+    resolvePackDocDateMap(allPackings).catch(() => new Map()),
+  ]);
+
+  const [{ itemMap, ledgerMap }, partyRateAccNameMap] = await Promise.all([
+    getImsMapsSafe(),
+    buildPartyRateAccNameMap(),
+  ]);
 
   return rows.map((row) => {
     const item = row?.item_dcode != null ? itemMap.get(String(row.item_dcode)) : null;
@@ -117,16 +248,24 @@ export async function enrichInventoryRows(rows = []) {
       const pn = String(row.packing_number ?? "").trim();
       customerCode = customerCodeMap.get(pn) ?? null;
     }
-    const customerName = customerCode
-      ? (ledgerMap.get(String(customerCode)) ?? row.customer_name ?? String(customerCode))
-      : (row.customer_name ?? null);
+    const codeStr = customerCode != null ? String(customerCode).trim() : "";
+    const customerName = codeStr
+      ? ledgerMap.get(codeStr) ??
+        lookupPartyRateAccName(partyRateAccNameMap, codeStr, row.item_dcode) ??
+        lookupPartyRateAccNameAnyItem(partyRateAccNameMap, codeStr) ??
+        (row.customer_name && String(row.customer_name).trim() !== "—" ? row.customer_name : null)
+      : (row.customer_name && String(row.customer_name).trim() !== "—" ? row.customer_name : null);
+
+    const pn = String(row.packing_number ?? "").trim();
+    const doc_dt = docDtMap.get(pn) ?? null;
 
     return {
       ...row,
       item_code: item?.item_code ?? row.item_code ?? String(row.item_dcode ?? "—"),
       item_desc: item?.item_desc ?? row.item_desc ?? "—",
       customer_code: customerCode,
-      customer_name: customerName ?? "—"
+      customer_name: customerName ?? "—",
+      doc_dt,
     };
   });
 }
@@ -134,8 +273,12 @@ export async function enrichInventoryRows(rows = []) {
 export const getInventoryReport = async (req, res) => {
   try {
     if (req.body?.action === "filter_options") {
-      const options = await getInventoryReportFilterOptions(req.body?.filters || {});
-      const enriched = await enrichInventoryFilterOptions(options);
+      const fields = Array.isArray(req.body?.fields) ? req.body.fields : null;
+      const options = await getInventoryReportFilterOptions(req.body?.filters || {}, { fields });
+      const enriched = await enrichInventoryFilterOptions(options, {
+        fields,
+        filters: req.body?.filters || {},
+      });
       return res.json({ success: true, data: enriched });
     }
 

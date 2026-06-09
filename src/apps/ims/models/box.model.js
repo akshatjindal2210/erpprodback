@@ -2,7 +2,7 @@ import dbQuery from "../../../config/db.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
 import { logBoxTransaction, logBoxTransactionSafe, singlePackingFromRows } from "../utils/logBoxTransaction.js";
-import { sqlBoxInHand, sqlBoxOutUidEmpty } from "../utils/boxInventorySql.js";
+import { sqlBoxInHand, sqlBoxOutUidEmpty, sqlBoxCustomerCode, sqlDailyprodLateralForBox } from "../utils/boxInventorySql.js";
 
 
 const ALLOWED_FILTER_FIELDS_BOX = [
@@ -1153,7 +1153,7 @@ export async function getProductionStickerPanelMetaByPackingNumbers(packingNumbe
          b.updated_by,
          b.packing_number::text AS packing_number,
          COALESCE(sa.item_dcode::text, dp.item_dcode::text, '-') AS item_dcode,
-         COALESCE(NULLIF(TRIM(dp.acc_code::text), ''), '-') AS acc_code,
+         ${sqlBoxCustomerCode("b", "dp")} AS acc_code,
          dp.acc_code AS dailyprod_acc_code,
          dp.item_dcode AS dailyprod_item_dcode,
          dp.total_qty AS dailyprod_total_qty,
@@ -1163,14 +1163,7 @@ export async function getProductionStickerPanelMetaByPackingNumbers(packingNumbe
          b.override_cust
        FROM ims_box_table b
        LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
-       LEFT JOIN LATERAL (
-         SELECT dp2.doc_dt, dp2.job_card_no, dp2.total_qty, dp2.item_dcode, dp2.acc_code
-         FROM ims_dailyprod dp2
-         WHERE NULLIF(TRIM(dp2.doc_no::text), '-') = NULLIF(TRIM(b.packing_number::text), '-')
-         ORDER BY
-           (CASE WHEN sa.item_dcode IS NOT NULL AND dp2.item_dcode = sa.item_dcode THEN 0 ELSE 1 END) ASC
-         LIMIT 1
-       ) dp ON true
+       ${sqlDailyprodLateralForBox("b", "sa", "NULLIF(TRIM(b.packing_number::text), '-')")}
        WHERE b.packing_number::text = ANY($1::text[])
          AND ${PRODUCTION_STICKER_BOX_FILTER}
      )

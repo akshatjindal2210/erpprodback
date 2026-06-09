@@ -12,7 +12,7 @@ import stockAdjustmentRoutes from "./stockAdjustment.route.js";
 import transactionBoxRoutes from "./transactionBox.routes.js";
 import inventoryReportRoutes from "./inventoryReport.route.js";
 import appConfigRoutes from "./appConfig.route.js";
-// import auditRoutes from "./audit.routes.js";
+import auditRoutes from "./audit.routes.js";
 
 const router = Router();
 
@@ -28,6 +28,6 @@ router.use("/stock-adjustment", stockAdjustmentRoutes);
 router.use("/box-transaction-logs", transactionBoxRoutes);
 router.use("/inventory-report", inventoryReportRoutes);
 router.use("/app-config", appConfigRoutes);
-// router.use("/audit", auditRoutes);
+router.use("/audit", auditRoutes);
 
 export default router;

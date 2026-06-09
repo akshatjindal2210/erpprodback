@@ -13,7 +13,7 @@ import { createTransactionBoxTable } from "./tables/transaction_box.table.js";
 import { createCategoryTable } from "./tables/category.table.js";
 import { createStickerTypeTable } from "./tables/sticker_type.table.js";
 import { createAppConfigTable } from "./tables/app_config.table.js";
-// import { createAuditTables } from "./tables/audit.table.js";
+import { createAuditTables } from "./tables/audit.table.js";
 import { syncImsSequences } from "./syncSequences.js";
 
 export async function initImsDB() {
@@ -33,7 +33,7 @@ export async function initImsDB() {
   await createBoxOverrideRequestTable();
   await createOutEntryScannedBoxTable();
   await createTransactionBoxTable();
-  // await createAuditTables();
+  await createAuditTables();
 
   await syncImsSequences();
 

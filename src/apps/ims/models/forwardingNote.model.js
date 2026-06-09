@@ -90,6 +90,12 @@ export const findForwardingNotes = async (options = {}) => {
 
     if (applyForwardingOutEntryListFilter(conditions, key, val)) continue;
 
+    if (key === "out_entry_locked") {
+      const locked = val === true || val === "true";
+      conditions.push(`COALESCE(f.out_entry_locked, false) = ${locked ? "true" : "false"}`);
+      continue;
+    }
+
     if (!ALLOWED_FILTER_FIELDS.includes(key)) continue;
     values.push(val);
     conditions.push(`f.${key} = $${i++}`);
@@ -478,6 +484,13 @@ export const findForwardedQtyByItemAndPacking = async (item_dcode, exclude_fuid 
      WHERE fi.is_deleted = false
        AND fi.item_dcode::int = $1::int
        AND ($2::bigint IS NULL OR fi.fuid <> $2::bigint)
+       AND NOT EXISTS (
+         SELECT 1
+         FROM ims_out_entry oe
+         WHERE oe.fuid = f.fuid
+           AND oe.is_deleted = false
+           AND COALESCE(oe.scan_complete, false) = true
+       )
      GROUP BY TRIM(fi.packing_number::text)`,
     [dcode, exclude]
   );

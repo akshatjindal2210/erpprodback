@@ -156,12 +156,12 @@ export const CRUD_MODULES = {
   audit: {
     idField: "audit_id",
     listFields: [
-      "am.audit_id", "am.assigned_user_id", "u_as.name AS assigned_user_name", "am.start_date", "am.end_date", "am.remarks", "am.status",
+      "am.audit_id", "am.start_date", "am.end_date", "am.remarks", "am.status",
       "am.approved", "am.approved_by", "am.approved_at", "am.created_by", "am.created_at", "am.updated_by", "am.updated_at",
       "u_cr.name AS created_by_name", "u_up.name AS updated_by_name", "u_ap.name AS approved_by_name", "u_dl.name AS deleted_by_name"
     ],
-    filterFields: ["audit_id", "assigned_user_id", "status", "approved", "from_date", "to_date"],
-    searchFields: ["am.remarks", "u_as.name"]
+    filterFields: ["audit_id", "status", "approved", "from_date", "to_date"],
+    searchFields: ["am.remarks"]
   },
 };
 

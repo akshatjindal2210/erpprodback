@@ -72,14 +72,14 @@ export function sqlBoxItemDcodeReport(saAlias = "sa", dpAlias = "dp") {
   return `COALESCE(${saAlias}.item_dcode::text, ${dpAlias}.item_dcode::text, '—')`;
 }
 
-/** Customer code per box — same priority as inventory report. */
+/** Customer code per box — per-box override wins over packing / dailyprod customer. */
 export function sqlBoxCustomerCode(boxAlias = "b", dpAlias = "dp") {
-  return `COALESCE(NULLIF(TRIM(${dpAlias}.acc_code::text), ''), NULLIF(TRIM(${boxAlias}.override_cust::text), ''), '-')`;
+  return `COALESCE(NULLIF(TRIM(${boxAlias}.override_cust::text), ''), NULLIF(TRIM(${dpAlias}.acc_code::text), ''), '-')`;
 }
 
 /** Customer code — inventory report / box_agg grouping (no dash fallback). */
 export function sqlBoxCustomerCodeReport(boxAlias = "b", dpAlias = "dp") {
-  return `COALESCE(NULLIF(TRIM(${dpAlias}.acc_code::text), ''), NULLIF(TRIM(${boxAlias}.override_cust::text), ''))`;
+  return `COALESCE(NULLIF(TRIM(${boxAlias}.override_cust::text), ''), NULLIF(TRIM(${dpAlias}.acc_code::text), ''))`;
 }
 
 /** Match ims_dailyprod.doc_no to a packing number (text or numeric). */

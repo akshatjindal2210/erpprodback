@@ -1,6 +1,7 @@
 import { buildImsDocFilter, findImsPackByDocNo, imsPackRowToProduction } from "../utils/imsPackRow.js";
 import { withTransaction } from "../../../config/db.js";
 import { findAdjustments, findAdjustmentById, insertAdjustment, updateAdjustments, insertAdjustmentTx, updateAdjustmentsTx, findFinancialYearForPacking } from "../models/stockAdjustment.model.js";
+import { findCustomerHintsForPackings } from "../models/inventoryReport.model.js";
 import { findDailyProdByDocNo, findBoxesByUids, purgeSaStickerBoxesTx, resolveItemDcodeForMinusAdjustment } from "../models/box.model.js";
 import { boxBelongsToPackingNumber } from "../utils/boxInventory.js";
 import { fetchFromIMS, fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../services/ims.service.js";
@@ -14,7 +15,7 @@ import { syncAdjustmentMetadataOnly } from "../utils/stockAdjustmentSync.js";
 import { resolveStockAdjustmentPackingMeta } from "../utils/stockAdjustmentPacking.js";
 import { applyStockAdjustmentOnApproveTx, revertStockAdjustmentOnUnapproveTx } from "../utils/stockAdjustmentApply.js";
 import { isBoxAvailableForMinus } from "../utils/boxInventory.js";
-import { findCustomerHintsForPackings } from "../models/inventoryReport.model.js";
+import { buildPartyRateAccNameMap, lookupPartyRateAccName } from "../utils/packingEntryCustomers.js";
 
 const STOCK_CFG = getCrudModuleConfig("stock_adjustment");
 
@@ -27,9 +28,10 @@ function canUserRemoveInventoryBoxes(req) {
 }
 
 async function enrichAdjustments(rows = []) {
-  const [{ itemMap, ledgerMap }, partyRateMap] = await Promise.all([
+  const [{ itemMap, ledgerMap }, partyRateMap, partyRateAccNameMap] = await Promise.all([
     getImsMapsSafe(),
-    getImsPartyRateMapSafe()
+    getImsPartyRateMapSafe(),
+    buildPartyRateAccNameMap(),
   ]);
   
   const packingNums = [...new Set(rows.map(r => String(r.packing_number || "").trim()).filter(Boolean))];
@@ -90,7 +92,8 @@ async function enrichAdjustments(rows = []) {
     
     const item = itemDcode ? itemMap.get(itemDcode) : null;
     const ledgerName = accCode ? ledgerMap.get(accCode) : null;
-    
+    const partyRateName = lookupPartyRateAccName(partyRateAccNameMap, accCode, itemDcode);
+
     const partyRate = pickPartyRateCustCode(partyRateMap, itemDcode || row.item_code, [accCode]);
 
     const existingName = row.acc_name && String(row.acc_name).trim() !== "" && String(row.acc_name).trim() !== "—" 
@@ -102,7 +105,7 @@ async function enrichAdjustments(rows = []) {
       item_code: item?.item_code ?? row.item_code ?? null,
       item_desc: item?.item_desc ?? row.item_desc ?? null,
       acc_code: rawAccCode, 
-      acc_name: ledgerName ?? existingName ?? (accCode ? `Customer ${accCode}` : null),
+      acc_name: ledgerName ?? partyRateName ?? existingName ?? null,
       party_rate_cust_code: partyRate ?? row.party_rate_cust_code ?? null
     };
   });
