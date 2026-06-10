@@ -340,7 +340,15 @@ export const deleteForwardingNotes = async (filters = {}, meta = {}) => {
     client
   );
 
-  if (row) return;
+  if (row?.fuid != null) {
+    await run(
+      `UPDATE ims_forwarding_note_item_wise
+       SET is_deleted = true, deleted_at = NOW(), deleted_by = $1
+       WHERE fuid = $2 AND is_deleted = false`,
+      [deleted_by, row.fuid]
+    );
+    return;
+  }
 
   const fuidFilterIndex = keys.findIndex((k) => k === "fuid");
   if (fuidFilterIndex >= 0) {

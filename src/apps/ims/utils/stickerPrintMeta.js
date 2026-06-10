@@ -65,12 +65,14 @@ export async function resolvePackingStickerMetaForPrint(packing_number, hints = 
   let acc_code = hints.acc_code ?? null;
   let job_card_no = hints.job_card_no ?? hints.job_no ?? null;
   let acc_name = hints.acc_name ?? null;
+  let doc_dt = hints.doc_dt ?? hints.docdt ?? null;
 
   const dp = await findDailyProdByDocNo(pn);
   if (dp) {
     itemdcode = itemdcode ?? dp.itemdcode ?? null;
     acc_code = acc_code ?? dp.acc_code ?? null;
     job_card_no = job_card_no ?? dp.job_card_no ?? null;
+    doc_dt = doc_dt ?? dp.doc_dt ?? null;
   }
 
   const fy = await resolveFinancialYearForPrint(pn, hints);
@@ -81,6 +83,7 @@ export async function resolvePackingStickerMetaForPrint(packing_number, hints = 
       acc_code = acc_code ?? packRow.acc_code ?? null;
       job_card_no = job_card_no ?? packRow.jobcardno ?? null;
       acc_name = acc_name ?? packRow.acc_name ?? null;
+      doc_dt = doc_dt ?? packRow.doc_dt ?? packRow.docdt ?? null;
     }
   }
 
@@ -90,6 +93,7 @@ export async function resolvePackingStickerMetaForPrint(packing_number, hints = 
       itemdcode = itemdcode ?? ims.itemdcode ?? null;
       acc_code = acc_code ?? ims.acc_code ?? null;
       job_card_no = job_card_no ?? ims.job_card_no ?? null;
+      doc_dt = doc_dt ?? ims.doc_dt ?? null;
     }
   }
 
@@ -147,6 +151,7 @@ export async function resolvePackingStickerMetaForPrint(packing_number, hints = 
     acc_name: hints.acc_name ?? enriched?.acc_name ?? acc_name ?? null,
     job_card_no: job_card_no || null,
     job_no: job_card_no || null,
+    doc_dt: doc_dt ?? null,
     party_rate_cust_code:
       party_rate_cust_code != null && String(party_rate_cust_code).trim() !== ""
         ? String(party_rate_cust_code).trim()

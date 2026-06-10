@@ -86,7 +86,7 @@ export const findForwardingNoteItems = async (options = {}) => {
 
   const values = [];
   let i = 1;
-  const conditions = ["fi.is_deleted = false"];
+  const conditions = ["fi.is_deleted = false", "fnm.is_deleted = false"];
 
   // Permission-based date restriction (can_view_days)
   if (permission?.can_view_days > 0) {
@@ -193,7 +193,7 @@ export const findForwardingNoteItem = async (filters = {}) => {
 
   const values = [];
   let i = 1;
-  const conditions = ["fi.is_deleted = false"];
+  const conditions = ["fi.is_deleted = false", "fnm.is_deleted = false"];
 
   for (const key of keys) {
     if (key !== "id" && !ALLOWED_FILTER_FIELDS.includes(key)) continue;

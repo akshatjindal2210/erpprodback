@@ -19,6 +19,53 @@ export function resolveStickerPackingNumber(sticker = {}, fallback = null) {
   return null;
 }
 
+const DOC_DATE_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Packing entry doc_dt → DD/MM/YYYY (sticker PACKING DT.; matches frontend formatDocDate). */
+export function formatDocDate(v) {
+  if (v == null || String(v).trim() === "") return null;
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    return `${String(v.getDate()).padStart(2, "0")}/${String(v.getMonth() + 1).padStart(2, "0")}/${v.getFullYear()}`;
+  }
+  const s = String(v).trim();
+  if (/invalid/i.test(s)) return null;
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) return s;
+  const dmy = /^(\d{2})-(\d{2})-(\d{4})$/.exec(s);
+  if (dmy) return `${dmy[1]}/${dmy[2]}/${dmy[3]}`;
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (ymd) return `${ymd[3]}/${ymd[2]}/${ymd[1]}`;
+  const monTok = /^(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{4})$/i.exec(s);
+  if (monTok) {
+    const day = parseInt(monTok[1], 10);
+    const year = parseInt(monTok[3], 10);
+    const monIdx = DOC_DATE_MON.findIndex((x) => x.toLowerCase() === monTok[2].toLowerCase());
+    if (monIdx >= 0 && day >= 1 && day <= 31 && year > 0) {
+      return `${String(day).padStart(2, "0")}/${String(monIdx + 1).padStart(2, "0")}/${year}`;
+    }
+  }
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    return `${String(parsed.getDate()).padStart(2, "0")}/${String(parsed.getMonth() + 1).padStart(2, "0")}/${parsed.getFullYear()}`;
+  }
+  return s;
+}
+
+/** Resolve packing doc date from sticker row (dailyprod / IMS), not box created_at. */
+export function resolveStickerDocDt(sticker = {}) {
+  const raw =
+    sticker?.doc_dt ??
+    sticker?.docdt ??
+    sticker?.Doc_Dt ??
+    sticker?.["Doc Dt"] ??
+    null;
+  if (raw == null || String(raw).trim() === "") return null;
+  return raw;
+}
+
+export function formatStickerPackingDate(sticker = {}) {
+  return formatDocDate(resolveStickerDocDt(sticker)) ?? "--";
+}
+
 const getLogoBase64 = () => {
   try {
     const logoPath = path.join(process.cwd(), "logo.png");
@@ -171,7 +218,7 @@ export const buildStickerCardHtml = async (sticker) => {
     qrUrl = "";
   }
 
-  const packingDate = sticker.created_at ? new Date(sticker.created_at).toLocaleDateString("en-GB") : "--";
+  const packingDate = formatStickerPackingDate(sticker);
 
   // Inline style helper: shrink font when text is long so it stays on one line
   const adaptiveFont = (text = "", baseSize = 22, minSize = 14) => {

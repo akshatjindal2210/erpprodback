@@ -496,15 +496,12 @@ export const applyAuditComparisonAdjustmentController = async (req, res) => {
       return res.status(access.status).json({ success: false, message: access.message });
     }
 
-    if (audit.status === "verified") {
-      return res.status(400).json({ success: false, message: "Audit is already completed" });
-    }
-
     const result = await withTransaction(async (client) =>
       applyAuditComparisonAdjustment(audit_id, {
         locationId: location_id,
         userId: req.user.id,
         client,
+        result_rejected: Boolean(req.body?.result_rejected ?? req.body?.rejected),
       })
     );
 
@@ -540,7 +537,10 @@ export const completeAuditLocationController = async (req, res) => {
     }
 
     const result = await withTransaction(async (client) =>
-      completeAuditLocation(audit_id, location_id, { client })
+      completeAuditLocation(audit_id, location_id, {
+        client,
+        result_rejected: Boolean(req.body?.result_rejected ?? req.body?.rejected),
+      })
     );
 
     await log(req, "complete_location", audit_id, { location_id, ...result }, audit);

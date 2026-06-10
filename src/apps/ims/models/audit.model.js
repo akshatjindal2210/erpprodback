@@ -52,6 +52,7 @@ const AUDIT_LOCATIONS_JSON = `
        al.reassigned_at,
        al.score_pct,
        al.score_at,
+       COALESCE(al.result_rejected, false) AS result_rejected,
        COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no,
        u_loc.name AS assigned_user_name,
        u_plan.name AS plan_assigned_user_name
@@ -453,6 +454,24 @@ export const countPendingAuditLocations = async (audit_id, { client = null } = {
   return row?.count ?? 0;
 };
 
+async function allActiveLocationsBoxMatched(audit_id, { client = null } = {}) {
+  const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const res = await run(
+    `SELECT expected_boxes, scanned_boxes
+     FROM ${T.AUDIT_LOCATIONS}
+     WHERE audit_id = $1 AND is_active = true`,
+    [audit_id]
+  );
+  const rows = client ? res.rows : res;
+  if (!rows?.length) return false;
+
+  for (const row of rows) {
+    const comparison = compareLocationBoxSets(row.expected_boxes, parseScannedBoxes(row.scanned_boxes));
+    if (!comparison.exact) return false;
+  }
+  return true;
+}
+
 export const syncAuditMasterStatus = async (audit_id, { client = null } = {}) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const res = await run(
@@ -464,14 +483,14 @@ export const syncAuditMasterStatus = async (audit_id, { client = null } = {}) =>
   if (!statuses.length) return null;
 
   const allClosed = statuses.every((s) => isLocationClosed(s));
-  const allMatched = statuses.every((s) => s === "completed");
-  const anyMismatch = statuses.some((s) => s === "mismatch");
+  const allCompleted = statuses.every((s) => s === "completed");
+  const inventoryMatched = allCompleted ? await allActiveLocationsBoxMatched(audit_id, { client }) : false;
 
   let nextStatus = "pending";
   if (statuses.some((s) => s === "draft")) nextStatus = "in_progress";
   else if (statuses.some((s) => s !== "pending")) nextStatus = "in_progress";
-  if (allClosed && allMatched) nextStatus = "verified";
-  else if (allClosed && anyMismatch) nextStatus = "submitted";
+  if (allClosed && allCompleted && inventoryMatched) nextStatus = "verified";
+  else if (allClosed) nextStatus = "submitted";
 
   await updateAudit({ status: nextStatus }, { audit_id }, { client });
   return nextStatus;
@@ -547,7 +566,7 @@ export const reopenAuditLocation = async (audit_id, location_id, { client = null
   const nextStatus = scanned.length > 0 ? "draft" : "pending";
 
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS} SET status = $3
+    `UPDATE ${T.AUDIT_LOCATIONS} SET status = $3, result_rejected = false
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id, nextStatus]
   );
@@ -781,6 +800,38 @@ export const saveLocationScorePct = async (
   return score_pct;
 };
 
+export const saveLocationResultRejected = async (
+  audit_id,
+  location_id,
+  result_rejected,
+  { assignment_id = null, client = null } = {}
+) => {
+  const auditId = Number(audit_id);
+  const locId = Number(location_id);
+  if (!Number.isFinite(auditId) || !Number.isFinite(locId)) {
+    throw new Error("Invalid audit_id or location_id");
+  }
+
+  const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const conditions = ["audit_id = $1", "location_id = $2"];
+  const values = [auditId, locId, Boolean(result_rejected)];
+
+  if (assignment_id != null) {
+    conditions.push(`assignment_id = $${values.length + 1}`);
+    values.push(assignment_id);
+  } else {
+    conditions.push("is_active = true");
+  }
+
+  await run(
+    `UPDATE ${T.AUDIT_LOCATIONS}
+     SET result_rejected = $3
+     WHERE ${conditions.join(" AND ")}`,
+    values
+  );
+  return Boolean(result_rejected);
+};
+
 function mapLocationScoreRow(row) {
   const breakdown = scoreBreakdownFromLocation(row);
   return {
@@ -933,6 +984,7 @@ export const getAuditComparisonReport = async (audit_id, { locationId = null } =
       location_id: locId,
       location_no: loc.location_no,
       location_status: loc.status,
+      result_rejected: Boolean(loc.result_rejected),
       system_count: systemSet.size,
       scanned_count: scannedSet.size,
       matched_scanned_count: matched_scanned_boxes.length,
@@ -994,7 +1046,7 @@ const inHandSql = sqlBoxInHand("b");
 /** Super-admin: align box_table with audit scans, log transactions, complete locations, verify audit. */
 export const applyAuditComparisonAdjustment = async (
   audit_id,
-  { locationId = null, userId = null, client = null } = {}
+  { locationId = null, userId = null, client = null, result_rejected = false } = {}
 ) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const audit = await findAudit({ audit_id });
@@ -1002,6 +1054,8 @@ export const applyAuditComparisonAdjustment = async (
 
   const report = await getAuditComparisonReport(audit_id, { locationId });
   if (!report?.locations?.length) throw new Error("No locations to adjust");
+
+  const { enrichOpts } = await buildAuditEnrichContext();
 
   const summary = {
     missing_boxes: 0,
@@ -1094,10 +1148,24 @@ export const applyAuditComparisonAdjustment = async (
       }
     }
 
+    const refreshedExpected = await fetchBoxSnapshotForLocation(locId, { client, enrichOpts });
+    const activeScans = parseScannedBoxes(auditLoc.scanned_boxes);
+    const postComparison = compareLocationBoxSets(refreshedExpected, activeScans);
+
     await run(
-      `UPDATE ${T.AUDIT_LOCATIONS} SET status = 'completed'
+      `UPDATE ${T.AUDIT_LOCATIONS}
+       SET status = 'completed',
+           result_rejected = $3,
+           expected_boxes = $4::jsonb
        WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
-      [audit_id, locId]
+      [audit_id, locId, Boolean(result_rejected), JSON.stringify(refreshedExpected)]
+    );
+
+    await recordLocationScoreFromComparison(
+      audit_id,
+      { ...auditLoc, location_id: locId },
+      postComparison,
+      { client, location_id: locId }
     );
 
     summary.locations_adjusted += 1;
@@ -1113,7 +1181,11 @@ export const applyAuditComparisonAdjustment = async (
 };
 
 /** Close location as Complete — status only, no box_table / inventory changes. */
-export const completeAuditLocation = async (audit_id, location_id, { client = null } = {}) => {
+export const completeAuditLocation = async (
+  audit_id,
+  location_id,
+  { client = null, result_rejected = false } = {}
+) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const locRes = await run(
     `SELECT expected_boxes, scanned_boxes, status, assignment_id, assigned_user_id, plan_assigned_user_id
@@ -1139,9 +1211,10 @@ export const completeAuditLocation = async (audit_id, location_id, { client = nu
   }
 
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS} SET status = 'completed'
+    `UPDATE ${T.AUDIT_LOCATIONS}
+     SET status = 'completed', result_rejected = $3
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
-    [audit_id, location_id]
+    [audit_id, location_id, Boolean(result_rejected)]
   );
 
   await recordLocationScoreFromComparison(audit_id, locRow, comparison, { client, location_id });
@@ -1151,6 +1224,7 @@ export const completeAuditLocation = async (audit_id, location_id, { client = nu
     location_status: "completed",
     audit_status: auditStatus,
     comparison,
+    result_rejected: Boolean(result_rejected),
     already_complete: false,
   };
 };

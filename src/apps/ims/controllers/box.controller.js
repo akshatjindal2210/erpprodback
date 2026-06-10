@@ -560,6 +560,7 @@ function mergeStickerPrintRow(enrichedBox, sticker_meta = {}, packingHint = null
     itemdesc: enrichedBox?.itemdesc || metaDesc || null,
     item_desc: enrichedBox?.item_desc || metaDesc || null,
     job_no: metaJob || enrichedBox?.job_no || null,
+    doc_dt: meta.doc_dt ?? meta.docdt ?? enrichedBox?.doc_dt ?? null,
     acc_name: metaAccName || enrichedBox?.acc_name || null,
     acc_code: meta.acc_code ?? enrichedBox?.acc_code ?? null,
     party_rate_cust_code: meta.party_rate_cust_code ?? enrichedBox?.party_rate_cust_code ?? null,
@@ -1062,8 +1063,6 @@ export const previewSticker = async (req, res) => {
     const boxNoUidPrefix = await getBoxNoUidPrefix();
     const box_no_uid = formatStandardBoxNoUid(doc_no, totalN, 1, boxNoUidPrefix);
 
-    const createdAt = doc_dt != null && doc_dt !== "" ? doc_dt : new Date().toISOString();
-
     const baseRow = {
       box_no_uid,
       packing_number: String(doc_no),
@@ -1072,7 +1071,8 @@ export const previewSticker = async (req, res) => {
       itemdcode,
       acc_code: acc_code || null,
       acc_name: acc_name || null,
-      created_at: createdAt,
+      doc_dt: doc_dt != null && doc_dt !== "" ? doc_dt : null,
+      created_at: new Date().toISOString(),
       job_no: job_card_no || null,
       unit: unit || "PCS",
     };

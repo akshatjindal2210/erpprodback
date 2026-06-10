@@ -358,7 +358,7 @@ export const findBoxesByPackingNumber = async (packing_number) => {
 export const findDailyProdByDocNo = async (doc_no) => {
   if (doc_no == null || String(doc_no).trim() === "") return null;
   const [row] = await dbQuery(
-    `SELECT acc_code, job_card_no, item_dcode AS itemdcode
+    `SELECT acc_code, job_card_no, item_dcode AS itemdcode, doc_dt
      FROM ims_dailyprod
      WHERE doc_no::text = trim($1::text)
      LIMIT 1`,
@@ -1681,6 +1681,7 @@ const FIND_BOX_DETAILED_SELECT = `
       NULL::text AS itemdesc,
       NULL::text AS acc_name,
       j.job_card_no AS job_no,
+      j.doc_dt,
       j.acc_code::text AS prod_acc_code,
       j.acc_code,
       COALESCE(j.item_dcode, sa_adj.item_dcode) AS itemdcode,
@@ -1758,6 +1759,7 @@ export const findBoxesDetailed = async ({ box_uids, packing_number }) => {
       b.*, 
       NULL::text AS item_code, NULL::text AS itemdesc, NULL::text AS acc_name,
       j.job_card_no as job_no,
+      j.doc_dt,
       j.acc_code::text AS prod_acc_code,
       j.acc_code,
       COALESCE(j.item_dcode, sa_adj.item_dcode) AS itemdcode,

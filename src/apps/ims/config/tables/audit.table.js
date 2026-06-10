@@ -1,4 +1,5 @@
 import dbQuery from "../../../../config/db.js";
+import { ensureColumns } from "../../../../config/ensureDbColumns.js";
 import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
 
 export async function createAuditTables() {
@@ -33,14 +34,18 @@ export async function createAuditTables() {
       is_active             BOOLEAN NOT NULL DEFAULT true,
       reassigned_at         TIMESTAMP,
       score_pct             NUMERIC(6, 2),
-      score_at              TIMESTAMP
+      score_at              TIMESTAMP,
+      result_rejected       BOOLEAN NOT NULL DEFAULT false
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_loc_one_active
       ON ${T.AUDIT_LOCATIONS} (audit_id, location_id)
       WHERE is_active = true;
-
-    ALTER TABLE ${T.AUDIT_LOCATIONS} ADD COLUMN IF NOT EXISTS score_pct NUMERIC(6, 2);
-    ALTER TABLE ${T.AUDIT_LOCATIONS} ADD COLUMN IF NOT EXISTS score_at TIMESTAMP;
   `);
+
+  await ensureColumns(dbQuery, T.AUDIT_LOCATIONS, [
+    { name: "score_pct", addSql: "score_pct NUMERIC(6, 2)" },
+    { name: "score_at", addSql: "score_at TIMESTAMP" },
+    { name: "result_rejected", addSql: "result_rejected BOOLEAN NOT NULL DEFAULT false" },
+  ]);
 }

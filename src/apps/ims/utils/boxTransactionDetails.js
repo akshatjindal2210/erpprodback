@@ -57,6 +57,17 @@ export function buildBoxLogDetails(rows = [], extra = {}) {
         ? qtys[0]
         : undefined;
 
+  const qtyByUid = new Map();
+  for (const r of list) {
+    const uid = r?.box_no_uid != null ? String(r.box_no_uid).trim() : "";
+    const q = Number(r?.qty);
+    if (uid && Number.isFinite(q)) qtyByUid.set(uid, q);
+  }
+  for (const e of box_sticker_entries) {
+    const q = qtyByUid.get(e.box_no_uid);
+    if (q != null && Number.isFinite(q)) e.qty = q;
+  }
+
   const resolvedQty =
     extra.total_qty != null && extra.total_qty !== ""
       ? Number(extra.total_qty)
@@ -223,10 +234,17 @@ export function buildBoxStickerEntriesFromLogDetails(detailsRaw, displayFallback
   }
   applyFlagsToLooseMap(looseByUid, pnUids, flags);
 
-  return uids.map((uid, i) => ({
-    box_no_uid: uid,
-    is_loose: inferLooseAtIndex(i, uids.length, d, looseByUid, uid, pnUids),
-  }));
+  return uids.map((uid, i) => {
+    const fromDetail = Array.isArray(d.box_sticker_entries)
+      ? d.box_sticker_entries.find((e) => String(e?.box_no_uid ?? "").trim() === uid)
+      : null;
+    const qty = Number(fromDetail?.qty);
+    return {
+      box_no_uid: uid,
+      is_loose: inferLooseAtIndex(i, uids.length, d, looseByUid, uid, pnUids),
+      ...(Number.isFinite(qty) ? { qty } : {}),
+    };
+  });
 }
 
 export function mergeStickerEntriesByUid(existing = [], incoming = []) {
@@ -235,25 +253,40 @@ export function mergeStickerEntriesByUid(existing = [], incoming = []) {
     const uid = String(e?.box_no_uid ?? "").trim();
     if (!uid) continue;
     const loose = e?.is_loose === true || e?.is_loose === 1 || e?.is_loose === "true";
-    if (!map.has(uid)) map.set(uid, { box_no_uid: uid, is_loose: loose });
-    else if (loose) map.set(uid, { box_no_uid: uid, is_loose: true });
+    const qty = Number(e?.qty);
+    const prev = map.get(uid);
+    if (!prev) {
+      map.set(uid, {
+        box_no_uid: uid,
+        is_loose: loose,
+        ...(Number.isFinite(qty) ? { qty } : {}),
+      });
+      continue;
+    }
+    if (loose) prev.is_loose = true;
+    if (Number.isFinite(qty)) prev.qty = qty;
   }
   return [...map.values()];
 }
 
-/** Fill missing sticker UIDs for bulk logs that only stored `box_uids` in JSON. */
+/** Fill missing sticker UIDs / per-box qty for bulk logs that only stored `box_uids` in JSON. */
 export async function hydrateTransactionBoxStickerEntries(row, findBoxesByUids) {
   const enriched = enrichTransactionBoxForList(row);
   const d = parseDetails(row?.details);
+  if (typeof findBoxesByUids !== "function") return enriched;
+
   const expected = Math.max(
     Number(enriched.box_count) || 0,
     Array.isArray(d.box_uids) ? d.box_uids.length : 0,
     normalizeBoxNoUidsField(d.box_no_uids).length
   );
   const have = enriched.box_sticker_entries?.length || 0;
-  if (!expected || have >= expected || typeof findBoxesByUids !== "function") {
-    return enriched;
-  }
+  const needsStickerFill = expected > 0 && have < expected;
+  const needsQtyFill = (enriched.box_sticker_entries || []).some(
+    (e) => !Number.isFinite(Number(e?.qty))
+  );
+
+  if (!needsStickerFill && !needsQtyFill) return enriched;
 
   const boxUids = (Array.isArray(d.box_uids) ? d.box_uids : [])
     .map((id) => Number(id))
@@ -267,6 +300,7 @@ export async function hydrateTransactionBoxStickerEntries(row, findBoxesByUids) 
     .map((b) => ({
       box_no_uid: String(b.box_no_uid).trim(),
       is_loose: isLooseRow(b),
+      qty: Number.isFinite(Number(b.qty)) ? Number(b.qty) : undefined,
     }));
 
   if (!fromDb.length) return enriched;

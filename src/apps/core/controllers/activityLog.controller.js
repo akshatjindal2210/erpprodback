@@ -2,10 +2,12 @@ import ActivityLog from "../models/activityLog.model.js";
 
 export const getActivityLogs = async (req, res) => {
   try {
-    const { app_type, module, action_type, page = 1, limit = 20, all_users, search, date_from, date_to, entity, entity_id } = req.query;
-    
-    // If not super admin, only show own logs unless specified otherwise
-    const user_id = (req.user.role === 'super_admin' && all_users === 'true') ? null : req.user.id;
+    const { app_type, module, action_type, page = 1, limit = 20, search, date_from, date_to, entity, entity_id } = req.query;
+
+    const userType = String(req.user?.type || req.user?.role || "").toLowerCase().trim();
+    const isSuperAdmin = userType === "super_admin";
+    // Super admin → sab users ke logs; baaki → sirf apne
+    const user_id = isSuperAdmin ? null : req.user.id;
 
     const logs = await ActivityLog.getAll({
       user_id,
