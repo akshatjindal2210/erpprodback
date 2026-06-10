@@ -1,11 +1,11 @@
-import { findAudits, findAudit, insertAudit, updateAudit, deleteAudit, appendAuditScannedBoxes, deleteAuditScan, evaluateAuditLocationProgress, syncAuditMasterStatus, getAuditComparisonReport, reopenAuditLocation, reassignAuditLocation } from "../models/audit.model.js";
+import { findAudits, findAudit, insertAudit, updateAudit, deleteAudit, appendAuditScannedBoxes, deleteAuditScan, evaluateAuditLocationProgress, syncAuditMasterStatus, getAuditComparisonReport, reopenAuditLocation, reassignAuditLocation, applyAuditComparisonAdjustment, completeAuditLocation, getAuditLocationScores } from "../models/audit.model.js";
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval.js";
 import { withTransaction } from "../../../config/db.js";
-import { canAccessAuditRecord, isWithinAuditDateRange } from "../utils/auditAccess.js";
+import { canAccessAuditRecord, filterAuditLocationsForUser, isWithinAuditDateRange } from "../utils/auditAccess.js";
 import { isLocationClosed } from "../utils/auditBoxSnapshot.js";
 
 const CFG = getCrudModuleConfig("audit");
@@ -68,7 +68,11 @@ export const getAudits = async (req, res) => {
       user: req.user
     });
 
-    return res.json({ success: true, ...result });
+    const data = (result.data || []).map((row) =>
+      filterAuditLocationsForUser(row, req.user, req.permission)
+    );
+
+    return res.json({ success: true, ...result, data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -86,7 +90,10 @@ export const getAuditById = async (req, res) => {
       return res.status(403).json({ success: false, message: "Access denied" });
     }
 
-    return res.json({ success: true, data });
+    return res.json({
+      success: true,
+      data: filterAuditLocationsForUser(data, req.user, req.permission),
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -471,26 +478,88 @@ export const reassignAuditLocationController = async (req, res) => {
   }
 };
 
-const ADJUSTMENT_TYPES = new Set(["not_scanned", "extra_scan"]);
-
-/** Log adjustment intent from comparison UI (no stock logic yet). */
-export const logAuditComparisonAdjustment = async (req, res) => {
+/** Apply audit comparison adjustments to box_table, log box transactions, complete location(s). */
+export const applyAuditComparisonAdjustmentController = async (req, res) => {
   try {
     const audit_id = Number(req.body?.audit_id ?? req.body?.id);
     const location_id = req.body?.location_id != null ? Number(req.body.location_id) : null;
-    const adjustment_type = String(req.body?.adjustment_type || "").trim();
-    const box_no_uids = Array.isArray(req.body?.box_no_uids)
-      ? [...new Set(req.body.box_no_uids.map((u) => String(u ?? "").trim()).filter(Boolean))]
-      : [];
 
     if (!Number.isFinite(audit_id)) {
       return res.status(400).json({ success: false, message: "audit_id required" });
     }
-    if (!ADJUSTMENT_TYPES.has(adjustment_type)) {
-      return res.status(400).json({
-        success: false,
-        message: "adjustment_type must be not_scanned or extra_scan",
-      });
+
+    const audit = await findAudit({ audit_id });
+    if (!audit) return res.status(404).json({ success: false, message: "Not found" });
+
+    const access = assertCanManageAudit(req, audit);
+    if (!access.ok) {
+      return res.status(access.status).json({ success: false, message: access.message });
+    }
+
+    if (audit.status === "verified") {
+      return res.status(400).json({ success: false, message: "Audit is already completed" });
+    }
+
+    const result = await withTransaction(async (client) =>
+      applyAuditComparisonAdjustment(audit_id, {
+        locationId: location_id,
+        userId: req.user.id,
+        client,
+      })
+    );
+
+    await log(req, "comparison_adjustment", audit_id, { location_id, ...result }, audit);
+
+    const message =
+      result.audit_status === "verified"
+        ? "Audit adjustment applied — audit completed"
+        : "Audit adjustment applied — location closed as Complete";
+
+    return res.json({ success: true, message, data: result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** Mark audit location Complete when scans match expected (no inventory adjustment). */
+export const completeAuditLocationController = async (req, res) => {
+  try {
+    const audit_id = Number(req.body?.audit_id);
+    const location_id = Number(req.body?.location_id);
+
+    if (!Number.isFinite(audit_id) || !Number.isFinite(location_id)) {
+      return res.status(400).json({ success: false, message: "audit_id and location_id required" });
+    }
+
+    const audit = await findAudit({ audit_id });
+    if (!audit) return res.status(404).json({ success: false, message: "Not found" });
+
+    const access = assertCanManageAudit(req, audit);
+    if (!access.ok) {
+      return res.status(access.status).json({ success: false, message: access.message });
+    }
+
+    const result = await withTransaction(async (client) =>
+      completeAuditLocation(audit_id, location_id, { client })
+    );
+
+    await log(req, "complete_location", audit_id, { location_id, ...result }, audit);
+
+    const message = result.already_complete
+      ? "Location is already Complete"
+      : "Location marked Complete (no inventory adjustment)";
+
+    return res.json({ success: true, message, data: result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const getAuditScoresController = async (req, res) => {
+  try {
+    const audit_id = Number(req.body?.audit_id ?? req.body?.id);
+    if (!Number.isFinite(audit_id)) {
+      return res.status(400).json({ success: false, message: "audit_id required" });
     }
 
     const audit = await findAudit({ audit_id });
@@ -499,25 +568,8 @@ export const logAuditComparisonAdjustment = async (req, res) => {
       return res.status(403).json({ success: false, message: "Access denied" });
     }
 
-    const payload = {
-      audit_id,
-      location_id,
-      adjustment_type,
-      box_count: box_no_uids.length,
-      box_no_uids,
-      triggered_by: req.user?.id ?? null,
-      triggered_at: new Date().toISOString(),
-    };
-
-    console.info("[audit-comparison-adjustment]", JSON.stringify(payload));
-
-    log(req, "comparison_adjustment_intent", audit_id, payload, audit);
-
-    return res.json({
-      success: true,
-      message: "Adjustment intent logged",
-      data: { audit_id, location_id, adjustment_type, box_count: box_no_uids.length },
-    });
+    const scores = await getAuditLocationScores(audit_id);
+    return res.json({ success: true, data: scores });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

@@ -1,4 +1,4 @@
-import { findForwardingNotes, findForwardingNote, insertForwardingNote, updateForwardingNotes, updateForwardingNoteBillNo, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters } from "../models/forwardingNote.model.js";
+import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertForwardingNote, updateForwardingNotes, updateForwardingNoteBillNo, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters } from "../models/forwardingNote.model.js";
 import { buildForwardingAvailableBoxes, sumBoxQty } from "../utils/forwardingAvailableStock.js";
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
@@ -127,8 +127,10 @@ export const getForwardingNoteItems = async (req, res) => {
 
 export const getForwardingNoteById = async (req, res) => {
   try {
-    const { fuid } = req.body;
-    if (!fuid) return res.status(400).json({ success: false, message: "fuid required" });
+    const fuid = parseForwardingFuid(req.body?.fuid ?? req.body?.id);
+    if (!fuid) {
+      return res.status(400).json({ success: false, message: "Valid fuid required" });
+    }
 
     const data = await findForwardingNote({ fuid });
     if (!data) return res.status(404).json({ success: false, message: "Not found" });

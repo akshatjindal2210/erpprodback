@@ -14,6 +14,18 @@ const ALLOWED_UPDATE_FIELDS = [
   "approved", "approved_by", "approved_at", "updated_by", "updated_at"
 ];
 
+/** Normalize forwarding note primary key from API / UI (fuid or id). */
+export function parseForwardingFuid(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "object") {
+    return parseForwardingFuid(value.fuid ?? value.id ?? null);
+  }
+  const s = String(value).trim();
+  if (!s || s === "-") return null;
+  const n = parseInt(s, 10);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 const queryRows = (result, client) => (client?.query ? result.rows : result);
 const firstQueryRow = (result, client) => queryRows(result, client)?.[0] ?? null;
 
@@ -151,16 +163,17 @@ export const findForwardingNotes = async (options = {}) => {
 };
 
 export const findForwardingNote = async (filters = {}) => {
-  const keys = Object.keys(filters);
-  if (!keys.length) return null;
+  const fuid = parseForwardingFuid(filters?.fuid ?? filters?.id);
+  if (!fuid) return null;
 
-  const values = [];
-  let i = 1;
-  const conditions = ["f.is_deleted = false"];
+  const values = [fuid];
+  let i = 2;
+  const conditions = ["f.is_deleted = false", "f.fuid = $1"];
 
-  for (const key of keys) {
-    if (key !== "fuid" && !ALLOWED_FILTER_FIELDS.includes(key)) continue;
-    values.push(filters[key]);
+  for (const [key, val] of Object.entries(filters || {})) {
+    if (key === "fuid" || key === "id") continue;
+    if (!ALLOWED_FILTER_FIELDS.includes(key) || val === undefined || val === null || val === "") continue;
+    values.push(val);
     conditions.push(`f.${key} = $${i++}`);
   }
 

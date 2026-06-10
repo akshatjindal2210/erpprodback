@@ -77,6 +77,16 @@ export function sqlBoxCustomerCode(boxAlias = "b", dpAlias = "dp") {
   return `COALESCE(NULLIF(TRIM(${boxAlias}.override_cust::text), ''), NULLIF(TRIM(${dpAlias}.acc_code::text), ''), '-')`;
 }
 
+/** Customer code for audit / SA boxes — stock adjustment acc_code before dailyprod. */
+export function sqlBoxCustomerCodeWithSa(boxAlias = "b", saAlias = "sa", dpAlias = "dp") {
+  return `COALESCE(
+    NULLIF(NULLIF(TRIM(${boxAlias}.override_cust::text), ''), '-'),
+    NULLIF(NULLIF(TRIM(${saAlias}.acc_code::text), ''), '-'),
+    NULLIF(NULLIF(TRIM(${dpAlias}.acc_code::text), ''), '-'),
+    '-'
+  )`;
+}
+
 /** Customer code — inventory report / box_agg grouping (no dash fallback). */
 export function sqlBoxCustomerCodeReport(boxAlias = "b", dpAlias = "dp") {
   return `COALESCE(NULLIF(TRIM(${boxAlias}.override_cust::text), ''), NULLIF(TRIM(${dpAlias}.acc_code::text), ''))`;

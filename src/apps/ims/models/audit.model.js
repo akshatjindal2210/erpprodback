@@ -1,19 +1,9 @@
 import dbQuery from "../../../config/db.js";
 import { MST_TABLES as M, IMS_TABLES as T } from "../../../config/dbTables.js";
+import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
 import { sqlBoxInHand } from "../utils/boxInventorySql.js";
-import {
-  fetchBoxSnapshotForLocation,
-  fetchBoxDetailsByUids,
-  flattenScansFromLocations,
-  mergeScannedBoxes,
-  removeScannedBox,
-  parseExpectedBoxes,
-  parseScannedBoxes,
-  compareLocationBoxSets,
-  resolveLocationStatusAfterScan,
-  isLocationClosed,
-  isLocationPending,
-} from "../utils/auditBoxSnapshot.js";
+import { logBoxTransaction, singlePackingFromRows } from "../utils/logBoxTransaction.js";
+import { fetchBoxSnapshotForLocation, fetchBoxDetailsByUids, flattenScansFromLocations, mergeScannedBoxes, removeScannedBox, parseExpectedBoxes, parseScannedBoxes, compareLocationBoxSets, resolveLocationStatusAfterScan, isLocationClosed, isLocationPending, resolveBoxAccName, resolveAuditBoxAccName, pickAuditAccCode, enrichAuditBoxRows, buildAuditEnrichContext } from "../utils/auditBoxSnapshot.js";
 
 const ALLOWED_FILTER_FIELDS = ["audit_id", "status", "approved", "from_date", "to_date"];
 const ALLOWED_SORT_FIELDS = ["audit_id", "start_date", "end_date", "status", "created_at"];
@@ -60,6 +50,8 @@ const AUDIT_LOCATIONS_JSON = `
        al.scanned_boxes,
        al.is_active,
        al.reassigned_at,
+       al.score_pct,
+       al.score_at,
        COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no,
        u_loc.name AS assigned_user_name,
        u_plan.name AS plan_assigned_user_name
@@ -512,6 +504,19 @@ export const evaluateAuditLocationProgress = async (
 
   const auditStatus = await syncAuditMasterStatus(audit_id, { client });
 
+  if (isLocationClosed(nextStatus)) {
+    const locMetaRes = await run(
+      `SELECT location_id, assignment_id, assigned_user_id, plan_assigned_user_id, expected_boxes, scanned_boxes
+       FROM ${T.AUDIT_LOCATIONS}
+       WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
+      [audit_id, location_id]
+    );
+    const locMeta = client ? locMetaRes.rows[0] : locMetaRes[0];
+    if (locMeta) {
+      await recordLocationScoreFromComparison(audit_id, locMeta, comparison, { client });
+    }
+  }
+
   return {
     location_status: nextStatus,
     audit_status: auditStatus,
@@ -675,26 +680,188 @@ export const deleteAuditScan = async (audit_id, location_id, box_no_uid, { clien
 
 const normalizeBoxUid = (uid) => String(uid || "").trim().toUpperCase();
 
-function formatBoxCustomer(detail) {
+function formatBoxCustomer(detail, enrichCtx = null) {
   if (!detail) return "—";
-  return detail.acc_name || detail.acc_code || detail.override_cust || "—";
+  const name =
+    detail.acc_name ||
+    (enrichCtx ? resolveAuditBoxAccName(detail, enrichCtx) : null) ||
+    resolveBoxAccName(detail);
+  if (name && String(name).trim() !== "" && name !== "-") return String(name).trim();
+  const code = pickAuditAccCode(detail);
+  return code || "—";
 }
 
 function formatBoxItem(detail) {
   if (!detail) return "—";
-  return detail.item_dcode || detail.item_code || "—";
+  return detail.item_code || "—";
 }
 
-function buildBoxReportRow(uid, detail, auditLocationNo, differenceType) {
+async function enrichExpectedBoxDetails(boxes = [], enrichOpts = null) {
+  if (!Array.isArray(boxes) || !boxes.length) return boxes;
+  return enrichAuditBoxRows(boxes, enrichOpts);
+}
+
+function buildBoxReportRow(uid, detail, auditLocationNo, differenceType, enrichCtx = null) {
   return {
     difference_type: differenceType,
     box_no_uid: uid,
     packing_number: detail?.packing_number ?? "—",
-    customer: formatBoxCustomer(detail),
-    item: formatBoxItem(detail),
+    acc_name: formatBoxCustomer(detail, enrichCtx),
+    item_code: formatBoxItem(detail),
     qty: detail?.qty ?? "—",
     location_no: detail?.location_no || auditLocationNo || "—",
+    expected: differenceType === "not_scanned" || differenceType === "matched_scan",
+    scanned: differenceType === "extra_scan" || differenceType === "matched_scan",
   };
+}
+
+/**
+ * Score % = (matched − extra) ÷ expected × 100, floor 0.
+ * Missing lowers matched; each extra scan also deducts 1 point per expected box.
+ */
+export function computeLocationScorePct(expectedCount, matchedCount, extraCount = 0) {
+  const expected = Number(expectedCount) || 0;
+  const matched = Number(matchedCount) || 0;
+  const extra = Number(extraCount) || 0;
+  const net = Math.max(0, matched - extra);
+  if (expected <= 0) return net > 0 ? 0 : 100;
+  return Math.round((net / expected) * 10000) / 100;
+}
+
+export function scoreBreakdownFromComparison(comparison) {
+  const expected = Number(comparison?.expected_count) || 0;
+  const scanned = Number(comparison?.scanned_count) || 0;
+  const missingCount = Array.isArray(comparison?.missing) ? comparison.missing.length : 0;
+  const extraCount = Array.isArray(comparison?.extra) ? comparison.extra.length : 0;
+  const matched = Math.max(0, expected - missingCount);
+  return {
+    expected_count: expected,
+    scanned_count: scanned,
+    matched_count: matched,
+    extra_count: extraCount,
+    score_pct: computeLocationScorePct(expected, matched, extraCount),
+  };
+}
+
+export function scoreBreakdownFromLocation(loc) {
+  const comparison = compareLocationBoxSets(loc?.expected_boxes, loc?.scanned_boxes);
+  return scoreBreakdownFromComparison(comparison);
+}
+
+export const saveLocationScorePct = async (
+  audit_id,
+  location_id,
+  score_pct,
+  { assignment_id = null, client = null } = {}
+) => {
+  const auditId = Number(audit_id);
+  const locId = Number(location_id);
+  if (!Number.isFinite(auditId) || !Number.isFinite(locId)) {
+    throw new Error("Invalid audit_id or location_id");
+  }
+
+  const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const conditions = ["audit_id = $1", "location_id = $2"];
+  const values = [auditId, locId, score_pct];
+
+  if (assignment_id != null) {
+    conditions.push(`assignment_id = $${values.length + 1}`);
+    values.push(assignment_id);
+  } else {
+    conditions.push("is_active = true");
+  }
+
+  await run(
+    `UPDATE ${T.AUDIT_LOCATIONS}
+     SET score_pct = $3,
+         score_at = NOW()
+     WHERE ${conditions.join(" AND ")}`,
+    values
+  );
+  return score_pct;
+};
+
+function mapLocationScoreRow(row) {
+  const breakdown = scoreBreakdownFromLocation(row);
+  return {
+    assignment_id: row.assignment_id,
+    audit_id: row.audit_id,
+    location_id: row.location_id,
+    assigned_user_id: row.score_user_id ?? row.assigned_user_id,
+    assigned_user_name: row.assigned_user_name,
+    location_no: row.location_no,
+    score_at: row.score_at,
+    ...breakdown,
+  };
+}
+
+export const getAuditLocationScores = async (audit_id, { client = null } = {}) => {
+  const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const res = await run(
+    `SELECT
+       al.assignment_id,
+       al.audit_id,
+       al.location_id,
+       al.assigned_user_id,
+       al.expected_boxes,
+       al.scanned_boxes,
+       COALESCE(al.plan_assigned_user_id, al.assigned_user_id) AS score_user_id,
+       al.score_pct,
+       al.score_at,
+       COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no,
+       COALESCE(u_plan.name, u_loc.name) AS assigned_user_name
+     FROM ${T.AUDIT_LOCATIONS} al
+     JOIN ${T.LOCATION_MASTER} lm ON al.location_id = lm.location_id
+     LEFT JOIN ${M.USERS} u_loc ON al.assigned_user_id = u_loc.id
+     LEFT JOIN ${M.USERS} u_plan ON al.plan_assigned_user_id = u_plan.id
+     WHERE al.audit_id = $1
+       AND al.is_active = true
+       AND al.score_at IS NOT NULL
+     ORDER BY location_no ASC, al.assignment_id ASC`,
+    [audit_id]
+  );
+  const rows = client ? res.rows : res;
+  const location_scores = (rows || []).map(mapLocationScoreRow);
+
+  const byUser = new Map();
+  for (const row of location_scores) {
+    const userId = row.assigned_user_id != null ? Number(row.assigned_user_id) : 0;
+    if (!byUser.has(userId)) {
+      byUser.set(userId, {
+        assigned_user_id: row.assigned_user_id,
+        assigned_user_name: row.assigned_user_name || (userId ? `User #${userId}` : "—"),
+        expected_count: 0,
+        scanned_count: 0,
+        matched_count: 0,
+        extra_count: 0,
+        location_count: 0,
+      });
+    }
+    const agg = byUser.get(userId);
+    agg.expected_count += Number(row.expected_count) || 0;
+    agg.scanned_count += Number(row.scanned_count) || 0;
+    agg.matched_count += Number(row.matched_count) || 0;
+    agg.extra_count += Number(row.extra_count) || 0;
+    agg.location_count += 1;
+  }
+
+  const user_scores = [...byUser.values()].map((agg) => ({
+    ...agg,
+    score_pct: computeLocationScorePct(agg.expected_count, agg.matched_count, agg.extra_count),
+  }));
+
+  return { location_scores, user_scores };
+};
+
+async function recordLocationScoreFromComparison(audit_id, loc, comparison, { client = null, location_id = null } = {}) {
+  if (!loc || !comparison) return null;
+  const locId = Number(loc.location_id ?? location_id);
+  if (!Number.isFinite(locId)) return null;
+  const { score_pct } = scoreBreakdownFromComparison(comparison);
+  return saveLocationScorePct(audit_id, locId, score_pct, {
+    assignment_id: loc.assignment_id ?? null,
+    client,
+  });
 }
 
 const buildDifferenceRow = buildBoxReportRow;
@@ -705,13 +872,14 @@ export const getAuditComparisonReport = async (audit_id, { locationId = null } =
 
   const locations = [];
   const allDifferenceRows = [];
+  const { enrichOpts, enrichCtx } = await buildAuditEnrichContext();
 
   for (const loc of audit.locations || []) {
     if (loc.is_active === false) continue;
     const locId = Number(loc.location_id);
     if (locationId != null && locId !== Number(locationId)) continue;
 
-    const expectedBoxes = parseExpectedBoxes(loc.expected_boxes);
+    const expectedBoxes = await enrichExpectedBoxDetails(parseExpectedBoxes(loc.expected_boxes), enrichOpts);
     const expectedByUid = new Map(
       expectedBoxes.map((b) => [normalizeBoxUid(b.box_no_uid), b]).filter(([uid]) => uid)
     );
@@ -741,18 +909,19 @@ export const getAuditComparisonReport = async (audit_id, { locationId = null } =
     const matched = missing_boxes.length === 0 && extra_boxes.length === 0;
 
     const lookupUids = [...new Set([...missing_boxes, ...extra_boxes, ...matched_scanned_boxes])];
-    const fetchedDetails = await fetchBoxDetailsByUids(lookupUids);
+    const fetchedDetails = await fetchBoxDetailsByUids(lookupUids, { enrichOpts });
 
-    const resolveDetail = (uid) => expectedByUid.get(uid) || fetchedDetails.get(uid) || null;
+    // Prefer live box_table + SA join over frozen expected_boxes (old snapshots lack acc_name).
+    const resolveDetail = (uid) => fetchedDetails.get(uid) ?? expectedByUid.get(uid) ?? null;
 
     const not_scanned_rows = missing_boxes.map((uid) =>
-      buildBoxReportRow(uid, resolveDetail(uid), loc.location_no, "not_scanned")
+      buildBoxReportRow(uid, resolveDetail(uid), loc.location_no, "not_scanned", enrichCtx)
     );
     const extra_scan_rows = extra_boxes.map((uid) =>
-      buildBoxReportRow(uid, resolveDetail(uid), loc.location_no, "extra_scan")
+      buildBoxReportRow(uid, resolveDetail(uid), loc.location_no, "extra_scan", enrichCtx)
     );
     const matched_rows = matched_scanned_boxes.map((uid) =>
-      buildBoxReportRow(uid, resolveDetail(uid), loc.location_no, "matched_scan")
+      buildBoxReportRow(uid, resolveDetail(uid), loc.location_no, "matched_scan", enrichCtx)
     );
     const difference_rows = [...not_scanned_rows, ...extra_scan_rows];
 
@@ -789,10 +958,13 @@ export const getAuditComparisonReport = async (audit_id, { locationId = null } =
   const totalExtra = locations.reduce((n, l) => n + (l.extra_scan_count || 0), 0);
   const totalMatched = locations.reduce((n, l) => n + (l.matched_scanned_count || 0), 0);
 
+  const scores = await getAuditLocationScores(audit_id);
+
   return {
     audit_id: audit.audit_id,
     status: audit.status,
     locations,
+    scores,
     difference_rows: allDifferenceRows,
     matched_rows: locations.flatMap((l) =>
       (l.matched_rows || []).map((row) => ({ ...row, location_id: l.location_id, audit_location_no: l.location_no }))
@@ -814,5 +986,171 @@ export const getAuditComparisonReport = async (audit_id, { locationId = null } =
       total_expected: locations.reduce((n, l) => n + (l.system_count || 0), 0),
       total_scanned: locations.reduce((n, l) => n + (l.scanned_count || 0), 0),
     },
+  };
+};
+
+const inHandSql = sqlBoxInHand("b");
+
+/** Super-admin: align box_table with audit scans, log transactions, complete locations, verify audit. */
+export const applyAuditComparisonAdjustment = async (
+  audit_id,
+  { locationId = null, userId = null, client = null } = {}
+) => {
+  const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const audit = await findAudit({ audit_id });
+  if (!audit) throw new Error("Audit not found");
+
+  const report = await getAuditComparisonReport(audit_id, { locationId });
+  if (!report?.locations?.length) throw new Error("No locations to adjust");
+
+  const summary = {
+    missing_boxes: 0,
+    extra_boxes: 0,
+    locations_adjusted: 0,
+  };
+
+  for (const loc of report.locations) {
+    const locId = Number(loc.location_id);
+    const missing = loc.missing_boxes || [];
+    const extra = loc.extra_boxes || [];
+    if (!missing.length && !extra.length) continue;
+
+    const auditLocRes = await run(
+      `SELECT assignment_id, assigned_user_id, plan_assigned_user_id, expected_boxes, scanned_boxes
+       FROM ${T.AUDIT_LOCATIONS}
+       WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
+      [audit_id, locId]
+    );
+    const auditLoc = client ? auditLocRes.rows[0] : auditLocRes[0];
+    if (!auditLoc) continue;
+
+    if (missing.length) {
+      const removeRes = await run(
+        `UPDATE ${T.BOX_TABLE} b
+         SET location_id = NULL,
+             updated_by = $3,
+             updated_at = NOW()
+         WHERE b.location_id = $1
+           AND TRIM(UPPER(b.box_no_uid::text)) = ANY($2::text[])
+           AND b.is_deleted = false
+           AND ${inHandSql}
+         RETURNING b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose, b.location_id`,
+        [locId, missing.map((u) => normalizeBoxUid(u)), userId]
+      );
+      const removed = client ? removeRes.rows : removeRes;
+      if (removed?.length) {
+        summary.missing_boxes += removed.length;
+        await logBoxTransaction({
+          client,
+          transaction_type: BOX_TX_TYPES.AUDIT_MISSING,
+          source_module: "audit",
+          source_id: String(audit_id),
+          packing_number: singlePackingFromRows(removed),
+          user_id: userId,
+          rows: removed,
+          details: {
+            audit_id,
+            location_id: locId,
+            difference_type: "missing",
+            reason: "Audit missing — box removed from location after adjustment",
+            box_count: removed.length,
+          },
+        });
+      }
+    }
+
+    if (extra.length) {
+      const extraUids = extra.map((u) => normalizeBoxUid(u));
+      const extraRes = await run(
+        `UPDATE ${T.BOX_TABLE} b
+         SET location_id = $1,
+             updated_by = $2,
+             updated_at = NOW()
+         WHERE TRIM(UPPER(b.box_no_uid::text)) = ANY($3::text[])
+           AND b.is_deleted = false
+           AND ${inHandSql}
+         RETURNING b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose, b.location_id`,
+        [locId, userId, extraUids]
+      );
+      const extraRows = client ? extraRes.rows : extraRes;
+      if (extraRows?.length) {
+        summary.extra_boxes += extraRows.length;
+        await logBoxTransaction({
+          client,
+          transaction_type: BOX_TX_TYPES.AUDIT_EXTRA,
+          source_module: "audit",
+          source_id: String(audit_id),
+          packing_number: singlePackingFromRows(extraRows),
+          user_id: userId,
+          rows: extraRows,
+          details: {
+            audit_id,
+            location_id: locId,
+            difference_type: "extra",
+            reason: "Audit extra — box assigned to audit location after adjustment",
+            box_count: extraRows.length,
+          },
+        });
+      }
+    }
+
+    await run(
+      `UPDATE ${T.AUDIT_LOCATIONS} SET status = 'completed'
+       WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
+      [audit_id, locId]
+    );
+
+    summary.locations_adjusted += 1;
+  }
+
+  if (!summary.locations_adjusted) {
+    throw new Error("No mismatched locations to adjust");
+  }
+
+  summary.audit_status = await syncAuditMasterStatus(audit_id, { client });
+
+  return summary;
+};
+
+/** Close location as Complete — status only, no box_table / inventory changes. */
+export const completeAuditLocation = async (audit_id, location_id, { client = null } = {}) => {
+  const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const locRes = await run(
+    `SELECT expected_boxes, scanned_boxes, status, assignment_id, assigned_user_id, plan_assigned_user_id
+     FROM ${T.AUDIT_LOCATIONS}
+     WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
+    [audit_id, location_id]
+  );
+  const locRow = client ? locRes.rows[0] : locRes[0];
+  if (!locRow) throw new Error("Audit location not found");
+
+  const activeScans = parseScannedBoxes(locRow.scanned_boxes);
+  const comparison = compareLocationBoxSets(locRow.expected_boxes, activeScans);
+
+  const currentStatus = String(locRow.status || "").trim().toLowerCase();
+  if (currentStatus === "completed") {
+    const auditStatus = await syncAuditMasterStatus(audit_id, { client });
+    return {
+      location_status: "completed",
+      audit_status: auditStatus,
+      comparison,
+      already_complete: true,
+    };
+  }
+
+  await run(
+    `UPDATE ${T.AUDIT_LOCATIONS} SET status = 'completed'
+     WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
+    [audit_id, location_id]
+  );
+
+  await recordLocationScoreFromComparison(audit_id, locRow, comparison, { client, location_id });
+  const auditStatus = await syncAuditMasterStatus(audit_id, { client });
+
+  return {
+    location_status: "completed",
+    audit_status: auditStatus,
+    comparison,
+    already_complete: false,
   };
 };

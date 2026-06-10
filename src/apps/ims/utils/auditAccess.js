@@ -39,3 +39,17 @@ export function canAccessAuditRecord(audit, user, permission = {}) {
   if (Number(audit.created_by) === Number(user?.id)) return true;
   return canAssignedWorkerAccessAudit(audit, user?.id);
 }
+
+/** Creator / managers see location rows before audit is activated; assigned workers do not. */
+export function canSeeInactiveAuditLocations(audit, user, permission = {}) {
+  if (!audit || audit.approved) return true;
+  if (user?.type === "super_admin") return true;
+  if (permission.can_edit || permission.can_authorize) return true;
+  return Number(audit.created_by) === Number(user?.id);
+}
+
+export function filterAuditLocationsForUser(audit, user, permission = {}) {
+  if (!audit) return audit;
+  if (canSeeInactiveAuditLocations(audit, user, permission)) return audit;
+  return { ...audit, locations: [] };
+}

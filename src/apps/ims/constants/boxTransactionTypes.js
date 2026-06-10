@@ -14,6 +14,8 @@ export const BOX_TX_TYPES = {
   SA_QTY_UPDATE: "sa_qty_update",
   BOX_SOFT_DELETE: "box_soft_delete",
   OVERRIDE_CUSTOMER: "override_customer",
+  AUDIT_MISSING: "audit_missing",
+  AUDIT_EXTRA: "audit_extra",
 };
 
 /** Simple Add / Remove labels for the logs UI (Out dispatch unchanged). */
@@ -32,4 +34,6 @@ export const BOX_TX_TYPE_LABELS = {
   [BOX_TX_TYPES.SA_QTY_UPDATE]: "Adjustment — Qty change",
   [BOX_TX_TYPES.BOX_SOFT_DELETE]: "Box — Remove",
   [BOX_TX_TYPES.OVERRIDE_CUSTOMER]: "Customer override",
+  [BOX_TX_TYPES.AUDIT_MISSING]: "Audit — Missing",
+  [BOX_TX_TYPES.AUDIT_EXTRA]: "Audit — Extra",
 };

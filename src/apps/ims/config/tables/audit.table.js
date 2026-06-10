@@ -31,11 +31,16 @@ export async function createAuditTables() {
       expected_boxes        JSONB NOT NULL DEFAULT '[]'::jsonb,
       scanned_boxes         JSONB NOT NULL DEFAULT '[]'::jsonb,
       is_active             BOOLEAN NOT NULL DEFAULT true,
-      reassigned_at         TIMESTAMP
+      reassigned_at         TIMESTAMP,
+      score_pct             NUMERIC(6, 2),
+      score_at              TIMESTAMP
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_loc_one_active
       ON ${T.AUDIT_LOCATIONS} (audit_id, location_id)
       WHERE is_active = true;
+
+    ALTER TABLE ${T.AUDIT_LOCATIONS} ADD COLUMN IF NOT EXISTS score_pct NUMERIC(6, 2);
+    ALTER TABLE ${T.AUDIT_LOCATIONS} ADD COLUMN IF NOT EXISTS score_at TIMESTAMP;
   `);
 }
