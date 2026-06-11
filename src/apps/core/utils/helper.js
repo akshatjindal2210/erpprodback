@@ -405,6 +405,27 @@ const fmtBillShortDate = (d) => {
   }
 };
 
+/** Split comma-separated bill_no into deduped list. */
+const parseBillNoList = (raw) => {
+  if (raw == null || String(raw).trim() === "") return [];
+  const seen = new Set();
+  const out = [];
+  for (const part of String(raw).split(/,\s*/)) {
+    const bill = part.trim();
+    if (!bill || seen.has(bill)) continue;
+    seen.add(bill);
+    out.push(bill);
+  }
+  return out;
+};
+
+/** Print HTML — one bill number per line (matches handwritten FN layout). */
+const formatBillNosPrintHtml = (raw) => {
+  const list = parseBillNoList(raw);
+  if (!list.length) return "";
+  return list.map((bill) => escapeHtml(bill)).join("<br>");
+};
+
 /**
  * Print-ready forwarding note — layout aligned with classic handwritten FN
  * (company header, FORWARDING NOTE title, S.No./Date/Customer, 6-column grid, dotted footer).
@@ -463,7 +484,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
   const docDateShort = fmtBillShortDate(note.timestamp || note.created_at);
   const challanNo = String(note.fuid ?? "");
   const partyName = escapeHtml(note.acc_name || "—");
-  const billNo = escapeHtml(note.bill_no || "—");
+  const billNoHtml = formatBillNosPrintHtml(note.bill_no);
   const transport = escapeHtml(note.transporter_name || "");
   const transportId = escapeHtml(note.transporter_id || "");
   const vehicle = escapeHtml(note.vehicle_number || "");
@@ -651,6 +672,11 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
       overflow: visible;
       text-align: left;
     }
+    .fn-bill-stack {
+      line-height: 1.35;
+      white-space: normal;
+      min-height: 1.35em;
+    }
     .fn-remarks {
       margin-top: 2mm;
       font-size: 9.5pt;
@@ -727,7 +753,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
             </tr>
             <tr>
               <td class="fn-fg-lbl">Bill No.</td>
-              <td class="fn-fg-cell"><span class="fn-under">${billNo !== "—" ? billNo : "&#160;"}</span></td>
+              <td class="fn-fg-cell"><span class="fn-under fn-bill-stack">${billNoHtml || "&#160;"}</span></td>
               <td class="fn-fg-lbl">Bill Made by</td>
               <td class="fn-fg-cell"><span class="fn-under">&#160;</span></td>
             </tr>

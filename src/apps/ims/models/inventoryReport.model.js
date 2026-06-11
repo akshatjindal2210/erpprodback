@@ -436,10 +436,13 @@ export async function findInventoryReportFiltered(options = {}) {
     order = "DESC",
     filters = {},
     includeTotals = true,
+    fetchAll = false,
   } = options;
 
   const safePage = Math.max(1, Number(page) || 1);
-  const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 500));
+  const safeLimit = fetchAll
+    ? Math.min(50000, Math.max(1, Number(limit) || 50000))
+    : Math.min(1000, Math.max(1, Number(limit) || 500));
   const offset = (safePage - 1) * safeLimit;
 
   const { values, baseCteSql, locationParamIndex } = buildBaseCte({ filters, search });

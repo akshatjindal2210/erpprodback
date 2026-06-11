@@ -287,7 +287,8 @@ export const getInventoryReport = async (req, res) => {
       order: "DESC",
     });
 
-    const includeTotals = req.body?.includeTotals !== false && page === 1;
+    const fetchAll = req.body?.fetchAll === true;
+    const includeTotals = req.body?.includeTotals !== false && (page === 1 || fetchAll);
 
     const result = await findInventoryReportFiltered({
       search: sanitizeSearch(search),
@@ -297,6 +298,7 @@ export const getInventoryReport = async (req, res) => {
       order,
       filters,
       includeTotals,
+      fetchAll,
     });
 
     const enrichedRows = await enrichInventoryRows(result.data || []);

@@ -1,4 +1,5 @@
 import dbQuery from "../../../../config/db.js";
+import { patchTableSchema } from "../../../../config/ensureDbColumns.js";
 import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
 
 export async function createForwardingNoteMasterTable() {
@@ -14,7 +15,7 @@ export async function createForwardingNoteMasterTable() {
       vehicle_number        VARCHAR(50),
       cartage               NUMERIC,
       total_items           INTEGER,
-      bill_no               VARCHAR(50),
+      bill_no               TEXT,
       bill_updated_by       INTEGER REFERENCES ${C.USERS}(id),
       bill_updated_at       TIMESTAMP,
       out_entry_locked      BOOLEAN DEFAULT false,
@@ -32,4 +33,8 @@ export async function createForwardingNoteMasterTable() {
       updated_at            TIMESTAMP
     );
   `);
+
+  await patchTableSchema(dbQuery, T.FORWARDING_NOTE_MASTER, {
+    columnTypes: [{ name: "bill_no", type: "text" }],
+  });
 }

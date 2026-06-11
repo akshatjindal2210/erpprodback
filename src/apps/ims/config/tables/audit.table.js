@@ -1,5 +1,5 @@
 import dbQuery from "../../../../config/db.js";
-import { ensureColumns } from "../../../../config/ensureDbColumns.js";
+import { patchTableSchema } from "../../../../config/ensureDbColumns.js";
 import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
 
 export async function createAuditTables() {
@@ -43,9 +43,11 @@ export async function createAuditTables() {
       WHERE is_active = true;
   `);
 
-  await ensureColumns(dbQuery, T.AUDIT_LOCATIONS, [
-    { name: "score_pct", addSql: "score_pct NUMERIC(6, 2)" },
-    { name: "score_at", addSql: "score_at TIMESTAMP" },
-    { name: "result_rejected", addSql: "result_rejected BOOLEAN NOT NULL DEFAULT false" },
-  ]);
+  await patchTableSchema(dbQuery, T.AUDIT_LOCATIONS, {
+    columns: [
+      { name: "score_pct", addSql: "score_pct NUMERIC(6, 2)" },
+      { name: "score_at", addSql: "score_at TIMESTAMP" },
+      { name: "result_rejected", addSql: "result_rejected BOOLEAN NOT NULL DEFAULT false" },
+    ],
+  });
 }

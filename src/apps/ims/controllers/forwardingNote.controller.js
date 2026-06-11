@@ -7,6 +7,7 @@ import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval
 import { insertForwardingNoteItem, deleteForwardingNoteItems, findForwardingNoteItems } from "../models/forwardingNoteItem.model.js";
 import { sanitizeSearch, buildForwardingNoteBillDocument } from "../../core/utils/helper.js";
 import { enrichRowsWithIMS } from "../utils/imsLookup.js";
+import { fetchFromIMS } from "../services/ims.service.js";
 
 const FORWARDING_CFG = getCrudModuleConfig("forwarding_note_master");
 const FORWARDING_ITEM_CFG = getCrudModuleConfig("forwarding_note_item_wise");
@@ -502,6 +503,49 @@ export const getForwardingNoteTransportersViews = async (req, res) => {
         last_used_at: r.last_used_at,
       })),
     });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+function normalizeImsBillNo(record) {
+  const raw =
+    record?.prnbillno ??
+    record?.PrnBillNo ??
+    record?.bill_no ??
+    record?.billno ??
+    "";
+  return String(raw ?? "").trim();
+}
+
+/** Live bill numbers from IMS (`requestedData: "billno"`). */
+export const getForwardingNoteBillNumbersViews = async (req, res) => {
+  try {
+    const search = String(req.body?.search ?? "").trim().toLowerCase();
+    const page = Math.max(1, Number(req.body?.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.body?.limit) || 50));
+
+    const records = await fetchFromIMS("billno");
+    const seen = new Set();
+    const rows = [];
+
+    for (const rec of records) {
+      const billNo = normalizeImsBillNo(rec);
+      if (!billNo || seen.has(billNo)) continue;
+      seen.add(billNo);
+      if (search && !billNo.toLowerCase().includes(search)) continue;
+      rows.push({ id: billNo, bill_no: billNo });
+    }
+
+    rows.sort((a, b) =>
+      String(a.bill_no).localeCompare(String(b.bill_no), undefined, { sensitivity: "base" })
+    );
+
+    const total = rows.length;
+    const start = (page - 1) * limit;
+    const data = rows.slice(start, start + limit);
+
+    res.json({ success: true, data, total });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
