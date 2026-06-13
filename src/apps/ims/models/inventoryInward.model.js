@@ -423,7 +423,7 @@ export const findPackingAreaBoxes = async (options = {}) => {
   const conditions = [...PACKING_AREA_BOX_WHERE("b")];
   const pnExpr = sqlBoxPackingNumber("b");
   const itemExpr = sqlBoxItemDcodeReport("sa", "dp");
-  const custExpr = sqlBoxCustomerCodeReport("b", "dp");
+  const custExpr = sqlBoxCustomerCodeReport("b", "sa", "dp");
   const dpJoin = sqlDailyprodLateralForBox("b", "sa", pnExpr);
 
   if (packing_number) {

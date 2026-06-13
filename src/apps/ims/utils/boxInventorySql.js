@@ -88,8 +88,12 @@ export function sqlBoxCustomerCodeWithSa(boxAlias = "b", saAlias = "sa", dpAlias
 }
 
 /** Customer code — inventory report / box_agg grouping (no dash fallback). */
-export function sqlBoxCustomerCodeReport(boxAlias = "b", dpAlias = "dp") {
-  return `COALESCE(NULLIF(TRIM(${boxAlias}.override_cust::text), ''), NULLIF(TRIM(${dpAlias}.acc_code::text), ''))`;
+export function sqlBoxCustomerCodeReport(boxAlias = "b", saAlias = "sa", dpAlias = "dp") {
+  return `COALESCE(
+    NULLIF(TRIM(${boxAlias}.override_cust::text), ''),
+    NULLIF(TRIM(${saAlias}.acc_code::text), ''),
+    NULLIF(TRIM(${dpAlias}.acc_code::text), '')
+  )`;
 }
 
 /** Match ims_dailyprod.doc_no to a packing number (text or numeric). */
@@ -118,7 +122,9 @@ export function sqlDailyprodLateralForBox(boxAlias = "b", saAlias = "sa", pnExpr
     ORDER BY
       (CASE WHEN ${saAlias}.item_dcode IS NOT NULL AND dp2.item_dcode = ${saAlias}.item_dcode THEN 0 ELSE 1 END) ASC,
       (CASE WHEN NULLIF(TRIM(${boxAlias}.override_cust::text), '') IS NOT NULL
-                 AND TRIM(dp2.acc_code::text) = TRIM(${boxAlias}.override_cust::text) THEN 0 ELSE 1 END) ASC
+                 AND TRIM(dp2.acc_code::text) = TRIM(${boxAlias}.override_cust::text) THEN 0 ELSE 1 END) ASC,
+      (CASE WHEN NULLIF(TRIM(${saAlias}.acc_code::text), '') IS NOT NULL
+                 AND TRIM(dp2.acc_code::text) = TRIM(${saAlias}.acc_code::text) THEN 0 ELSE 1 END) ASC
     LIMIT 1
   ) dp ON true`;
 }

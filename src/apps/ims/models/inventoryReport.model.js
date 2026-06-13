@@ -30,8 +30,9 @@ const SQL_PACKING_AREA = `${SQL_IN_HAND} AND b.location_id IS NULL`;
 const SQL_OUT = sqlBoxCountedAsOut("b");
 
 const BOX_AGG_ITEM = sqlBoxItemDcodeReport("sa", "dp");
-const BOX_AGG_CUSTOMER = sqlBoxCustomerCodeReport("b", "dp");
+const BOX_AGG_CUSTOMER = sqlBoxCustomerCodeReport("b", "sa", "dp");
 const BOX_AGG_DP_JOIN = sqlDailyprodLateralForBox("b", "sa", PN_B);
+const BOX_BASE_CUSTOMER = BOX_AGG_CUSTOMER;
 
 function buildBoxAggCte(locationParamIndex = null) {
   const inStoreScoped = locationParamIndex
@@ -161,10 +162,23 @@ function buildBaseCte({ filters = {}, search } = {}) {
   if (customerCodes.length) {
     values.push(customerCodes);
     const p = values.length;
-    dpWhere.push(`dp.acc_code::text = ANY($${p}::text[])`);
-    boxWhere.push(`(
-      COALESCE(NULLIF(TRIM(b.override_cust::text), ''), NULLIF(TRIM(dp.acc_code::text), '')) = ANY($${p}::text[])
+    dpWhere.push(`(
+      dp.acc_code::text = ANY($${p}::text[])
+      OR EXISTS (
+        SELECT 1 FROM ims_stock_adjustment sa
+        WHERE sa.is_deleted = false
+          AND sa.acc_code::text = ANY($${p}::text[])
+          AND (
+            trim(sa.packing_number::text) = trim(dp.doc_no::text)
+            OR (
+              nullif(trim(sa.packing_number::text), '-') ~ '^[0-9]+$'
+              AND nullif(trim(dp.doc_no::text), '-') ~ '^[0-9]+$'
+              AND trim(sa.packing_number::text)::numeric = trim(dp.doc_no::text)::numeric
+            )
+          )
+      )
     )`);
+    boxWhere.push(`(${BOX_BASE_CUSTOMER} = ANY($${p}::text[]))`);
   }
   if (packingNos.length) {
     values.push(packingNos);
@@ -208,6 +222,7 @@ function buildBaseCte({ filters = {}, search } = {}) {
       OR COALESCE(dp.item_dcode::text, '') ILIKE $${p}
       OR COALESCE(sa.item_dcode::text, '') ILIKE $${p}
       OR COALESCE(dp.acc_code::text, '') ILIKE $${p}
+      OR COALESCE(sa.acc_code::text, '') ILIKE $${p}
     )`);
   }
 
@@ -232,22 +247,13 @@ function buildBaseCte({ filters = {}, search } = {}) {
         COALESCE(sa.item_dcode::text, dp.item_dcode::text, '—') AS item_dcode,
         COALESCE(sa.item_dcode::text, dp.item_dcode::text, '—') AS item_code,
         '—'::text AS item_desc,
-        COALESCE(
-          NULLIF(TRIM(b.override_cust::text), ''),
-          NULLIF(TRIM(dp.acc_code::text), '')
-        ) AS customer_code,
+        ${BOX_BASE_CUSTOMER} AS customer_code,
         '—'::text AS customer_name
       FROM ims_box_table b
       LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
-      LEFT JOIN LATERAL (
-        SELECT dp2.item_dcode, dp2.acc_code
-        FROM ims_dailyprod dp2
-        WHERE NULLIF(TRIM(dp2.doc_no::text), '') = ${PN_B}
-        ORDER BY (CASE WHEN sa.item_dcode IS NOT NULL AND dp2.item_dcode = sa.item_dcode THEN 0 ELSE 1 END) ASC
-        LIMIT 1
-      ) dp ON true
+      ${BOX_AGG_DP_JOIN}
       ${boxWhereSql}
-      GROUP BY ${PN_B}, COALESCE(sa.item_dcode::text, dp.item_dcode::text, '—'), COALESCE(NULLIF(TRIM(b.override_cust::text), ''), NULLIF(TRIM(dp.acc_code::text), ''))
+      GROUP BY ${PN_B}, COALESCE(sa.item_dcode::text, dp.item_dcode::text, '—'), ${BOX_BASE_CUSTOMER}
     ),
     base AS (
       SELECT fb.packing_number, fb.item_dcode, fb.item_code, fb.item_desc, fb.customer_code, fb.customer_name
@@ -277,9 +283,11 @@ export async function findCustomerHintsForPackings(packingNumbers = []) {
        trim(x.pn::text) AS packing_number,
        COALESCE(
          NULLIF(trim(boxes.override_cust::text), ''),
+         NULLIF(trim(sa_hint.acc_code::text), ''),
+         NULLIF(trim(sa_hdr.acc_code::text), ''),
          NULLIF(trim(dp.acc_code::text), '')
        ) AS customer_code,
-       sa_fy.financial_year
+       sa_hdr.financial_year
      FROM unnest($1::text[]) AS x(pn)
      LEFT JOIN ims_dailyprod dp ON (
        trim(dp.doc_no::text) = trim(x.pn::text)
@@ -308,7 +316,28 @@ export async function findCustomerHintsForPackings(packingNumbers = []) {
        AND b.is_deleted = false
      ) boxes ON true
      LEFT JOIN LATERAL (
-       SELECT MAX(sa.financial_year) AS financial_year
+       SELECT MAX(NULLIF(trim(sa.acc_code::text), '')) AS acc_code
+       FROM ims_box_table b
+       INNER JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
+       WHERE (
+         trim(b.packing_number::text) = trim(x.pn::text)
+         OR (
+           nullif(trim(b.packing_number::text), '-') ~ '^[0-9]+$'
+           AND nullif(trim(x.pn::text), '-') ~ '^[0-9]+$'
+           AND trim(b.packing_number::text)::numeric = trim(x.pn::text)::numeric
+         )
+         OR (
+           b.sa_entry_type = 'stock_in'
+           AND b.sa_id IS NOT NULL
+           AND b.box_no_uid::text ~ ('(^|_)' || trim(x.pn::text) || '_SA')
+         )
+       )
+       AND b.is_deleted = false
+     ) sa_hint ON true
+     LEFT JOIN LATERAL (
+       SELECT
+         MAX(sa.financial_year) AS financial_year,
+         MAX(NULLIF(trim(sa.acc_code::text), '')) AS acc_code
        FROM ims_stock_adjustment sa
        WHERE (
          trim(sa.packing_number::text) = trim(x.pn::text)
@@ -319,9 +348,7 @@ export async function findCustomerHintsForPackings(packingNumbers = []) {
          )
        )
        AND sa.is_deleted = false
-       AND sa.financial_year IS NOT NULL
-       AND NULLIF(trim(sa.financial_year::text), '') IS NOT NULL
-     ) sa_fy ON true`,
+     ) sa_hdr ON true`,
     [list]
   );
 }
