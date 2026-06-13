@@ -1,7 +1,7 @@
 import { fetchFromIMS, fetchPackRowsForFinancialYearDoc } from "../services/ims.service.js";
 import { getProductionStickerPanelMetaByPackingNumbers, getProductionStickerPackingDocNos, findItemDcodesWithInHandStock } from "../models/box.model.js";
 import { pickProductionStickerPanelMeta } from "../utils/productionStickerPanelMeta.js";
-import { enrichRowsWithIMS, resolvePartyRateCustCodeFromIms, getImsMapsSafe } from "../utils/imsLookup.js";
+import { enrichRowsWithIMS, resolvePartyRateCustCodeFromIms, getImsMapsSafe, canonicalCode } from "../utils/imsLookup.js";
 import dbQuery from "../../../config/db.js";
 import { getDefaultListViewSpanDays } from "../../core/models/appConfig.model.js";
 import { resolveStandardQtyPerBoxForPacking } from "../utils/stockAdjustmentPacking.js";
@@ -495,6 +495,47 @@ export const getPartyRates = async (req, res) => {
   }
 };
 
+function applyPanelMetaToDailyProdRow(row, panelMetaMap, dailyprodAccByDoc, itemMap, ledgerMap) {
+  const docKey = normalizePackingDocNo(row.doc_no);
+  const panel =
+    pickProductionStickerPanelMeta(panelMetaMap, row.doc_no, row.itemdcode, row.acc_code) ??
+    (docKey ? panelMetaMap.get(docKey) : undefined);
+  const next = { ...row };
+
+  if (row.sticker_generated) {
+    const stickerCustomer = docKey ? dailyprodAccByDoc.get(docKey) : null;
+    if (stickerCustomer) {
+      next.acc_code = stickerCustomer;
+      next.acc_name =
+        ledgerMap.get(canonicalCode(stickerCustomer)) ??
+        (stickerCustomer != null ? `Customer ${stickerCustomer}` : next.acc_name);
+    }
+  }
+
+  if (row.sticker_generated && panel) {
+    if (panel.itemdcode) {
+      const itemDetail = itemMap.get(canonicalCode(panel.itemdcode));
+      next.itemdcode = panel.itemdcode;
+      next.item_code = itemDetail?.item_code ?? next.item_code;
+      next.item_desc = itemDetail?.item_desc ?? next.item_desc;
+    }
+    if (panel.dailyprod_job_card_no) next.job_card_no = panel.dailyprod_job_card_no;
+    if (panel.dailyprod_total_qty != null && panel.dailyprod_total_qty !== "") {
+      next.total_qty = String(panel.dailyprod_total_qty);
+    }
+  }
+
+  if (panel) {
+    next.sticker_count = panel.sticker_count ?? null;
+    next.sticker_created_at = panel.sticker_created_at ?? null;
+    next.sticker_created_by_name = panel.sticker_created_by_name ?? null;
+    next.sticker_updated_at = panel.sticker_updated_at ?? null;
+    next.sticker_updated_by_name = panel.sticker_updated_by_name ?? null;
+  }
+
+  return next;
+}
+
 export const getDailyProd = async (req, res) => {
   try {
     const { search, page, limit, sortBy, order, filters } = req.body;
@@ -502,14 +543,10 @@ export const getDailyProd = async (req, res) => {
     const defaultSpanDays = await getDefaultListViewSpanDays();
     const imsPackFilter = buildImsPackDocdtFilter({ from_date, to_date }, defaultSpanDays);
 
-    const [records, items, ledgers] = await Promise.all([
+    const [records, { itemMap, ledgerMap }] = await Promise.all([
       fetchFromIMS("pack", imsPackFilter),
-      fetchFromIMS("item"),
-      fetchFromIMS("cust")
+      getImsMapsSafe(),
     ]);
-
-    const itemMap = new Map((items || []).map((i) => [String(i.ItemDcode), i]));
-    const ledgerMap = new Map((ledgers || []).map((l) => [String(l.Acc_Code), l]));
 
     const [localGenerated, packingWithStickers] = await Promise.all([
       dbQuery(`SELECT doc_no::text AS doc_no FROM ims_dailyprod WHERE sticker_generated = true`),
@@ -525,7 +562,7 @@ export const getDailyProd = async (req, res) => {
       if (n) generatedMap.add(n);
     }
 
-    const generatedDocList = [...generatedMap];
+    const generatedDocList = generatedMap.size ? [...generatedMap] : [];
 
     const [panelMetaMap, dailyprodAccRows] = await Promise.all([
       generatedMap.size
@@ -548,60 +585,9 @@ export const getDailyProd = async (req, res) => {
       if (key && acc) dailyprodAccByDoc.set(key, acc);
     }
 
-    const applyPanelMetaToDailyProdRow = (row) => {
-      const docKey = normalizePackingDocNo(row.doc_no);
-      const panel =
-        pickProductionStickerPanelMeta(
-          panelMetaMap,
-          row.doc_no,
-          row.itemdcode,
-          row.acc_code
-        ) ??
-        (docKey ? panelMetaMap.get(docKey) : undefined);
-      let next = { ...row };
-
-      if (row.sticker_generated) {
-        // Packing entry customer = chosen at sticker generate (ims_dailyprod). Never per-box override (C3).
-        const stickerCustomer = docKey ? dailyprodAccByDoc.get(docKey) : null;
-        if (stickerCustomer) {
-          const ledgerDetail = ledgerMap.get(String(stickerCustomer));
-          next.acc_code = stickerCustomer;
-          next.acc_name =
-            ledgerDetail?.Acc_Name ??
-            (stickerCustomer != null ? `Customer ${stickerCustomer}` : next.acc_name);
-        }
-      }
-
-      if (row.sticker_generated && panel) {
-        if (panel.itemdcode) {
-          const itemDetail = itemMap.get(String(panel.itemdcode));
-          next.itemdcode = panel.itemdcode;
-          next.item_code = itemDetail?.Item_Code ?? next.item_code;
-          next.item_desc = itemDetail?.ItemDesc ?? next.item_desc;
-        }
-        if (panel.dailyprod_job_card_no) {
-          next.job_card_no = panel.dailyprod_job_card_no;
-        }
-        if (panel.dailyprod_total_qty != null && panel.dailyprod_total_qty !== "") {
-          next.total_qty = String(panel.dailyprod_total_qty);
-        }
-      }
-
-      if (panel) {
-        next.sticker_count = panel.sticker_count ?? null;
-        next.sticker_created_at = panel.sticker_created_at ?? null;
-        next.sticker_created_by_name = panel.sticker_created_by_name ?? null;
-        next.sticker_updated_at = panel.sticker_updated_at ?? null;
-        next.sticker_updated_by_name = panel.sticker_updated_by_name ?? null;
-      }
-
-      return next;
-    };
-
     let data = (records || []).map((r) => {
       const p = parsePackRow(r);
-      const itemDetail = itemMap.get(String(p.itemdcode));
-      const ledgerDetail = ledgerMap.get(String(p.acc_code));
+      const itemDetail = itemMap.get(canonicalCode(p.itemdcode));
       const docKey = normalizePackingDocNo(p.doc_no);
 
       const base = {
@@ -610,17 +596,20 @@ export const getDailyProd = async (req, res) => {
         job_card_no: p.job_card_no,
         acc_code: p.acc_code,
         acc_name:
-          p.acc_name_row ?? ledgerDetail?.Acc_Name ?? (p.acc_code != null ? `Customer ${p.acc_code}` : null),
+          p.acc_name_row ??
+          ledgerMap.get(canonicalCode(p.acc_code)) ??
+          (p.acc_code != null ? `Customer ${p.acc_code}` : null),
         itemdcode: p.itemdcode,
-        item_code: p.item_code_row ?? itemDetail?.Item_Code ?? "N/A",
-        item_desc: p.itemdesc_row ?? itemDetail?.ItemDesc ?? "N/A",
+        item_code: p.item_code_row ?? itemDetail?.item_code ?? "N/A",
+        item_desc: p.itemdesc_row ?? itemDetail?.item_desc ?? "N/A",
         total_qty: String(p.qty ?? "0"),
         sticker_generated: docKey ? generatedMap.has(docKey) : false,
       };
 
-      return base.sticker_generated ? applyPanelMetaToDailyProdRow(base) : base;
+      return base.sticker_generated
+        ? applyPanelMetaToDailyProdRow(base, panelMetaMap, dailyprodAccByDoc, itemMap, ledgerMap)
+        : base;
     });
-
     if (acc_code != null && acc_code !== "")
       data = data.filter((r) => String(r.acc_code) === String(acc_code));
     if (item_dcode != null && item_dcode !== "")

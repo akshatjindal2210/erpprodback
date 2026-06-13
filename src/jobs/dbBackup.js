@@ -1,10 +1,12 @@
 import { spawn } from "child_process";
 import cron from "node-cron";
 import fs from "fs";
+import fsp from "fs/promises";
 import path from "path";
 
 import config from "../config/config.js";
 import logger from "../utils/logger.js";
+import { deferCronWork, scheduleDeferred } from "./cronUtil.js";
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 /** Calendar-day snapshot in weekly/ — not tied to hourly 8–19; runs at midnight (00:00). */
@@ -30,33 +32,50 @@ const getBackupRoot = () => {
   return root;
 };
 
-const removeOldSlotFiles = (dir, prefix, keep) => {
-  if (!fs.existsSync(dir)) return;
-  for (const name of fs.readdirSync(dir)) {
-    if (name !== keep && name.startsWith(prefix) && name.endsWith(".dump")) {
-      fs.unlinkSync(path.join(dir, name));
-      logger.info(`DB backup: removed previous file — ${name}`);
-    }
+const removeOldSlotFiles = async (dir, prefix, keep) => {
+  let entries;
+  try {
+    entries = await fsp.readdir(dir);
+  } catch {
+    return;
   }
+  await Promise.all(
+    entries.map(async (name) => {
+      if (name !== keep && name.startsWith(prefix) && name.endsWith(".dump")) {
+        await fsp.unlink(path.join(dir, name));
+        logger.info(`DB backup: removed previous file — ${name}`);
+      }
+    }),
+  );
 };
 
-const removeOldHourlySlotFiles = (dir, db) => {
-  if (!fs.existsSync(dir)) return;
+const removeOldHourlySlotFiles = async (dir, db) => {
+  let entries;
+  try {
+    entries = await fsp.readdir(dir);
+  } catch {
+    return;
+  }
   const pattern = anyHourlyFilePattern(db);
-  const files = fs.readdirSync(dir)
-    .filter((name) => pattern.test(name))
-    .map((name) => ({
-      name,
-      mtime: fs.statSync(path.join(dir, name)).mtime.getTime(),
-    }))
-    .sort((a, b) => b.mtime - a.mtime); // Newest first
+  const files = (
+    await Promise.all(
+      entries
+        .filter((name) => pattern.test(name))
+        .map(async (name) => ({
+          name,
+          mtime: (await fsp.stat(path.join(dir, name))).mtime.getTime(),
+        })),
+    )
+  ).sort((a, b) => b.mtime - a.mtime);
 
   const max = config.dbBackup.hourlyKeepCount;
   if (files.length > max) {
-    for (let i = max; i < files.length; i++) {
-      fs.unlinkSync(path.join(dir, files[i].name));
-      logger.info(`DB backup: removed old hourly file — ${files[i].name}`);
-    }
+    await Promise.all(
+      files.slice(max).map(async ({ name }) => {
+        await fsp.unlink(path.join(dir, name));
+        logger.info(`DB backup: removed old hourly file — ${name}`);
+      }),
+    );
   }
 };
 
@@ -86,25 +105,24 @@ const runOneBackup = async ({ targetDir, replacePrefix, fileName, label, hourSlo
   // Pre-cleanup: Backup shuru hone se pehle hi purani extra files hata do
   // taaki agar backup fail bhi ho, to folder cluttered na rahe.
   if (hourSlot) {
-    removeOldHourlySlotFiles(targetDir, hourSlot.db);
+    await removeOldHourlySlotFiles(targetDir, hourSlot.db);
   }
 
   logger.info(`DB backup started (${label}) — ${outFile}`);
   try {
-    if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+    await fsp.unlink(tempFile).catch(() => {});
     await pgDump(tempFile, env);
-    fs.renameSync(tempFile, outFile);
+    await fsp.rename(tempFile, outFile);
     if (hourSlot) {
-      // Post-cleanup: Naya backup aane ke baad phir se clean karo taaki count exactly max rahe.
-      removeOldHourlySlotFiles(targetDir, hourSlot.db);
+      await removeOldHourlySlotFiles(targetDir, hourSlot.db);
     } else {
-      removeOldSlotFiles(targetDir, replacePrefix, fileName);
+      await removeOldSlotFiles(targetDir, replacePrefix, fileName);
     }
   } catch (e) {
-    if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+    await fsp.unlink(tempFile).catch(() => {});
     throw e;
   }
-  logger.info(`DB backup completed (${label}, ${formatSize(fs.statSync(outFile).size)}) — ${outFile}`);
+  logger.info(`DB backup completed (${label}, ${formatSize((await fsp.stat(outFile)).size)}) — ${outFile}`);
   return { file: outFile, label };
 };
 
@@ -202,10 +220,9 @@ export function startDbBackupCron() {
     }
   };
 
-  cron.schedule(schedule, () => runScheduledBackup("cron"));
+  scheduleDeferred(schedule, () => runScheduledBackup("cron"), { name: "db-backup" });
 
-  // Cron only fires on the hour (e.g. :00); run once when the server starts.
-  void runScheduledBackup("startup");
+  deferCronWork(() => runScheduledBackup("startup"));
 
   const { hourlyStartHour: s, hourlyEndHour: e, dir } = config.dbBackup;
   logger.info(

@@ -23,6 +23,9 @@ function toPgPlaceholders(sql) {
 function getInsertId(row) {
   if (!row) return 0;
   if (row.id != null) return Number(row.id);
+  if (row.assignment_id != null) return Number(row.assignment_id);
+  if (row.task_id != null) return Number(row.task_id);
+  if (row.chat_id != null) return Number(row.chat_id);
   const key = Object.keys(row).find((k) => k.endsWith("_id"));
   return key ? Number(row[key]) : 0;
 }

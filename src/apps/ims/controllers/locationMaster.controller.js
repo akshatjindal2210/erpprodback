@@ -1,4 +1,4 @@
-import { findLocations, findLocation, findLocationDuplicate, insertLocation, updateLocations, deleteLocations } from "../models/locationMaster.model.js";
+import { findLocations, findLocation, findLocationDuplicate, insertLocation, updateLocations, deleteLocations, LOCATION_DEFAULT_FIELDS } from "../models/locationMaster.model.js";
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { resolveLocationViewsSelectFields } from "../config/view-fields/location.js";
@@ -314,7 +314,7 @@ export const getLocationsViews = async (req, res) => {
 
     if (id) {
       const fields = resolveLocationViewsSelectFields({ permission_module: req.body.permission_module, permission_action: req.body.permission_action });
-      const location = await findLocation({ location_id: id, approved: true, is_deleted: false }, { fields: fields || DEFAULT_FIELDS });
+      const location = await findLocation({ location_id: id, approved: true, is_deleted: false }, { fields: fields || LOCATION_DEFAULT_FIELDS });
       if (!location) return res.json({ success: true, data: null });
       const [enriched] = await enrichLocationRows([location]);
       return res.json({
@@ -328,6 +328,7 @@ export const getLocationsViews = async (req, res) => {
           acc_name: enriched.acc_name,
           item_code: enriched.item_code,
           item_desc: enriched.item_desc,
+          location_description: enriched.location_description ?? null,
           total_capacity: enriched.total_capacity,
           box_count: enriched.box_count
         }

@@ -1,7 +1,12 @@
 import RecurringTask from "../models/recurringTask.model.js";
 import Task from "../models/task.model.js";
 import User from "../../core/models/user.model.js";
-import { calculateNextOccurrence, chatMessage, ensureDir, saveAttachments, upsertRecurring, isDbTrue, parseSubUsers, parseAttachmentsJson, asArray } from "../shared/index.js";
+import { sendTaskNotification } from "../services/notification.service.js";
+import { markTaskViewed } from "../services/taskActivityLog.service.js";
+import { calculateNextOccurrence, chatMessage, ensureDir, saveAttachments, upsertRecurring, isDbTrue, parseSubUsers, parseAttachmentsJson, asArray, normalizeCreatorType } from "../shared/index.js";
+import { isAssignedTask } from "../shared/utils/targetDateHelper.js";
+import TargetDate from "../models/targetDate.model.js";
+import { canUserSetTargetDate } from "./targetDate.controller.js";
 import fs from "fs";
 import path from "path";
 import config from "../../../config/config.js";
@@ -20,8 +25,11 @@ export async function getTasks(req, res) {
   try {
     const { 
       search = "", page = 1, limit = 10, sortBy = "t.task_id", order = "DESC", status, priority, category_id, view, task_type, reminder, overdue, upcoming_due, 
-      new_today, creator_pending, action_required_today, include_closed, department_id, user_id, assigned_by_id, report
+      new_today, creator_pending, action_required_today, open_tasks, updated_tasks, include_closed, department_id, user_id, assigned_by_id, report
     } = req.query;
+
+    const openTasksFilter = open_tasks === "true" || open_tasks === true;
+    const updatedTasksFilter = updated_tasks === "true" || updated_tasks === true;
 
     const userId   = req.user.id;
     const userRole = (req.user.type ?? req.user.role ?? "user").toLowerCase();
@@ -33,7 +41,8 @@ export async function getTasks(req, res) {
     const filterParams = {
       search, page, limit, sortBy, order, status, priority, category_id,
       view, task_type, reminder, overdue, upcoming_due, new_today, creator_pending,
-      action_required_today, userId, userRole, include_closed, 
+      action_required_today, open_tasks: openTasksFilter, updated_tasks: updatedTasksFilter,
+      userId, userRole, include_closed, 
       department_id: department_id ? Number(department_id) : null,
       user_id: user_id ? Number(user_id) : null,
       assigned_by_id: assigned_by_id ? Number(assigned_by_id) : null,
@@ -107,17 +116,26 @@ export async function getTaskById(req, res) {
       });
     }
 
-    const [assignmentChain, activityLog] = await Promise.all([
+    void markTaskViewed(id, user_id, requester?.name).catch(() => {});
+
+    const [assignmentChain, activityLog, targetHistory, currentTarget, hasValidTarget] = await Promise.all([
       Task.getAssignmentChain(id),
       Task.getActivityLog(id),
+      TargetDate.getHistory(id),
+      TargetDate.getCurrent(id),
+      TargetDate.hasValidCurrent(id),
     ]);
 
     res.json({
       success: true,
       data: {
         ...task,
-        assignment_chain: assignmentChain ?? [],
-        task_log:         activityLog    ?? [],
+        assignment_chain:   assignmentChain ?? [],
+        task_log:           activityLog    ?? [],
+        target_dates:       targetHistory  ?? [],
+        current_target:     currentTarget  ?? null,
+        has_valid_target:   hasValidTarget,
+        can_set_target_date: canUserSetTargetDate(user_id, task),
       },
     });
   } catch (err) {
@@ -130,7 +148,7 @@ export async function createSelfTask(req, res) {
   try {
     const user_id = req.user.id;
     const user_name = req.user.name ?? "Someone";
-    const user_type = req.user.type ?? req.user.role ?? "user";
+    const user_type = normalizeCreatorType(req.user.type ?? req.user.role);
 
     const {
       title, description, category_id, priority,
@@ -232,7 +250,7 @@ export async function createTask(req, res) {
   try {
     const created_by   = req.user.id;
     const created_name = req.user.name ?? "Someone";
-    const creator_type = req.user.type ?? req.user.role ?? "user";
+    const creator_type = normalizeCreatorType(req.user.type ?? req.user.role);
 
     const {
       title, description, assigned_to, assigned_by,
@@ -370,6 +388,17 @@ export async function createTask(req, res) {
 
       await log(task_id, created_by, created_name, "task_created", null, null);
       await log(task_id, created_by, created_name, "task_assigned", `Assigned to ${assignee.name} (Level-1)`, assignment_id);
+
+      const assignerUser = await Task.getUserById(actual_assigned_by);
+      const assignerName = assignerUser?.name ?? created_name;
+
+      void sendTaskNotification("task_assigned", assigned_to, {
+        task_title: title.trim(),
+        task_id: String(task_id),
+        assigned_by: assignerName,
+        due_date: taskDueDate ? new Date(taskDueDate).toISOString().slice(0, 10) : "-",
+        status: "Pending",
+      }, task_id);
     }
 
     res.status(201).json({
@@ -437,7 +466,7 @@ export async function assignSubUsers(req, res) {
         message: "No valid sub-users to assign (already assigned or not found)",
       });
 
-    if (task.status === "pending")
+    if (task.status === "pending" && !isAssignedTask(task))
       await Task.updateStatus(id, "in_progress");
 
     res.json({
@@ -715,27 +744,44 @@ export async function forwardTask(req, res) {
     const newLevel = (task.current_assignment_level || 1) + 1;
     const parentId = activeL1?.assignment_id ?? task.current_assignment_id ?? null;
 
-    const newAsgn = await Task.createAssignment({
-      task_id:              id,
-      assigned_by:          user_id,
-      assigned_to:          forward_to,
-      level:                newLevel,
-      role:                 "sub_user",
-      is_level_one:         false,
-      parent_assignment_id: parentId,
-      note,
+    const existingSub = await Task.getSubUserAssignment(id, forward_to);
+    let newAssignmentId;
+
+    if (existingSub) {
+      await Task.reactivateAssignment(existingSub.assignment_id, {
+        assigned_by: user_id,
+        note,
+        parent_assignment_id: parentId,
+        level: newLevel,
+      });
+      newAssignmentId = existingSub.assignment_id;
+    } else {
+      const newAsgn = await Task.createAssignment({
+        task_id:              id,
+        assigned_by:          user_id,
+        assigned_to:          forward_to,
+        level:                newLevel,
+        role:                 "sub_user",
+        is_level_one:         false,
+        parent_assignment_id: parentId,
+        note,
+      });
+      newAssignmentId = newAsgn.insertId;
+    }
+
+    await Task.updateCurrentHolder(id, {
+      current_holder_id:     forward_to,
+      current_assignment_id: newAssignmentId,
+      status:                "forwarded",
     });
 
-
-    await Task.updateCurrentHolder(id, {current_holder_id: forward_to, current_assignment_id: newAsgn.insertId, status: "forwarded"});
-
     await log(id, user_id, user_name, "task_forwarded",
-      `Forwarded to ${fwdUser.name}`, newAsgn.insertId);
+      `Forwarded to ${fwdUser.name}`, newAssignmentId);
 
     res.json({
       success: true,
       message: `Task forwarded to ${fwdUser.name}`,
-      data: { new_assignment_id: newAsgn.insertId },
+      data: { new_assignment_id: newAssignmentId },
     });
   } catch (err) {
     console.error("forwardTask:", err);

@@ -19,6 +19,14 @@ const log = (req, action, entity_id, details, record = null) =>
     record,
   }).catch(() => {});
 
+function findActiveAuditLocation(audit, locationId) {
+  return (
+    (audit?.locations || []).find(
+      (loc) => Number(loc.location_id) === Number(locationId) && loc.is_active !== false
+    ) ?? null
+  );
+}
+
 function validateAuditAssignments(assignments) {
   if (!Array.isArray(assignments) || !assignments.length) {
     return { ok: false, message: "At least one assignment row required" };
@@ -176,7 +184,6 @@ export const updateAuditController = async (req, res) => {
       updated_at: new Date(),
     };
 
-    // If audit was already verified, only super admin can edit
     if (existing.status === 'verified' && req.user.type !== 'super_admin') {
       return res.status(403).json({ success: false, message: "Verified audits cannot be edited" });
     }
@@ -246,9 +253,7 @@ export const submitAuditScan = async (req, res) => {
     const audit = await findAudit({ audit_id });
     if (!audit) return res.status(404).json({ success: false, message: "Audit not found" });
 
-    const locRow = (audit.locations || []).find(
-      (loc) => Number(loc.location_id) === Number(location_id) && loc.is_active !== false
-    );
+    const locRow = findActiveAuditLocation(audit, location_id);
     if (!locRow) {
       return res.status(404).json({ success: false, message: "Audit location not found" });
     }
@@ -339,9 +344,7 @@ export const removeAuditScan = async (req, res) => {
     const audit = await findAudit({ audit_id });
     if (!audit) return res.status(404).json({ success: false, message: "Audit not found" });
 
-    const locRow = (audit.locations || []).find(
-      (loc) => Number(loc.location_id) === Number(location_id) && loc.is_active !== false
-    );
+    const locRow = findActiveAuditLocation(audit, location_id);
     if (!locRow) {
       return res.status(404).json({ success: false, message: "Audit location not found" });
     }
@@ -406,9 +409,7 @@ export const reopenAuditLocationController = async (req, res) => {
       return res.status(access.status).json({ success: false, message: access.message });
     }
 
-    const locRow = (audit.locations || []).find(
-      (loc) => Number(loc.location_id) === Number(location_id) && loc.is_active !== false
-    );
+    const locRow = findActiveAuditLocation(audit, location_id);
     if (!locRow) {
       return res.status(404).json({ success: false, message: "Audit location not found" });
     }
@@ -451,9 +452,7 @@ export const reassignAuditLocationController = async (req, res) => {
       return res.status(access.status).json({ success: false, message: access.message });
     }
 
-    const locRow = (audit.locations || []).find(
-      (loc) => Number(loc.location_id) === Number(location_id) && loc.is_active !== false
-    );
+    const locRow = findActiveAuditLocation(audit, location_id);
     if (!locRow) {
       return res.status(404).json({ success: false, message: "Audit location not found" });
     }
@@ -478,7 +477,6 @@ export const reassignAuditLocationController = async (req, res) => {
   }
 };
 
-/** Apply audit comparison adjustments to box_table, log box transactions, complete location(s). */
 export const applyAuditComparisonAdjustmentController = async (req, res) => {
   try {
     const audit_id = Number(req.body?.audit_id ?? req.body?.id);
@@ -518,7 +516,6 @@ export const applyAuditComparisonAdjustmentController = async (req, res) => {
   }
 };
 
-/** Mark audit location Complete when scans match expected (no inventory adjustment). */
 export const completeAuditLocationController = async (req, res) => {
   try {
     const audit_id = Number(req.body?.audit_id);
@@ -588,9 +585,7 @@ export const getAuditComparisonReportController = async (req, res) => {
     }
 
     if (location_id != null) {
-      const locRow = (audit.locations || []).find(
-        (loc) => Number(loc.location_id) === Number(location_id) && loc.is_active !== false
-      );
+      const locRow = findActiveAuditLocation(audit, location_id);
       if (!locRow) {
         return res.status(404).json({ success: false, message: "Audit location not found" });
       }

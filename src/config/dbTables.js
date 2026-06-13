@@ -2,7 +2,7 @@
  * Central registry for PostgreSQL table names.
  *
  * Naming:
- *   mst_*  — master / shared tables (core, settings, admin); used by every app for FK refs
+ *   mst_*  — master / shared tables (core, settings, admin, global inbox); used by every app for FK refs
  *   ims_*  — IMS app tables only
  *   task_* — Task app tables only
  *
@@ -31,6 +31,7 @@ export const DB_TABLES = {
     "mst_departments",
     "mst_designations",
     "mst_activity_logs",
+    "mst_inbox",
   ],
 
   /** IMS application tables. */
@@ -67,7 +68,7 @@ export const DB_TABLES = {
     "task_assignments",
     "task_chat",
     "task_self_notes",
-    "task_log",
+    "task_app_config",
   ],
 };
 

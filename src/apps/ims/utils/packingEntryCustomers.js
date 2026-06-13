@@ -98,8 +98,17 @@ export async function listPackingEntryCustomersForItem(itemdcode, ledgers = []) 
   return [...byAcc.values()];
 }
 
+const PARTY_RATE_ACC_NAME_TTL_MS = Math.max(60_000, Number(process.env.IMS_MAPS_CACHE_MS) || 300_000);
+let partyRateAccNameCache = null;
+let partyRateAccNameCacheAt = 0;
+
 /** acc_code + itemdcode → acc_name from IMS custcode (party-rates). */
 export async function buildPartyRateAccNameMap() {
+  const now = Date.now();
+  if (partyRateAccNameCache && now - partyRateAccNameCacheAt < PARTY_RATE_ACC_NAME_TTL_MS) {
+    return partyRateAccNameCache;
+  }
+
   const partyRates = await fetchFromIMS("custcode");
   const map = new Map();
   for (const r of partyRates || []) {
@@ -111,6 +120,8 @@ export async function buildPartyRateAccNameMap() {
     const key = `${acc}__${item}`;
     if (!map.has(key)) map.set(key, String(name).trim());
   }
+  partyRateAccNameCache = map;
+  partyRateAccNameCacheAt = now;
   return map;
 }
 

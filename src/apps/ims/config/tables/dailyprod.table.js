@@ -13,5 +13,7 @@ export async function createDailyProdTable() {
       sticker_generated     BOOLEAN DEFAULT false,
       packing_standard_id   INTEGER REFERENCES ${T.PACKING_STANDARD}(standard_id) ON DELETE SET NULL
     );
+
+    CREATE INDEX IF NOT EXISTS idx_dailyprod_doc_no_text ON ${T.DAILYPROD} ((TRIM(doc_no::text)));
   `);
 }

@@ -63,6 +63,29 @@ const config = {
   uploadPath: getUploadPath(),
   uploadPublicPath: "uploads",
   cookie_name: "auth_token",
+  /** Live: NODE_ENV=production + DOMAIN=.jflbharat.com | Test: development + localhost */
+  cookie_options: {
+    httpOnly: true,
+    sameSite: "lax",
+    path: "/",
+    secure: (process.env.NODE_ENV || "development") === "production",
+    ...((process.env.DOMAIN || "localhost") !== "localhost"
+      ? { domain: process.env.DOMAIN }
+      : {}),
+  },
+  /** ERP internal API — IMS data only (master, changepass, etc.) */
+  erpInternalApi: {
+    url: process.env.ERP_IMS_API_URL || "http://192.168.1.100:3200/data/imsdata",
+    timeoutMs: 15000,
+  },
+  /** WhatsApp message APIs — task/template notifications */
+  waApi: {
+    /** Instant / event-triggered messages (task assigned, reminders, status, etc.) */
+    swa: process.env.WA_API_SWA_URL || "http://192.168.1.100:3200/wa/swa",
+    /** Daily fixed-time bulk messages (daily_reminder template) */
+    swap: process.env.WA_API_SWAP_URL || "http://192.168.1.100:3200/wa/swap",
+    timeoutMs: 15000,
+  },
 };
 
 if (config.node_env === "production" && !config.jwt_secret) {
@@ -70,3 +93,9 @@ if (config.node_env === "production" && !config.jwt_secret) {
 }
 
 export default config;
+
+/** Login din — raat 11:59 PM IST tak session */
+export function getSessionMaxAgeMs() {
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+  return Math.max(60_000, new Date(`${today}T23:59:59.999+05:30`) - Date.now());
+}

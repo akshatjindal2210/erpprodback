@@ -1,12 +1,39 @@
-import cron from "node-cron";
-import fs from "fs";
+import fsp from "fs/promises";
 import path from "path";
 import dbQuery from "../config/db.js";
 import config from "../config/config.js";
+import { addTaskActivityLog } from "../apps/task/services/taskActivityLog.service.js";
+import { scheduleDeferred } from "./cronUtil.js";
 
-export function initRecurringTasksCron() {
-  cron.schedule("0 0 * * *", async () => {
+async function copyRecurringChatAttachments(files) {
+  const newDir = path.join(config.uploadPath, "task_tasks", "chat");
+  await fsp.mkdir(newDir, { recursive: true });
+  const attachments = [];
+
+  for (const f of files) {
+    const oldPathRelative = f.file_path.startsWith(`${config.uploadPublicPath}/`)
+      ? f.file_path.slice(config.uploadPublicPath.length + 1)
+      : f.file_path;
+    const oldPath = path.join(config.uploadPath, oldPathRelative);
+    const newPathRelative = path.join("task_tasks", "chat", path.basename(oldPath));
+    const newPath = path.join(config.uploadPath, newPathRelative);
+
     try {
+      await fsp.access(oldPath);
+      await fsp.copyFile(oldPath, newPath);
+      attachments.push({
+        ...f,
+        file_path: path.join(config.uploadPublicPath, newPathRelative).replace(/\\/g, "/"),
+      });
+    } catch {
+      // Source file missing — skip
+    }
+  }
+
+  return attachments;
+}
+
+async function processRecurringTasks() {
       const today = new Date().toISOString().split("T")[0];
 
       const recurringTasks = await dbQuery(
@@ -93,23 +120,7 @@ export function initRecurringTasksCron() {
           if (chat.attachments) {
             try {
               const files = typeof chat.attachments === "string" ? JSON.parse(chat.attachments) : chat.attachments;
-              const newDir = path.join(config.uploadPath, "task_tasks", "chat");
-              if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
-
-              for (const f of files) {
-                const oldPathRelative = f.file_path.startsWith(`${config.uploadPublicPath}/`)
-                  ? f.file_path.slice(config.uploadPublicPath.length + 1)
-                  : f.file_path;
-                const oldPath = path.join(config.uploadPath, oldPathRelative);
-
-                const newPathRelative = path.join("task_tasks", "chat", path.basename(oldPath));
-                const newPath = path.join(config.uploadPath, newPathRelative);
-
-                if (fs.existsSync(oldPath)) {
-                  fs.copyFileSync(oldPath, newPath);
-                  attachments.push({ ...f, file_path: path.join(config.uploadPublicPath, newPathRelative).replace(/\\/g, "/") });
-                }
-              }
+              attachments = await copyRecurringChatAttachments(files);
             } catch (e) {
               console.error("Failed to process attachments for chat:", e);
             }
@@ -122,10 +133,13 @@ export function initRecurringTasksCron() {
           );
         }
 
-        await dbQuery(
-          `INSERT INTO task_log (task_id, action, action_detail, performed_by)
-           VALUES (?, ?, ?, ?)`,
-          [newTaskId, "task_created", `Created from recurring_id ${rt.recurring_id}`, "System"]
+        await addTaskActivityLog(
+          newTaskId,
+          null,
+          "System",
+          "task_created",
+          `Created from recurring_id ${rt.recurring_id}`,
+          null
         );
 
         const nextDate = new Date(rt.next_occurrence);
@@ -151,8 +165,14 @@ export function initRecurringTasksCron() {
       }
 
       console.log("✅ Recurring tasks processed at", new Date());
+}
+
+export function initRecurringTasksCron() {
+  scheduleDeferred("0 0 * * *", async () => {
+    try {
+      await processRecurringTasks();
     } catch (err) {
       console.error("❌ Recurring tasks cron error:", err);
     }
-  });
+  }, { name: "recurring-tasks" });
 }

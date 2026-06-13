@@ -43,6 +43,8 @@ export function resolveBoxViewsSelectFields(options = {}) {
       "lm.shelf_no",
       "COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no",
     ];
+  } else if (mod === "boxes" && act === "view") {
+    return [...forModal];
   }
 
   return null;

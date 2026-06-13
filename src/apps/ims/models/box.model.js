@@ -1688,7 +1688,7 @@ const FIND_BOX_DETAILED_SELECT = `
       ps.unit,
       NULL::text AS party_rate_cust_code
     FROM ims_box_table b
-    LEFT JOIN ims_dailyprod j ON b.packing_number::TEXT = j.doc_no::TEXT
+    LEFT JOIN ims_dailyprod j ON TRIM(b.packing_number::TEXT) = TRIM(j.doc_no::TEXT)
     LEFT JOIN ims_stock_adjustment sa_adj
       ON b.sa_id = sa_adj.adjustment_id AND b.sa_entry_type = 'stock_in'
     LEFT JOIN ims_packing_standard ps ON j.packing_standard_id = ps.standard_id`;
@@ -1766,7 +1766,7 @@ export const findBoxesDetailed = async ({ box_uids, packing_number }) => {
       ps.unit,
       NULL::text AS party_rate_cust_code
     FROM ims_box_table b
-    LEFT JOIN ims_dailyprod j ON b.packing_number::TEXT = j.doc_no::TEXT
+    LEFT JOIN ims_dailyprod j ON TRIM(b.packing_number::TEXT) = TRIM(j.doc_no::TEXT)
     LEFT JOIN ims_stock_adjustment sa_adj
       ON b.sa_id = sa_adj.adjustment_id AND b.sa_entry_type = 'stock_in'
     LEFT JOIN ims_packing_standard ps ON j.packing_standard_id = ps.standard_id

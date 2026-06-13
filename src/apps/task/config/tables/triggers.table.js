@@ -22,6 +22,7 @@ export async function createTaskUpdatedAtTriggers() {
     T.ASSIGNMENTS,
     T.CHAT,
     T.SELF_NOTES,
+    T.APP_CONFIG,
   ];
 
   for (const table of tables) {

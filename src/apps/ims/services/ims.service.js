@@ -1,8 +1,6 @@
 import fetch from "node-fetch";
+import config from "../../../config/config.js";
 import { noteImsIssue } from "../utils/imsMeta.js";
-
-const IMS_URL = process.env.IMS_BASE_URL?.trim() || "http://192.168.1.100:3200/data/imsdata";
-const IMS_FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.IMS_FETCH_TIMEOUT_MS) || 15000);
 
 function imsFailureMessage(err) {
   const m = err?.cause?.message || err?.message || String(err);
@@ -14,9 +12,9 @@ function imsFailureMessage(err) {
 
 async function imsPostJsonBody(requestedData, filter) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), IMS_FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), config.erpInternalApi.timeoutMs || 15000);
   try {
-    const response = await fetch(IMS_URL, {
+    const response = await fetch(config.erpInternalApi.url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

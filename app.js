@@ -8,8 +8,9 @@ import { initDB } from "./src/config/initDB.js";
 import { seedCoreRootUser } from "./src/apps/core/config/seed.js";
 import { seedImsData } from "./src/apps/ims/config/seed.js";
 import logger from "./src/utils/logger.js";
-import { initRecurringTasksCron, startDbBackupCron } from "./src/jobs/index.js";
+import { initRecurringTasksCron, initTaskNotificationsCron, startDbBackupCron } from "./src/jobs/index.js";
 import { initSocket } from "./src/utils/socket.js";
+import { deliverUnreadInboxToSocket } from "./src/apps/task/services/taskPwaPush.service.js";
 
 const server = http.createServer(app);
 
@@ -48,6 +49,8 @@ io.on("connection", (socket) => {
   socket.join(`user_${userId}`);
   console.log(`User connected: ${userId}`);
 
+  void deliverUnreadInboxToSocket(userId);
+
   socket.on("disconnect", () => {
     console.log(`User disconnected: ${userId}`);
   });
@@ -59,6 +62,7 @@ async function startServer() {
     await seedCoreRootUser();
     await seedImsData();
     initRecurringTasksCron();
+    initTaskNotificationsCron();
 
     server.listen(config.port, () => {
       logger.info(`Server running on port ${config.port} (API v${config.app_version})`);

@@ -1,5 +1,7 @@
 import dbQuery from "../shared/db.js";
+import { normalizeCreatorType } from "../shared/utils/helper.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
+import { addTaskActivityLog, getTaskActivityLog, getTaskActivityLogCount, taskUnseenUpdatesSql, taskLogCountSubquery } from "../services/taskActivityLog.service.js";
 
 async function roleFilter(userRole, userId, report = false) {
   
@@ -78,12 +80,18 @@ function assignedToViewClause(userId) {
   };
 }
 
+const OPEN_TASKS_SQL = "t.status NOT IN ('completed','closed')";
+
+function unseenUserId({ userId, user_id }) {
+  return user_id ?? userId;
+}
+
 const Task = {
 
   // GET ALL   paginated list
   async getAll({
     page = 1, limit = 10, search = "", sortBy = "t.task_id", order = "DESC", status, priority, category_id, view, userId, userRole, task_type, reminder, overdue, 
-    upcoming_due, new_today, creator_pending, action_required_today, include_closed, department_id, user_id, assigned_by_id, report = false
+    upcoming_due, new_today, creator_pending, action_required_today, open_tasks, updated_tasks, include_closed, department_id, user_id, assigned_by_id, report = false
   }) {
     const offset = (Number(page) - 1) * Number(limit);
     const where  = ["1=1"];
@@ -162,6 +170,12 @@ const Task = {
         OR (DATE(t.created_at) = CURRENT_DATE)
       )`);
     }
+    if (open_tasks) { where.push(OPEN_TASKS_SQL); }
+    const unseenUid = unseenUserId({ userId, user_id });
+    if (updated_tasks) {
+      where.push(taskUnseenUpdatesSql("t", "?"));
+      params.push(unseenUid);
+    }
 
     //  Security Access Clause (ONLY for access control)
     const { clause, values } = await roleFilter(userRole, userId, report);
@@ -199,7 +213,8 @@ const Task = {
         ca.assignment_level AS current_assignment_level,
         ca.is_level_one AS current_is_level_one,
 
-        (SELECT COUNT(*) FROM task_log tl WHERE tl.task_id = t.task_id) AS log_count,
+        ${taskLogCountSubquery("t")} AS log_count,
+        (${taskUnseenUpdatesSql("t", "?")}) AS has_unseen_updates,
 
         CASE 
           WHEN t.status = 'pending' AND (lc.attachments IS NULL OR COALESCE(jsonb_array_length(lc.attachments::jsonb), 0) = 0)
@@ -231,13 +246,13 @@ const Task = {
       WHERE ${where.join(" AND ")}
       ORDER BY ${safeSort} ${safeOrder}
       LIMIT ? OFFSET ?`,
-      [userId, ...params, Number(limit), Number(offset)]
+      [unseenUid, userId, ...params, Number(limit), Number(offset)]
     );
   },
 
   // COUNT
   async count({ search = "", status, priority, category_id, view, userId, userRole, task_type, reminder, overdue, upcoming_due, new_today,
-    creator_pending, action_required_today, include_closed, department_id, user_id, assigned_by_id, report = false
+    creator_pending, action_required_today, open_tasks, updated_tasks, include_closed, department_id, user_id, assigned_by_id, report = false
   }) {
     const where  = ["1=1"];
     const params = [];
@@ -307,6 +322,12 @@ const Task = {
         OR (DATE(t.created_at) = CURRENT_DATE)
       )`);
     }
+    if (open_tasks) { where.push(OPEN_TASKS_SQL); }
+    const unseenUid = unseenUserId({ userId, user_id });
+    if (updated_tasks) {
+      where.push(taskUnseenUpdatesSql("t", "?"));
+      params.push(unseenUid);
+    }
 
     //  Security Access Clause (ONLY for access control)
     const { clause, values } = await roleFilter(userRole, userId, report);
@@ -343,7 +364,8 @@ const Task = {
     const { clause, values } = await roleFilter(userRole, userId, report);
     const where = ["1=1"];
     if (clause) where.push(clause);
-    const params = [userId, ...values];
+    const unseenUid = filter_user_id ?? userId;
+    const params = [unseenUid, userId, ...values];
 
     if (task_type) {
       const types = Array.isArray(task_type) ? task_type : [task_type];
@@ -418,7 +440,11 @@ const Task = {
           OR (DATE(COALESCE(tsn.reminder_at, t.reminder_date)) = CURRENT_DATE AND t.status != 'completed')
           OR (DATE(t.updated_at) = CURRENT_DATE AND t.status != 'completed')
           OR (DATE(t.created_at) = CURRENT_DATE AND t.status != 'completed')
-        ) THEN t.task_id END) AS action_required
+        ) THEN t.task_id END) AS action_required,
+
+        COUNT(DISTINCT CASE WHEN ${OPEN_TASKS_SQL} THEN t.task_id END) AS open_tasks,
+
+        COUNT(DISTINCT CASE WHEN ${taskUnseenUpdatesSql("t", "?")} THEN t.task_id END) AS updated_tasks
 
       FROM task_tasks t
       LEFT JOIN task_self_notes tsn 
@@ -447,6 +473,7 @@ const Task = {
          CASE
            WHEN t.creator_type = 'super_admin' THEN 'Super Admin'
            WHEN t.creator_type = 'admin'       THEN 'Admin'
+           WHEN t.creator_type = 'executive_assistant' THEN 'Executive Assistant'
            ELSE 'User'
          END AS creator_label,
 
@@ -512,7 +539,7 @@ const Task = {
        VALUES (?, ?, 'assigned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         title, description     || null,
-        created_by, creator_type || "user",
+        created_by, normalizeCreatorType(creator_type),
         assigned_by,
         first_assigned_to, first_assigned_to,
         category_id   || null,
@@ -539,7 +566,7 @@ const Task = {
        VALUES (?, ?, 'self', ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       [
         title, description         || null,
-        user_id, user_type,
+        user_id, normalizeCreatorType(user_type),
         user_id, user_id, user_id,
         category_id                || null,
         priority                   || "medium",
@@ -741,6 +768,29 @@ const Task = {
     return dbQuery(
       `UPDATE task_assignments SET is_active = FALSE WHERE assignment_id = ?`,
       [assignment_id]
+    );
+  },
+
+  /** Re-activate an existing sub-user row when L1 forwards to a pre-assigned person */
+  async reactivateAssignment(assignment_id, { assigned_by, note, parent_assignment_id, level }) {
+    return dbQuery(
+      `UPDATE task_assignments SET
+         is_active               = TRUE,
+         assigned_by             = ?,
+         note                    = ?,
+         parent_assignment_id    = ?,
+         assignment_level        = ?,
+         completion_requested_at = NULL,
+         completion_approved_at  = NULL,
+         updated_at              = NOW()
+       WHERE assignment_id = ?`,
+      [
+        assigned_by,
+        note?.trim() || null,
+        parent_assignment_id || null,
+        level,
+        assignment_id,
+      ]
     );
   },
 
@@ -1034,71 +1084,20 @@ const Task = {
     );
   },
 
-  // ADD ACTIVITY LOG
   async addLog(task_id, user_id, performed_by, action, action_detail = null, assignment_id = null) {
-    return dbQuery(
-      `INSERT INTO task_log (task_id, assignment_id, user_id, performed_by, action, action_detail)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [task_id, assignment_id ?? null, user_id, performed_by, action, action_detail ?? null]
-    ).catch(() => {});
+    return addTaskActivityLog(task_id, user_id, performed_by, action, action_detail, assignment_id);
   },
 
-  // GET ACTIVITY LOG
-  // async getActivityLog(task_id, order = "ASC") {
-  //     `SELECT
-  //        tl.activity_id, tl.action, tl.action_detail, tl.performed_by,
-  //        DATE_FORMAT(tl.action_time, '%Y-%m-%d %H:%i:%s') AS action_time,
-  //        tl.user_id, tl.assignment_id
-  //      FROM task_log tl
-  //      WHERE tl.task_id = ?
-  //      ORDER BY tl.action_time ${safeOrder}, tl.activity_id ${safeOrder}`,
-  //     [task_id]
-  //   );
-  // },
-
-  // Activity log paginated
   async getLogCount(taskId) {
-    const result = await dbQuery(
-      `SELECT COUNT(*) as total FROM task_log WHERE task_id = ?`, 
-      [taskId]
-    );
-    return result[0]?.total || 0;
+    return getTaskActivityLogCount(taskId);
   },
 
-  async getActivityLog(taskId, { limit = 2000, offset = 0, action_type = null } = {}) {
-    let sql = `
-      SELECT
-        tl.activity_id, tl.action, tl.action_detail,
-        tl.action_time, tl.assignment_id,
-        u.name AS performed_by
-      FROM task_log tl
-      LEFT JOIN ${M.USERS} u ON u.id = tl.user_id
-      WHERE tl.task_id = ?
-    `;
-    const params = [taskId];
-
-    if (action_type) {
-      sql += ` AND tl.action = ?`;
-      params.push(action_type);
-    }
-
-    sql += ` ORDER BY tl.action_time DESC LIMIT ? OFFSET ?`;
-    params.push(Number(limit), Number(offset));
-
-    return await dbQuery(sql, params);
+  async getActivityLog(taskId, opts = {}) {
+    return getTaskActivityLog(taskId, opts);
   },
 
   async getActivityLogCount(taskId, action_type = null) {
-    let sql = `SELECT COUNT(*) as total FROM task_log WHERE task_id = ?`;
-    const params = [taskId];
-    
-    if (action_type) { 
-      sql += ` AND action = ?`; 
-      params.push(action_type); 
-    }
-    
-    const result = await dbQuery(sql, params);
-    return result[0]?.total || 0;
+    return getTaskActivityLogCount(taskId, action_type);
   },
 
   async getChatAttachments(task_id) {

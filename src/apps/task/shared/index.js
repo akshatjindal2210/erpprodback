@@ -19,6 +19,7 @@ export {
   isValidDate,
   isDbTrue,
   toDbBool,
+  normalizeCreatorType,
 } from "./utils/helper.js";
 
 export { TASK_TABLES } from "../../../config/dbTables.js";

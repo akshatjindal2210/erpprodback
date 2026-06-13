@@ -31,6 +31,10 @@ export async function createBoxTable() {
       WHERE is_deleted = false;
     CREATE INDEX IF NOT EXISTS idx_box_packing_active ON ${T.BOX_TABLE}(packing_number)
       WHERE is_deleted = false AND (sa_entry_type IS DISTINCT FROM 'stock_out');
+    CREATE INDEX IF NOT EXISTS idx_box_location_active ON ${T.BOX_TABLE}(location_id, packing_number)
+      WHERE is_deleted = false;
+    CREATE INDEX IF NOT EXISTS idx_box_out_uid_active ON ${T.BOX_TABLE}(out_uid)
+      WHERE is_deleted = false AND out_uid IS NOT NULL;
   `);
 }
 

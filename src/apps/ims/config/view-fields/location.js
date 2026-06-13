@@ -22,6 +22,8 @@ export function resolveLocationViewsSelectFields(options = {}) {
     return [...forModal];
   } else if (mod === "audit" && (act === "view" || act === "add" || act === "edit" || act === "authorize")) {
     return [...forAuditPicker];
+  } else if (mod === "boxes" && act === "view") {
+    return [...forModal];
   } else {
     return null;
   }

@@ -426,24 +426,23 @@ export const getBoxesViews = async (req, res) => {
         if (!boxDetailed || boxDetailed.is_deleted || !isBoxInHand(boxDetailed)) {
           return res.json({ success: true, data: null });
         }
-        const [imsRow] = await enrichBoxRowsFromIMS([boxDetailed]);
-        const base = imsRow || boxDetailed;
-        const withSuggestion = await attachSuggestedInwardLocationToBoxRow(stripBoxAuditFromClientPayload(base));
+        const displayRow = await enrichSingleBoxForFinder(boxDetailed);
+        const withSuggestion = await attachSuggestedInwardLocationToBoxRow(stripBoxAuditFromClientPayload(displayRow));
         return res.json({ success: true, data: stripBoxAuditFromClientPayload(withSuggestion) });
       }
 
+      const useDetailedLookup = permission_module === "change_override_customer" || (permission_module === "boxes" && permission_action === "view");
+
       let boxRow = null;
       if (scanNoUid || scanUid) {
-        boxRow =
-          permission_module === "change_override_customer"
-            ? await findBoxDetailedByStickerScan({ box_no_uid: scanNoUid, box_uid: scanUid })
-            : await findBoxByStickerScan({ box_no_uid: scanNoUid, box_uid: scanUid });
+        boxRow = useDetailedLookup
+          ? await findBoxDetailedByStickerScan({ box_no_uid: scanNoUid, box_uid: scanUid })
+          : await findBoxByStickerScan({ box_no_uid: scanNoUid, box_uid: scanUid });
       }
       if (!boxRow && legacyId) {
-        boxRow =
-          permission_module === "change_override_customer"
-            ? await findBoxDetailedByUidOrNoUid(legacyId)
-            : await findBoxByUidOrNoUid(legacyId);
+        boxRow = useDetailedLookup
+          ? await findBoxDetailedByUidOrNoUid(legacyId)
+          : await findBoxByUidOrNoUid(legacyId);
       }
       if (!boxRow || boxRow.is_deleted) {
         return res.json({ success: true, data: null });
@@ -455,10 +454,13 @@ export const getBoxesViews = async (req, res) => {
           reject_reason: overrideCustomerScanRejectMessage(boxRow),
         });
       }
-      const [enrichedBox] = await enrichBoxRowsFromIMS([boxRow]);
+      const displayRow =
+        permission_module === "boxes" && permission_action === "view"
+          ? await enrichSingleBoxForFinder(boxRow)
+          : (await enrichBoxRowsFromIMS([boxRow]))[0] || boxRow;
       return res.json({
         success: true,
-        data: stripBoxAuditFromClientPayload(enrichedBox || boxRow),
+        data: stripBoxAuditFromClientPayload(displayRow),
       });
     }
 
@@ -564,6 +566,75 @@ function mergeStickerPrintRow(enrichedBox, sticker_meta = {}, packingHint = null
     acc_name: metaAccName || enrichedBox?.acc_name || null,
     acc_code: meta.acc_code ?? enrichedBox?.acc_code ?? null,
     party_rate_cust_code: meta.party_rate_cust_code ?? enrichedBox?.party_rate_cust_code ?? null,
+  };
+}
+
+/** Box finder scan: resolve customer + item like sticker print (single-box only). */
+async function enrichSingleBoxForFinder(boxRow) {
+  if (!boxRow || typeof boxRow !== "object") return boxRow;
+
+  const [imsRow] = await enrichBoxRowsFromIMS([boxRow]);
+  const base = imsRow || boxRow;
+  const pn = String(base.packing_number ?? "").trim();
+
+  const { acc_code: resolvedAcc, item_dcode: resolvedItem } =
+    await resolveAccAndItemForLocationSuggestion(base);
+
+  const packingMeta = pn
+    ? await resolvePackingStickerMetaForPrint(pn, {
+        itemdcode: resolvedItem ?? base.itemdcode ?? base.item_dcode,
+        acc_code: resolvedAcc ?? base.prod_acc_code ?? base.acc_code,
+        override_cust: base.override_cust,
+        sa_id: base.sa_id,
+        job_card_no: base.job_no,
+        doc_dt: base.doc_dt,
+      })
+    : {};
+
+  const packingAcc =
+    packingMeta.acc_code != null && String(packingMeta.acc_code).trim() !== ""
+      ? String(packingMeta.acc_code).trim()
+      : canonicalCode(base.prod_acc_code ?? base.acc_code);
+  const overridden = isBoxCustomerOverridden(base.override_cust, packingAcc);
+  const acc_code = overridden
+    ? effectiveBoxCustomerAcc(base.override_cust, packingAcc) ?? base.acc_code
+    : packingAcc ?? base.acc_code;
+
+  const itemdcode =
+    resolvedItem ?? base.itemdcode ?? base.item_dcode ?? packingMeta.itemdcode ?? null;
+
+  const { itemMap, ledgerMap } = await getImsMapsSafe();
+  const item = itemdcode != null ? itemMap.get(canonicalCode(itemdcode)) : null;
+  const accNameFromLedger = acc_code != null ? ledgerMap.get(canonicalCode(acc_code)) : null;
+  const acc_name =
+    accNameFromLedger ??
+    packingMeta.acc_name ??
+    base.acc_name ??
+    null;
+
+  const party_rate_cust_code = acc_code
+    ? await resolvePartyRateCustCodeFromIms({
+        itemdcode,
+        item_code: item?.item_code ?? packingMeta.item_code ?? base.item_code,
+        acc_code,
+      })
+    : null;
+
+  return {
+    ...base,
+    itemdcode,
+    item_dcode: itemdcode,
+    item_code: item?.item_code ?? packingMeta.item_code ?? base.item_code ?? null,
+    item_desc: item?.item_desc ?? packingMeta.itemdesc ?? base.item_desc ?? base.itemdesc ?? null,
+    itemdesc: item?.item_desc ?? packingMeta.itemdesc ?? base.itemdesc ?? base.item_desc ?? null,
+    acc_code: acc_code ?? base.acc_code,
+    acc_name,
+    party_rate_cust_code:
+      party_rate_cust_code != null && String(party_rate_cust_code).trim() !== ""
+        ? String(party_rate_cust_code).trim()
+        : packingMeta.party_rate_cust_code ?? null,
+    job_no: packingMeta.job_card_no ?? packingMeta.job_no ?? base.job_no ?? null,
+    doc_dt: packingMeta.doc_dt ?? base.doc_dt ?? null,
   };
 }
 

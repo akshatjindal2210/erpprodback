@@ -451,29 +451,51 @@ export async function findInventoryReportFiltered(options = {}) {
   const sortCol = SORT_COLUMNS[safeSortKey(sortBy)];
   const sortDir = String(order).toUpperCase() === "ASC" ? "ASC" : "DESC";
 
-  const [{ count = 0 } = {}] = await dbQuery(
-    `WITH ${baseCteSql}, ${boxAggCte}
-     SELECT COUNT(*)::int AS count
-     FROM base b
-     LEFT JOIN box_agg a ON ${BOX_AGG_JOIN}
-     WHERE ${activeStockWhere}`,
-    values
-  );
-
   const limitIdx = values.length + 1;
   const offsetIdx = values.length + 2;
-  const rows = await dbQuery(
-    `WITH ${baseCteSql}, ${boxAggCte}
+  const rowsSql = `
+    WITH ${baseCteSql}, ${boxAggCte}
      SELECT ${ROW_SELECT}
      FROM base b
      LEFT JOIN box_agg a ON ${BOX_AGG_JOIN}
      WHERE ${activeStockWhere}
      ORDER BY ${sortCol} ${sortDir} NULLS LAST
-     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
-    [...values, safeLimit, offset]
-  );
+     LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
 
-  const totals = includeTotals ? await getInventoryReportTotals({ filters, search }) : null;
+  if (fetchAll) {
+    const rowsPromise = dbQuery(rowsSql, [...values, safeLimit, offset]);
+    const totalsPromise = includeTotals
+      ? getInventoryReportTotals({ filters, search })
+      : Promise.resolve(null);
+    const [rows, totals] = await Promise.all([rowsPromise, totalsPromise]);
+
+    return {
+      data: rows,
+      totals,
+      total: toQty(rows.length),
+      page: safePage,
+      limit: safeLimit,
+    };
+  }
+
+  const countSql = `
+    WITH ${baseCteSql}, ${boxAggCte}
+     SELECT COUNT(*)::int AS count
+     FROM base b
+     LEFT JOIN box_agg a ON ${BOX_AGG_JOIN}
+     WHERE ${activeStockWhere}`;
+
+  const countPromise = dbQuery(countSql, values);
+  const rowsPromise = dbQuery(rowsSql, [...values, safeLimit, offset]);
+  const totalsPromise = includeTotals
+    ? getInventoryReportTotals({ filters, search })
+    : Promise.resolve(null);
+
+  const [[{ count = 0 } = {}], rows, totals] = await Promise.all([
+    countPromise,
+    rowsPromise,
+    totalsPromise,
+  ]);
 
   return {
     data: rows,

@@ -51,13 +51,25 @@ export function buildImsLedgerMap(ledgers = []) {
   return map;
 }
 
+const IMS_MAPS_TTL_MS = Math.max(60_000, Number(process.env.IMS_MAPS_CACHE_MS) || 300_000);
+let imsMapsCache = null;
+let imsMapsCacheAt = 0;
+
 export async function getImsMapsSafe() {
+  const now = Date.now();
+  if (imsMapsCache && now - imsMapsCacheAt < IMS_MAPS_TTL_MS) {
+    return imsMapsCache;
+  }
+
   try {
     const [items, ledgers] = await Promise.all([fetchFromIMS("item"), fetchFromIMS("cust")]);
-    return {
+    const maps = {
       itemMap: buildImsItemMap(items || []),
       ledgerMap: buildImsLedgerMap(ledgers || [])
     };
+    imsMapsCache = maps;
+    imsMapsCacheAt = now;
+    return maps;
   } catch {
     return {
       itemMap: new Map(),

@@ -3,7 +3,7 @@ import { authenticate, authorize, chatUpload, selfUpload } from "../shared/index
 import { getTasks, getTaskById, createTask, createSelfTask, assignSubUsers, updateTask, deleteTask, forwardTask, requestCompletion, approveSubUser, rejectSubUser, creatorDecision, getTaskActivity, reassignTask } from "../controllers/task.controller.js";
 import { getChat, sendMessage, deleteMessage } from "../controllers/taskChat.controller.js";
 import { getSelfNote, upsertSelfNote, deleteSelfNote, toggleRecurringTaskStatus } from "../controllers/taskSelfNote.controller.js";
-
+import { getTargetDates, setTargetDate } from "../controllers/targetDate.controller.js";
 const router = express.Router();
 const allRoles = authorize("super_admin", "admin", "user", "executive_assistant");
 
@@ -26,6 +26,8 @@ router.post("/:id/approve-sub/:assignmentId", allRoles, approveSubUser);
 router.post("/:id/reject-sub/:assignmentId", allRoles, rejectSubUser);
 router.post("/:id/creator-decision", allRoles, creatorDecision);
 router.get("/:id/activity", allRoles, getTaskActivity);
+router.get("/:id/target-dates", allRoles, getTargetDates);
+router.post("/:id/target-date", allRoles, setTargetDate);
 
 router.get("/:id/chat", allRoles, getChat);
 router.post("/:id/chat", allRoles, chatUpload.array("files", 10), sendMessage);

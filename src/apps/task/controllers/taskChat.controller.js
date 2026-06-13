@@ -1,4 +1,6 @@
 import Task from "../models/task.model.js";
+import TargetDate from "../models/targetDate.model.js";
+import { isChatLockedForUser } from "../shared/utils/targetDateHelper.js";
 import fs   from "fs";
 import path from "path";
 import config from "../../../config/config.js";
@@ -48,6 +50,17 @@ export async function sendMessage(req, res) {
     if (!message.trim() && files.length === 0)
       return res.status(400).json({ success: false, message: "Message or attachment required" });
 
+    const task = await Task.getById(id);
+    if (!task)
+      return res.status(404).json({ success: false, message: "Task not found" });
+
+    const hasValidTarget = await TargetDate.hasValidCurrent(id);
+    if (isChatLockedForUser(task, hasValidTarget, user_id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Chat is locked until target date is set. Only Assigned By can send messages.",
+      });
+    }
 
     if (reply_to_id) {
       const replied = await Task.getChatById(reply_to_id, id);
@@ -68,14 +81,12 @@ export async function sendMessage(req, res) {
     const result  = await Task.sendChatMessage(id, user_id, message, reply_to_id, attachments);
     const chat_id = result.insertId;
 
-    const task = await Task.getById(id);
     if (task && task.status === "pending") {
       await Task.updateStatus(id, "in_progress", user_id);
-
       await log(
         id,
         user_id,
-        req.user.name,
+        req.user.name ?? "Someone",
         "status_changed",
         "Status changed to In Progress (user replied)",
         null

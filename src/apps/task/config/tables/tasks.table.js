@@ -11,7 +11,7 @@ export async function createTaskTasksTable() {
         CHECK (task_type IN ('self', 'assigned')),
       created_by            INT NOT NULL REFERENCES ${C.USERS}(id) ON DELETE CASCADE,
       creator_type          VARCHAR(20) DEFAULT 'user'
-        CHECK (creator_type IN ('admin', 'super_admin', 'user')),
+        CHECK (creator_type IN ('admin', 'super_admin', 'user', 'executive_assistant')),
       assigned_by           INT NOT NULL REFERENCES ${C.USERS}(id) ON DELETE CASCADE,
       first_assigned_to     INT NOT NULL REFERENCES ${C.USERS}(id) ON DELETE CASCADE,
       current_holder_id     INT NOT NULL REFERENCES ${C.USERS}(id) ON DELETE CASCADE,
@@ -43,4 +43,14 @@ export async function createTaskTasksTable() {
   await dbQuery(`CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON ${T.TASKS} (due_date)`);
   await dbQuery(`CREATE INDEX IF NOT EXISTS idx_tasks_reminder ON ${T.TASKS} (reminder_date)`);
   await dbQuery(`CREATE INDEX IF NOT EXISTS idx_tasks_self_reminder ON ${T.TASKS} (self_reminder_date)`);
+
+  await dbQuery(`ALTER TABLE ${T.TASKS} DROP CONSTRAINT IF EXISTS task_tasks_creator_type_check`);
+  await dbQuery(`
+    ALTER TABLE ${T.TASKS} ADD CONSTRAINT task_tasks_creator_type_check
+      CHECK (creator_type IN ('admin', 'super_admin', 'user', 'executive_assistant'))
+  `);
+
+  await dbQuery(`ALTER TABLE ${T.TASKS} ADD COLUMN IF NOT EXISTS current_target_at TIMESTAMP`);
+  await dbQuery(`ALTER TABLE ${T.TASKS} ADD COLUMN IF NOT EXISTS target_dates_history JSONB DEFAULT '[]'::jsonb`);
+  await dbQuery(`CREATE INDEX IF NOT EXISTS idx_tasks_current_target ON ${T.TASKS} (current_target_at)`);
 }

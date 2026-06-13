@@ -8,6 +8,7 @@ import { createModuleSopsTable } from "./tables/module_sops.table.js";
 import { createDepartmentsTable } from "./tables/department.table.js";
 import { createDesignationsTable } from "./tables/designation.table.js";
 import { createActivityLogsTable } from "./tables/activity_log.table.js";
+import { createInboxTable } from "./tables/inbox.table.js";
 import { createCoreUpdatedAtTriggers } from "./tables/triggers.table.js";
 
 export const initCoreDB = async () => {
@@ -29,6 +30,8 @@ export const initCoreDB = async () => {
   console.log(`✅ ${T.DESIGNATIONS} ready`);
   await createActivityLogsTable();
   console.log(`✅ ${T.ACTIVITY_LOGS} ready`);
+  await createInboxTable();
+  console.log(`✅ ${T.INBOX} ready`);
   await createCoreUpdatedAtTriggers();
   console.log("✅ Core triggers ready");
 };

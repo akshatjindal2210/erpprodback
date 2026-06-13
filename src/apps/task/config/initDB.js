@@ -5,9 +5,10 @@ import { createTaskRecurringTasksTable, createTaskRecurringTaskAssignmentsTable,
 import { createTaskAssignmentsTable } from "./tables/task_assignments.table.js";
 import { createTaskChatTable } from "./tables/task_chat.table.js";
 import { createTaskSelfNotesTable } from "./tables/task_self_notes.table.js";
-import { createTaskLogTable } from "./tables/task_log.table.js";
+import { createTaskAppConfigTable } from "./tables/app_config.table.js";
 import { createTaskUpdatedAtTriggers } from "./tables/triggers.table.js";
 import { syncTaskSequences } from "./syncSequences.js";
+import { seedTaskNotificationTemplates } from "./seedNotifications.js";
 
 export async function initTaskDB() {
   try {
@@ -23,11 +24,12 @@ export async function initTaskDB() {
     await createTaskAssignmentsTable();
     await createTaskChatTable();
     await createTaskSelfNotesTable();
-    await createTaskLogTable();
+    await createTaskAppConfigTable();
+
+    await seedTaskNotificationTemplates();
 
     await createTaskUpdatedAtTriggers();
 
-    // Sync sequences to prevent duplicate key errors
     await syncTaskSequences();
 
     console.log("✅ Task tables ready");

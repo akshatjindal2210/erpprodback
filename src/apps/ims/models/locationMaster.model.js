@@ -28,6 +28,8 @@ const DEFAULT_FIELDS = [
   "u_dl.name AS deleted_by_name"
 ];
 
+export { DEFAULT_FIELDS as LOCATION_DEFAULT_FIELDS };
+
 export const findLocations = async (options = {}) => {
   const { filters = {}, search, sort = {}, page = 1, limit = 10, fields = [], permission = {} } = options;
 

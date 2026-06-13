@@ -1,4 +1,5 @@
 import { findInventoryReportFiltered, getInventoryReportFilterOptions, findCustomerHintsForPackings } from "../models/inventoryReport.model.js";
+import { fetchDailyprodDocMetaByPackings } from "../models/inventoryInward.model.js";
 import { extractListParams } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { getImsMapsSafe } from "../utils/imsLookup.js";
@@ -14,32 +15,63 @@ function isMissingDocDt(value) {
   return value == null || String(value).trim() === "";
 }
 
-/** IMS pack: docno → docdt (batched IMS calls to avoid timeouts). */
+function formatDocDt(raw) {
+  if (isMissingDocDt(raw)) return null;
+  const s = String(raw).trim();
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : s;
+}
+
+/** doc_dt: local ims_dailyprod first, then IMS pack (batched + parallel). */
 async function resolvePackDocDateMap(packingNumbers = []) {
   const unique = [...new Set(packingNumbers.map((p) => String(p ?? "").trim()).filter(Boolean))];
   if (!unique.length) return new Map();
 
   const map = new Map();
-  const CHUNK = 35;
+  const stillNeed = [];
 
   try {
-    for (let i = 0; i < unique.length; i += CHUNK) {
-      const chunk = unique.slice(i, i + CHUNK);
-      const filter = buildImsDocFilterMany(chunk);
-      if (!filter) continue;
-      const recs = await fetchFromIMS("pack", filter);
-      for (const pn of chunk) {
-        const packRow = findImsPackByDocNo(recs, pn);
-        if (!packRow) continue;
-        const raw =
-          packRow.docdt ??
-          packRow.doc_dt ??
-          packRow["Doc Dt"] ??
-          packRow.Doc_Dt ??
-          packRow.DocDt;
-        if (!isMissingDocDt(raw)) map.set(pn, String(raw).trim());
-      }
+    const localMeta = await fetchDailyprodDocMetaByPackings(unique);
+    for (const pn of unique) {
+      const meta =
+        localMeta.get(pn) ??
+        (/^\d+$/.test(pn) ? localMeta.get(String(Number(pn))) : null);
+      const formatted = formatDocDt(meta?.doc_dt);
+      if (formatted) map.set(pn, formatted);
+      else stillNeed.push(pn);
     }
+  } catch {
+    stillNeed.push(...unique.filter((pn) => !map.has(pn)));
+  }
+
+  if (!stillNeed.length) return map;
+
+  const CHUNK = 35;
+  const chunks = [];
+  for (let i = 0; i < stillNeed.length; i += CHUNK) {
+    chunks.push(stillNeed.slice(i, i + CHUNK));
+  }
+
+  try {
+    await Promise.all(
+      chunks.map(async (chunk) => {
+        const filter = buildImsDocFilterMany(chunk);
+        if (!filter) return;
+        const recs = await fetchFromIMS("pack", filter);
+        for (const pn of chunk) {
+          const packRow = findImsPackByDocNo(recs, pn);
+          if (!packRow) continue;
+          const raw =
+            packRow.docdt ??
+            packRow.doc_dt ??
+            packRow["Doc Dt"] ??
+            packRow.Doc_Dt ??
+            packRow.DocDt;
+          const formatted = formatDocDt(raw);
+          if (formatted) map.set(pn, formatted);
+        }
+      })
+    );
   } catch {
     /* optional IMS */
   }
@@ -59,6 +91,36 @@ function toFilterIdList(val) {
   return String(val).split(",").map((v) => v.trim()).filter(Boolean);
 }
 
+async function fetchImsCustomerCodesBatched(packingNumbers = [], map) {
+  if (!packingNumbers.length) return;
+
+  const CHUNK = 35;
+  const chunks = [];
+  for (let i = 0; i < packingNumbers.length; i += CHUNK) {
+    chunks.push(packingNumbers.slice(i, i + CHUNK));
+  }
+
+  await Promise.all(
+    chunks.map(async (chunk) => {
+      try {
+        const filter = buildImsDocFilterMany(chunk);
+        if (!filter) return;
+        const recs = await fetchFromIMS("pack", filter);
+        for (const pn of chunk) {
+          if (map.has(pn)) continue;
+          const packRow = findImsPackByDocNo(recs, pn);
+          const acc = packRow?.acc_code ?? packRow?.Acc_Code ?? packRow?.acc_Code;
+          if (acc != null && String(acc).trim() !== "") {
+            map.set(pn, String(acc).trim());
+          }
+        }
+      } catch {
+        /* optional IMS */
+      }
+    })
+  );
+}
+
 /** Resolve customer acc_code for packings still missing after the report SQL. */
 async function resolveCustomerCodeMap(packingNumbers = []) {
   const unique = [...new Set(packingNumbers.map((p) => String(p ?? "").trim()).filter(Boolean))];
@@ -66,46 +128,44 @@ async function resolveCustomerCodeMap(packingNumbers = []) {
 
   const hints = await findCustomerHintsForPackings(unique);
   const map = new Map();
+  const hintByPn = new Map();
 
   for (const row of hints || []) {
     const pn = String(row.packing_number ?? "").trim();
     if (!pn) continue;
+    hintByPn.set(pn, row);
     const code = row.customer_code != null ? String(row.customer_code).trim() : "";
     if (code) map.set(pn, code);
   }
 
   const needIms = unique.filter((pn) => !map.has(pn));
-  await Promise.all(
-    needIms.map(async (pn) => {
-      const hint = (hints || []).find((h) => String(h.packing_number).trim() === pn);
-      const fy = hint?.financial_year != null ? String(hint.financial_year).trim() : "";
+  const withFy = [];
+  const withoutFy = [];
 
-      if (fy) {
+  for (const pn of needIms) {
+    const hint = hintByPn.get(pn);
+    const fy = hint?.financial_year != null ? String(hint.financial_year).trim() : "";
+    if (fy) withFy.push({ pn, fy });
+    else withoutFy.push(pn);
+  }
+
+  await Promise.all([
+    Promise.all(
+      withFy.map(async ({ pn, fy }) => {
         try {
           const ims = await fetchPackRowsForFinancialYearDoc(fy, pn);
           const first = ims?.records?.[0];
           const acc = first?.acc_code ?? first?.Acc_Code;
           if (acc != null && String(acc).trim() !== "") {
             map.set(pn, String(acc).trim());
-            return;
           }
         } catch {
           /* optional IMS */
         }
-      }
-
-      try {
-        const recs = await fetchFromIMS("pack", buildImsDocFilter(pn));
-        const packRow = findImsPackByDocNo(recs, pn);
-        const acc = packRow?.acc_code ?? packRow?.Acc_Code ?? packRow?.acc_Code;
-        if (acc != null && String(acc).trim() !== "") {
-          map.set(pn, String(acc).trim());
-        }
-      } catch {
-        /* optional IMS */
-      }
-    })
-  );
+      })
+    ),
+    fetchImsCustomerCodesBatched(withoutFy, map),
+  ]);
 
   return map;
 }
@@ -231,12 +291,9 @@ export async function enrichInventoryRows(rows = []) {
     .map((row) => row.packing_number);
   const allPackings = [...new Set(rows.map((r) => String(r.packing_number ?? "").trim()).filter(Boolean))];
 
-  const [customerCodeMap, docDtMap] = await Promise.all([
+  const [customerCodeMap, docDtMap, { itemMap, ledgerMap }, partyRateAccNameMap] = await Promise.all([
     resolveCustomerCodeMap(missingPackings),
     resolvePackDocDateMap(allPackings).catch(() => new Map()),
-  ]);
-
-  const [{ itemMap, ledgerMap }, partyRateAccNameMap] = await Promise.all([
     getImsMapsSafe(),
     buildPartyRateAccNameMap(),
   ]);

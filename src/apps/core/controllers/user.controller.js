@@ -1,6 +1,6 @@
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-import config from "../../../config/config.js";
+import config, { getSessionMaxAgeMs } from "../../../config/config.js";
 import { findUsers, findUser, findUserByUsernameInsensitive, insertUser, updateUsers, deleteUsers } from "../models/user.model.js";
 import { fetchFromIMS, fetchImsDataRaw } from "../../ims/services/ims.service.js";
 import { findModules } from "../models/module.model.js";
@@ -608,26 +608,11 @@ export const loginUser = async (req, res) => {
       return res.status(403).json({ success: false, message: "Account is inactive" });
     }
 
-    // Calculate expiration: End of the next day (11:59:59 PM) to avoid logout during office hours.
-    // This ensures that if a user logs in today, they won't be logged out during office hours tomorrow.
-    const now = new Date();
-    const expirationDate = new Date(now);
-    expirationDate.setDate(now.getDate() + 1);
-    expirationDate.setHours(23, 59, 59, 999);
-    
-    const expiresInMs = expirationDate.getTime() - now.getTime();
-    const expiresInSeconds = Math.floor(expiresInMs / 1000);
-
-    const token = jwt.sign({ id: user.id, type: user.type }, config.jwt_secret, { expiresIn: expiresInSeconds });
-
-    res.cookie(config.cookie_name, token, {
-      httpOnly: true,
-      secure: config.node_env === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: expiresInMs,
-      ...(config.domain !== "localhost" ? { domain: config.domain } : {}),
+    const maxAge = getSessionMaxAgeMs();
+    const token = jwt.sign({ id: user.id, type: user.type }, config.jwt_secret, {
+      expiresIn: Math.floor(maxAge / 1000),
     });
+    res.cookie(config.cookie_name, token, { ...config.cookie_options, maxAge });
 
     const permissions = await findUserPermissions(user.id);
     const appAccess = await findUserAppAccess(user.id);
@@ -698,13 +683,7 @@ export const logoutUser = async (req, res) => {
       }
     }
 
-    res.clearCookie(config.cookie_name, {
-      httpOnly: true,
-      secure: config.node_env === "production",
-      sameSite: "lax",
-      path: "/",
-      ...(config.domain !== "localhost" ? { domain: config.domain } : {}),
-    });
+    res.clearCookie(config.cookie_name, config.cookie_options);
 
     res.json({ success: true, message: "Logged out successfully" });
   } catch (err) {

@@ -3,6 +3,14 @@ import fs from "fs";
 import path from "path";
 import config from "../../../../config/config.js";
 
+const ALLOWED_CREATOR_TYPES = new Set(["admin", "super_admin", "user", "executive_assistant"]);
+
+/** Map user role/type to task_tasks.creator_type CHECK constraint values. */
+export const normalizeCreatorType = (type) => {
+  const t = String(type ?? "user").toLowerCase().trim();
+  return ALLOWED_CREATOR_TYPES.has(t) ? t : "user";
+};
+
 /** PostgreSQL boolean columns may come back as true/false, 1/0, or 't'/'f'. */
 export const isDbTrue = (val) =>
   val === true || val === 1 || val === "1" || val === "t" || val === "true";
