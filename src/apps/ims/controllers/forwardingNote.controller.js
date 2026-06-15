@@ -8,6 +8,7 @@ import { insertForwardingNoteItem, deleteForwardingNoteItems, findForwardingNote
 import { sanitizeSearch, buildForwardingNoteBillDocument } from "../../core/utils/helper.js";
 import { enrichRowsWithIMS } from "../utils/imsLookup.js";
 import { fetchFromIMS } from "../services/ims.service.js";
+import { resolvePackingStickerMetaForPrint } from "../utils/stickerPrintMeta.js";
 
 const FORWARDING_CFG = getCrudModuleConfig("forwarding_note_master");
 const FORWARDING_ITEM_CFG = getCrudModuleConfig("forwarding_note_item_wise");
@@ -71,6 +72,37 @@ const sanitizePrintCompanyInfo = (raw) => {
   }
   return out;
 };
+
+/** Bill print only — fill missing packing doc_dt (dailyprod + IMS, same as sticker print). */
+async function enrichBillPackingDates(note) {
+  if (!note?.items?.length) return note;
+
+  const pending = new Map();
+  for (const grp of note.items) {
+    for (const line of grp.breakdowns || []) {
+      if (line.doc_dt != null && String(line.doc_dt).trim() !== "") continue;
+      const pn = String(line.packing_number ?? "").trim();
+      if (!pn) continue;
+      if (!pending.has(pn)) pending.set(pn, []);
+      pending.get(pn).push(line);
+    }
+  }
+
+  await Promise.all(
+    [...pending.entries()].map(async ([pn, lines]) => {
+      try {
+        const meta = await resolvePackingStickerMetaForPrint(pn);
+        const dt = meta?.doc_dt;
+        if (dt == null || String(dt).trim() === "") return;
+        for (const line of lines) line.doc_dt = dt;
+      } catch {
+        /* ignore lookup errors */
+      }
+    })
+  );
+
+  return note;
+}
 
 const buildLockMessage = (record) => {
   const lockBy = record?.out_entry_locked_by_name || "another user";
@@ -665,6 +697,7 @@ export const printForwardingNoteBill = async (req, res) => {
     if (!data) return res.status(404).json({ success: false, message: "Not found" });
 
     const enriched = await enrichForwardingNoteDetail(data);
+    await enrichBillPackingDates(enriched);
     const html = buildForwardingNoteBillDocument(enriched, sanitizePrintCompanyInfo(company_info));
     res.json({ success: true, html });
   } catch (err) {

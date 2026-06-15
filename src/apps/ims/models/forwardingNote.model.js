@@ -188,9 +188,20 @@ export const findForwardingNote = async (filters = {}) => {
 
   if (!row) return null;
 
-  // Fetch items for this forwarding note
+  // Fetch items for this forwarding note (packing doc_dt from dailyprod for bill print)
   const items = await dbQuery(
-    `SELECT fi.*, fi.item_dcode::text AS item_code, NULL::text AS itemdesc
+    `SELECT fi.*,
+            fi.item_dcode::text AS item_code,
+            NULL::text AS itemdesc,
+            (
+              SELECT dp.doc_dt
+              FROM ims_dailyprod dp
+              WHERE NULLIF(TRIM(dp.doc_no::text), '') = NULLIF(TRIM(fi.packing_number::text), '')
+              ORDER BY
+                (CASE WHEN dp.doc_dt IS NOT NULL THEN 0 ELSE 1 END) ASC,
+                dp.doc_dt DESC NULLS LAST
+              LIMIT 1
+            ) AS doc_dt
      FROM ims_forwarding_note_item_wise fi
      WHERE fi.fuid = $1 AND fi.is_deleted = false
      ORDER BY fi.id ASC`,

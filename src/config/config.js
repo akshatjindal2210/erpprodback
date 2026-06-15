@@ -60,6 +60,7 @@ const config = {
   node_env: process.env.NODE_ENV || "development",
   domain: process.env.DOMAIN || "localhost",
   frontend_url: ["https://out.jflbharat.com","https://inside.jflbharat.com","http://localhost:3000"],
+  // frontend_url: ["https://devout.jflbharat.com","https://dev.jflbharat.com","http://localhost:3000"],
   // frontend_url1: process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(",") : ["http://localhost:3000"],
   uploadPath: getUploadPath(),
   uploadPublicPath: "uploads",
@@ -79,12 +80,9 @@ const config = {
     url: process.env.ERP_IMS_API_URL || "http://192.168.1.100:3200/data/imsdata",
     timeoutMs: 15000,
   },
-  /** WhatsApp message APIs — task/template notifications */
+  /** WhatsApp message API — task/template notifications (requestedData: swa | swpa) */
   waApi: {
-    /** Instant / event-triggered messages (task assigned, reminders, status, etc.) */
-    swa: process.env.WA_API_SWA_URL || "http://192.168.1.100:3200/wa/swa",
-    /** Daily fixed-time bulk messages (daily_reminder template) */
-    swap: process.env.WA_API_SWAP_URL || "http://192.168.1.100:3200/wa/swap",
+    url: process.env.WA_API_URL || "http://192.168.1.100:3200/send/wa",
     timeoutMs: 15000,
   },
 };
@@ -95,7 +93,7 @@ if (config.node_env === "production" && !config.jwt_secret) {
 
 export default config;
 
-/** Login din — raat 11:59 PM IST tak session */
+/** Session expires at 11:59 PM IST on the login day */
 export function getSessionMaxAgeMs() {
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
   return Math.max(60_000, new Date(`${today}T23:59:59.999+05:30`) - Date.now());

@@ -391,6 +391,15 @@ const fmtQtyPlain = (n) => {
   return String(Math.round(num));
 };
 
+/** DD/MM/YY — packing doc_dt for bill print (not row created_at). */
+const fmtBillPackingDate = (line) => {
+  const formatted = formatDocDate(resolveStickerDocDt(line));
+  if (!formatted) return "—";
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(formatted);
+  if (m) return `${m[1]}/${m[2]}/${m[3].slice(-2)}`;
+  return formatted;
+};
+
 /** DD/MM/YY — matches handwritten forwarding note style */
 const fmtBillShortDate = (d) => {
   if (!d) return "—";
@@ -453,7 +462,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
       sumBoxCount += Number(line.box || 0) + Number(line.loose_box || 0);
       const hpCode = escapeHtml(grp.item_code || line.item_code || "—");
       const pkgNo = escapeHtml(line.packing_number || "—");
-      const pkgDate = fmtBillShortDate(line.created_at || line.updated_at);
+      const pkgDate = fmtBillPackingDate(line);
       const qtyCell = fmtQtyPlain(line.total_qty);
       rowChunks.push(`
         <tr>

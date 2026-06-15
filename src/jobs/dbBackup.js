@@ -102,8 +102,7 @@ const runOneBackup = async ({ targetDir, replacePrefix, fileName, label, hourSlo
 
   fs.mkdirSync(targetDir, { recursive: true });
 
-  // Pre-cleanup: Backup shuru hone se pehle hi purani extra files hata do
-  // taaki agar backup fail bhi ho, to folder cluttered na rahe.
+  // Pre-cleanup: remove stale hourly files before starting so a failed run does not leave clutter.
   if (hourSlot) {
     await removeOldHourlySlotFiles(targetDir, hourSlot.db);
   }
@@ -135,7 +134,7 @@ const buildPlans = (root, cronMode) => {
     const h = now.getHours();
     const weeklyDir = path.join(root, config.dbBackup.weeklyDir);
 
-    // Manual (npm run backup) weekly nahi — warna beech din partial se purana slot overwrite ho jata.
+    // Manual `npm run backup` skips weekly — otherwise a mid-day partial run could overwrite the weekly slot.
     if (cronMode && h === WEEKLY_SNAPSHOT_HOUR) {
       const snapshotDay = new Date(now);
       snapshotDay.setDate(snapshotDay.getDate() - 1);

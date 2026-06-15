@@ -1,19 +1,28 @@
 import fetch from "node-fetch";
 import config from "../../config/config.js";
 
-const REQUESTED_DATA = "sendmessage";
-
-function buildBody(filter) {
-  return { requestedData: REQUESTED_DATA, filter };
+function buildBody(requestedData, filter) {
+  return { requestedData, filter };
 }
 
-export function resolveWaMessageUrl(templateKey) {
-  return templateKey === "daily_reminder" ? config.waApi.swap : config.waApi.swa;
+/** Paid → swpa; free → swa. Daily reminder keeps paid channel when WhatsApp is on. */
+export function resolveWaRequestedData(templateKey, sendVia) {
+  const via = String(sendVia ?? "");
+  const key = String(templateKey ?? "");
+  if (via === "none") return "swa";
+  if (via === "paid" || via === "whatsapp_2") return "swpa";
+  if (key === "daily_reminder") return "swpa";
+  return "swa";
 }
 
-/** POST task notification to /wa/swa (instant) or /wa/swap (daily). */
-export async function postWaMessage(templateKey, filter) {
-  const url = resolveWaMessageUrl(templateKey);
+export function resolveWaMessageUrl() {
+  return config.waApi.url;
+}
+
+/** POST /send/wa — requestedData swa (normal) or swpa (paid). */
+export async function postWaMessage(templateKey, filter, sendVia) {
+  const url = resolveWaMessageUrl();
+  const requestedData = resolveWaRequestedData(templateKey, sendVia);
   const timeoutMs = config.waApi.timeoutMs || 15000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -22,7 +31,7 @@ export async function postWaMessage(templateKey, filter) {
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildBody(filter)),
+      body: JSON.stringify(buildBody(requestedData, filter)),
       signal: controller.signal,
     });
 
@@ -36,10 +45,16 @@ export async function postWaMessage(templateKey, filter) {
       }
     }
 
-    return { httpOk: response.ok, json, status: response.status, url };
+    return { httpOk: response.ok, json, status: response.status, url, requestedData };
   } catch (err) {
     const message = err?.cause?.message || err?.message || String(err);
-    return { httpOk: false, json: { success: false, message }, status: 0, url };
+    return {
+      httpOk: false,
+      json: { success: false, message },
+      status: 0,
+      url,
+      requestedData,
+    };
   } finally {
     clearTimeout(timer);
   }

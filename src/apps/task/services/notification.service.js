@@ -8,7 +8,7 @@ import { sendTaskNotifyGateway } from "./taskNotifyGateway.service.js";
 import { sendTaskPwaPush, isPwaPushConfigured } from "./taskPwaPush.service.js";
 import { toUserId } from "../../../utils/socket.js";
 
-const SEND_VIA = ["none", "whatsapp_1", "whatsapp_2", "email"];
+const SEND_VIA = ["none", "free", "paid"];
 
 const FALLBACK_SUBJECT = {
   task_assigned: "New task: {{task_title}}",
@@ -38,9 +38,8 @@ export function getChannelStatus() {
   return {
     gateway: { id: "gateway", label: "ERP Gateway", configured: true },
     pwa_push: { id: "pwa_push", label: "PWA (Socket)", configured: isPwaPushConfigured() },
-    email: { id: "email", label: "Email", configured: true },
-    whatsapp_1: { id: "whatsapp_1", label: "WhatsApp 1", configured: true },
-    whatsapp_2: { id: "whatsapp_2", label: "WhatsApp 2", configured: true },
+    free: { id: "free", label: "Free", configured: true },
+    paid: { id: "paid", label: "Paid", configured: true },
   };
 }
 
@@ -100,7 +99,7 @@ export async function sendTaskNotification(
   const sendVia = SEND_VIA.includes(tpl.send_via) ? tpl.send_via : "none";
   if (sendVia === "none") return;
 
-  const recipient = sendVia === "email" ? user.email : user.phone;
+  const recipient = user.phone;
   if (!recipient) {
     writeLog({
       task_id: task_id ?? null,
@@ -110,7 +109,7 @@ export async function sendTaskNotification(
       recipient: null,
       message,
       status: "skipped",
-      error_detail: sendVia === "email" ? "User has no email" : "User has no phone",
+      error_detail: "User has no phone",
     });
     return;
   }

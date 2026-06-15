@@ -1,18 +1,21 @@
 import TaskAppConfig, { TASK_CONFIG_KEYS } from "./taskAppConfig.model.js";
 
-export const SEND_VIA_OPTIONS = ["none", "whatsapp_1", "whatsapp_2", "email"];
+export const SEND_VIA_OPTIONS = ["none", "free", "paid"];
+
+export function coerceSendVia(raw, legacy = {}) {
+  const v = String(raw ?? "");
+  if (SEND_VIA_OPTIONS.includes(v)) return v;
+  if (v === "whatsapp_2") return "paid";
+  if (v === "whatsapp_1") return "free";
+  if (v === "email") return "none";
+  if (legacy.whatsapp_enabled) return "free";
+  return "none";
+}
 
 export function normalizeTemplate(t) {
   if (!t) return null;
 
-  let send_via = "none";
-  if (t.send_via && SEND_VIA_OPTIONS.includes(t.send_via)) {
-    send_via = t.send_via;
-  } else if (t.whatsapp_enabled) {
-    send_via = "whatsapp_1";
-  } else if (t.email_enabled) {
-    send_via = "email";
-  }
+  const send_via = coerceSendVia(t.send_via, t);
 
   const is_enabled = !!t.is_enabled;
   return {

@@ -13,9 +13,9 @@ export function singlePackingFromRows(rows = []) {
 }
 
 /**
- * source_module = kis feature se (packing_entry, inventory_inward, ims_out_entry, ims_stock_adjustment)
- * source_id     = us record ki id (in_uid, out_uid, adjustment_id, packing no)
- * transaction_type = kya hua (inward_link, sa_stock_in, out_link, …)
+ * source_module = originating feature (packing_entry, inventory_inward, ims_out_entry, ims_stock_adjustment)
+ * source_id     = record id (in_uid, out_uid, adjustment_id, packing no)
+ * transaction_type = action (inward_link, sa_stock_in, out_link, …)
  */
 export async function logBoxTransaction({ client = null, transaction_type, source_module, source_id = null, packing_number = null, user_id = null, details = {}, rows = [] }) {
   if (!transaction_type || !source_module) return;
