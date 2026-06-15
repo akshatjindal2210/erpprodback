@@ -333,12 +333,19 @@ export async function fetchDailyprodDocMetaByPackings(packingNumbers = []) {
 
   const rows = await dbQuery(
     `SELECT
-       TRIM(doc_no::text) AS packing_number,
-       doc_dt,
-       job_card_no
-     FROM ims_dailyprod
-     WHERE doc_no::text = ANY($1::text[])
-        OR TRIM(doc_no::text) = ANY($1::text[])`,
+       TRIM(x.pn::text) AS packing_number,
+       dp.doc_dt,
+       dp.job_card_no
+     FROM unnest($1::text[]) AS x(pn)
+     LEFT JOIN LATERAL (
+       SELECT dp2.doc_dt, dp2.job_card_no
+       FROM ims_dailyprod dp2
+       WHERE ${sqlDailyprodDocNoMatch("dp2.doc_no", "x.pn")}
+       ORDER BY
+         (CASE WHEN dp2.doc_dt IS NOT NULL THEN 0 ELSE 1 END) ASC,
+         dp2.doc_dt DESC NULLS LAST
+       LIMIT 1
+     ) dp ON true`,
     [nums]
   );
 

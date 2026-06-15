@@ -16,9 +16,7 @@ const server = http.createServer(app);
 
 export const io = new Server(server, {
   cors: {
-    origin: [
-      ...config.frontend_url,
-    ],
+    origin: config.frontend_url,
     credentials: true,
   },
 });

@@ -9,7 +9,8 @@ import {
   lookupPartyRateAccNameAnyItem,
 } from "../utils/packingEntryCustomers.js";
 import { fetchFromIMS, fetchPackRowsForFinancialYearDoc } from "../services/ims.service.js";
-import { findImsPackByDocNo, buildImsDocFilterMany } from "../utils/imsPackRow.js";
+import { findImsPackByDocNo, buildImsDocFilterMany, imsPackRowToProduction } from "../utils/imsPackRow.js";
+import { getProductionStickerPanelMetaByPackingNumbers } from "../models/box.model.js";
 
 function isMissingDocDt(value) {
   return value == null || String(value).trim() === "";
@@ -17,9 +18,32 @@ function isMissingDocDt(value) {
 
 function formatDocDt(raw) {
   if (isMissingDocDt(raw)) return null;
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
+    return `${raw.getUTCFullYear()}-${String(raw.getUTCMonth() + 1).padStart(2, "0")}-${String(raw.getUTCDate()).padStart(2, "0")}`;
+  }
   const s = String(raw).trim();
   const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  return m ? m[1] : s;
+  if (m) return m[1];
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+  }
+  return s;
+}
+
+function lookupPackMetaMap(map, pn) {
+  const key = String(pn ?? "").trim();
+  if (!key || !map?.size) return null;
+  if (map.has(key)) return map.get(key);
+  if (/^\d+$/.test(key) && map.has(String(Number(key)))) return map.get(String(Number(key)));
+  return null;
+}
+
+function setPackMetaMap(map, pn, value) {
+  const key = String(pn ?? "").trim();
+  if (!key || value == null || value === "") return;
+  map.set(key, value);
+  if (/^\d+$/.test(key)) map.set(String(Number(key)), value);
 }
 
 /** doc_dt: local ims_dailyprod first, then IMS pack (batched + parallel). */
@@ -33,15 +57,13 @@ async function resolvePackDocDateMap(packingNumbers = []) {
   try {
     const localMeta = await fetchDailyprodDocMetaByPackings(unique);
     for (const pn of unique) {
-      const meta =
-        localMeta.get(pn) ??
-        (/^\d+$/.test(pn) ? localMeta.get(String(Number(pn))) : null);
+      const meta = lookupPackMetaMap(localMeta, pn);
       const formatted = formatDocDt(meta?.doc_dt);
-      if (formatted) map.set(pn, formatted);
+      if (formatted) setPackMetaMap(map, pn, formatted);
       else stillNeed.push(pn);
     }
   } catch {
-    stillNeed.push(...unique.filter((pn) => !map.has(pn)));
+    stillNeed.push(...unique.filter((pn) => !lookupPackMetaMap(map, pn)));
   }
 
   if (!stillNeed.length) return map;
@@ -61,19 +83,65 @@ async function resolvePackDocDateMap(packingNumbers = []) {
         for (const pn of chunk) {
           const packRow = findImsPackByDocNo(recs, pn);
           if (!packRow) continue;
-          const raw =
-            packRow.docdt ??
-            packRow.doc_dt ??
-            packRow["Doc Dt"] ??
-            packRow.Doc_Dt ??
-            packRow.DocDt;
-          const formatted = formatDocDt(raw);
-          if (formatted) map.set(pn, formatted);
+          const prod = imsPackRowToProduction(packRow);
+          const formatted = formatDocDt(prod?.doc_dt);
+          if (formatted) setPackMetaMap(map, pn, formatted);
         }
       })
     );
   } catch {
     /* optional IMS */
+  }
+
+  let stillMissing = unique.filter((pn) => !lookupPackMetaMap(map, pn));
+  if (stillMissing.length) {
+    try {
+      const panelMap = await getProductionStickerPanelMetaByPackingNumbers(stillMissing);
+      for (const pn of stillMissing) {
+        const entry = lookupPackMetaMap(panelMap, pn);
+        const formatted = formatDocDt(entry?.dailyprod_doc_dt);
+        if (formatted) setPackMetaMap(map, pn, formatted);
+      }
+    } catch {
+      /* optional panel meta */
+    }
+  }
+
+  stillMissing = unique.filter((pn) => !lookupPackMetaMap(map, pn));
+  if (stillMissing.length) {
+    try {
+      const hints = await findCustomerHintsForPackings(stillMissing);
+      const hintByPn = new Map();
+      for (const row of hints || []) {
+        const pn = String(row.packing_number ?? "").trim();
+        if (!pn) continue;
+        hintByPn.set(pn, row);
+        if (/^\d+$/.test(pn)) hintByPn.set(String(Number(pn)), row);
+      }
+      await Promise.all(
+        stillMissing.map(async (pn) => {
+          if (lookupPackMetaMap(map, pn)) return;
+          const hint = lookupPackMetaMap(hintByPn, pn);
+          const fy = hint?.financial_year != null ? String(hint.financial_year).trim() : "";
+          if (!fy) return;
+          try {
+            const ims = await fetchPackRowsForFinancialYearDoc(fy, pn);
+            const first =
+              (ims?.records || []).find((r) => {
+                const raw = r?.doc_dt ?? r?.docdt ?? r?.Doc_Dt ?? r?.["Doc Dt"];
+                return !isMissingDocDt(raw);
+              }) ?? ims?.records?.[0];
+            const prod = imsPackRowToProduction(first);
+            const formatted = formatDocDt(prod?.doc_dt);
+            if (formatted) setPackMetaMap(map, pn, formatted);
+          } catch {
+            /* optional IMS FY */
+          }
+        })
+      );
+    } catch {
+      /* optional hints */
+    }
   }
 
   return map;
@@ -314,7 +382,7 @@ export async function enrichInventoryRows(rows = []) {
       : (row.customer_name && String(row.customer_name).trim() !== "—" ? row.customer_name : null);
 
     const pn = String(row.packing_number ?? "").trim();
-    const doc_dt = docDtMap.get(pn) ?? null;
+    const doc_dt = lookupPackMetaMap(docDtMap, pn) ?? null;
 
     return {
       ...row,
