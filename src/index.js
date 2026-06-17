@@ -25,7 +25,7 @@ app.use(requestLogger);
 
 app.use(
   cors({
-    origin: config.frontend_url,
+    origin: [...config.frontend_url],
     credentials: true,
   }),
 );

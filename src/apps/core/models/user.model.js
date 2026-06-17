@@ -63,6 +63,16 @@ export const findUsers = async (options = {}) => {
   const mappedSelect = fields.length > 0
     ? fields.filter((f) => ALLOWED_SELECT_FIELDS.includes(f)).map((f) => `u.${f}`)
     : [];
+  if (mappedSelect.length > 0) {
+    const wantsDept = fields.includes("department_id");
+    const wantsDesig = fields.includes("designation_id");
+    if (wantsDept && !mappedSelect.some((c) => c.includes("department_name"))) {
+      mappedSelect.push("d.name AS department_name");
+    }
+    if (wantsDesig && !mappedSelect.some((c) => c.includes("designation_name"))) {
+      mappedSelect.push("des.name AS designation_name");
+    }
+  }
   const effectiveJoin = join || USER_LIST_JOIN;
   const safeFields = mappedSelect.length > 0
     ? mappedSelect.join(", ")
@@ -352,6 +362,13 @@ const User = {
   async isManager(id) {
     const user = await findUser({ id });
     return user?.designation_name?.toLowerCase() === "manager";
+  },
+
+  async isExecutive(id) {
+    const user = await findUser({ id });
+    const d = String(user?.designation_name ?? "").toLowerCase().trim();
+    if (!d || d === "manager") return false;
+    return d === "executive" || d === "executive assistant" || d.includes("executive");
   },
 };
 

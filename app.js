@@ -8,7 +8,7 @@ import { initDB } from "./src/config/initDB.js";
 import { seedCoreRootUser } from "./src/apps/core/config/seed.js";
 import { seedImsData } from "./src/apps/ims/config/seed.js";
 import logger from "./src/utils/logger.js";
-import { initRecurringTasksCron, initTaskNotificationsCron, startDbBackupCron } from "./src/jobs/index.js";
+import { initRecurringTasksCron, /* initClTasksCron, */ initTaskNotificationsCron, startDbBackupCron } from "./src/jobs/index.js";
 import { initSocket } from "./src/utils/socket.js";
 import { deliverUnreadInboxToSocket } from "./src/apps/task/services/taskPwaPush.service.js";
 
@@ -16,7 +16,9 @@ const server = http.createServer(app);
 
 export const io = new Server(server, {
   cors: {
-    origin: config.frontend_url,
+    origin: [
+      ...config.frontend_url,
+    ],
     credentials: true,
   },
 });
@@ -60,6 +62,7 @@ async function startServer() {
     await seedCoreRootUser();
     await seedImsData();
     initRecurringTasksCron();
+    // initClTasksCron();
     initTaskNotificationsCron();
 
     server.listen(config.port, () => {

@@ -6,8 +6,6 @@ export const TASK_NOTIFY_VARIABLE_KEYS = [
   "task_description",
   "user_name",
   "status",
-  "old_status",
-  "new_status",
   "priority",
   "category",
   "assigned_by",
@@ -55,10 +53,7 @@ export function buildNotifyVarsFromTask(task, overrides = {}) {
   merged.task_id = String(overrides.task_id ?? task.task_id);
   merged.task_title = overrides.task_title ?? task.title ?? "";
 
-  const statusRaw = overrides.new_status ?? overrides.status ?? task.status;
-  merged.status = formatNotifyStatus(overrides.status ?? statusRaw);
-  if (merged.new_status) merged.new_status = formatNotifyStatus(merged.new_status);
-  if (merged.old_status) merged.old_status = formatNotifyStatus(merged.old_status);
+  merged.status = formatNotifyStatus(overrides.status ?? task.status);
 
   return merged;
 }

@@ -8,21 +8,11 @@ import {
   resolveStandardQtyPerBoxForPacking,
 } from "./stockAdjustmentPacking.js";
 import { boxBelongsToPackingNumber, isBoxAvailableForMinus } from "./boxInventory.js";
+import { resolveAccCodeFromBoxRows } from "./boxCustomerOverride.js";
+import { buildMinusRemovedBoxIdsJson, parseRemovedBoxIdsJson } from "./minusRemovedBoxPayload.js";
+import { getImsMapsSafe } from "./imsLookup.js";
 
-export function parseRemovedBoxIdsJson(raw) {
-  if (raw == null || raw === "") return [];
-  if (Array.isArray(raw)) {
-    return raw.map((u) => Number(u)).filter((n) => Number.isFinite(n) && n > 0);
-  }
-  try {
-    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return (Array.isArray(parsed) ? parsed : [])
-      .map((u) => Number(u))
-      .filter((n) => Number.isFinite(n) && n > 0);
-  } catch {
-    return [];
-  }
-}
+export { parseMinusRemovedBoxPayload, parseRemovedBoxIdsJson } from "./minusRemovedBoxPayload.js";
 
 /** Undo minus marks when un-approving or before re-apply. */
 export async function revertMinusAdjustmentBoxesTx(client, { adjustment, userId }) {
@@ -141,12 +131,14 @@ export async function applyStockAdjustmentOnApproveTx(client, { adjustment, user
     });
 
     const sumQty = live.reduce((s, r) => s + (parseInt(r.qty, 10) || 0), 0);
+    const { ledgerMap } = await getImsMapsSafe();
     await updateAdjustmentsTx(
       client,
       {
         box_count_impact: live.length,
         qty: -Math.abs(sumQty),
-        removed_box_ids: JSON.stringify(uids)
+        removed_box_ids: buildMinusRemovedBoxIdsJson(live, pn, ledgerMap),
+        acc_code: resolveAccCodeFromBoxRows(live),
       },
       { adjustment_id: adjId }
     );

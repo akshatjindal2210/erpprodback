@@ -3,7 +3,8 @@ import { findInventoryInwards, findInventoryInward, insertInventoryInward, updat
 import { logActivity } from "../utils/activityLogger.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
-import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByScanCode, inwardScanRejectMessage, getProductionStickerPanelMetaByPackingNumbers } from "../models/box.model.js";
+import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByAnyScanCodes, inwardScanRejectMessage, getProductionStickerPanelMetaByPackingNumbers } from "../models/box.model.js";
+import { expandStickerScanLookupCodes, primaryStickerScanCode } from "../utils/stickerScanParse.js";
 import { enrichRowsWithIMS, getImsMapsSafe } from "../utils/imsLookup.js";
 import { logInwardLinkBatch } from "../utils/logBoxTransaction.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
@@ -408,12 +409,19 @@ export const batchScanInwardBoxes = async (req, res) => {
       return res.status(400).json({ success: false, message: "Maximum 50 scans per request" });
     }
 
-    const normalizedItems = scanItems.map((item, index) => ({
-      id: item?.id != null ? String(item.id) : String(index),
-      code: item?.code != null ? String(item.code).trim() : "",
-    }));
+    const normalizedItems = scanItems.map((item, index) => {
+      const raw = item?.code != null ? String(item.code).trim() : "";
+      const lookupCodes = expandStickerScanLookupCodes(raw);
+      return {
+        id: item?.id != null ? String(item.id) : String(index),
+        code: primaryStickerScanCode(raw),
+        lookupCodes,
+      };
+    });
 
-    const codes = normalizedItems.map((item) => item.code).filter(Boolean);
+    const codes = [
+      ...new Set(normalizedItems.flatMap((item) => item.lookupCodes).filter(Boolean)),
+    ];
     const [boxRows, anyRows] = await Promise.all([
       findInHandBoxesByScanCodes(codes),
       findBoxesByScanCodesAny(codes),
@@ -421,8 +429,8 @@ export const batchScanInwardBoxes = async (req, res) => {
 
     const resolved = normalizedItems.map((item) => ({
       ...item,
-      row: item.code ? matchBoxRowByScanCode(boxRows, item.code) : null,
-      anyRow: item.code ? matchBoxRowByScanCode(anyRows, item.code) : null,
+      row: item.lookupCodes.length ? matchBoxRowByAnyScanCodes(boxRows, item.lookupCodes) : null,
+      anyRow: item.lookupCodes.length ? matchBoxRowByAnyScanCodes(anyRows, item.lookupCodes) : null,
     }));
 
     const boxNoUids = [

@@ -281,6 +281,15 @@ export function matchBoxRowByScanCode(rows, scanCode) {
   return null;
 }
 
+/** Try multiple parsed lookup keys from one raw sticker / QR scan. */
+export function matchBoxRowByAnyScanCodes(rows, scanCodes = []) {
+  for (const code of scanCodes) {
+    const row = matchBoxRowByScanCode(rows, code);
+    if (row) return row;
+  }
+  return null;
+}
+
 /** Single round-trip lookup by numeric box_uid and/or box_no_uid (QR scan hot path). */
 export const findBoxByUidOrNoUid = async (id) => {
   const val = id != null ? String(id).trim() : "";
@@ -379,7 +388,8 @@ const IN_HAND_BOX_SELECT_SQL = `
        b.out_uid,
        b.sa_id,
        b.sa_entry_type,
-       b.override_cust::text AS acc_name,
+       dp.acc_code AS prod_acc_code,
+       dp.item_dcode AS itemdcode,
        lm.rack_no,
        lm.shelf_no,
        COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '-')))) AS location_no`;

@@ -6,15 +6,24 @@ import { isAssignedTask } from "../shared/utils/targetDateHelper.js";
 const log = (task_id, user_id, performed_by, action, action_detail = null, assignment_id = null) =>
   Task.addLog(task_id, user_id, performed_by, action, action_detail, assignment_id);
 
-/** Only Assigned To person (first_assigned_to) may set target date — no role override (incl. super_admin). */
-function canSetTargetDate(reqUser, task) {
+function isAdminOrSuperAdmin(reqUser) {
   const role = (reqUser.type ?? reqUser.role ?? "").toLowerCase();
-  if (role === "super_admin") return false;
-  return Number(reqUser.id) === Number(task.first_assigned_to_id ?? task.first_assigned_to);
+  return role === "admin" || role === "super_admin";
 }
 
-export function canUserSetTargetDate(userId, task) {
-  return canSetTargetDate({ id: userId }, task);
+/** Active target: only admin/super_admin may change. No active target: only Assigned To may set. */
+function canSetTargetDate(reqUser, task, hasValidTarget = false) {
+  const isAssignedTo = Number(reqUser.id) === Number(task.first_assigned_to_id ?? task.first_assigned_to);
+  if (hasValidTarget) return isAdminOrSuperAdmin(reqUser);
+  return isAssignedTo;
+}
+
+export function canUserSetTargetDate(userId, task, hasValidTarget = false, userType = null) {
+  return canSetTargetDate({ id: userId, type: userType, role: userType }, task, hasValidTarget);
+}
+
+export function canAdminOverrideTargetDate(reqUser, task, hasValidTarget) {
+  return isAssignedTask(task) && hasValidTarget && isAdminOrSuperAdmin(reqUser);
 }
 
 function formatTargetForNotify(dt) {
@@ -43,10 +52,14 @@ export async function setTargetDate(req, res) {
     if (task.status === "completed") {
       return res.status(400).json({ success: false, message: "Task is already completed" });
     }
-    if (!canSetTargetDate(req.user, task)) {
+    const hasValidTarget = await TargetDate.hasValidCurrent(id);
+
+    if (!canSetTargetDate(req.user, task, hasValidTarget)) {
       return res.status(403).json({
         success: false,
-        message: "Only Assigned To person can set target date.",
+        message: hasValidTarget
+          ? "Current target date has not passed yet. Only Admin or Super Admin can change it."
+          : "Only Assigned To person can set target date.",
       });
     }
 

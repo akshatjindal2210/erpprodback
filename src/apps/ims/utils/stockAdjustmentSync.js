@@ -1,7 +1,9 @@
 import { updateAdjustmentsTx } from "../models/stockAdjustment.model.js";
 import { findBoxesByUids } from "../models/box.model.js";
 import { boxBelongsToPackingNumber, isBoxAvailableForMinus } from "./boxInventory.js";
-import { parseRemovedBoxIdsJson } from "./stockAdjustmentApply.js";
+import { resolveAccCodeFromBoxRows } from "./boxCustomerOverride.js";
+import { buildMinusRemovedBoxIdsJson } from "./minusRemovedBoxPayload.js";
+import { getImsMapsSafe } from "./imsLookup.js";
 
 /**
  * Pending edit: update adjustment row only — ims_box_table changes on approve.
@@ -78,7 +80,9 @@ export async function syncAdjustmentMetadataOnly(client, { existing, body, userI
       throw err;
     }
     const sumQty = live.reduce((s, r) => s + (parseInt(r.qty, 10) || 0), 0);
-    fields.removed_box_ids = JSON.stringify(uids);
+    fields.acc_code = resolveAccCodeFromBoxRows(live);
+    const { ledgerMap } = await getImsMapsSafe();
+    fields.removed_box_ids = buildMinusRemovedBoxIdsJson(live, pn, ledgerMap);
     fields.box_count_impact = uids.length;
     fields.qty = -Math.abs(sumQty);
     touched = true;

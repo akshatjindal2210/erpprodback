@@ -93,7 +93,7 @@ async function runPersonalReminders() {
      JOIN ${T.TASKS} t ON t.task_id = tsn.task_id
      WHERE tsn.reminder_at IS NOT NULL
        AND tsn.reminder_at <= NOW()
-       AND tsn.reminder_at >= NOW() - INTERVAL '5 minutes'
+       AND tsn.reminder_at >= NOW() - INTERVAL '15 minutes'
        AND t.status != 'completed'`
   );
   if (!rows.length) return;
@@ -114,6 +114,10 @@ async function runPersonalReminders() {
       },
       row.task_id,
       { tpl }
+    );
+    await dbQuery(
+      `UPDATE ${T.SELF_NOTES} SET reminder_at = NULL WHERE task_id = ? AND user_id = ?`,
+      [row.task_id, row.user_id]
     );
     sent += 1;
   });

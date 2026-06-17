@@ -56,6 +56,17 @@ const DEFAULT_TEMPLATES = {
     send_via: "none",
     trigger_time: null,
   },
+  manual_instant: {
+    template_key: "manual_instant",
+    label: "Instant / Manual Message",
+    subject: "Update from admin",
+    body: "Hi {{user_name}},\n\nPlease check the Task app for an important update.",
+    is_enabled: false,
+    pwa_enabled: false,
+    api_enabled: false,
+    send_via: "none",
+    trigger_time: null,
+  },
 };
 
 function withChannelDefaults(tpl) {
@@ -94,6 +105,11 @@ export async function seedTaskNotificationTemplates() {
     const tpl = existing[key];
     if (!tpl || tpl.pwa_enabled !== undefined) continue;
     existing[key] = withChannelDefaults(tpl);
+    changed = true;
+  }
+
+  if (!existing.manual_instant) {
+    existing.manual_instant = DEFAULT_TEMPLATES.manual_instant;
     changed = true;
   }
 

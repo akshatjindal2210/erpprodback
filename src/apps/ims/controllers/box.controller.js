@@ -654,13 +654,25 @@ async function enrichBoxRowsFromIMS(rows = [], maps = null) {
       row.cust_at_time != null && String(row.cust_at_time).trim() !== ""
         ? String(row.cust_at_time).trim()
         : null;
+    const rawAccName =
+      row.acc_name != null && String(row.acc_name).trim() !== ""
+        ? String(row.acc_name).trim()
+        : null;
+    const nameLooksLikeCode =
+      accCode &&
+      rawAccName &&
+      (rawAccName === String(accCode) || rawAccName === canonicalCode(accCode));
+    const acc_name =
+      accNameFromLedger ??
+      (custSnapshot && custSnapshot !== String(accCode) ? custSnapshot : null) ??
+      (rawAccName && !nameLooksLikeCode ? rawAccName : null);
     return {
       ...row,
       item_code: item?.item_code ?? row.item_code ?? null,
       itemdesc: item?.item_desc ?? row.itemdesc ?? row.item_desc ?? null,
       item_desc: item?.item_desc ?? row.item_desc ?? row.itemdesc ?? null,
       acc_code: accCode ?? row.acc_code ?? null,
-      acc_name: accNameFromLedger ?? custSnapshot ?? row.acc_name ?? null,
+      acc_name,
       party_rate_cust_code: null,
       from_customer_name: (row.from_customer != null ? ledgerMap.get(String(row.from_customer)) : null) ?? row.from_customer_name ?? null,
       to_customer_name: (row.to_customer != null ? ledgerMap.get(String(row.to_customer)) : null) ?? row.to_customer_name ?? null,

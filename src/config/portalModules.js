@@ -7,7 +7,7 @@ export const APP_GATES = {
 export const APP_META = {
   core: { label: "Admin Console", permissions: true },
   ims: { label: "IMS", permissions: true },
-  task: { label: "Task", permissions: false },
+  task: { label: "Task", permissions: true },
 };
 
 export const PORTAL_APP_KEYS = ["core", "ims", "task"];
@@ -41,7 +41,12 @@ export const MODULES = {
     { name: "sticker_download_logs", label: "Sticker Download Logs" },
     { name: "audit", label: "Inventory Audit" },
   ],
-  task: [],
+  task: [
+    // { name: "cl_task", label: "CL Task" },
+    // { name: "cl_task_verification", label: "CL Task Verification" },
+    // { name: "cl_task_report", label: "CL Task Report" },
+    // { name: "red_ticket", label: "Red Ticket" },
+  ],
 };
 
 export const SEED_MODULES = [
@@ -67,5 +72,9 @@ export const SEED_MODULES = [
   { name: "departments",                  label: "Departments",                     sort_order: 20,       app_type: "core" },
   { name: "designations",                 label: "Designations",                    sort_order: 21,       app_type: "core" },
   { name: "audit",                        label: "Inventory Audit",                 sort_order: 22,       app_type: "ims" },
+  // { name: "cl_task",                      label: "CL Task",                         sort_order: 23,       app_type: "task" },
+  // { name: "cl_task_verification",         label: "CL Task Verification",            sort_order: 24,       app_type: "task" },
+  // { name: "cl_task_report",               label: "CL Task Report",                  sort_order: 25,       app_type: "task" },
+  // { name: "red_ticket",                   label: "Red Ticket",                      sort_order: 26,       app_type: "task" },
 ];
 

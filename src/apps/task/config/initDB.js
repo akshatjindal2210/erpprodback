@@ -5,6 +5,9 @@ import { createTaskRecurringTasksTable, createTaskRecurringTaskAssignmentsTable,
 import { createTaskAssignmentsTable } from "./tables/task_assignments.table.js";
 import { createTaskChatTable } from "./tables/task_chat.table.js";
 import { createTaskSelfNotesTable } from "./tables/task_self_notes.table.js";
+// import { createTaskClTasksTable, createTaskClTaskInstancesTable } from "./tables/cl_tasks.table.js";
+// import { createTaskRedTicketsTable } from "./tables/red_tickets.table.js";
+// import { createTaskMisScoreLedgerTable, createTaskReportReviewsTable } from "./tables/mis_score.table.js";
 import { createTaskAppConfigTable } from "./tables/app_config.table.js";
 import { createTaskUpdatedAtTriggers } from "./tables/triggers.table.js";
 import { syncTaskSequences } from "./syncSequences.js";
@@ -25,6 +28,12 @@ export async function initTaskDB() {
     await createTaskChatTable();
     await createTaskSelfNotesTable();
     await createTaskAppConfigTable();
+
+    // await createTaskClTasksTable();
+    // await createTaskClTaskInstancesTable();
+    // await createTaskRedTicketsTable();
+    // await createTaskMisScoreLedgerTable();
+    // await createTaskReportReviewsTable();
 
     await seedTaskNotificationTemplates();
 

@@ -91,7 +91,7 @@ const Task = {
   // GET ALL   paginated list
   async getAll({
     page = 1, limit = 10, search = "", sortBy = "t.task_id", order = "DESC", status, priority, category_id, view, userId, userRole, task_type, reminder, overdue, 
-    upcoming_due, new_today, creator_pending, action_required_today, open_tasks, updated_tasks, include_closed, department_id, user_id, assigned_by_id, report = false
+    upcoming_due, new_today, creator_pending, action_required_today, open_tasks, updated_tasks, include_closed, department_id, designation_id, user_id, assigned_by_id, report = false
   }) {
     const offset = (Number(page) - 1) * Number(limit);
     const where  = ["1=1"];
@@ -133,6 +133,16 @@ const Task = {
         AND u.id IN (t.first_assigned_to, t.current_holder_id, t.assigned_by, t.created_by)
       )`);
       params.push(department_id);
+    }
+
+    // Designation Filter
+    if (designation_id) {
+      where.push(`EXISTS (
+        SELECT 1 FROM ${M.USERS} u 
+        WHERE u.designation_id = ? 
+        AND u.id IN (t.first_assigned_to, t.current_holder_id, t.assigned_by, t.created_by)
+      )`);
+      params.push(designation_id);
     }
 
     if (task_type) {
@@ -252,7 +262,7 @@ const Task = {
 
   // COUNT
   async count({ search = "", status, priority, category_id, view, userId, userRole, task_type, reminder, overdue, upcoming_due, new_today,
-    creator_pending, action_required_today, open_tasks, updated_tasks, include_closed, department_id, user_id, assigned_by_id, report = false
+    creator_pending, action_required_today, open_tasks, updated_tasks, include_closed, department_id, designation_id, user_id, assigned_by_id, report = false
   }) {
     const where  = ["1=1"];
     const params = [];
@@ -287,6 +297,16 @@ const Task = {
         AND u.id IN (t.first_assigned_to, t.current_holder_id, t.assigned_by, t.created_by)
       )`);
       params.push(department_id);
+    }
+
+    // Designation Filter
+    if (designation_id) {
+      where.push(`EXISTS (
+        SELECT 1 FROM ${M.USERS} u 
+        WHERE u.designation_id = ? 
+        AND u.id IN (t.first_assigned_to, t.current_holder_id, t.assigned_by, t.created_by)
+      )`);
+      params.push(designation_id);
     }
 
     if (task_type) {
@@ -353,6 +373,7 @@ const Task = {
     userId,
     userRole,
     department_id = null,
+    designation_id = null,
     filter_user_id = null,
     assigned_by_id = null,
     report = false,
@@ -394,6 +415,16 @@ const Task = {
         AND u.id IN (t.first_assigned_to, t.current_holder_id, t.assigned_by, t.created_by)
       )`);
       params.push(department_id);
+    }
+
+    // Designation Filter
+    if (designation_id) {
+      where.push(`EXISTS (
+        SELECT 1 FROM ${M.USERS} u 
+        WHERE u.designation_id = ? 
+        AND u.id IN (t.first_assigned_to, t.current_holder_id, t.assigned_by, t.created_by)
+      )`);
+      params.push(designation_id);
     }
 
     if (!report) {
@@ -982,7 +1013,8 @@ const Task = {
   async getSelfNote(task_id, user_id) {
     const rows = await dbQuery(
       `SELECT
-        self_note_id, task_id, user_id, note, reminder_at, attachments,
+        self_note_id, task_id, user_id, note, attachments,
+        TO_CHAR(reminder_at, 'YYYY-MM-DD HH24:MI:SS') AS reminder_at,
         TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
         TO_CHAR(updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at
       FROM task_self_notes

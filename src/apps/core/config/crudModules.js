@@ -1,8 +1,8 @@
 export const CRUD_MODULES = {
   users: {
     idField: "id",
-    listFields: ["id", "name", "username", "usercode", "email", "phone", "type", "status", "auth_source", "created_at"],
-    filterFields: ["id", "name", "username", "usercode", "email", "phone", "type", "status", "auth_source", "from_date", "to_date"],
+    listFields: ["id", "name", "username", "usercode", "email", "phone", "type", "status", "auth_source", "department_id", "designation_id", "created_at"],
+    filterFields: ["id", "name", "username", "usercode", "email", "phone", "type", "status", "auth_source", "department_id", "designation_id", "from_date", "to_date"],
     searchFields: ["name", "username", "email", "usercode"]
   },
   user_permissions: {

@@ -34,6 +34,19 @@ function writeLog(data) {
   });
 }
 
+function logWhatsAppResult({ task_id, user_id, template_key, sendVia, recipient, message, gateway }) {
+  writeLog({
+    task_id: task_id ?? null,
+    user_id,
+    template_key,
+    channel: sendVia,
+    recipient,
+    message,
+    status: gateway?.ok ? "sent" : "failed",
+    error_detail: gateway?.ok ? null : gateway?.error ?? "WhatsApp API unavailable",
+  });
+}
+
 export function getChannelStatus() {
   return {
     gateway: { id: "gateway", label: "ERP Gateway", configured: true },
@@ -124,15 +137,14 @@ export async function sendTaskNotification(
       recipient,
       vars: merged,
     });
-    writeLog({
-      task_id: task_id ?? null,
+    logWhatsAppResult({
+      task_id,
       user_id: uid,
       template_key,
-      channel: gateway.ok ? "gateway" : "console",
+      sendVia,
       recipient,
       message,
-      status: gateway.ok ? "sent" : "console",
-      error_detail: gateway.ok ? null : gateway.error ?? "ERP API unavailable",
+      gateway,
     });
   } catch (err) {
     console.error(`[Task notify] ERP ${template_key}:`, err.message);
@@ -147,6 +159,193 @@ export async function sendTaskNotification(
       error_detail: err.message,
     });
   }
+}
+
+/** Admin instant send — ignores template is_enabled; uses chosen channels per request. */
+export async function sendDirectNotification(
+  userId,
+  {
+    template_key = "manual_instant",
+    subject = "",
+    body = "",
+    pwa_enabled = false,
+    api_enabled = false,
+    send_via = "none",
+    vars = {},
+    task_id = null,
+  } = {}
+) {
+  const uid = toUserId(userId);
+  if (!uid) return { ok: false, skipped: true, user_id: userId, error: "Invalid user id" };
+
+  const user = await User.getById(uid);
+  if (!user) return { ok: false, skipped: true, user_id: uid, error: "User not found" };
+
+  const merged = { user_name: user.name ?? "", ...vars };
+  const finalSubject = renderTemplate(subject, merged);
+  const finalBody = renderTemplate(body, merged);
+  const message = finalSubject ? `${finalSubject}\n\n${finalBody}` : finalBody;
+  const via = SEND_VIA.includes(send_via) ? send_via : "none";
+
+  let pwaOk = false;
+  let apiOk = false;
+  const errors = [];
+
+  if (pwa_enabled) {
+    try {
+      const pwa = await sendTaskPwaPush({
+        userId: uid,
+        subject: finalSubject || "Task update",
+        body: finalBody,
+        message,
+        task_id,
+        template_key,
+      });
+      writeLog({
+        task_id: task_id ?? null,
+        user_id: uid,
+        template_key,
+        channel: "pwa_push",
+        recipient: `user:${uid}`,
+        message,
+        status: pwa.ok ? "sent" : pwa.skipped ? "skipped" : "failed",
+        error_detail: pwa.ok ? null : pwa.error ?? "PWA notify failed",
+      });
+      pwaOk = !!pwa.ok;
+      if (!pwa.ok && pwa.error) errors.push(pwa.error);
+    } catch (err) {
+      errors.push(err.message);
+      writeLog({
+        task_id: task_id ?? null,
+        user_id: uid,
+        template_key,
+        channel: "pwa_push",
+        recipient: `user:${uid}`,
+        message,
+        status: "failed",
+        error_detail: err.message,
+      });
+    }
+  }
+
+  if (api_enabled && via !== "none") {
+    const recipient = user.phone;
+    if (!recipient) {
+      writeLog({
+        task_id: task_id ?? null,
+        user_id: uid,
+        template_key,
+        channel: via,
+        recipient: null,
+        message,
+        status: "skipped",
+        error_detail: "User has no phone",
+      });
+      errors.push("No phone number");
+    } else {
+      try {
+        const gateway = await sendTaskNotifyGateway({
+          tpl: { template_key, send_via: via },
+          subject: finalSubject,
+          body: finalBody,
+          message,
+          task_id,
+          recipient,
+          vars: merged,
+        });
+        logWhatsAppResult({
+          task_id,
+          user_id: uid,
+          template_key,
+          sendVia: via,
+          recipient,
+          message,
+          gateway,
+        });
+        apiOk = !!gateway.ok;
+        if (!gateway.ok && gateway.error) errors.push(gateway.error);
+      } catch (err) {
+        errors.push(err.message);
+        writeLog({
+          task_id: task_id ?? null,
+          user_id: uid,
+          template_key,
+          channel: via,
+          recipient,
+          message,
+          status: "failed",
+          error_detail: err.message,
+        });
+      }
+    }
+  }
+
+  const ok = pwaOk || apiOk;
+  return {
+    ok,
+    skipped: !pwa_enabled && (!api_enabled || via === "none"),
+    user_id: uid,
+    user_name: user.name,
+    pwa: pwaOk,
+    api: apiOk,
+    error: errors.length ? errors.join("; ") : null,
+  };
+}
+
+export async function sendInstantMessage({
+  recipient_mode = "users",
+  user_ids = [],
+  template_key = "manual_instant",
+  subject = "",
+  body = "",
+  pwa_enabled = true,
+  api_enabled = false,
+  send_via = "none",
+  vars = {},
+}) {
+  const subj = String(subject ?? "").trim();
+  const msgBody = String(body ?? "").trim();
+  if (!subj && !msgBody) {
+    throw new Error("Subject or message body is required");
+  }
+  if (!pwa_enabled && (!api_enabled || send_via === "none")) {
+    throw new Error("Enable PWA and/or WhatsApp (Free/Paid)");
+  }
+
+  let ids = (Array.isArray(user_ids) ? user_ids : [])
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+
+  if (recipient_mode === "all") {
+    const users = await User.getAll({ status: "active" });
+    ids = users.map((u) => u.id);
+  }
+
+  if (!ids.length) {
+    throw new Error("No recipients selected");
+  }
+
+  const details = [];
+  for (const uid of ids) {
+    const result = await sendDirectNotification(uid, {
+      template_key,
+      subject: subj,
+      body: msgBody,
+      pwa_enabled,
+      api_enabled,
+      send_via,
+      vars,
+    });
+    details.push(result);
+  }
+
+  return {
+    total: ids.length,
+    sent: details.filter((d) => d.ok).length,
+    failed: details.filter((d) => !d.ok && !d.skipped).length,
+    skipped: details.filter((d) => d.skipped).length,
+    details,
+  };
 }
 
 export { renderTemplate };

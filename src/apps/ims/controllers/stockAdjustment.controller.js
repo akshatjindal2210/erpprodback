@@ -15,7 +15,10 @@ import { syncAdjustmentMetadataOnly } from "../utils/stockAdjustmentSync.js";
 import { resolveStockAdjustmentPackingMeta } from "../utils/stockAdjustmentPacking.js";
 import { applyStockAdjustmentOnApproveTx, revertStockAdjustmentOnUnapproveTx } from "../utils/stockAdjustmentApply.js";
 import { isBoxAvailableForMinus } from "../utils/boxInventory.js";
+import { resolveAccCodeFromBoxRows } from "../utils/boxCustomerOverride.js";
 import { buildPartyRateAccNameMap, lookupPartyRateAccName } from "../utils/packingEntryCustomers.js";
+import { applyMinusCustomerEnrichment, buildMinusCustomerLinesByAdjustmentId } from "../utils/stockAdjustmentMinusEnrich.js";
+import { buildMinusRemovedBoxIdsJson } from "../utils/minusRemovedBoxPayload.js";
 
 const STOCK_CFG = getCrudModuleConfig("stock_adjustment");
 
@@ -83,6 +86,8 @@ async function enrichAdjustments(rows = []) {
     }));
   }
   
+  const minusLinesMap = await buildMinusCustomerLinesByAdjustmentId(rows, ledgerMap);
+
   return rows.map(row => {
     const itemDcode = canonicalCode(row.item_dcode);
     const pn = String(row.packing_number || "").trim();
@@ -100,7 +105,7 @@ async function enrichAdjustments(rows = []) {
       ? String(row.acc_name).trim() 
       : null;
 
-    return {
+    const base = {
       ...row,
       item_code: item?.item_code ?? row.item_code ?? null,
       item_desc: item?.item_desc ?? row.item_desc ?? null,
@@ -108,6 +113,12 @@ async function enrichAdjustments(rows = []) {
       acc_name: ledgerName ?? partyRateName ?? existingName ?? null,
       party_rate_cust_code: partyRate ?? row.party_rate_cust_code ?? null
     };
+
+    const minusLines = minusLinesMap.get(row.adjustment_id);
+    if (row.entry_type === "minus" && minusLines?.length) {
+      return applyMinusCustomerEnrichment(base, minusLines);
+    }
+    return base;
   });
 }
 
@@ -216,6 +227,7 @@ export const createAdjustment = async (req, res) => {
         });
       }
       liveMinusRows = live;
+      acc_code = resolveAccCodeFromBoxRows(live);
       const sumQty = live.reduce((s, r) => s + (parseInt(r.qty, 10) || 0), 0);
       qty = -Math.abs(sumQty);
       box_count_impact_v = live.length;
@@ -230,9 +242,8 @@ export const createAdjustment = async (req, res) => {
         });
       }
       item_dcode = resolvedItem;
-      removed_box_ids_json = JSON.stringify(
-        live.map((r) => r.box_uid).filter((id) => id != null)
-      );
+      const { ledgerMap } = await getImsMapsSafe();
+      removed_box_ids_json = buildMinusRemovedBoxIdsJson(live, pnNorm, ledgerMap);
     } else {
       if (item_dcode == null || item_dcode === "") {
         return res.status(400).json({ success: false, message: "item_dcode required" });
@@ -251,7 +262,9 @@ export const createAdjustment = async (req, res) => {
       remarks, 
       created_by: req.user.id 
     };
-    if (acc_code !== undefined) {
+    if (entry_type === "minus") {
+      data.acc_code = acc_code ?? null;
+    } else if (acc_code !== undefined) {
       data.acc_code = acc_code;
     }
 

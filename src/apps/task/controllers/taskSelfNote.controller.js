@@ -2,6 +2,13 @@ import Task from "../models/task.model.js";
 import fs   from "fs";
 import config from "../../../config/config.js";
 
+/** Store reminder as IST wall-clock (matches DB TIMESTAMP without TZ). */
+function normalizeReminderAt(value) {
+  if (value == null || value === "") return null;
+  const m = String(value).trim().match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})/);
+  return m ? `${m[1]} ${m[2]}:${m[3]}:00` : null;
+}
+
 export async function getSelfNote(req, res) {
   try {
     const { id }  = req.params;
@@ -53,7 +60,7 @@ export async function upsertSelfNote(req, res) {
     // Merge kept attachments with new uploads
     const mergedAttachments = [...filteredAttachments, ...newAttachments];
 
-    await Task.upsertSelfNote(id, user_id, note, reminder_at, mergedAttachments);
+    await Task.upsertSelfNote(id, user_id, note, normalizeReminderAt(reminder_at), mergedAttachments);
 
     const updated = await Task.getSelfNote(id, user_id);
     res.json({ success: true, message: "Self note saved", data: updated });

@@ -7,6 +7,7 @@ import { moduleSortOrderNumericExpr } from "../utils/moduleSortOrderSql.js";
 const MODULE_SORT_ORDER = moduleSortOrderNumericExpr("m");
 
 import { MODULE_DISABLED_MESSAGE, NO_ACCESS_MESSAGE } from "../../../global/messages.js";
+import { APP_META } from "../../../config/portalModules.js";
 
 export const accessControl = (moduleName, actions) => {
   return async (req, res, next) => {
@@ -102,10 +103,8 @@ export const accessControl = (moduleName, actions) => {
       const appAccess = await findUserAppAccess(user.id);
       const moduleAppType = moduleRow.app_type;
 
-      // 1. Direct app access check
-      if (appAccess[moduleAppType]) {
-        // If the app doesn't use granular permissions (like Task), allow full access if app access is ON
-        // For Core/IMS, we still prefer granular, but for "view" we can be more lenient if they have app access.
+      // 1. Direct app access check — only when app has no granular module permissions
+      if (appAccess[moduleAppType] && APP_META[moduleAppType]?.permissions === false) {
         if (actionList.length === 1 && actionList[0] === "view") {
           req.permission = { can_view: true, can_view_days: 0 };
           return next();
@@ -206,7 +205,7 @@ export const accessControlAny = (alternatives) => {
         const appAccess = await findUserAppAccess(user.id);
         const moduleAppType = moduleRow.app_type;
 
-        if (appAccess[moduleAppType]) {
+        if (appAccess[moduleAppType] && APP_META[moduleAppType]?.permissions === false) {
           if (actionList.length === 1 && actionList[0] === "view") {
             req.permission = { can_view: true, can_view_days: 0 };
             return next();
@@ -248,6 +247,13 @@ export const dynamicAccessControl = () => {
     accessControl(moduleName, action)(req, res, next);
   };
 };
+
+/** Run module access check inside a controller; returns false if response already sent (denied). */
+export async function ensureModuleAccess(req, res, moduleName, actions) {
+  let allowed = false;
+  await accessControl(moduleName, actions)(req, res, () => { allowed = true; });
+  return allowed;
+}
 
 export const superAdminOnly = (req, res, next) => {
   const user = req.user;

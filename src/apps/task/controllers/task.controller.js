@@ -6,7 +6,7 @@ import { markTaskViewed } from "../services/taskActivityLog.service.js";
 import { calculateNextOccurrence, chatMessage, ensureDir, saveAttachments, upsertRecurring, isDbTrue, parseSubUsers, parseAttachmentsJson, asArray, normalizeCreatorType } from "../shared/index.js";
 import { isAssignedTask } from "../shared/utils/targetDateHelper.js";
 import TargetDate from "../models/targetDate.model.js";
-import { canUserSetTargetDate } from "./targetDate.controller.js";
+import { canUserSetTargetDate, canAdminOverrideTargetDate } from "./targetDate.controller.js";
 import fs from "fs";
 import path from "path";
 import config from "../../../config/config.js";
@@ -25,7 +25,7 @@ export async function getTasks(req, res) {
   try {
     const { 
       search = "", page = 1, limit = 10, sortBy = "t.task_id", order = "DESC", status, priority, category_id, view, task_type, reminder, overdue, upcoming_due, 
-      new_today, creator_pending, action_required_today, open_tasks, updated_tasks, include_closed, department_id, user_id, assigned_by_id, report
+      new_today, creator_pending, action_required_today, open_tasks, updated_tasks, include_closed, department_id, designation_id, user_id, assigned_by_id, report
     } = req.query;
 
     const openTasksFilter = open_tasks === "true" || open_tasks === true;
@@ -34,9 +34,26 @@ export async function getTasks(req, res) {
     const userId   = req.user.id;
     const userRole = (req.user.type ?? req.user.role ?? "user").toLowerCase();
 
+    const wantsReport = report === "true" || report === true;
     const isManager = await User.isManager(userId);
+    const isExecutive = await User.isExecutive(userId);
 
-    const isReport = report === "true" && (userRole === "admin" ||  userRole === "super_admin" || userRole === "executive_assistant" || userRole === "user" || isManager);
+    let isReport = false;
+    if (wantsReport) {
+      let reportAllowed = false;
+      if (userRole === "admin" || userRole === "super_admin" || userRole === "executive_assistant") {
+        reportAllowed = true;
+      } else if (userRole === "user" && isManager && !isExecutive) {
+        reportAllowed = true;
+      }
+      if (!reportAllowed) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied to task report",
+        });
+      }
+      isReport = true;
+    }
 
     const filterParams = {
       search, page, limit, sortBy, order, status, priority, category_id,
@@ -44,6 +61,7 @@ export async function getTasks(req, res) {
       action_required_today, open_tasks: openTasksFilter, updated_tasks: updatedTasksFilter,
       userId, userRole, include_closed, 
       department_id: department_id ? Number(department_id) : null,
+      designation_id: designation_id ? Number(designation_id) : null,
       user_id: user_id ? Number(user_id) : null,
       assigned_by_id: assigned_by_id ? Number(assigned_by_id) : null,
       report: isReport
@@ -95,16 +113,13 @@ export async function getTaskById(req, res) {
     let hasAccess = false;
 
     if (userType === "super_admin") {
-        // Super Admin — full access
         hasAccess = true;
     } else if (userType === "admin" || userType === "executive_assistant" || userType === "user") {
-        // Check 1: Creator access
         const isCreator = await Task.checkTaskCreator(id, user_id);
     
         if (isCreator) {
             hasAccess = true;
         } else {
-            // Check 2: Manager or normal user access
             hasAccess = isManager ? await Task.checkManagerTaskAccess(id, department_id) : await Task.checkUserTaskAccess(id, user_id, user_role);
         }  
     }
@@ -135,7 +150,8 @@ export async function getTaskById(req, res) {
         target_dates:       targetHistory  ?? [],
         current_target:     currentTarget  ?? null,
         has_valid_target:   hasValidTarget,
-        can_set_target_date: canUserSetTargetDate(user_id, task),
+        can_set_target_date: canUserSetTargetDate(user_id, task, hasValidTarget, userType),
+        can_admin_override_target_date: canAdminOverrideTargetDate(req.user, task, hasValidTarget),
       },
     });
   } catch (err) {

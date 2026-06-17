@@ -69,6 +69,11 @@ export const DB_TABLES = {
     "task_chat",
     "task_self_notes",
     "task_app_config",
+    "task_cl_tasks",
+    "task_cl_task_instances",
+    "task_red_tickets",
+    "task_mis_score_ledger",
+    "task_report_reviews",
   ],
 };
 

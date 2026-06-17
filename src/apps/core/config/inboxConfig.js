@@ -14,6 +14,7 @@ export const TRIGGER_LABELS = {
   daily_reminder: "Daily summary",
   personal_reminder: "Reminder",
   status_changed: "Status update",
+  manual_instant: "Admin message",
 };
 
 export const INBOX_SOCKET = {
