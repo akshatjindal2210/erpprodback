@@ -885,12 +885,16 @@ export const getStickerHistory = async (doc_no, category_id = null) => {
         ON ps.is_deleted = false
        AND ps.approved = true
        AND (
-            (b.packing_standard_id IS NOT NULL AND ps.standard_id = b.packing_standard_id)
+            (
+              $2::text IS NULL
+              AND b.packing_standard_id IS NOT NULL
+              AND ps.standard_id = b.packing_standard_id
+            )
             OR
             (
-              b.packing_standard_id IS NULL
-              AND ps.item_dcode::text = b.itemdcode::text
+              ps.item_dcode::text = b.itemdcode::text
               AND (ps.acc_code::text = b.acc_code::text OR ps.acc_code IS NULL)
+              AND (b.packing_standard_id IS NULL OR $2::text IS NOT NULL)
             )
           )
       WHERE ($2::text IS NULL OR ps.type::text = $2::text)
@@ -998,12 +1002,16 @@ export const getStickerHistoryFromLiveRow = async (live = {}, category_id = null
         ON ps.is_deleted = false
        AND ps.approved = true
        AND (
-            (b.packing_standard_id IS NOT NULL AND ps.standard_id = b.packing_standard_id)
+            (
+              $9::text IS NULL
+              AND b.packing_standard_id IS NOT NULL
+              AND ps.standard_id = b.packing_standard_id
+            )
             OR
             (
-              b.packing_standard_id IS NULL
-              AND ps.item_dcode::text = b.itemdcode::text
+              ps.item_dcode::text = b.itemdcode::text
               AND (ps.acc_code::text = b.acc_code::text OR ps.acc_code IS NULL)
+              AND (b.packing_standard_id IS NULL OR $9::text IS NOT NULL)
             )
           )
       WHERE ($9::text IS NULL OR ps.type::text = $9::text)
