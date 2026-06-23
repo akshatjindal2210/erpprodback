@@ -4,9 +4,9 @@ import cookieParser from "cookie-parser";
 import path from "path";
 import config from "./config/config.js";
 
-import { morganMiddleware, requestLogger } from "./utils/logger.js";
-import logger from "./utils/logger.js";
-import { imsMetaMiddleware } from "./apps/ims/utils/imsMeta.js";
+import { morganMiddleware, requestLogger } from "./apps/core/utils/logger.js";
+import logger from "./apps/core/utils/logger.js";
+import { imsMetaMiddleware } from "./apps/ims/utils/erp-api/imsMeta.js";
 import { activityLogger } from "./apps/core/middleware/activityLogger.js";
 
 import imsRoutes from "./apps/ims/routes/index.js";

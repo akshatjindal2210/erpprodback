@@ -1,10 +1,14 @@
 import dbQuery from "../../../config/db.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
-import { sqlBoxInHand } from "../utils/boxInventorySql.js";
-import { applyForwardingOutEntryListFilter } from "../utils/forwardingNoteListFilters.js";
+import { sqlBoxSellable, sqlDocDtText } from "../utils/box/boxInventorySql.js";
+import { applyForwardingOutEntryListFilter } from "../utils/forwarding-note/forwardingNoteListFilters.js";
+
+/**
+ * Forwarding Note — DB access (ims_forwarding_note_master + items + available boxes).
+ * List queries join out_entry lateral for lock/complete status.
+ */
 
 const ALLOWED_FILTER_FIELDS = ["fuid", "acc_code", "po_number", "approved", "out_entry_locked", "out_entry_available", "from_date", "to_date"];
-
 const ALLOWED_SORT_FIELDS = ["created_at", "approved_at", "updated_at", "po_number", "fuid"];
 
 const ALLOWED_UPDATE_FIELDS = [
@@ -194,12 +198,12 @@ export const findForwardingNote = async (filters = {}) => {
             fi.item_dcode::text AS item_code,
             NULL::text AS itemdesc,
             (
-              SELECT dp.doc_dt
+              SELECT ${sqlDocDtText("dp.doc_dt")}
               FROM ims_dailyprod dp
               WHERE NULLIF(TRIM(dp.doc_no::text), '') = NULLIF(TRIM(fi.packing_number::text), '')
               ORDER BY
                 (CASE WHEN dp.doc_dt IS NOT NULL THEN 0 ELSE 1 END) ASC,
-                dp.doc_dt DESC NULLS LAST
+                dp.doc_dt ASC NULLS LAST
               LIMIT 1
             ) AS doc_dt
      FROM ims_forwarding_note_item_wise fi
@@ -469,7 +473,7 @@ export const findAvailableBoxes = async (item_dcode) => {
       b.is_loose,
       b.override_cust,
       dp.doc_no,
-      dp.doc_dt,
+      ${sqlDocDtText("dp.doc_dt")} AS doc_dt,
       dp.job_card_no,
       COALESCE(NULLIF(trim(b.override_cust::text), ''), dp.acc_code::text) AS acc_code,
       CASE
@@ -483,15 +487,24 @@ export const findAvailableBoxes = async (item_dcode) => {
       ON b.sa_id = sa_adj.adjustment_id
      AND b.sa_entry_type = 'stock_in'
      AND sa_adj.is_deleted = false
-    WHERE
-      (
-        CASE
-          WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL
-            THEN sa_adj.item_dcode
-          ELSE dp.item_dcode
-        END
-      )::int = $1::int
-      AND ${sqlBoxInHand("b")}
+    WHERE b.is_deleted = false
+      AND ${sqlBoxSellable("b")}
+      AND (
+        (
+          CASE
+            WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL
+              THEN sa_adj.item_dcode
+            ELSE dp.item_dcode
+          END
+        )::int = $1::int
+        OR EXISTS (
+          SELECT 1
+          FROM ims_qc_hold_material h
+          WHERE h.is_deleted = false
+            AND h.item_dcode::int = $1::int
+            AND position(concat('_QCH', h.hold_id::text, '_') IN b.box_no_uid::text) > 0
+        )
+      )
     ORDER BY b.created_at ASC
   `;
 

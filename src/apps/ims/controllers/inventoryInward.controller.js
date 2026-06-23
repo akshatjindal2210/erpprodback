@@ -1,18 +1,18 @@
-import { findInventoryInwards, findInventoryInward, insertInventoryInward, updateInventoryInwards, deleteInventoryInwards, resetBoxesForInward, findPackingAreaByPacking, findPackingAreaBoxes, fetchDailyprodDocMetaByPackings } from "../models/inventoryInward.model.js";
+import { findInventoryInwards, findInventoryInward, insertInventoryInward, updateInventoryInwards, deleteInventoryInwards, resetBoxesForInward, findPackingAreaByPacking, findPackingAreaBoxes } from "../models/inventoryInward.model.js";
 
-import { logActivity } from "../utils/activityLogger.js";
+import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
-import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByAnyScanCodes, inwardScanRejectMessage, getProductionStickerPanelMetaByPackingNumbers } from "../models/box.model.js";
-import { expandStickerScanLookupCodes, primaryStickerScanCode } from "../utils/stickerScanParse.js";
-import { enrichRowsWithIMS, getImsMapsSafe } from "../utils/imsLookup.js";
-import { logInwardLinkBatch } from "../utils/logBoxTransaction.js";
+import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByAnyScanCodes, inwardScanRejectMessage } from "../models/box.model.js";
+import { expandStickerScanLookupCodes, primaryStickerScanCode } from "../utils/box/stickerScanParse.js";
+import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../utils/erp-api/imsLookup.js";
+import { logInwardLinkBatch } from "../utils/box/logBoxTransaction.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { validateInwardLocationsAgainstBoxes, validateSingleBoxAtLocation, validateBoxesAtLocationBatch, isInwardLocationValidationEnabled } from "../utils/inwardLocationValidation.js";
-import { enrichInventoryRows } from "./inventoryReport.controller.js";
-import { resolveStockAdjustmentPackingMeta } from "../utils/stockAdjustmentPacking.js";
+import { validateInwardLocationsAgainstBoxes, validateSingleBoxAtLocation, validateBoxesAtLocationBatch, isInwardLocationValidationEnabled } from "../utils/inventory-inward/inwardLocationValidation.js";
+import { resolvePackingCustomerName } from "../utils/packing-entry/packingEntryCustomers.js";
 import { withTransaction } from "../../../config/db.js";
-import { snapshotMetadataFromBoxUids, snapshotInwardMetadata } from "../utils/entryListMetadata.js";
+import { snapshotMetadataFromBoxUids, snapshotInwardMetadata } from "../utils/erp-api/entryListMetadata.js";
+import { parsePositiveIntId } from "../../core/utils/parseId.js";
 
 const INWARD_CFG = getCrudModuleConfig("inventory_inwards");
 
@@ -91,102 +91,69 @@ export const getInventoryInwards = async (req, res) => {
   }
 };
 
-function packingAreaPanelKey(pn, item, cust) {
-  const itemNorm = item === "—" ? "-" : item;
-  return `${pn}:${itemNorm}:${cust}`;
-}
-
-function hasPackingMetaValue(v) {
-  return v != null && String(v).trim() !== "" && String(v).trim() !== "—";
-}
-
-function pickPanelMeta(panelMap, pn, item, cust) {
-  if (!pn || !panelMap?.size) return undefined;
-  const itemStr = String(item ?? "").trim();
-  const itemAlt = itemStr === "—" ? "-" : itemStr;
-  const c = String(cust ?? "").trim();
-  const keys = [
-    packingAreaPanelKey(pn, itemStr, c),
-    packingAreaPanelKey(pn, itemAlt, c),
-    packingAreaPanelKey(pn, itemStr, c || "-"),
-    packingAreaPanelKey(pn, itemAlt, c || "-"),
-  ];
-  for (const key of keys) {
-    if (panelMap.has(key)) return panelMap.get(key);
-  }
-  const prefixes = [`${pn}:${itemStr}:`, `${pn}:${itemAlt}:`];
-  for (const [key, val] of panelMap.entries()) {
-    if (prefixes.some((p) => key.startsWith(p))) return val;
-  }
-  for (const [key, val] of panelMap.entries()) {
-    if (key.startsWith(`${pn}:`)) return val;
-  }
-  return undefined;
-}
-
-/** Item/customer + date/job card — shared by By Packing and By Box tabs. */
-async function enrichPackingAreaRows(rows = []) {
+/** Fast enrich: local row first, IMS map only when names still missing. */
+async function enrichPackingAreaListSimple(rows = []) {
   if (!Array.isArray(rows) || !rows.length) return rows;
 
-  const [panelMap, dailyprodMap] = await Promise.all([
-    getProductionStickerPanelMetaByPackingNumbers(rows.map((r) => r.packing_number)),
-    fetchDailyprodDocMetaByPackings(rows.map((r) => r.packing_number)),
-  ]);
+  const needsIms = rows.some(
+    (row) =>
+      !row?.item_desc ||
+      String(row.item_desc).trim() === "—" ||
+      !row?.acc_name ||
+      String(row.acc_name).trim() === "—" ||
+      String(row.acc_name).trim() === "Unknown" ||
+      (row?.item_code &&
+        canonicalCode(row.item_code) === canonicalCode(row.item_dcode))
+  );
 
-  const mapped = rows.map((row) => ({
-    ...row,
-    customer_code: row.acc_code ?? row.customer_code ?? null,
-  }));
-  const enriched = await enrichInventoryRows(mapped);
+  const { itemMap, ledgerMap } = needsIms
+    ? await getImsMapsSafe()
+    : { itemMap: new Map(), ledgerMap: new Map() };
 
-  const result = enriched.map((row, idx) => {
-    const sqlRow = mapped[idx] ?? row;
-    const pn = row.packing_number != null ? String(row.packing_number).trim() : "";
-    const item = sqlRow.item_dcode != null ? String(sqlRow.item_dcode).trim() : "";
-    const sqlCust = String(sqlRow.customer_code ?? sqlRow.acc_code ?? "").trim();
-    const panel = pickPanelMeta(panelMap, pn, item, sqlCust);
-    const dp = pn
-      ? (dailyprodMap.get(pn)
-        ?? (/^\d+$/.test(pn) ? dailyprodMap.get(String(Number(pn))) : undefined))
-      : undefined;
+  return rows.map((row) => {
+    const itemDcode = row.item_dcode != null ? String(row.item_dcode).trim() : "";
+    const itemKey = itemDcode ? canonicalCode(itemDcode) : null;
+    const item = itemKey ? itemMap.get(itemKey) : null;
+    const codeStr =
+      row.acc_code != null && String(row.acc_code).trim() !== "" && String(row.acc_code).trim() !== "—"
+        ? String(row.acc_code).trim()
+        : "";
 
-    const docDt = [sqlRow.doc_dt, row.doc_dt, panel?.dailyprod_doc_dt, dp?.doc_dt].find(hasPackingMetaValue) ?? null;
-    const jobCard = [sqlRow.job_card_no, row.job_card_no, panel?.dailyprod_job_card_no, dp?.job_card_no].find(hasPackingMetaValue) ?? null;
+    const sqlItemCode =
+      row.item_code && String(row.item_code).trim() && String(row.item_code).trim() !== "—"
+        ? String(row.item_code).trim()
+        : null;
+    const sqlItemDesc =
+      row.item_desc && String(row.item_desc).trim() && String(row.item_desc).trim() !== "—"
+        ? String(row.item_desc).trim()
+        : null;
+    const sqlAccName =
+      row.acc_name && String(row.acc_name).trim() && !["—", "Unknown"].includes(String(row.acc_name).trim())
+        ? String(row.acc_name).trim()
+        : null;
+
+    const accName =
+      sqlAccName ??
+      (codeStr
+        ? resolvePackingCustomerName(codeStr, { ledgerMap, itemDcode: itemDcode || null })
+        : null) ??
+      "Unknown";
 
     return {
       ...row,
-      acc_code: row.customer_code ?? row.acc_code ?? null,
-      acc_name: row.customer_name ?? row.acc_name ?? null,
-      doc_dt: docDt,
-      job_card_no: jobCard,
-      sa_financial_year: panel?.sa_financial_year ?? sqlRow.sa_financial_year ?? null,
+      acc_code: codeStr || null,
+      acc_name: accName,
+      item_code: sqlItemCode ?? item?.item_code ?? itemDcode ?? "—",
+      item_desc: sqlItemDesc ?? item?.item_desc ?? "—",
     };
   });
-
-  for (const row of result) {
-    if ((hasPackingMetaValue(row.doc_dt) && hasPackingMetaValue(row.job_card_no)) || !row.packing_number) continue;
-    try {
-      const fullMeta = await resolveStockAdjustmentPackingMeta(row.packing_number, {
-        item_dcode: row.item_dcode,
-        financial_year: row.sa_financial_year,
-      });
-      if (fullMeta) {
-        if (!hasPackingMetaValue(row.doc_dt)) row.doc_dt = fullMeta.doc_dt ?? null;
-        if (!hasPackingMetaValue(row.job_card_no)) row.job_card_no = fullMeta.job_card_no ?? null;
-      }
-    } catch (e) {
-      console.warn("[packing area] failed to resolve IMS metadata for", row.packing_number, e.message);
-    }
-  }
-
-  return result;
 }
 
 export const getPackingAreaList = async (req, res) => {
   try {
     const { page, limit, sortBy, order, search, filters } = extractListParams(req.body, {
       sortBy: "packing_number",
-      order: "ASC",
+      order: "DESC",
     });
 
     const result = await findPackingAreaByPacking({
@@ -196,7 +163,7 @@ export const getPackingAreaList = async (req, res) => {
       limit,
       filters,
     });
-    result.data = await enrichPackingAreaRows(result.data);
+    result.data = await enrichPackingAreaListSimple(result.data);
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -206,8 +173,8 @@ export const getPackingAreaList = async (req, res) => {
 export const getPackingAreaBoxesList = async (req, res) => {
   try {
     const { page, limit, sortBy, order, search, filters } = extractListParams(req.body, {
-      sortBy: "box_no_uid",
-      order: "ASC",
+      sortBy: "packing_number",
+      order: "DESC",
     });
     const packing_number =
       req.body?.packing_number != null ? String(req.body.packing_number).trim() : "";
@@ -228,7 +195,7 @@ export const getPackingAreaBoxesList = async (req, res) => {
     });
 
     if (result.data?.length) {
-      result.data = await enrichPackingAreaRows(result.data);
+      result.data = await enrichPackingAreaListSimple(result.data);
     }
 
     res.json({ success: true, ...result });
@@ -239,10 +206,9 @@ export const getPackingAreaBoxesList = async (req, res) => {
 
 export const getInventoryInwardById = async (req, res) => {
   try {
-    const { in_uid } = req.body;
-
+    const in_uid = parsePositiveIntId(req.body?.in_uid);
     if (!in_uid) {
-      return res.status(400).json({ success: false, message: "in_uid required" });
+      return res.status(400).json({ success: false, message: "Valid in_uid required" });
     }
 
     const data = await findInventoryInward({ in_uid });

@@ -1,12 +1,13 @@
 import { findAudits, findAudit, insertAudit, updateAudit, deleteAudit, appendAuditScannedBoxes, deleteAuditScan, evaluateAuditLocationProgress, syncAuditMasterStatus, getAuditComparisonReport, reopenAuditLocation, reassignAuditLocation, applyAuditComparisonAdjustment, completeAuditLocation, getAuditLocationScores } from "../models/audit.model.js";
-import { logActivity } from "../utils/activityLogger.js";
+import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
 import { withTransaction } from "../../../config/db.js";
-import { canAccessAuditRecord, filterAuditLocationsForUser, isWithinAuditDateRange } from "../utils/auditAccess.js";
-import { isLocationClosed } from "../utils/auditBoxSnapshot.js";
+import { canAccessAuditRecord, filterAuditLocationsForUser, isWithinAuditDateRange } from "../utils/audit/auditAccess.js";
+import { isLocationClosed } from "../utils/audit/auditBoxSnapshot.js";
+import { parsePositiveIntId } from "../../core/utils/parseId.js";
 
 const CFG = getCrudModuleConfig("audit");
 
@@ -63,17 +64,16 @@ function validateAuditAssignments(assignments) {
 
 export const getAudits = async (req, res) => {
   try {
-    const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, { sortBy: "audit_id", order: "DESC" });
+    const { page, limit, filters, search } = extractListParams(req.body, { sortBy: "audit_id", order: "DESC" });
 
     const result = await findAudits({
       filters: sanitizeFilters(filters, CFG.filterFields),
       search: sanitizeSearch(search),
-      sort: { by: sortBy, order },
       page,
       limit,
       fields: CFG.listFields,
       permission: req.permission,
-      user: req.user
+      user: req.user,
     });
 
     const data = (result.data || []).map((row) =>
@@ -88,8 +88,8 @@ export const getAudits = async (req, res) => {
 
 export const getAuditById = async (req, res) => {
   try {
-    const { id } = req.body;
-    if (!id) return res.status(400).json({ success: false, message: "ID required" });
+    const id = parsePositiveIntId(req.body?.id);
+    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
 
     const data = await findAudit({ audit_id: id });
     if (!data) return res.status(404).json({ success: false, message: "Not found" });

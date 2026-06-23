@@ -1,5 +1,5 @@
 import express from "express";
-import { getOutEntries, getOutEntryById, createOutEntry, updateOutEntry, deleteOutEntry, verifyBoxSticker, batchScanOutEntryBoxes, getFuidDetailsForOutEntry, lockFuidForOutEntry, getOutEntriesViews, getOutEntryReasonsViews } from "../controllers/outEntry.controller.js";
+import { getOutEntries, getOutEntryById, createOutEntry, updateOutEntry, deleteOutEntry, verifyBoxSticker, batchScanOutEntryBoxes, getFuidDetailsForOutEntry, getQcHoldDetailsForOutEntry, getOutEntryLinkedBoxesController, lockFuidForOutEntry, getOutEntriesViews, getOutEntryReasonsViews } from "../controllers/outEntry.controller.js";
 import { authenticate } from "../middleware/auth.js";
 import { accessControl, dynamicAccessControl } from "../../core/middleware/accessControl.js";
 
@@ -23,6 +23,10 @@ router.post("/delete", authenticate, accessControl("out_entry", "delete"), delet
 
 // Get Forwarding Note details for Out Entry
 router.post("/get-details", authenticate, accessControl("out_entry", "view"), getFuidDetailsForOutEntry);
+
+router.post("/get-qc-hold-details", authenticate, accessControl("out_entry", "view"), getQcHoldDetailsForOutEntry);
+
+router.post("/linked-boxes", authenticate, accessControl("out_entry", "view"), getOutEntryLinkedBoxesController);
 
 router.post("/lock-fuid", authenticate, accessControl("out_entry", "add"), lockFuidForOutEntry);
 

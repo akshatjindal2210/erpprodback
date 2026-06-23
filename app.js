@@ -7,9 +7,10 @@ import config from "./src/config/config.js";
 import { initDB } from "./src/config/initDB.js";
 import { seedCoreRootUser } from "./src/apps/core/config/seed.js";
 import { seedImsData } from "./src/apps/ims/config/seed.js";
-import logger from "./src/utils/logger.js";
+import logger from "./src/apps/core/utils/logger.js";
 import { initRecurringTasksCron, /* initClTasksCron, */ initTaskNotificationsCron, startDbBackupCron } from "./src/jobs/index.js";
-import { initSocket } from "./src/utils/socket.js";
+import { startLogCleanupCron } from "./src/logging/index.js";
+import { initSocket } from "./src/apps/core/utils/socket.js";
 import { deliverUnreadInboxToSocket } from "./src/apps/task/services/taskPwaPush.service.js";
 
 const server = http.createServer(app);
@@ -69,6 +70,7 @@ async function startServer() {
       logger.info(`Server running on port ${config.port} (API v${config.app_version})`);
       console.log(`🚀 Server running on port ${config.port} — API v${config.app_version}`);
       startDbBackupCron();
+      startLogCleanupCron();
     });
   } catch (error) {
     logger.error(`Server failed to start: ${error.message}`);

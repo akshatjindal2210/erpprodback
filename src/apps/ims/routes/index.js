@@ -13,6 +13,7 @@ import transactionBoxRoutes from "./transactionBox.routes.js";
 import inventoryReportRoutes from "./inventoryReport.route.js";
 import appConfigRoutes from "./appConfig.route.js";
 import auditRoutes from "./audit.routes.js";
+import qcHoldMaterialRoutes from "./qcHoldMaterial.routes.js";
 
 const router = Router();
 
@@ -29,5 +30,6 @@ router.use("/box-transaction-logs", transactionBoxRoutes);
 router.use("/inventory-report", inventoryReportRoutes);
 router.use("/app-config", appConfigRoutes);
 router.use("/audit", auditRoutes);
+router.use("/qc-hold-material", qcHoldMaterialRoutes);
 
 export default router;

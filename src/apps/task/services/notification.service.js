@@ -6,7 +6,7 @@ import TargetDate from "../models/targetDate.model.js";
 import { buildNotifyVarsFromTask } from "../config/notificationVariables.js";
 import { sendTaskNotifyGateway } from "./taskNotifyGateway.service.js";
 import { sendTaskPwaPush, isPwaPushConfigured } from "./taskPwaPush.service.js";
-import { toUserId } from "../../../utils/socket.js";
+import { toUserId } from "../../core/utils/socket.js";
 
 const SEND_VIA = ["none", "free", "paid"];
 

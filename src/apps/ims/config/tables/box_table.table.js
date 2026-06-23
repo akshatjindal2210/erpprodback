@@ -1,4 +1,5 @@
 import dbQuery from "../../../../config/db.js";
+import { patchTableSchema, patchCol, runIfColumnExists } from "../../../../config/ensureDbColumns.js";
 import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
 
 export async function createBoxTable() {
@@ -16,6 +17,7 @@ export async function createBoxTable() {
       in_uid          INTEGER,
       out_uid         INTEGER,
       fuid            INTEGER,
+      qc_hold_id      INTEGER REFERENCES ${T.QC_HOLD_MATERIAL}(hold_id) ON DELETE SET NULL,
       download_count  INTEGER DEFAULT 0,
       is_deleted      BOOLEAN DEFAULT false,
       deleted_by      INTEGER REFERENCES ${C.USERS}(id),
@@ -36,6 +38,42 @@ export async function createBoxTable() {
     CREATE INDEX IF NOT EXISTS idx_box_out_uid_active ON ${T.BOX_TABLE}(out_uid)
       WHERE is_deleted = false AND out_uid IS NOT NULL;
   `);
+
+  await patchTableSchema(dbQuery, T.BOX_TABLE, {
+    columns: [
+      patchCol("qc_hold_id", `INTEGER REFERENCES ${T.QC_HOLD_MATERIAL}(hold_id) ON DELETE SET NULL`),
+    ],
+    indexes: [
+      `CREATE INDEX IF NOT EXISTS idx_box_qc_hold_active ON ${T.BOX_TABLE}(qc_hold_id)
+       WHERE is_deleted = false AND qc_hold_id IS NOT NULL`,
+    ],
+  });
+
+  await runIfColumnExists(dbQuery, T.BOX_TABLE, "qc_hold_id", async () => {
+    await dbQuery(`
+      UPDATE ${T.BOX_TABLE} b
+      SET qc_hold_id = h.hold_id, updated_at = NOW()
+      FROM ${T.QC_HOLD_MATERIAL} h
+      WHERE h.is_deleted = false
+        AND COALESCE(h.status, 'pending') <> 'complete'
+        AND b.is_deleted = false AND b.qc_hold_id IS NULL
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements_text(
+            CASE WHEN jsonb_typeof(h.hold_data->'boxes') = 'array' THEN h.hold_data->'boxes' ELSE '[]'::jsonb END
+          ) AS uid(val)
+          WHERE uid.val = b.box_no_uid::text OR uid.val = b.box_uid::text
+        )
+    `);
+    await dbQuery(`
+      UPDATE ${T.BOX_TABLE} b SET qc_hold_id = NULL, updated_at = NOW()
+      WHERE b.is_deleted = false AND b.qc_hold_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM ${T.QC_HOLD_MATERIAL} h
+          WHERE h.hold_id = b.qc_hold_id AND h.is_deleted = false
+            AND COALESCE(h.status, 'pending') <> 'complete'
+        )
+    `);
+  });
 }
 
 export async function createBoxDownloadLogTable() {

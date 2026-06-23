@@ -1,11 +1,12 @@
 import { findLocations, findLocation, findLocationDuplicate, insertLocation, updateLocations, deleteLocations, LOCATION_DEFAULT_FIELDS } from "../models/locationMaster.model.js";
-import { logActivity } from "../utils/activityLogger.js";
+import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { resolveLocationViewsSelectFields } from "../config/view-fields/location.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval.js";
-import { enrichRowsWithIMS } from "../utils/imsLookup.js";
+import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
+import { parsePositiveIntId } from "../../core/utils/parseId.js";
+import { enrichRowsWithIMS } from "../utils/erp-api/imsLookup.js";
 
 const CFG = getCrudModuleConfig("location_master");
 const RACK_NO_NUMERIC_RE = /^\d+$/;
@@ -86,10 +87,10 @@ export const getLocations = async (req, res) => {
 
 export const getLocationById = async (req, res) => {
   try {
-    const { id } = req.body;
+    const id = parsePositiveIntId(req.body?.id);
     
     if (!id) {
-      return res.status(400).json({ success: false, message: "ID required" });
+      return res.status(400).json({ success: false, message: "Valid ID required" });
     }
 
     const data = await findLocation({ location_id: id });
@@ -190,10 +191,11 @@ export const createLocation = async (req, res) => {
 export const updateLocation = async (req, res) => {
   let locationNo = "";
   try {
-    const { id, rack_no, shelf_no, location_description, total_capacity, acc_code, item_dcode, approved } = req.body;
+    const { rack_no, shelf_no, location_description, total_capacity, acc_code, item_dcode, approved } = req.body;
+    const id = parsePositiveIntId(req.body?.id);
     const normalizedApproved = normalizeApprovedInput(approved);
 
-    if (!id) return res.status(400).json({ success: false, message: "ID required" });
+    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
 
     const existing = await findLocation({ location_id: id });
     if (!existing) return res.status(404).json({ success: false, message: "Not found" });
@@ -283,10 +285,10 @@ export const updateLocation = async (req, res) => {
 
 export const deleteLocation = async (req, res) => {
   try {
-    const { id } = req.body;
+    const id = parsePositiveIntId(req.body?.id);
 
     if (!id) {
-      return res.status(400).json({ success: false, message: "ID required" });
+      return res.status(400).json({ success: false, message: "Valid ID required" });
     }
 
     const existing = await findLocation({ location_id: id });

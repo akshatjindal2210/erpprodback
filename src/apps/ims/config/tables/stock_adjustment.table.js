@@ -1,4 +1,5 @@
 import dbQuery from "../../../../config/db.js";
+import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
 import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
 
 export async function createStockAdjustmentTable() {
@@ -27,4 +28,16 @@ export async function createStockAdjustmentTable() {
       removed_box_ids   TEXT
     );
   `);
+
+  /** Packing meta frozen in columns (no JSON snapshot). */
+  await patchTableSchema(dbQuery, T.STOCK_ADJUSTMENT, {
+    columns: [
+      patchCol("doc_dt", "DATE"),
+      patchCol("job_card_no", "VARCHAR(50)"),
+      patchCol("item_code", "VARCHAR(50)"),
+      patchCol("item_desc", "TEXT"),
+      patchCol("acc_code", "INTEGER"),
+      patchCol("acc_name", "VARCHAR(255)"),
+    ],
+  });
 }

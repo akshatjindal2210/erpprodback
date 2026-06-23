@@ -3,7 +3,7 @@ import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
 import { getCrudModuleConfig } from "../config/crudModules.js";
 import { clearAllCachedPermissions } from "../../../config/permissionCache.js";
 import { sanitizeSearch } from "../utils/helper.js";
-import { emitToAll } from "../../../utils/socket.js";
+import { emitToAll } from "../utils/socket.js";
 
 const MODULE_CFG = getCrudModuleConfig("modules");
 

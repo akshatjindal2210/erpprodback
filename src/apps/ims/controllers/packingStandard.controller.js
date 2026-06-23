@@ -1,12 +1,12 @@
 import { findPackingStandards, findPackingStandard, findPackingStandardDuplicate, insertPackingStandard, updatePackingStandards, deletePackingStandards } from "../models/packingStandard.model.js";
 
-import { logActivity } from "../utils/activityLogger.js";
+import { logActivity } from "../../core/utils/logActivity.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { resolvePackingStandardViewsSelectFields } from "../config/view-fields/packingStandard.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { enrichRowsWithIMS } from "../utils/imsLookup.js";
+import { enrichRowsWithIMS } from "../utils/erp-api/imsLookup.js";
 
 const CFG = getCrudModuleConfig("packing_standard");
 

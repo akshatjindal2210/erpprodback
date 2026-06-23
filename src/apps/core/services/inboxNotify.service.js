@@ -1,5 +1,5 @@
 import Inbox from "../models/inbox.model.js";
-import { emitToUser, getIO, toUserId } from "../../../utils/socket.js";
+import { emitToUser, getIO, toUserId } from "../utils/socket.js";
 import { INBOX_SOCKET, getAppTypeLabel, getTriggerLabel } from "../config/inboxConfig.js";
 
 function shortBody(text) {

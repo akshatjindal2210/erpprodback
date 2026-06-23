@@ -1,7 +1,7 @@
 import QRCode from "qrcode";
 import fs from "fs";
 import path from "path";
-import { docNoFromStandardBoxNoUid } from "../../../global/boxUid.js";
+import { docNoFromStandardBoxNoUid } from "../../ims/utils/box/boxUid.js";
 import { getAppConfigValue, getStickerCompanyInfo, APP_CONFIG_KEYS } from "../models/appConfig.model.js";
 
 export function resolveStickerPackingNumber(sticker = {}, fallback = null) {
@@ -32,8 +32,15 @@ export function formatDocDate(v) {
   if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) return s;
   const dmy = /^(\d{2})-(\d{2})-(\d{4})$/.exec(s);
   if (dmy) return `${dmy[1]}/${dmy[2]}/${dmy[3]}`;
-  const ymd = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
   if (ymd) return `${ymd[3]}/${ymd[2]}/${ymd[1]}`;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})T/.exec(s);
+  if (iso) {
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) {
+      return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+    }
+  }
   const monTok = /^(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{4})$/i.exec(s);
   if (monTok) {
     const day = parseInt(monTok[1], 10);

@@ -4,7 +4,7 @@ import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { BOX_TX_TYPE_LABELS } from "../constants/boxTransactionTypes.js";
 import {
   hydrateTransactionBoxStickerEntries,
-} from "../utils/boxTransactionDetails.js";
+} from "../utils/box/boxTransactionDetails.js";
 import { findBoxesByUids } from "../models/box.model.js";
 
 const CFG = getCrudModuleConfig("box_transaction_logs");

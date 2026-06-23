@@ -1,6 +1,7 @@
 import fetch from "node-fetch";
 import config from "../../../config/config.js";
-import { noteImsIssue } from "../utils/imsMeta.js";
+import { noteImsIssue } from "../utils/erp-api/imsMeta.js";
+import { normalizeDocDtForDb } from "../utils/packing-entry/packRowParse.js";
 
 function imsFailureMessage(err) {
   const m = err?.cause?.message || err?.message || String(err);
@@ -160,37 +161,6 @@ export function rowInIndianFinancialYear(row, fyStr) {
   return rowT >= from.getTime() && rowT <= to.getTime();
 }
 
-function formatPackDocDateIso(raw) {
-  if (raw == null || raw === "") return null;
-  const s0 = String(raw).trim();
-  if (!s0) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
-    const [y, mo, d] = s0.split("-");
-    return `${y}-${mo}-${d}`;
-  }
-  const monTok = /^(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{4})$/i.exec(s0);
-  if (monTok) {
-    const day = parseInt(monTok[1], 10);
-    const year = parseInt(monTok[3], 10);
-    const monIdx = IMS_PACK_DOC_MON.findIndex((x) => x.toLowerCase() === monTok[2].toLowerCase());
-    if (monIdx >= 0 && year > 0 && day >= 1 && day <= 31) {
-      const dt = new Date(year, monIdx, day);
-      if (dt.getFullYear() === year && dt.getMonth() === monIdx && dt.getDate() === day) {
-        return `${year}-${String(monIdx + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-      }
-    }
-  }
-  if (s0.includes("-")) {
-    const parts = s0.split("-").map((p) => p.trim());
-    if (parts.length === 3) {
-      const [p0, p1, p2] = parts;
-      if (p0.length === 4) return `${p0}-${p1.padStart(2, "0")}-${p2.padStart(2, "0")}`;
-      if (p2.length === 4) return `${p2}-${p1.padStart(2, "0")}-${p0.padStart(2, "0")}`;
-    }
-  }
-  return null;
-}
-
 export function normalizeImsPackRow(r) {
   const docno = r.docno ?? r.doc_no ?? r.Doc_No ?? r["Doc No"] ?? r.DocNo;
   const rawDate = r.docdt ?? r.doc_dt ?? r.Doc_Dt ?? r["Doc Dt"] ?? r.DocDt;
@@ -202,7 +172,7 @@ export function normalizeImsPackRow(r) {
   const itemdesc = r.itemdesc ?? r.ItemDesc ?? r.item_desc;
   const qtyRaw = r.QTY ?? r.qty ?? r.Total_Qty ?? r.TotalQty ?? r.total_qty;
   const QTY = qtyRaw != null && qtyRaw !== "" ? Number(qtyRaw) : null;
-  const doc_dt = formatPackDocDateIso(rawDate);
+  const doc_dt = normalizeDocDtForDb(rawDate);
   return {
     docno,
     docdt: rawDate != null ? String(rawDate) : null,

@@ -1,9 +1,5 @@
 import { pickNotifyVarsForFilter } from "../config/notificationVariables.js";
-import {
-  postWaMessage,
-  resolveWaMessageUrl,
-  resolveWaRequestedData,
-} from "../../../shared/services/waGateway.service.js";
+import { postWaMessage, resolveWaMessageUrl, resolveWaRequestedData } from "./waGateway.service.js";
 
 function logPayloadToConsole(trigger, filter, requestedData, note, url) {
   console.log(`\n[Task notify - ${note}]`);

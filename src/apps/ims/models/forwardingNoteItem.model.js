@@ -1,6 +1,8 @@
 import dbQuery from "../../../config/db.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
-import { applyForwardingOutEntryListFilter } from "../utils/forwardingNoteListFilters.js";
+import { applyForwardingOutEntryListFilter } from "../utils/forwarding-note/forwardingNoteListFilters.js";
+
+/** Forwarding Note item-wise rows — joined to master for list filters. */
 
 // Master-level columns available for filters/search
 const ALLOWED_FILTER_FIELDS = ["id", "fuid", "item_dcode", "approved", "out_entry_locked", "from_date", "to_date", "po_number", "acc_code"];

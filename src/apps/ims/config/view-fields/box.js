@@ -42,6 +42,20 @@ export function resolveBoxViewsSelectFields(options = {}) {
       "lm.rack_no",
       "lm.shelf_no",
       "COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no",
+      "dp.item_dcode AS itemdcode",
+      "dp.item_dcode::text AS item_code",
+    ];
+  } else if (mod === "qc_hold_material" && (act === "view" || act === "add" || act === "edit" || act === "authorize")) {
+    return [
+      "b.box_uid",
+      "b.box_no_uid",
+      "b.packing_number",
+      "b.qty",
+      "b.in_uid",
+      "b.out_uid",
+      "b.override_cust::text AS acc_name",
+      "dp.item_dcode AS itemdcode",
+      "dp.item_dcode::text AS item_code",
     ];
   } else if (mod === "boxes" && act === "view") {
     return [...forModal];

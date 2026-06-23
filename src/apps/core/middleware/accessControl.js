@@ -6,7 +6,7 @@ import { moduleSortOrderNumericExpr } from "../utils/moduleSortOrderSql.js";
 
 const MODULE_SORT_ORDER = moduleSortOrderNumericExpr("m");
 
-import { MODULE_DISABLED_MESSAGE, NO_ACCESS_MESSAGE } from "../../../global/messages.js";
+import { MODULE_DISABLED_MESSAGE, NO_ACCESS_MESSAGE } from "../constants/messages.js";
 import { APP_META } from "../../../config/portalModules.js";
 
 export const accessControl = (moduleName, actions) => {

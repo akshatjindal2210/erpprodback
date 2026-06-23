@@ -1,5 +1,5 @@
 import { saveInboxAlert, syncUnreadInboxToSocket } from "../../core/services/inboxNotify.service.js";
-import { getIO } from "../../../utils/socket.js";
+import { getIO } from "../../core/utils/socket.js";
 import { APP_TYPE } from "../../core/config/inboxConfig.js";
 import { ROUTES } from "../config/taskNotifyConfig.js";
 

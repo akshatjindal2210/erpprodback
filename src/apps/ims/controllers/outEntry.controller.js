@@ -1,177 +1,26 @@
-import {
-  findOutEntries,
-  findOutEntry,
-  insertOutEntry,
-  updateOutEntries,
-  deleteOutEntries,
-  findFuidDetailsForOutEntry,
-  findOutEntryLinkedBoxes,
-  findOutEntryDraftBoxUids,
-  applyOutEntryApprovedStock,
-  applyOutEntryOtherReturn,
-  saveOutEntryDraftScans,
-  clearOutEntryDraftScans,
-  resetBoxesForOutEntry,
-  findAnyOutEntryByFuid,
-  findDistinctOutEntryReasons,
-} from "../models/outEntry.model.js";
+import { findOutEntries, findOutEntry, insertOutEntry, updateOutEntries, deleteOutEntries, findFuidDetailsForOutEntry, findOutEntryLinkedBoxes, findQcHoldDetailsForOutEntry, clearOutEntryDraftScans, resetBoxesForOutEntry, findAnyOutEntryByFuid, findDistinctOutEntryReasons } from "../models/outEntry.model.js";
 import { findForwardingNote, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry } from "../models/forwardingNote.model.js";
-import { findBoxesByNoUids } from "../models/box.model.js";
-import { isBoxAvailableForOutEntryScan, isBoxInHand } from "../utils/boxInventory.js";
-
-import { logActivity } from "../utils/activityLogger.js";
+import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { enrichRowsWithIMS, getImsMapsSafe } from "../utils/imsLookup.js";
-import {
-  assertOutEntryFulfillmentComplete,
-  findScannedBoxUidsForOutEntry,
-  getOutEntryScanSummary,
-  getOutEntryOtherScanSummary,
-  resolveOutEntryBatchScan,
-  resolveOutEntryOtherBatchScan,
-  resolveOutEntryInventoryOutBatchScan,
-  isBoxEligibleForOutEntryOther,
-  isBoxEligibleForOutEntryInventoryOut,
-} from "../utils/outEntryFulfillment.js";
+import { findScannedBoxUidsForOutEntry, getOutEntryScanSummary, getOutEntryOtherScanSummary, getOutEntryQcAreaScanSummary, resolveOutEntryBatchScan, resolveOutEntryOtherBatchScan, resolveOutEntryInventoryOutBatchScan, resolveOutEntryQcAreaBatchScan } from "../utils/out-entry/outEntryFulfillment.js";
+import { enrichOutEntryItems, enrichOutEntryListRows, enrichOutEntryNote, isOutEntryAutoAuthorized, isOutEntryInventoryOut, isOutEntryPackingArea, isOutEntryQcArea, normalizeOutEntryReasonInput, normalizeOutEntryType, OUT_ENTRY_TYPE, scannedListForOut, syncOutEntryBoxLinks, validateOutEntryInventoryOutScannedBoxes, validateOutEntryOtherScannedBoxes, validateOutEntryQcAreaScannedBoxes, validateOutEntryScannedBoxes } from "../utils/out-entry/index.js";
 import { withTransaction } from "../../../config/db.js";
-import { snapshotMetadataFromBoxUids, snapshotOutEntryMetadata } from "../utils/entryListMetadata.js";
-import {
-  isOutEntryAutoAuthorized,
-  isOutEntryInventoryOut,
-  isOutEntryPackingArea,
-  normalizeOutEntryType,
-  OUT_ENTRY_TYPE,
-} from "../utils/outEntryTypes.js";
+import { enrichQcHoldListRows } from "../utils/qc-hold-material/qcHoldList.js";
+import { snapshotMetadataFromBoxUids, snapshotOutEntryMetadata } from "../utils/erp-api/entryListMetadata.js";
+import { parsePositiveIntId } from "../../core/utils/parseId.js";
 
 const OUT_CFG = getCrudModuleConfig("out_entry");
 
-function normalizeOutEntryReasonInput(...values) {
-  for (const value of values) {
-    const text = String(value ?? "").trim();
-    if (text) return text.slice(0, 200);
+function requireOutUid(res, raw) {
+  const out_uid = parsePositiveIntId(raw);
+  if (!out_uid) {
+    res.status(400).json({ success: false, message: "Valid out_uid required" });
+    return null;
   }
-  return null;
-}
-
-async function validateOutEntryOtherScannedBoxes(scanned_boxes, forOutUid = null) {
-  const uids = [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
-  if (!uids.length) return "Scan at least one box.";
-  const rows = await findBoxesByNoUids(uids);
-  if (rows.length !== uids.length) {
-    return "Some scanned boxes were not found or are deleted.";
-  }
-  const draftSet = new Set(
-    forOutUid != null ? await findOutEntryDraftBoxUids(forOutUid) : []
-  );
-  const scopedOut =
-    forOutUid != null && String(forOutUid).trim() !== "" ? Number(forOutUid) : null;
-  const blocked = rows.find((r) => {
-    const uid = String(r.box_no_uid ?? "").trim();
-    if (draftSet.has(uid)) return false;
-    if (Number.isFinite(scopedOut) && Number(r.out_uid) === scopedOut) return false;
-    return !isBoxEligibleForOutEntryOther(r);
-  });
-  if (blocked) {
-    return "Some boxes are not in store or are already in packing area / outward.";
-  }
-  return null;
-}
-
-async function validateOutEntryInventoryOutScannedBoxes(scanned_boxes, forOutUid = null) {
-  const uids = [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
-  if (!uids.length) return "Scan at least one box.";
-  const rows = await findBoxesByNoUids(uids);
-  if (rows.length !== uids.length) {
-    return "Some scanned boxes were not found or are deleted.";
-  }
-  const draftSet = new Set(
-    forOutUid != null ? await findOutEntryDraftBoxUids(forOutUid) : []
-  );
-  const scopedOut =
-    forOutUid != null && String(forOutUid).trim() !== "" ? Number(forOutUid) : null;
-  const blocked = rows.find((r) => {
-    const uid = String(r.box_no_uid ?? "").trim();
-    if (draftSet.has(uid)) return false;
-    if (Number.isFinite(scopedOut) && Number(r.out_uid) === scopedOut) return false;
-    return !isBoxEligibleForOutEntryInventoryOut(r);
-  });
-  if (blocked) {
-    return "Some boxes are not in stock or cannot be removed.";
-  }
-  return null;
-}
-
-async function validateOutEntryScannedBoxes(scanned_boxes, forOutUid = null) {
-  const uids = [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
-  if (!uids.length) return null;
-  const rows = await findBoxesByNoUids(uids);
-  if (rows.length !== uids.length) {
-    return "Some scanned boxes were not found or are deleted.";
-  }
-  const draftSet = new Set(
-    forOutUid != null ? await findOutEntryDraftBoxUids(forOutUid) : []
-  );
-  const scopedOut =
-    forOutUid != null && String(forOutUid).trim() !== "" ? Number(forOutUid) : null;
-  const blocked = rows.find((r) => {
-    if (isBoxInHand(r)) return false;
-    const uid = String(r.box_no_uid ?? "").trim();
-    if (draftSet.has(uid)) return false;
-    if (Number.isFinite(scopedOut) && Number(r.out_uid) === scopedOut) return false;
-    return !isBoxAvailableForOutEntryScan(r, { forOutUid });
-  });
-  if (blocked) {
-    return "Some boxes are not in stock — they may be outward or removed via stock adjustment.";
-  }
-  return null;
-}
-
-/** Draft = scan list only; approved = stock outward on ims_box_table (or other return). */
-async function syncOutEntryBoxLinks({ out_uid, userId, scanned_boxes, approved, entry_type = "forwarding_note" }, { client = null } = {}) {
-  const list = [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
-  if (isOutEntryPackingArea(entry_type)) {
-    if (approved && list.length) {
-      await applyOutEntryOtherReturn({ out_uid, userId, scanned_boxes: list }, { client });
-    } else {
-      await saveOutEntryDraftScans({ out_uid, userId, scanned_boxes: list }, { client });
-    }
-    return list;
-  }
-  if (approved) {
-    await applyOutEntryApprovedStock({ out_uid, userId, scanned_boxes: list }, { client });
-  } else {
-    await saveOutEntryDraftScans({ out_uid, userId, scanned_boxes: list }, { client });
-  }
-  return list;
-}
-
-async function enrichOutEntryItems(rows = []) {
-  const enriched = await enrichRowsWithIMS(rows, {
-    itemCodeField: "item_dcode",
-    itemCodeOut: "item_code",
-    itemDescOut: "itemdesc"
-  });
-  return (enriched || []).map((row) => ({ ...row, item_desc: row.item_desc ?? row.itemdesc ?? null }));
-}
-
-async function enrichOutEntryNote(note) {
-  if (!note) return note;
-  const [enriched] = await enrichRowsWithIMS([note], {
-    accCodeField: "acc_code",
-    accNameOut: "acc_name"
-  });
-  return enriched || note;
-}
-
-async function scannedListForOut({ out_uid, scanned_boxes }) {
-  if (scanned_boxes !== undefined) {
-    return [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
-  }
-  if (out_uid) return findScannedBoxUidsForOutEntry(out_uid);
-  return [];
+  return out_uid;
 }
 
 export const getOutEntries = async (req, res) => {
@@ -189,24 +38,8 @@ export const getOutEntries = async (req, res) => {
       permission: req.permission
     });
 
-    // Resolve aggregated item codes to alphanumeric values
-    if (result.data?.length) {
-      const { itemMap } = await getImsMapsSafe();
-      result.data = result.data.map(row => {
-        if (!row.item_codes) return row;
-        const codes = row.item_codes.split(' | ').map(c => {
-          const trimmed = c.trim();
-          const mapped = itemMap.get(trimmed);
-          return mapped?.item_code || trimmed;
-        });
-        return {
-          ...row,
-          item_codes: codes.join(' | ')
-        };
-      });
-    }
-
-    res.json({ success: true, ...result });
+    const enrichedData = await enrichOutEntryListRows(result.data || []);
+    res.json({ success: true, ...result, data: enrichedData });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -214,8 +47,8 @@ export const getOutEntries = async (req, res) => {
 
 export const getOutEntryById = async (req, res) => {
   try {
-    const { out_uid } = req.body;
-    if (!out_uid) return res.status(400).json({ success: false, message: "out_uid required" });
+    const out_uid = requireOutUid(res, req.body?.out_uid);
+    if (!out_uid) return;
 
     const data = await findOutEntry({ out_uid });
     if (!data) return res.status(404).json({ success: false, message: "Not found" });
@@ -233,7 +66,7 @@ export const createOutEntry = async (req, res) => {
     const entry_type = normalizeOutEntryType(rawEntryType);
     const normalizedApproved = normalizeApprovedInput(approved);
 
-    if (isOutEntryInventoryOut(entry_type) || isOutEntryPackingArea(entry_type)) {
+    if (isOutEntryInventoryOut(entry_type) || isOutEntryPackingArea(entry_type) || isOutEntryQcArea(entry_type)) {
       const normalizedReason = normalizeOutEntryReasonInput(reason, reason_text);
       if (!normalizedReason) {
         return res.status(400).json({ success: false, message: "Reason is required." });
@@ -243,6 +76,67 @@ export const createOutEntry = async (req, res) => {
       if (!scannedList.length) {
         return res.status(400).json({ success: false, message: "Scan at least one box." });
       }
+
+      if (isOutEntryQcArea(entry_type)) {
+        const qc_hold_id = Number(req.body.qc_hold_id);
+        if (!Number.isFinite(qc_hold_id) || qc_hold_id <= 0) {
+          return res.status(400).json({ success: false, message: "QC hold is required." });
+        }
+        const scanErr = await validateOutEntryQcAreaScannedBoxes(scannedList, qc_hold_id);
+        if (scanErr) return res.status(400).json({ success: false, message: scanErr });
+
+        const summary = await getOutEntryQcAreaScanSummary({ scanned_boxes: scannedList, hold_id: qc_hold_id });
+
+        const result = await withTransaction(async (client) => {
+          const row = await insertOutEntry({
+            entry_type: OUT_ENTRY_TYPE.QC_AREA,
+            qc_hold_id,
+            reason: normalizedReason,
+            remarks,
+            created_by: userId,
+            scan_complete: summary.scan_complete,
+            boxes_required: summary.boxes_required,
+            boxes_scanned: summary.boxes_scanned,
+          }, { client });
+          const outUid = row.out_uid;
+
+          await syncOutEntryBoxLinks({
+            out_uid: outUid,
+            userId,
+            scanned_boxes: scannedList,
+            approved: true,
+            entry_type: OUT_ENTRY_TYPE.QC_AREA,
+            qc_hold_id,
+          }, { client });
+
+          const listMeta = await snapshotMetadataFromBoxUids(scannedList, { includePackingNumbers: true });
+          const patchFields = {
+            packing_numbers: listMeta.packing_numbers,
+            item_codes: listMeta.item_codes,
+            qtys: listMeta.qtys,
+            total_qty: listMeta.total_qty,
+            updated_by: userId,
+            updated_at: new Date(),
+            scan_complete: summary.scan_complete,
+            boxes_required: summary.boxes_required,
+            boxes_scanned: summary.boxes_scanned,
+            approved: true,
+            approved_by: userId,
+            approved_at: new Date(),
+          };
+          await updateOutEntries(patchFields, { out_uid: outUid }, { client });
+          return { outUid };
+        });
+
+        const data = await findOutEntry({ out_uid: result.outUid });
+        await logActivity(req, { action: "create", entity: "out_entry", entity_id: result.outUid });
+        return res.status(201).json({
+          success: true,
+          message: "QC area out completed.",
+          data,
+        });
+      }
+
       const scanErr = isOutEntryInventoryOut(entry_type)
         ? await validateOutEntryInventoryOutScannedBoxes(scannedList)
         : await validateOutEntryOtherScannedBoxes(scannedList);
@@ -384,11 +278,12 @@ export const createOutEntry = async (req, res) => {
 
 export const updateOutEntry = async (req, res) => {
   try {
-    const { out_uid, fuid, remarks, approved, scanned_boxes, reason, reason_text } = req.body;
+    const { out_uid: rawOutUid, fuid, remarks, approved, scanned_boxes, reason, reason_text } = req.body;
     const userId = req.user.id;
     const normalizedApproved = normalizeApprovedInput(approved);
 
-    if (!out_uid) return res.status(400).json({ success: false, message: "out_uid required" });
+    const out_uid = requireOutUid(res, rawOutUid);
+    if (!out_uid) return;
 
     const existing = await findOutEntry({ out_uid });
     if (!existing) return res.status(404).json({ success: false, message: "Not found" });
@@ -577,8 +472,8 @@ export const lockFuidForOutEntry = async (req, res) => {
 
 export const deleteOutEntry = async (req, res) => {
   try {
-    const { out_uid } = req.body;
-    if (!out_uid) return res.status(400).json({ success: false, message: "out_uid required" });
+    const out_uid = requireOutUid(res, req.body?.out_uid);
+    if (!out_uid) return;
 
     const existing = await findOutEntry({ out_uid });
     if (!existing) return res.status(404).json({ success: false, message: "Not found" });
@@ -623,7 +518,9 @@ export const getOutEntriesViews = async (req, res) => {
     const { page, limit, sortBy, order, search } = extractListParams(req.body, { sortBy: "out_uid", order: "DESC" });
 
     if (id) {
-      const data = await findOutEntry({ out_uid: id });
+      const parsedId = parsePositiveIntId(id);
+      if (!parsedId) return res.status(400).json({ success: false, message: "Valid out_uid required" });
+      const data = await findOutEntry({ out_uid: parsedId });
       if (!data || data.is_deleted || !data.approved) return res.json({ success: true, data: null });
       return res.json({ success: true, data: { out_uid: data.out_uid, fuid: data.fuid, remarks: data.remarks } });
     }
@@ -644,15 +541,11 @@ export const getOutEntriesViews = async (req, res) => {
 
 export const verifyBoxSticker = async (req, res) => {
   try {
-    // ONLY log the body, not the whole request object
-    console.log("Request Body Received:", req.body);
-
-    return res.status(200).json({ 
-      success: true, 
+    return res.status(200).json({
+      success: true,
       message: "Server reached successfully",
-      received: req.body // Good for debugging
+      received: req.body,
     });
-
   } catch (error) {
     return res.status(500).json({ success: false, message: "Internal Server Error" });
   }
@@ -663,7 +556,7 @@ export const batchScanOutEntryBoxes = async (req, res) => {
     const { fuid, entry_type: rawEntryType, for_out_uid, items, session_scanned } = req.body;
     const entry_type = normalizeOutEntryType(rawEntryType);
 
-    if (isOutEntryInventoryOut(entry_type) || isOutEntryPackingArea(entry_type)) {
+    if (isOutEntryInventoryOut(entry_type) || isOutEntryPackingArea(entry_type) || isOutEntryQcArea(entry_type)) {
       const scanItems = Array.isArray(items) ? items : [];
       if (!scanItems.length) {
         return res.status(400).json({ success: false, message: "items array is required" });
@@ -676,6 +569,20 @@ export const batchScanOutEntryBoxes = async (req, res) => {
           ? Number(for_out_uid)
           : null;
       const forOutUid = Number.isFinite(forOutUidParsed) ? forOutUidParsed : null;
+
+      if (isOutEntryQcArea(entry_type)) {
+        const holdId = Number(req.body.qc_hold_id);
+        if (!Number.isFinite(holdId) || holdId <= 0) {
+          return res.status(400).json({ success: false, message: "qc_hold_id is required" });
+        }
+        const { results } = await resolveOutEntryQcAreaBatchScan({
+          holdId,
+          items: scanItems,
+          session_scanned: Array.isArray(session_scanned) ? session_scanned : [],
+        });
+        return res.json({ success: true, results });
+      }
+
       const { results } = isOutEntryInventoryOut(entry_type)
         ? await resolveOutEntryInventoryOutBatchScan({
             forOutUid,
@@ -723,7 +630,6 @@ export const batchScanOutEntryBoxes = async (req, res) => {
 };
 
 export const getFuidDetailsForOutEntry = async (req, res) => {
-  console.time("API_Execution");
   try {
     const { fuid, for_out_uid } = req.body;
     if (!fuid) return res.status(400).json({ success: false, message: "fuid required" });
@@ -769,7 +675,56 @@ export const getFuidDetailsForOutEntry = async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
-  } finally {
-    console.timeEnd("API_Execution");
+  }
+};
+
+export const getQcHoldDetailsForOutEntry = async (req, res) => {
+  try {
+    const { qc_hold_id, for_out_uid } = req.body;
+    const holdId = Number(qc_hold_id);
+    if (!Number.isFinite(holdId) || holdId <= 0) {
+      return res.status(400).json({ success: false, message: "qc_hold_id required" });
+    }
+
+    const forOutUidParsed =
+      for_out_uid !== undefined && for_out_uid !== null && String(for_out_uid).trim() !== ""
+        ? Number(for_out_uid)
+        : null;
+    const forOutUid = Number.isFinite(forOutUidParsed) ? forOutUidParsed : null;
+
+    const data = await findQcHoldDetailsForOutEntry(holdId, forOutUid);
+    if (!data) return res.status(404).json({ success: false, message: "QC hold not found" });
+
+    const [holdMeta] = await enrichQcHoldListRows([
+      {
+        hold_id: data.hold_id,
+        packing_number: data.packing_number,
+        item_dcode: data.item_dcode,
+        hold_data: { balance_qty: data.hold_balance_qty, qty: data.hold_balance_qty },
+      },
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        ...data,
+        item_code: holdMeta?.item_code ?? null,
+        item_desc: holdMeta?.item_desc ?? null,
+        balance_qty: holdMeta?.balance_qty ?? data.hold_balance_qty,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const getOutEntryLinkedBoxesController = async (req, res) => {
+  try {
+    const out_uid = requireOutUid(res, req.body?.out_uid);
+    if (!out_uid) return;
+    const boxes = await findOutEntryLinkedBoxes(out_uid);
+    res.json({ success: true, data: boxes || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };

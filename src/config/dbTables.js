@@ -32,6 +32,7 @@ export const DB_TABLES = {
     "mst_designations",
     "mst_activity_logs",
     "mst_inbox",
+    // "mst_user_app_preferences",
   ],
 
   /** IMS application tables. */
@@ -55,6 +56,7 @@ export const DB_TABLES = {
     "ims_audit_master",
     "ims_audit_locations",
     "ims_audit_scans",
+    "ims_qc_hold_material",
   ],
 
   /** Task application tables. */

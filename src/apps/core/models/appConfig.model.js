@@ -156,3 +156,20 @@ export async function setAppConfigValue(config_key, config_value, { updated_by }
   );
   invalidateAppConfigCache(key);
 }
+
+/** Whether inward location–box rules are enforced (IMS app config + env fallback). */
+export async function isInwardLocationValidationEnabled() {
+  try {
+    const raw = await getAppConfigValue(APP_CONFIG_KEYS.INWARD_LOCATION_VALIDATION);
+    if (raw != null && String(raw).trim() !== "") {
+      return String(raw).trim().toLowerCase() === "true";
+    }
+  } catch {
+    /* e.g. `ims_app_config` not created yet */
+  }
+  const envRaw = process.env.INWARD_LOCATION_VALIDATION;
+  if (envRaw != null && String(envRaw).trim() !== "") {
+    return String(envRaw).toLowerCase() === "true";
+  }
+  return false;
+}

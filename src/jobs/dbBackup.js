@@ -5,7 +5,7 @@ import fsp from "fs/promises";
 import path from "path";
 
 import config from "../config/config.js";
-import logger from "../utils/logger.js";
+import logger from "../apps/core/utils/logger.js";
 import { deferCronWork, scheduleDeferred } from "./cronUtil.js";
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];

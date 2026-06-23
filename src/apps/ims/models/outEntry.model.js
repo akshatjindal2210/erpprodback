@@ -1,14 +1,17 @@
 import dbQuery from "../../../config/db.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
-import { logBoxTransactionSafe, singlePackingFromRows } from "../utils/logBoxTransaction.js";
+import { logBoxTransactionSafe, singlePackingFromRows } from "../utils/box/logBoxTransaction.js";
 
-const ALLOWED_FILTER_FIELDS = ["out_uid", "fuid", "reason", "entry_type", "approved", "scan_complete", "from_date", "to_date"];
+/** Store Out — DB access for ims_out_entry (list, CRUD, box links, FUID details). */
+
+const ALLOWED_FILTER_FIELDS = ["out_uid", "fuid", "qc_hold_id", "reason", "entry_type", "approved", "scan_complete", "from_date", "to_date"];
 
 const ALLOWED_SORT_FIELDS = ["created_at", "approved_at", "updated_at", "out_uid"];
 
 const ALLOWED_UPDATE_FIELDS = [
   "fuid",
+  "qc_hold_id",
   "reason",
   "entry_type",
   "packing_numbers",
@@ -34,7 +37,7 @@ const JOINS = `
 `;
 
 const DEFAULT_FIELDS = [
-  "o.out_uid", "o.fuid", "o.reason",
+  "o.out_uid", "o.fuid", "o.qc_hold_id", "o.reason",
   "o.entry_type",
   "o.packing_numbers", "o.item_codes", "o.qtys", "o.total_qty",
   "o.remarks",
@@ -411,7 +414,7 @@ export const findOutEntryLinkedBoxes = async (out_uid) => {
     `SELECT approved, entry_type FROM ims_out_entry WHERE out_uid = $1 AND is_deleted = false LIMIT 1`,
     [out_uid]
   );
-  if (entry?.entry_type === "other" || entry?.entry_type === "packing_area") {
+  if (entry?.entry_type === "other" || entry?.entry_type === "packing_area" || entry?.entry_type === "qc_area") {
     return dbQuery(
       `SELECT d.box_no_uid::text AS box_no_uid,
               b.packing_number,
@@ -493,6 +496,59 @@ export const applyOutEntryOtherReturn = async ({ out_uid, userId, scanned_boxes 
       details: {
         out_uid,
         entry_type: "packing_area",
+        packing_numbers: [...new Set(resultRows.map((r) => r.packing_number).filter(Boolean))],
+        box_count: resultRows.length,
+      },
+    });
+  }
+  return resultRows;
+};
+
+/** QC Area out entry: move in-store held boxes to QC area (clear location, keep qc_hold_id). */
+export const applyOutEntryQcAreaRelease = async (
+  { out_uid, userId, scanned_boxes = [], qc_hold_id = null },
+  { client = null } = {}
+) => {
+  const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const uids = [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
+  const holdId = Number(qc_hold_id);
+  if (!out_uid || !uids.length || !Number.isFinite(holdId) || holdId <= 0) return [];
+
+  await replaceOutEntryDraftScans({ out_uid, scanned_boxes: uids }, { client });
+
+  const rows = await run(
+    `UPDATE ims_box_table
+     SET location_id = NULL,
+         in_uid = NULL,
+         qc_hold_id = $3::integer,
+         updated_by = $1,
+         updated_at = NOW()
+     WHERE box_no_uid = ANY($2::text[])
+       AND is_deleted = false
+       AND out_uid IS NULL
+       AND sa_entry_type IS DISTINCT FROM 'stock_out'
+       AND qc_hold_id = $3::integer
+       AND (location_id IS NOT NULL OR in_uid IS NOT NULL)
+     RETURNING box_uid, box_no_uid, packing_number, qty, is_loose, location_id, qc_hold_id`,
+    [userId, uids, holdId]
+  );
+
+  const resultRows = client?.query ? rows.rows : rows;
+
+  if (resultRows?.length) {
+    logBoxTransactionSafe({
+      client,
+      transaction_type: BOX_TX_TYPES.OUT_QC_AREA_RELEASE,
+      source_module: "out_entry",
+      source_id: String(out_uid),
+      packing_number: singlePackingFromRows(resultRows),
+      user_id: userId,
+      rows: resultRows,
+      details: {
+        out_uid,
+        qc_hold_id: holdId,
+        entry_type: "qc_area",
+        moved_to_qc_area: true,
         packing_numbers: [...new Set(resultRows.map((r) => r.packing_number).filter(Boolean))],
         box_count: resultRows.length,
       },
@@ -613,7 +669,7 @@ export const findDistinctOutEntryReasons = async ({ search, limit = 200 } = {}) 
   const conditions = [
     "is_deleted = false",
     "BTRIM(reason) <> ''",
-    "entry_type IN ('inventory_out', 'packing_area', 'other')",
+    "entry_type IN ('inventory_out', 'packing_area', 'other', 'qc_area')",
   ];
 
   if (search && String(search).trim()) {
@@ -632,4 +688,150 @@ export const findDistinctOutEntryReasons = async ({ search, limit = 200 } = {}) 
   );
 
   return rows || [];
+};
+
+const QC_HOLD_BOX_BASE_SQL = `
+  b.is_deleted = false
+  AND b.qc_hold_id = $1::integer
+  AND b.out_uid IS NULL
+  AND b.sa_entry_type IS DISTINCT FROM 'stock_out'
+`;
+
+/** Live in-store boxes on a QC hold (scan to move from store → QC area). */
+export const findInStoreBoxesOnQcHold = async (hold_id) => {
+  const holdNum = Number(hold_id);
+  if (!Number.isFinite(holdNum) || holdNum <= 0) return [];
+  return dbQuery(
+    `SELECT b.box_uid,
+            b.box_no_uid,
+            b.packing_number,
+            b.qty,
+            b.is_loose,
+            b.location_id,
+            b.qc_hold_id,
+            b.in_uid,
+            b.out_uid,
+            b.sa_entry_type,
+            b.is_deleted,
+            COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no
+     FROM ims_box_table b
+     LEFT JOIN ims_location_master lm ON b.location_id = lm.location_id
+     WHERE ${QC_HOLD_BOX_BASE_SQL}
+       AND (b.location_id IS NOT NULL OR b.in_uid IS NOT NULL)
+     ORDER BY location_no NULLS LAST, b.box_no_uid ASC`,
+    [holdNum]
+  );
+};
+
+/** Packing-area boxes on QC hold (already in QC area — no scan required). */
+export const countPackingAreaBoxesOnQcHold = async (hold_id) => {
+  const holdNum = Number(hold_id);
+  if (!Number.isFinite(holdNum) || holdNum <= 0) return 0;
+  const [row] = await dbQuery(
+    `SELECT COUNT(*)::int AS c
+     FROM ims_box_table b
+     WHERE ${QC_HOLD_BOX_BASE_SQL}
+       AND b.location_id IS NULL
+       AND b.in_uid IS NULL`,
+    [holdNum]
+  );
+  return Number(row?.c) || 0;
+};
+
+/** @deprecated Use findInStoreBoxesOnQcHold — kept for callers that need all hold boxes. */
+export const findBoxesOnQcHold = async (hold_id) => {
+  const holdNum = Number(hold_id);
+  if (!Number.isFinite(holdNum) || holdNum <= 0) return [];
+  return dbQuery(
+    `SELECT b.box_uid,
+            b.box_no_uid,
+            b.packing_number,
+            b.qty,
+            b.is_loose,
+            b.location_id,
+            b.qc_hold_id,
+            b.in_uid,
+            b.out_uid,
+            b.sa_entry_type,
+            b.is_deleted
+     FROM ims_box_table b
+     WHERE ${QC_HOLD_BOX_BASE_SQL}
+     ORDER BY b.box_no_uid ASC`,
+    [holdNum]
+  );
+};
+
+/** QC hold header + boxes for out-entry scanning UI. */
+export const findQcHoldDetailsForOutEntry = async (hold_id, forOutUid = null) => {
+  const holdNum = Number(hold_id);
+  if (!Number.isFinite(holdNum) || holdNum <= 0) return null;
+
+  const [hold] = await dbQuery(
+    `SELECT h.hold_id,
+            h.packing_number,
+            h.item_dcode,
+            h.reason,
+            h.approved,
+            h.hold_data
+     FROM ims_qc_hold_material h
+     WHERE h.hold_id = $1
+       AND h.is_deleted = false
+     LIMIT 1`,
+    [holdNum]
+  );
+  if (!hold) return null;
+
+  const [liveStoreBoxes, packingAreaBoxCount] = await Promise.all([
+    findInStoreBoxesOnQcHold(holdNum),
+    countPackingAreaBoxesOnQcHold(holdNum),
+  ]);
+  const linked = forOutUid ? await findOutEntryLinkedBoxes(forOutUid) : [];
+  const linkedSet = new Set((linked || []).map((b) => String(b.box_no_uid).trim()).filter(Boolean));
+
+  const boxes = (liveStoreBoxes || []).map((b) => ({
+    ...b,
+    is_in_store: true,
+    is_needs_scan: true,
+    is_scanned: linkedSet.has(String(b.box_no_uid).trim()),
+  }));
+
+  for (const row of linked || []) {
+    const uid = String(row.box_no_uid ?? "").trim();
+    if (!uid || boxes.some((b) => String(b.box_no_uid).trim() === uid)) continue;
+    boxes.push({
+      box_uid: row.box_uid ?? null,
+      box_no_uid: uid,
+      packing_number: row.packing_number ?? hold.packing_number,
+      qty: row.qty ?? 0,
+      is_loose: row.is_loose === true || row.is_loose === 1,
+      location_id: row.location_id ?? null,
+      location_no: row.location_no ?? null,
+      qc_hold_id: holdNum,
+      is_in_store: true,
+      is_needs_scan: false,
+      is_scanned: true,
+      is_released: true,
+    });
+  }
+
+  boxes.sort((a, b) => {
+    const locCmp = String(a.location_no ?? "").localeCompare(String(b.location_no ?? ""));
+    if (locCmp !== 0) return locCmp;
+    return String(a.box_no_uid).localeCompare(String(b.box_no_uid));
+  });
+
+  const storeBoxCount = boxes.filter((b) => b.is_needs_scan !== false && !b.is_released).length;
+
+  return {
+    hold_id: hold.hold_id,
+    packing_number: hold.packing_number,
+    item_dcode: hold.item_dcode,
+    reason: hold.reason,
+    approved: hold.approved,
+    boxes,
+    store_box_count: storeBoxCount,
+    packing_area_box_count: packingAreaBoxCount,
+    box_count: storeBoxCount + packingAreaBoxCount,
+    hold_balance_qty: Number(hold.hold_data?.balance_qty ?? hold.hold_data?.qty ?? 0) || 0,
+  };
 };

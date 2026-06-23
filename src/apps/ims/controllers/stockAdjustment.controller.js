@@ -1,24 +1,22 @@
-import { buildImsDocFilter, findImsPackByDocNo, imsPackRowToProduction } from "../utils/imsPackRow.js";
 import { withTransaction } from "../../../config/db.js";
 import { findAdjustments, findAdjustmentById, insertAdjustment, updateAdjustments, insertAdjustmentTx, updateAdjustmentsTx, findFinancialYearForPacking } from "../models/stockAdjustment.model.js";
-import { findCustomerHintsForPackings } from "../models/inventoryReport.model.js";
 import { findDailyProdByDocNo, findBoxesByUids, purgeSaStickerBoxesTx, resolveItemDcodeForMinusAdjustment } from "../models/box.model.js";
-import { boxBelongsToPackingNumber } from "../utils/boxInventory.js";
-import { fetchFromIMS, fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../services/ims.service.js";
-import { logActivity } from "../utils/activityLogger.js";
+import { boxBelongsToPackingNumber } from "../utils/box/boxInventory.js";
+import { fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../services/ims.service.js";
+import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { enrichRowsWithIMS, getImsMapsSafe, getImsPartyRateMapSafe, pickPartyRateCustCode, canonicalCode } from "../utils/imsLookup.js";
-import { syncAdjustmentMetadataOnly } from "../utils/stockAdjustmentSync.js";
-import { resolveStockAdjustmentPackingMeta } from "../utils/stockAdjustmentPacking.js";
-import { applyStockAdjustmentOnApproveTx, revertStockAdjustmentOnUnapproveTx } from "../utils/stockAdjustmentApply.js";
-import { isBoxAvailableForMinus } from "../utils/boxInventory.js";
-import { resolveAccCodeFromBoxRows } from "../utils/boxCustomerOverride.js";
-import { buildPartyRateAccNameMap, lookupPartyRateAccName } from "../utils/packingEntryCustomers.js";
-import { applyMinusCustomerEnrichment, buildMinusCustomerLinesByAdjustmentId } from "../utils/stockAdjustmentMinusEnrich.js";
-import { buildMinusRemovedBoxIdsJson } from "../utils/minusRemovedBoxPayload.js";
+import { getImsMapsSafe } from "../utils/erp-api/imsLookup.js";
+import { syncAdjustmentMetadataOnly } from "../utils/stock-adjustment/stockAdjustmentSync.js";
+import { resolveStockAdjustmentPackingMeta } from "../utils/stock-adjustment/stockAdjustmentPacking.js";
+import { applyStockAdjustmentOnApproveTx, revertStockAdjustmentOnUnapproveTx } from "../utils/stock-adjustment/stockAdjustmentApply.js";
+import { persistAdjustmentDocDtTx } from "../utils/stock-adjustment/stockAdjustmentDocDt.js";
+import { isBoxAvailableForMinus } from "../utils/box/boxInventory.js";
+import { enrichStockAdjustmentListRows } from "../utils/stock-adjustment/stockAdjustmentList.js";
+import { buildMinusRemovedBoxIdsJson } from "../utils/stock-adjustment/minusRemovedBoxPayload.js";
+import { parsePositiveIntId } from "../../core/utils/parseId.js";
 
 const STOCK_CFG = getCrudModuleConfig("stock_adjustment");
 
@@ -28,98 +26,6 @@ function canUserRemoveInventoryBoxes(req) {
   const p = req.permission;
   if (!p) return false;
   return !!(p.can_delete || p.can_add || p.can_edit || p.can_authorize);
-}
-
-async function enrichAdjustments(rows = []) {
-  const [{ itemMap, ledgerMap }, partyRateMap, partyRateAccNameMap] = await Promise.all([
-    getImsMapsSafe(),
-    getImsPartyRateMapSafe(),
-    buildPartyRateAccNameMap(),
-  ]);
-  
-  const packingNums = [...new Set(rows.map(r => String(r.packing_number || "").trim()).filter(Boolean))];
-  const hints = packingNums.length > 0 ? await findCustomerHintsForPackings(packingNums) : [];
-  const hintMap = new Map(hints.map(h => [String(h.packing_number), h.customer_code]));
-  const fyHintMap = new Map(hints.map(h => [String(h.packing_number), h.financial_year]));
-
-  // Identify rows that still lack a customer code after local hints
-  const missingAccRows = rows.filter(r => {
-    const pn = String(r.packing_number || "").trim();
-    return pn && !r.acc_code && !hintMap.get(pn);
-  });
-
-  if (missingAccRows.length > 0) {
-    // Fetch from IMS for unique (packing_number, financial_year) pairs
-    const uniqueMissing = [...new Map(missingAccRows.map(r => {
-      const fy = String(r.financial_year || fyHintMap.get(String(r.packing_number || "").trim()) || "").trim();
-      return [String(r.packing_number).trim(), { pn: r.packing_number, fy }];
-    })).values()].filter(x => x.pn);
-
-    await Promise.all(uniqueMissing.map(async ({ pn, fy }) => {
-      try {
-        let acc = null;
-        // 1. Try strict FY + PN if FY is available
-        if (fy) {
-          const imsRes = await fetchPackRowsForFinancialYearDoc(fy, pn);
-          if (imsRes?.success && imsRes.records?.length > 0) {
-            acc = imsRes.records[0].acc_code;
-          }
-        }
-
-        // 2. Fallback: Broad IMS search (no FY) if still missing
-        if (!acc) {
-          const filter = buildImsDocFilter(pn);
-          const records = filter ? await fetchFromIMS("pack", filter) : [];
-          const matched = findImsPackByDocNo(records, pn);
-          const prod = imsPackRowToProduction(matched);
-          if (prod?.acc_code) {
-            acc = prod.acc_code;
-          }
-        }
-
-        if (acc) {
-          hintMap.set(String(pn).trim(), String(acc).trim());
-        }
-      } catch (err) {
-        // silent fail for background enrichment
-      }
-    }));
-  }
-  
-  const minusLinesMap = await buildMinusCustomerLinesByAdjustmentId(rows, ledgerMap);
-
-  return rows.map(row => {
-    const itemDcode = canonicalCode(row.item_dcode);
-    const pn = String(row.packing_number || "").trim();
-    // Prioritize stored acc_code, fallback to hint from packing (local or IMS-fetched)
-    const rawAccCode = row.acc_code || hintMap.get(pn);
-    const accCode = canonicalCode(rawAccCode);
-    
-    const item = itemDcode ? itemMap.get(itemDcode) : null;
-    const ledgerName = accCode ? ledgerMap.get(accCode) : null;
-    const partyRateName = lookupPartyRateAccName(partyRateAccNameMap, accCode, itemDcode);
-
-    const partyRate = pickPartyRateCustCode(partyRateMap, itemDcode || row.item_code, [accCode]);
-
-    const existingName = row.acc_name && String(row.acc_name).trim() !== "" && String(row.acc_name).trim() !== "—" 
-      ? String(row.acc_name).trim() 
-      : null;
-
-    const base = {
-      ...row,
-      item_code: item?.item_code ?? row.item_code ?? null,
-      item_desc: item?.item_desc ?? row.item_desc ?? null,
-      acc_code: rawAccCode, 
-      acc_name: ledgerName ?? partyRateName ?? existingName ?? null,
-      party_rate_cust_code: partyRate ?? row.party_rate_cust_code ?? null
-    };
-
-    const minusLines = minusLinesMap.get(row.adjustment_id);
-    if (row.entry_type === "minus" && minusLines?.length) {
-      return applyMinusCustomerEnrichment(base, minusLines);
-    }
-    return base;
-  });
 }
 
 export const getAdjustments = async (req, res) => {
@@ -133,10 +39,10 @@ export const getAdjustments = async (req, res) => {
       limit,
       filters: sanitizeFilters(filters, STOCK_CFG.filterFields),
       sort: { by: sortBy, order },
-      search,
+      search: sanitizeSearch(search),
       permission: req.permission
     });
-    const enriched = await enrichAdjustments(result.data || []);
+    const enriched = await enrichStockAdjustmentListRows(result.data || [], { listView: true });
     res.json({ success: true, ...result, data: enriched });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -281,6 +187,7 @@ export const createAdjustment = async (req, res) => {
     if (entry_type === "add" || entry_type === "minus") {
       adjustment = await withTransaction(async (client) => {
         const adj = await insertAdjustmentTx(client, data);
+        await persistAdjustmentDocDtTx(client, { ...adj, ...data });
         if (normalizedApproved === true) {
           const approvalFields = {};
           applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false });
@@ -308,7 +215,7 @@ export const createAdjustment = async (req, res) => {
       record: saved || adjustment,
       details: data,
     });
-    const [enriched] = await enrichAdjustments(saved ? [saved] : [adjustment]);
+    const [enriched] = await enrichStockAdjustmentListRows(saved ? [saved] : [adjustment]);
     res.status(201).json({ success: true, data: enriched || saved || adjustment, message: "Adjustment created" });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, message: err.message });
@@ -334,8 +241,8 @@ export const getStockAdjustmentPackingMeta = async (req, res) => {
 
 export const getAdjustmentById = async (req, res) => {
   try {
-    const { id } = req.body;
-    if (!id) return res.status(400).json({ success: false, message: "ID required" });
+    const id = parsePositiveIntId(req.body?.id);
+    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
 
     const data = await findAdjustmentById(id);
     if (!data) return res.status(404).json({ success: false, message: "Adjustment not found" });
@@ -352,7 +259,7 @@ export const getAdjustmentById = async (req, res) => {
       (data.entry_type === "add" || data.entry_type === "minus");
 
     const [[enriched], packing_meta] = await Promise.all([
-      enrichAdjustments(data ? [data] : []),
+      enrichStockAdjustmentListRows(data ? [data] : []),
       isPackingForm
         ? resolveStockAdjustmentPackingMeta(data.packing_number, {
             adjustment_id: data.adjustment_id,
@@ -377,9 +284,10 @@ export const getAdjustmentById = async (req, res) => {
 
 export const updateAdjustment = async (req, res) => {
   try {
-    const { id, approved, removed_box_uids, remove_add_box_uids, add_extra_boxes, no_of_boxes, acc_code, ...incoming } = req.body;
+    const { id: rawId, approved, removed_box_uids, remove_add_box_uids, add_extra_boxes, no_of_boxes, acc_code, ...incoming } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
-    if (!id) return res.status(400).json({ success: false, message: "ID required" });
+    const id = parsePositiveIntId(rawId);
+    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
 
     const existing = await findAdjustmentById(id);
     if (!existing) return res.status(404).json({ success: false, message: "Adjustment not found" });
@@ -509,7 +417,7 @@ export const updateAdjustment = async (req, res) => {
       details: fields,
     });
 
-    const [enriched] = await enrichAdjustments(saved ? [saved] : updated ? [updated] : []);
+    const [enriched] = await enrichStockAdjustmentListRows(saved ? [saved] : updated ? [updated] : []);
     res.json({ success: true, data: enriched || saved || updated, message: "Adjustment updated" });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, message: err.message });
@@ -518,9 +426,9 @@ export const updateAdjustment = async (req, res) => {
 
 export const deleteAdjustment = async (req, res) => {
   try {
-    const id = Number(req.body.id);
-    if (!Number.isFinite(id) || id < 1) {
-      return res.status(400).json({ success: false, message: "Invalid adjustment id." });
+    const id = parsePositiveIntId(req.body?.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "Valid adjustment id required." });
     }
 
     const existing = await findAdjustmentById(id);
@@ -588,7 +496,7 @@ export const getStockAdjustmentsViews = async (req, res) => {
       limit: limit || 5000,
       fields: ["adjustment_id", "item_dcode", "qty", "unit"]
     });
-    const enriched = await enrichAdjustments(result.data || []);
+    const enriched = await enrichStockAdjustmentListRows(result.data || [], { listView: true });
     res.json({ success: true, data: enriched, total: result.total });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

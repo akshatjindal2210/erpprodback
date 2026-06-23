@@ -5,15 +5,15 @@ import { findUsers, findUser, findUserByUsernameInsensitive, insertUser, updateU
 import { fetchFromIMS, fetchImsDataRaw } from "../../ims/services/ims.service.js";
 import { findModules } from "../models/module.model.js";
 import { findUserPermissions, findUserAppAccess, upsertBulkPermissions, upsertBulkAppAccess, syncAppGateChildPermissions } from "../models/permission.model.js";
-import { logActivity } from "../../ims/utils/activityLogger.js";
-import { emitToUser } from "../../../utils/socket.js";
+import { logActivity } from "../utils/logActivity.js";
+import { emitToUser } from "../utils/socket.js";
 import { setCachedPermissions, clearCachedPermissions } from "../../../config/permissionCache.js";
 import { getCrudModuleConfig } from "../config/crudModules.js";
 import { resolveUserViewsSelectFields } from "../config/view-fields/user.js";
 import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
 import { cleanPermissionMap, formatPermissions, sanitizeSearch } from "../utils/helper.js";
 import { getDefaultListViewSpanDays, getBoxNoUidPrefix } from "../models/appConfig.model.js";
-import { isInwardLocationValidationEnabled } from "../../ims/utils/inwardLocationValidation.js";
+import { isInwardLocationValidationEnabled } from "../../core/models/appConfig.model.js";
 
 /** DB `CHECK (auth_source IN ('local','erp'))` — keep in sync with frontend `AUTH_SOURCES`. */
 const ALLOWED_AUTH_SOURCES = Object.freeze(["local", "erp"]);

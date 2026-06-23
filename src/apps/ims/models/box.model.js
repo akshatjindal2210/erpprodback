@@ -1,8 +1,9 @@
 import dbQuery from "../../../config/db.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
-import { logBoxTransaction, logBoxTransactionSafe, singlePackingFromRows } from "../utils/logBoxTransaction.js";
-import { sqlBoxInHand, sqlBoxOutUidEmpty, sqlBoxCustomerCode, sqlDailyprodLateralForBox } from "../utils/boxInventorySql.js";
+import { logBoxTransaction, logBoxTransactionSafe, singlePackingFromRows } from "../utils/box/logBoxTransaction.js";
+import { sqlBoxInHand, sqlBoxOutUidEmpty, sqlBoxCustomerCode, sqlDailyprodLateralForBox, sqlBoxSellable, sqlBoxNotOnQcHold, sqlBoxOutwardDispatchAny, sqlBoxPackingNumberMatch, sqlDocDtText, sqlDocDtFromDailyprod, sqlOutEntryCustomerDispatch } from "../utils/box/boxInventorySql.js";
+import { normalizeDocDtForDb } from "../utils/packing-entry/packRowParse.js";
 
 
 const ALLOWED_FILTER_FIELDS_BOX = [
@@ -34,8 +35,11 @@ const JOINS = `
   LEFT JOIN ims_dailyprod dp        ON b.packing_number::TEXT = dp.doc_no::TEXT
   LEFT JOIN ims_location_master lm  ON b.location_id          = lm.location_id
   LEFT JOIN ims_inventory_inwards ii ON b.in_uid::TEXT        = ii.in_uid::TEXT
-  LEFT JOIN ims_out_entry io        ON b.out_uid::TEXT        = io.out_uid::TEXT
   
+  LEFT JOIN ims_out_entry io        ON b.out_uid::TEXT        = io.out_uid::TEXT AND io.is_deleted = false
+  LEFT JOIN ims_forwarding_note_master fnm ON fnm.fuid = io.fuid AND fnm.is_deleted = false
+  LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
+
   LEFT JOIN ${M.USERS} u_cr    ON b.created_by  = u_cr.id
   LEFT JOIN ${M.USERS} u_upd   ON b.updated_by  = u_upd.id
   LEFT JOIN ${M.USERS} u_dl    ON b.deleted_by  = u_dl.id
@@ -78,7 +82,11 @@ export const findBoxes = async (options = {}) => {
   /** When listing by stock-adjustment id, include minus (`stock_out`) rows linked to that adjustment. */
   const filterBySaId =
     filters.sa_id !== undefined && filters.sa_id !== null && String(filters.sa_id).trim() !== "";
-  if (!filterBySaId) {
+  const filterByPacking =
+    filters.packing_number !== undefined &&
+    filters.packing_number !== null &&
+    String(filters.packing_number).trim() !== "";
+  if (!filterBySaId && !filterByPacking) {
     conditions.push("(b.sa_entry_type IS DISTINCT FROM 'stock_out')");
   }
 
@@ -106,6 +114,12 @@ export const findBoxes = async (options = {}) => {
     // NORMAL FILTERS (SAFE)
     if (!ALLOWED_FILTER_FIELDS_BOX.includes(key)) continue;
 
+    if (key === "packing_number") {
+      values.push(String(val).trim());
+      conditions.push(sqlPackingNumberMatch("b", `$${i++}`));
+      continue;
+    }
+
     values.push(String(val));
     conditions.push(`b.${key}::TEXT = $${i++}::TEXT`);
   }
@@ -117,11 +131,15 @@ export const findBoxes = async (options = {}) => {
     values.push(searchTerm);
 
     conditions.push(`(
+      b.box_uid::TEXT ILIKE $${searchIndex} OR
       b.box_no_uid::TEXT ILIKE $${searchIndex} OR
       b.packing_number::TEXT ILIKE $${searchIndex} OR
       b.qty::TEXT ILIKE $${searchIndex} OR
       b.override_cust::TEXT ILIKE $${searchIndex} OR
-      lm.rack_no ILIKE $${searchIndex}
+      b.in_uid::TEXT ILIKE $${searchIndex} OR
+      b.out_uid::TEXT ILIKE $${searchIndex} OR
+      lm.rack_no ILIKE $${searchIndex} OR
+      lm.location_no ILIKE $${searchIndex}
     )`);
     i++;
   }
@@ -227,7 +245,7 @@ export const findInHandBoxesByScanCodes = async (scanCodes = []) => {
     `SELECT b.box_uid, b.box_no_uid, b.packing_number, b.qty
      FROM ims_box_table b
      WHERE b.is_deleted = false
-       AND ${sqlBoxInHand("b")}
+       AND ${sqlBoxSellable("b")}
        AND (
          b.box_no_uid::text = ANY($1::text[])
          OR (cardinality($2::text[]) > 0 AND b.box_uid::text = ANY($2::text[]))
@@ -244,7 +262,7 @@ export const findBoxesByScanCodesAny = async (scanCodes = []) => {
   const numericOnly = raw.filter((c) => /^\d+$/.test(c));
 
   return dbQuery(
-    `SELECT b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.out_uid, b.sa_entry_type, b.is_deleted
+    `SELECT b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.out_uid, b.sa_entry_type, b.is_deleted, b.qc_hold_id
      FROM ims_box_table b
      WHERE b.is_deleted = false
        AND (
@@ -258,6 +276,9 @@ export const findBoxesByScanCodesAny = async (scanCodes = []) => {
 /** Why an inward scan did not match {@link findInHandBoxesByScanCodes}. */
 export function inwardScanRejectMessage(row) {
   if (!row || row.is_deleted) return "Box not found";
+  if (row.qc_hold_id != null && String(row.qc_hold_id).trim() !== "") {
+    return "Box is on QC hold and cannot be scanned until the submission is approved";
+  }
   if (row.sa_entry_type === "stock_out") {
     return "Box removed via stock adjustment and cannot be stored inward";
   }
@@ -363,13 +384,45 @@ export const findBoxesByPackingNumber = async (packing_number) => {
   );
 };
 
+/** Full dailyprod row for sticker fetch fast path (local columns). */
+export const findDailyProdStickerRow = async (doc_no) => {
+  if (doc_no == null || String(doc_no).trim() === "") return null;
+  const [row] = await dbQuery(
+    `SELECT doc_no,
+            ${sqlDocDtText("doc_dt")} AS doc_dt,
+            job_card_no,
+            acc_code,
+            acc_name,
+            item_dcode AS itemdcode,
+            item_code,
+            item_desc,
+            total_qty,
+            sticker_generated,
+            packing_standard_id,
+            party_rate_cust_code,
+            unit,
+            fg_location,
+            category_id,
+            category_name,
+            qty_per_box,
+            full_boxes_count,
+            loose_box_qty,
+            total_stickers
+     FROM ims_dailyprod
+     WHERE doc_no::text = trim($1::text)
+     LIMIT 1`,
+    [String(doc_no)]
+  );
+  return row ?? null;
+};
+
 /** Resolve production acc/item when the list-view join did not attach `ims_dailyprod` columns. */
 export const findDailyProdByDocNo = async (doc_no) => {
   if (doc_no == null || String(doc_no).trim() === "") return null;
   const [row] = await dbQuery(
-    `SELECT acc_code, job_card_no, item_dcode AS itemdcode, doc_dt
-     FROM ims_dailyprod
-     WHERE doc_no::text = trim($1::text)
+    `SELECT dp.acc_code, dp.job_card_no, dp.item_dcode AS itemdcode, ${sqlDocDtText("dp.doc_dt")} AS doc_dt
+     FROM ims_dailyprod dp
+     WHERE dp.doc_no::text = trim($1::text)
      LIMIT 1`,
     [String(doc_no)]
   );
@@ -388,6 +441,7 @@ const IN_HAND_BOX_SELECT_SQL = `
        b.out_uid,
        b.sa_id,
        b.sa_entry_type,
+       b.qc_hold_id,
        dp.acc_code AS prod_acc_code,
        dp.item_dcode AS itemdcode,
        lm.rack_no,
@@ -502,11 +556,16 @@ export const resolveItemDcodeForMinusAdjustment = async ({ packing_number, boxRo
 /**
  * Stock adjustment minus drawer: production in-hand + SA add (stock_in) + optional this adj's stock_out.
  */
-export const findStockAdjustmentMinusBoxesByPacking = async (packing_number, adjustment_id = null) => {
+export const findStockAdjustmentMinusBoxesByPacking = async (
+  packing_number,
+  adjustment_id = null,
+  { sellableOnly = false } = {}
+) => {
   const pn = String(packing_number ?? "").trim();
   if (!pn) return [];
   const adjId = Number(adjustment_id);
   const hasAdj = Number.isFinite(adjId) && adjId > 0;
+  const qcHoldFilter = sellableOnly ? `AND ${sqlBoxNotOnQcHold("b")}` : "";
 
   const values = [pn];
   let removedOr = "";
@@ -539,11 +598,12 @@ export const findStockAdjustmentMinusBoxesByPacking = async (packing_number, adj
      WHERE b.is_deleted = false
        AND ${belongsToPacking}
        AND (
-         ${sqlBoxInHand("b")}
+         (${sqlBoxInHand("b")} ${qcHoldFilter})
          OR (
            b.sa_entry_type = 'stock_in'
            AND b.sa_id IS NOT NULL
            AND ${sqlBoxOutUidEmpty("b")}
+           ${qcHoldFilter}
          )
          ${removedOr}
        )
@@ -555,6 +615,201 @@ export const findStockAdjustmentMinusBoxesByPacking = async (packing_number, adj
 /** All in-hand boxes for a packing (production + SA add) — same rules as inventory report. */
 export const findInHandBoxesByPackingNumber = async (packing_number) => {
   return findStockAdjustmentMinusBoxesByPacking(packing_number, null);
+};
+
+/** Sellable in-hand boxes for a packing (excludes QC hold). */
+export const findSellableInHandBoxesByPackingNumber = async (packing_number) => {
+  const pn = String(packing_number ?? "").trim();
+  if (!pn) return [];
+  return findStockAdjustmentMinusBoxesByPacking(pn, null, { sellableOnly: true });
+};
+
+/** Outward dispatch lines for a packing — grouped by out entry, FUID, and customer. */
+export const findDispatchedOutwardLinesByPacking = async (packing_number) => {
+  const pn = String(packing_number ?? "").trim();
+  if (!pn) return [];
+
+  const outwardSql = sqlBoxOutwardDispatchAny("b");
+  const customerDispatchSql = sqlOutEntryCustomerDispatch("io");
+  const packingSql = sqlBoxPackingNumberMatch("b", "$1");
+  const customerKeySql = `COALESCE(
+    NULLIF(TRIM(b.override_cust::text), ''),
+    NULLIF(TRIM(fnm.acc_code::text), ''),
+    '—'
+  )`;
+
+  const dispatchSelect = `
+         b.out_uid,
+         io.fuid,
+         io.entry_type,
+         fnm.acc_code,
+         ${customerKeySql} AS customer_key,
+         COUNT(b.box_uid)::int AS box_count,
+         COALESCE(SUM(b.qty), 0)::int AS total_qty,
+         COUNT(*) FILTER (WHERE b.is_loose IS TRUE)::int AS loose_box_count,
+         COUNT(*) FILTER (WHERE b.is_loose IS NOT TRUE)::int AS full_box_count,
+         MAX(NULLIF(TRIM(b.override_cust::text), '')) AS override_cust,
+         MAX(dp.item_dcode::text) AS item_dcode,
+         MAX(dp.item_code) AS item_code,
+         MAX(dp.item_desc) AS item_desc`;
+
+  const [fromBoxes, fromScans] = await Promise.all([
+    dbQuery(
+      `SELECT ${dispatchSelect}
+       FROM ims_box_table b
+       LEFT JOIN ims_out_entry io
+         ON b.out_uid::text = io.out_uid::text
+        AND io.is_deleted = false
+       LEFT JOIN ims_forwarding_note_master fnm
+         ON fnm.fuid = io.fuid
+        AND fnm.is_deleted = false
+       LEFT JOIN ims_dailyprod dp
+         ON NULLIF(TRIM(b.packing_number::text), '') = NULLIF(TRIM(dp.doc_no::text), '')
+       WHERE ${outwardSql}
+         AND ${packingSql}
+         AND ${customerDispatchSql}
+       GROUP BY b.out_uid, io.fuid, io.entry_type, fnm.acc_code, ${customerKeySql}
+       ORDER BY b.out_uid DESC, total_qty DESC`,
+      [pn]
+    ),
+    dbQuery(
+      `SELECT
+         COALESCE(b.out_uid, io.out_uid) AS out_uid,
+         io.fuid,
+         io.entry_type,
+         fnm.acc_code,
+         ${customerKeySql} AS customer_key,
+         COUNT(b.box_uid)::int AS box_count,
+         COALESCE(SUM(b.qty), 0)::int AS total_qty,
+         COUNT(*) FILTER (WHERE b.is_loose IS TRUE)::int AS loose_box_count,
+         COUNT(*) FILTER (WHERE b.is_loose IS NOT TRUE)::int AS full_box_count,
+         MAX(NULLIF(TRIM(b.override_cust::text), '')) AS override_cust,
+         MAX(dp.item_dcode::text) AS item_dcode,
+         MAX(dp.item_code) AS item_code,
+         MAX(dp.item_desc) AS item_desc
+       FROM ims_out_entry_scanned_box d
+       INNER JOIN ims_out_entry io
+         ON io.out_uid = d.out_uid
+        AND io.is_deleted = false
+       INNER JOIN ims_box_table b
+         ON b.box_no_uid::text = d.box_no_uid
+        AND b.is_deleted = false
+       LEFT JOIN ims_forwarding_note_master fnm
+         ON fnm.fuid = io.fuid
+        AND fnm.is_deleted = false
+       LEFT JOIN ims_dailyprod dp
+         ON NULLIF(TRIM(b.packing_number::text), '') = NULLIF(TRIM(dp.doc_no::text), '')
+       WHERE ${packingSql}
+         AND ${sqlBoxOutUidEmpty("b")}
+         AND ${customerDispatchSql}
+       GROUP BY COALESCE(b.out_uid, io.out_uid), io.fuid, io.entry_type, fnm.acc_code, ${customerKeySql}
+       ORDER BY out_uid DESC, total_qty DESC`,
+      [pn]
+    ),
+  ]);
+
+  const merged = new Map();
+  const mergeRow = (row) => {
+    const outUid = row?.out_uid != null ? Number(row.out_uid) : null;
+    const cust = String(row?.customer_key ?? row?.override_cust ?? row?.acc_code ?? "").trim().toLowerCase();
+    const key = Number.isFinite(outUid)
+      ? `out:${outUid}:c:${cust || "unknown"}`
+      : `row:${cust || merged.size}`;
+    const prev = merged.get(key);
+    if (!prev) {
+      merged.set(key, row);
+      return;
+    }
+    merged.set(key, {
+      ...prev,
+      box_count: Number(prev.box_count || 0) + Number(row.box_count || 0),
+      total_qty: Number(prev.total_qty || 0) + Number(row.total_qty || 0),
+      full_box_count: Number(prev.full_box_count || 0) + Number(row.full_box_count || 0),
+      loose_box_count: Number(prev.loose_box_count || 0) + Number(row.loose_box_count || 0),
+      override_cust: prev.override_cust || row.override_cust || null,
+    });
+  };
+
+  for (const row of fromBoxes || []) mergeRow(row);
+  for (const row of fromScans || []) mergeRow(row);
+
+  return [...merged.values()].sort((a, b) => {
+    const outCmp = Number(b.out_uid) - Number(a.out_uid);
+    if (outCmp !== 0) return outCmp;
+    return Number(b.total_qty) - Number(a.total_qty);
+  });
+};
+
+/** Mark boxes as on QC hold. */
+export const setBoxesQcHold = async (holdId, boxUids = []) => {
+  const pk = Number(holdId);
+  const uids = [...new Set((boxUids || []).map((v) => String(v).trim()).filter(Boolean))];
+  if (!Number.isFinite(pk) || pk <= 0 || !uids.length) return { updated: 0 };
+
+  const numericOnly = uids.filter((c) => /^\d+$/.test(c));
+  const rows = await dbQuery(
+    `UPDATE ims_box_table b
+     SET qc_hold_id = $1::integer,
+         updated_at = NOW()
+     WHERE b.is_deleted = false
+       AND ${sqlBoxSellable("b")}
+       AND (
+         b.box_no_uid::text = ANY($2::text[])
+         OR (cardinality($3::text[]) > 0 AND b.box_uid::text = ANY($3::text[]))
+       )
+     RETURNING b.*`,
+    [pk, uids, numericOnly]
+  );
+  return { updated: (rows || []).length, rows: rows || [] };
+};
+
+/** Clear QC hold flag from all boxes linked to a hold. */
+export const clearBoxesQcHold = async (holdId) => {
+  const pk = Number(holdId);
+  if (!Number.isFinite(pk) || pk <= 0) return { updated: 0 };
+  const rows = await dbQuery(
+    `UPDATE ims_box_table
+     SET qc_hold_id = NULL,
+         updated_at = NOW()
+     WHERE qc_hold_id = $1::integer
+       AND is_deleted = false
+     RETURNING box_uid`,
+    [pk]
+  );
+  return { updated: (rows || []).length };
+};
+
+/** Sync box QC hold flags when hold box list changes. */
+export const syncBoxesQcHold = async (holdId, prevUids = [], nextUids = []) => {
+  const pk = Number(holdId);
+  if (!Number.isFinite(pk) || pk <= 0) return;
+
+  const prev = new Set((prevUids || []).map((v) => String(v).trim()).filter(Boolean));
+  const next = new Set((nextUids || []).map((v) => String(v).trim()).filter(Boolean));
+  const toRelease = [...prev].filter((u) => !next.has(u));
+  const toApply = [...next].filter((u) => !prev.has(u));
+
+  if (toRelease.length) {
+    const numericOnly = toRelease.filter((c) => /^\d+$/.test(c));
+    await dbQuery(
+      `UPDATE ims_box_table
+       SET qc_hold_id = NULL,
+           updated_at = NOW()
+       WHERE qc_hold_id = $1::integer
+         AND is_deleted = false
+         AND (
+           box_no_uid::text = ANY($2::text[])
+           OR (cardinality($3::text[]) > 0 AND box_uid::text = ANY($3::text[]))
+         )`,
+      [pk, toRelease, numericOnly]
+    );
+  }
+  let appliedRows = [];
+  if (toApply.length) {
+    const applied = await setBoxesQcHold(pk, toApply);
+    appliedRows = applied?.rows || [];
+  }
+  return { appliedRows };
 };
 
 /**
@@ -586,6 +841,25 @@ export const findStockAdjustmentAddBoxesByPattern = async (packing_number, adjus
   );
 };
 
+/** QC hold completion stickers: `_QCH{hold_id}_` in box_no_uid. */
+export const findQcHoldCompletionBoxesByPattern = async (packing_number, hold_id) => {
+  const pn = String(packing_number ?? "").trim();
+  const hid = Number(hold_id);
+  if (!pn || !Number.isFinite(hid) || hid <= 0) return [];
+  const tag = `_QCH${hid}_`;
+
+  return dbQuery(
+    `SELECT ${IN_HAND_BOX_SELECT_SQL}
+     FROM ims_box_table b
+     ${JOINS}
+     WHERE b.is_deleted = false
+       AND ${sqlPackingNumberMatch("b", "$1")}
+       AND position($2::text IN b.box_no_uid::text) > 0
+     ORDER BY b.box_uid ASC`,
+    [pn, tag]
+  );
+};
+
 export const findItemDcodesWithInHandStock = async () => {
   return dbQuery(
     `SELECT DISTINCT
@@ -602,7 +876,7 @@ export const findItemDcodesWithInHandStock = async () => {
        ON b.sa_id = sa_adj.adjustment_id
       AND b.sa_entry_type = 'stock_in'
       AND sa_adj.is_deleted = false
-     WHERE ${sqlBoxInHand("b")}
+     WHERE ${sqlBoxSellable("b")}
        AND (
          CASE
            WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL
@@ -672,15 +946,22 @@ export const findBoxesByUids = async (box_uids = []) => {
   return await dbQuery(
     `SELECT 
         b.*, 
-        dp.doc_dt, 
+        ${sqlDocDtText("dp.doc_dt")} AS doc_dt, 
         dp.job_card_no, 
-        dp.acc_code AS prod_acc_code, 
-        COALESCE(dp.item_dcode, sa_adj.item_dcode) AS itemdcode, 
+        COALESCE(
+          NULLIF(trim(dp.acc_code::text), ''),
+          NULLIF(trim(sa_adj.acc_code::text), '')
+        )::text AS prod_acc_code,
+        COALESCE(
+          NULLIF(trim(dp.item_dcode::text), ''),
+          NULLIF(trim(sa_adj.item_dcode::text), '')
+        )::text AS itemdcode,
         dp.total_qty AS prod_total_qty
      FROM ims_box_table b
      LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::TEXT), '-') = NULLIF(TRIM(dp.doc_no::TEXT), '-')
      LEFT JOIN ims_stock_adjustment sa_adj
        ON b.sa_id = sa_adj.adjustment_id
+      AND b.sa_entry_type = 'stock_in'
       AND sa_adj.is_deleted = false
      WHERE b.box_uid::TEXT = ANY($1::TEXT[])
        AND b.is_deleted = false
@@ -832,7 +1113,17 @@ export const resetDailyProdStickerGeneratedForDoc = async (doc_no) => {
   return dbQuery(
     `UPDATE ims_dailyprod
      SET sticker_generated = false,
-         packing_standard_id = NULL
+         packing_standard_id = NULL,
+         item_desc = NULL,
+         party_rate_cust_code = NULL,
+         unit = 'PCS',
+         fg_location = NULL,
+         category_id = NULL,
+         category_name = NULL,
+         qty_per_box = NULL,
+         full_boxes_count = NULL,
+         loose_box_qty = NULL,
+         total_stickers = NULL
      WHERE doc_no = trim(COALESCE($1::text, '-'))::integer`,
     [String(doc_no)]
   );
@@ -848,16 +1139,16 @@ export const getStickerHistory = async (doc_no, category_id = null) => {
     WITH base AS (
       SELECT
         dp.doc_no,
-        dp.doc_dt,
+        ${sqlDocDtText("dp.doc_dt")} AS doc_dt,
         dp.job_card_no,
         dp.item_dcode AS itemdcode,
         dp.total_qty,
         dp.acc_code,
+        dp.acc_name,
         dp.sticker_generated,
         dp.packing_standard_id,
-        NULL::text AS item_code,
-        NULL::text AS itemdesc,
-        NULL::text AS acc_name
+        dp.item_code,
+        dp.item_desc AS itemdesc
       FROM ims_dailyprod dp
       WHERE dp.doc_no::text = $1::text
     ),
@@ -1176,7 +1467,7 @@ export async function getProductionStickerPanelMetaByPackingNumbers(packingNumbe
          dp.item_dcode AS dailyprod_item_dcode,
          dp.total_qty AS dailyprod_total_qty,
          dp.job_card_no AS dailyprod_job_card_no,
-         dp.doc_dt AS dailyprod_doc_dt,
+         ${sqlDocDtText("dp.doc_dt")} AS dailyprod_doc_dt,
          sa.financial_year AS sa_financial_year,
          b.override_cust
        FROM ims_box_table b
@@ -1580,22 +1871,55 @@ export const markBoxesStockAdjustmentOutTx = async (client, { adjustmentId, boxU
   return rows;
 };
 
-/** If no local row exists, insert one from `snapshot` (live production line). */
-export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, snapshot = null) => {
+/** If no local row exists, insert one from `fields` (live production line). */
+export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, fields = null) => {
   const d = String(doc_no);
-  const sid =
-    standard_id != null && standard_id !== ""
-      ? standard_id
-      : null;
+  const sid = standard_id != null && standard_id !== "" ? standard_id : null;
+  const f = fields && typeof fields === "object" ? fields : {};
 
   const snapAcc =
-    snapshot?.acc_code != null && String(snapshot.acc_code).trim() !== ""
-      ? String(snapshot.acc_code).trim()
-      : null;
-
+    f.acc_code != null && String(f.acc_code).trim() !== "" ? String(f.acc_code).trim() : null;
+  const snapAccName =
+    f.acc_name != null && String(f.acc_name).trim() !== "" ? String(f.acc_name).trim() : null;
   const snapItemCode =
-    snapshot?.item_code != null && String(snapshot.item_code).trim() !== ""
-      ? String(snapshot.item_code).trim()
+    f.item_code != null && String(f.item_code).trim() !== "" ? String(f.item_code).trim() : null;
+  const snapItemDesc =
+    f.item_desc != null && String(f.item_desc).trim() !== "" ? String(f.item_desc).trim() : null;
+  const snapDocDt = normalizeDocDtForDb(f.doc_dt) ?? "";
+  const snapJobCard =
+    f.job_card_no != null && String(f.job_card_no).trim() !== ""
+      ? String(f.job_card_no).trim()
+      : null;
+  const snapTotalQty =
+    f.total_qty != null && String(f.total_qty).trim() !== "" ? String(f.total_qty).trim() : null;
+  const snapItemDcode =
+    f.itemdcode != null && String(f.itemdcode).trim() !== "" ? String(f.itemdcode).trim() : null;
+  const snapPartyRate =
+    f.party_rate_cust_code != null && String(f.party_rate_cust_code).trim() !== ""
+      ? String(f.party_rate_cust_code).trim()
+      : null;
+  const snapUnit = f.unit != null && String(f.unit).trim() !== "" ? String(f.unit).trim() : "PCS";
+  const snapFgLoc =
+    f.fg_location != null && String(f.fg_location).trim() !== "" ? String(f.fg_location).trim() : null;
+  const snapCategoryId =
+    f.category_id != null && String(f.category_id).trim() !== "" ? String(f.category_id).trim() : null;
+  const snapCategoryName =
+    f.category_name != null && String(f.category_name).trim() !== ""
+      ? String(f.category_name).trim()
+      : null;
+  const snapQtyPerBox =
+    f.qty_per_box != null && String(f.qty_per_box).trim() !== "" ? String(f.qty_per_box).trim() : null;
+  const snapFullBoxes =
+    f.full_boxes_count != null && String(f.full_boxes_count).trim() !== ""
+      ? String(f.full_boxes_count).trim()
+      : null;
+  const snapLooseQty =
+    f.loose_box_qty != null && String(f.loose_box_qty).trim() !== ""
+      ? String(f.loose_box_qty).trim()
+      : null;
+  const snapTotalStickers =
+    f.total_stickers != null && String(f.total_stickers).trim() !== ""
+      ? String(f.total_stickers).trim()
       : null;
 
   const updated = await dbQuery(
@@ -1606,57 +1930,136 @@ export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, s
            WHEN $3::text IS NOT NULL AND trim($3::text) <> '-' THEN trim($3::text)::integer
            ELSE acc_code
          END,
-         item_code = COALESCE($4::text, item_code)
+         acc_name = COALESCE(NULLIF(trim($4::text), ''), acc_name),
+         item_code = COALESCE($5::text, item_code),
+         item_desc = COALESCE($6::text, item_desc),
+         doc_dt = COALESCE(
+           CASE WHEN $7::text IS NOT NULL AND trim($7::text) <> '' AND trim($7::text) <> '-'
+             THEN trim($7::text)::date ELSE NULL END,
+           doc_dt
+         ),
+         job_card_no = COALESCE(NULLIF(trim($8::text), ''), job_card_no),
+         total_qty = COALESCE(
+           NULLIF(trim(COALESCE($9::text, '')), '')::numeric,
+           total_qty
+         ),
+         item_dcode = CASE
+           WHEN $10::text IS NOT NULL AND trim($10::text) <> '-' THEN trim($10::text)::bigint
+           ELSE item_dcode
+         END,
+         party_rate_cust_code = COALESCE(NULLIF(trim($11::text), ''), party_rate_cust_code),
+         unit = COALESCE(NULLIF(trim($12::text), ''), unit, 'PCS'),
+         fg_location = COALESCE(NULLIF(trim($13::text), ''), fg_location),
+         category_id = CASE
+           WHEN $14::text IS NOT NULL AND trim($14::text) <> '-' THEN trim($14::text)::integer
+           ELSE category_id
+         END,
+         category_name = COALESCE(NULLIF(trim($15::text), ''), category_name),
+         qty_per_box = COALESCE(NULLIF(trim($16::text), '')::numeric, qty_per_box),
+         full_boxes_count = COALESCE(NULLIF(trim($17::text), '')::integer, full_boxes_count),
+         loose_box_qty = COALESCE(NULLIF(trim($18::text), '')::numeric, loose_box_qty),
+         total_stickers = COALESCE(NULLIF(trim($19::text), '')::integer, total_stickers)
      WHERE doc_no = trim(COALESCE($1::text, '-'))::integer
      RETURNING doc_no`,
-    [d, sid, snapAcc, snapItemCode]
+    [
+      d,
+      sid,
+      snapAcc,
+      snapAccName,
+      snapItemCode,
+      snapItemDesc,
+      snapDocDt,
+      snapJobCard,
+      snapTotalQty,
+      snapItemDcode,
+      snapPartyRate,
+      snapUnit,
+      snapFgLoc,
+      snapCategoryId,
+      snapCategoryName,
+      snapQtyPerBox,
+      snapFullBoxes,
+      snapLooseQty,
+      snapTotalStickers,
+    ]
   );
 
   if (Array.isArray(updated) && updated.length > 0) return updated;
 
-  if (!snapshot || typeof snapshot !== "object") return [];
+  if (!fields || typeof fields !== "object") return [];
 
-  const doc_dt = snapshot.doc_dt ?? null;
-  const job_card_no = snapshot.job_card_no ?? null;
-  const acc_code = snapshot.acc_code ?? null;
-  const itemdcode = snapshot.itemdcode ?? null;
-  const item_code = snapshot.item_code ?? null;
-  const total_qty = snapshot.total_qty ?? 0;
-
+  const doc_dt = normalizeDocDtForDb(f.doc_dt);
   const sidStr = sid != null && sid !== "" ? String(sid) : "";
 
   return dbQuery(
-    `INSERT INTO ims_dailyprod (doc_no, doc_dt, job_card_no, acc_code, item_dcode, item_code, total_qty, sticker_generated, packing_standard_id)
+    `INSERT INTO ims_dailyprod (
+       doc_no, doc_dt, job_card_no, acc_code, acc_name, item_dcode, item_code, item_desc,
+       total_qty, sticker_generated, packing_standard_id, party_rate_cust_code, unit,
+       fg_location, category_id, category_name, qty_per_box, full_boxes_count, loose_box_qty, total_stickers
+     )
      VALUES (
        trim(COALESCE($1::text, '-'))::integer,
        CASE WHEN trim(COALESCE($2::text, '-')) = '-' THEN NULL::date ELSE trim($2::text)::date END,
        NULLIF(trim(COALESCE($3::text, '-')), '-'),
        CASE WHEN trim(COALESCE($4::text, '-')) = '-' THEN NULL::integer ELSE trim($4::text)::integer END,
-       CASE WHEN trim(COALESCE($5::text, '-')) = '-' THEN NULL::bigint ELSE trim($5::text)::bigint END,
-       NULLIF(trim(COALESCE($6::text, '-')), '-'),
-       COALESCE(NULLIF(trim(COALESCE($7::text, '-')), '-')::numeric, 0),
+       NULLIF(trim(COALESCE($5::text, '-')), '-'),
+       CASE WHEN trim(COALESCE($6::text, '-')) = '-' THEN NULL::bigint ELSE trim($6::text)::bigint END,
+       NULLIF(trim(COALESCE($7::text, '-')), '-'),
+       NULLIF(trim(COALESCE($8::text, '-')), '-'),
+       COALESCE(NULLIF(trim(COALESCE($9::text, '-')), '-')::numeric, 0),
        true,
-       CASE WHEN trim(COALESCE($8::text, '-')) = '-' THEN NULL::bigint ELSE trim($8::text)::bigint END
+       CASE WHEN trim(COALESCE($10::text, '-')) = '-' THEN NULL::bigint ELSE trim($10::text)::bigint END,
+       NULLIF(trim(COALESCE($11::text, '-')), '-'),
+       COALESCE(NULLIF(trim(COALESCE($12::text, '-')), '-'), 'PCS'),
+       NULLIF(trim(COALESCE($13::text, '-')), '-'),
+       CASE WHEN trim(COALESCE($14::text, '-')) = '-' THEN NULL::integer ELSE trim($14::text)::integer END,
+       NULLIF(trim(COALESCE($15::text, '-')), '-'),
+       NULLIF(trim(COALESCE($16::text, '-')), '-')::numeric,
+       NULLIF(trim(COALESCE($17::text, '-')), '-')::integer,
+       NULLIF(trim(COALESCE($18::text, '-')), '-')::numeric,
+       NULLIF(trim(COALESCE($19::text, '-')), '-')::integer
      )
      ON CONFLICT (doc_no) DO UPDATE SET
        sticker_generated = true,
        packing_standard_id = EXCLUDED.packing_standard_id,
        acc_code = COALESCE(EXCLUDED.acc_code, ims_dailyprod.acc_code),
+       acc_name = COALESCE(EXCLUDED.acc_name, ims_dailyprod.acc_name),
        item_dcode = COALESCE(EXCLUDED.item_dcode, ims_dailyprod.item_dcode),
        item_code = COALESCE(EXCLUDED.item_code, ims_dailyprod.item_code),
+       item_desc = COALESCE(EXCLUDED.item_desc, ims_dailyprod.item_desc),
        total_qty = COALESCE(EXCLUDED.total_qty, ims_dailyprod.total_qty),
        doc_dt = COALESCE(EXCLUDED.doc_dt, ims_dailyprod.doc_dt),
-       job_card_no = COALESCE(EXCLUDED.job_card_no, ims_dailyprod.job_card_no)
+       job_card_no = COALESCE(EXCLUDED.job_card_no, ims_dailyprod.job_card_no),
+       party_rate_cust_code = COALESCE(EXCLUDED.party_rate_cust_code, ims_dailyprod.party_rate_cust_code),
+       unit = COALESCE(EXCLUDED.unit, ims_dailyprod.unit),
+       fg_location = COALESCE(EXCLUDED.fg_location, ims_dailyprod.fg_location),
+       category_id = COALESCE(EXCLUDED.category_id, ims_dailyprod.category_id),
+       category_name = COALESCE(EXCLUDED.category_name, ims_dailyprod.category_name),
+       qty_per_box = COALESCE(EXCLUDED.qty_per_box, ims_dailyprod.qty_per_box),
+       full_boxes_count = COALESCE(EXCLUDED.full_boxes_count, ims_dailyprod.full_boxes_count),
+       loose_box_qty = COALESCE(EXCLUDED.loose_box_qty, ims_dailyprod.loose_box_qty),
+       total_stickers = COALESCE(EXCLUDED.total_stickers, ims_dailyprod.total_stickers)
      RETURNING doc_no`,
     [
       d,
-      doc_dt != null ? String(doc_dt) : "",
-      job_card_no != null ? String(job_card_no) : "",
-      acc_code != null ? String(acc_code) : "",
-      itemdcode != null ? String(itemdcode) : "",
-      item_code != null ? String(item_code) : "",
-      String(total_qty),
-      sidStr
+      doc_dt != null ? (normalizeDocDtForDb(doc_dt) ?? "") : "",
+      f.job_card_no != null ? String(f.job_card_no) : "",
+      f.acc_code != null ? String(f.acc_code) : "",
+      f.acc_name != null ? String(f.acc_name) : "",
+      f.itemdcode != null ? String(f.itemdcode) : "",
+      f.item_code != null ? String(f.item_code) : "",
+      f.item_desc != null ? String(f.item_desc) : "",
+      f.total_qty != null ? String(f.total_qty) : "0",
+      sidStr,
+      snapPartyRate ?? "",
+      snapUnit,
+      snapFgLoc ?? "",
+      snapCategoryId ?? "",
+      snapCategoryName ?? "",
+      snapQtyPerBox ?? "",
+      snapFullBoxes ?? "",
+      snapLooseQty ?? "",
+      snapTotalStickers ?? "",
     ]
   );
 };
@@ -1700,15 +2103,26 @@ const FIND_BOX_DETAILED_SELECT = `
       NULL::text AS acc_name,
       j.job_card_no AS job_no,
       j.doc_dt,
-      j.acc_code::text AS prod_acc_code,
-      j.acc_code,
-      COALESCE(j.item_dcode, sa_adj.item_dcode) AS itemdcode,
+      COALESCE(
+        NULLIF(trim(j.acc_code::text), ''),
+        NULLIF(trim(sa_adj.acc_code::text), '')
+      )::text AS prod_acc_code,
+      COALESCE(
+        NULLIF(trim(j.acc_code::text), ''),
+        NULLIF(trim(sa_adj.acc_code::text), '')
+      )::text AS acc_code,
+      COALESCE(
+        NULLIF(trim(j.item_dcode::text), ''),
+        NULLIF(trim(sa_adj.item_dcode::text), '')
+      )::text AS itemdcode,
       ps.unit,
       NULL::text AS party_rate_cust_code
     FROM ims_box_table b
     LEFT JOIN ims_dailyprod j ON TRIM(b.packing_number::TEXT) = TRIM(j.doc_no::TEXT)
     LEFT JOIN ims_stock_adjustment sa_adj
-      ON b.sa_id = sa_adj.adjustment_id AND b.sa_entry_type = 'stock_in'
+      ON b.sa_id = sa_adj.adjustment_id
+     AND b.sa_entry_type = 'stock_in'
+     AND sa_adj.is_deleted = false
     LEFT JOIN ims_packing_standard ps ON j.packing_standard_id = ps.standard_id`;
 
 // 2. Find Single Box Detailed (join ims_dailyprod like findBoxes `dp` fields for suggestion resolver)
@@ -1778,15 +2192,26 @@ export const findBoxesDetailed = async ({ box_uids, packing_number }) => {
       NULL::text AS item_code, NULL::text AS itemdesc, NULL::text AS acc_name,
       j.job_card_no as job_no,
       j.doc_dt,
-      j.acc_code::text AS prod_acc_code,
-      j.acc_code,
-      COALESCE(j.item_dcode, sa_adj.item_dcode) AS itemdcode,
+      COALESCE(
+        NULLIF(trim(j.acc_code::text), ''),
+        NULLIF(trim(sa_adj.acc_code::text), '')
+      )::text AS prod_acc_code,
+      COALESCE(
+        NULLIF(trim(j.acc_code::text), ''),
+        NULLIF(trim(sa_adj.acc_code::text), '')
+      )::text AS acc_code,
+      COALESCE(
+        NULLIF(trim(j.item_dcode::text), ''),
+        NULLIF(trim(sa_adj.item_dcode::text), '')
+      )::text AS itemdcode,
       ps.unit,
       NULL::text AS party_rate_cust_code
     FROM ims_box_table b
     LEFT JOIN ims_dailyprod j ON TRIM(b.packing_number::TEXT) = TRIM(j.doc_no::TEXT)
     LEFT JOIN ims_stock_adjustment sa_adj
-      ON b.sa_id = sa_adj.adjustment_id AND b.sa_entry_type = 'stock_in'
+      ON b.sa_id = sa_adj.adjustment_id
+     AND b.sa_entry_type = 'stock_in'
+     AND sa_adj.is_deleted = false
     LEFT JOIN ims_packing_standard ps ON j.packing_standard_id = ps.standard_id
     WHERE 
   `;
@@ -2227,151 +2652,7 @@ export const getStickerManagementList = async (options = {}) => {
   return getStickerDownloadLogList(options);
 };
 
-export const insertOverrideRequest = async ({ packing_number, itemdcode, box_uids, from_customer, to_customer, remarks, requested_by, approved = false }) => {
-  const approved_by = approved ? requested_by : null;
-  const approved_at = approved ? new Date() : null;
-  const status = approved ? "approved" : "pending";
-
-  const [row] = await dbQuery(
-    `INSERT INTO ims_box_override_request
-      (packing_number, itemdcode, box_uids, from_customer, to_customer, remarks, requested_by, approved, approved_by, approved_at, status)
-     VALUES ($1, $2, $3::text[], $4, $5, $6, $7, $8, $9, $10, $11)
-     RETURNING *`,
-    [String(packing_number), String(itemdcode), box_uids.map((id) => String(id)), from_customer || null, to_customer, remarks || null, requested_by, approved, approved_by, approved_at, status]
-  );
-  return row;
-};
-
-export const listOverrideRequests = async (options = {}) => {
-  const { filters = {}, search, sort = {}, page = 1, limit = 10 } = options;
-
-  const values = [];
-  let i = 1;
-  const conditions = ["1=1"];
-
-  if (filters.from_date) {
-    values.push(filters.from_date);
-    conditions.push(`r.requested_at >= $${i++}`);
-  }
-  if (filters.to_date) {
-    values.push(filters.to_date);
-    conditions.push(`r.requested_at <= $${i++}`);
-  }
-  if (filters.status) {
-    values.push(filters.status);
-    conditions.push(`r.status = $${i++}`);
-  }
-
-  const searchText = search != null ? String(search).trim() : "";
-  if (searchText) {
-    const searchTerm = `%${searchText}%`;
-    values.push(searchTerm);
-    const idx = i++;
-    conditions.push(`(
-      r.packing_number::TEXT ILIKE $${idx} OR
-      r.itemdcode::TEXT ILIKE $${idx} OR
-      r.from_customer::TEXT ILIKE $${idx} OR
-      r.to_customer::TEXT ILIKE $${idx} OR
-      r.remarks ILIKE $${idx} OR
-      r.request_id::TEXT ILIKE $${idx} OR
-      req_user.name ILIKE $${idx} OR
-      app_user.name ILIKE $${idx} OR
-      EXISTS (
-        SELECT 1 FROM ims_box_table b
-        WHERE b.box_uid::TEXT = ANY(r.box_uids::TEXT[])
-          AND b.box_no_uid::TEXT ILIKE $${idx}
-      )
-    )`);
-  }
-
-  const joins = `
-    LEFT JOIN ${M.USERS} req_user ON req_user.id = r.requested_by
-    LEFT JOIN ${M.USERS} app_user ON app_user.id = r.approved_by
-  `;
-
-  const whereClause = `WHERE ${conditions.join(" AND ")}`;
-
-  const countRes = await dbQuery(
-    `SELECT COUNT(*) as count FROM ims_box_override_request r ${joins} ${whereClause}`,
-    values
-  );
-  const total = Number(countRes[0]?.count || 0);
-
-  const safePage = Math.max(1, Number(page) || 1);
-  const safeLimit = Math.max(1, Number(limit) || 10);
-  const offset = (safePage - 1) * safeLimit;
-
-  const sortMapping = {
-    request_id: "r.request_id",
-    packing_number: "r.packing_number",
-    requested_at: "r.requested_at",
-    status: "r.status",
-    requested_by_name: "req_user.name",
-    approved_by_name: "app_user.name",
-    from_customer_name: "r.from_customer",
-    to_customer_name: "r.to_customer",
-    item_name: "r.itemdcode",
-    itemdcode: "r.itemdcode",
-  };
-
-  const orderByColumn = sortMapping[sort.sortBy] || sortMapping[sort.by] || "r.requested_at";
-  const orderDir = sort.order === "ASC" ? "ASC" : "DESC";
-
-  const queryValues = [...values, safeLimit, offset];
-  
-  const sql = `
-    SELECT
-      r.*,
-      req_user.name AS requested_by_name,
-      app_user.name AS approved_by_name,
-      r.from_customer AS from_customer_name,
-      r.to_customer AS to_customer_name,
-      r.itemdcode AS item_name,
-      (
-        SELECT ARRAY_AGG(b.box_no_uid)
-        FROM ims_box_table b
-        WHERE b.box_uid::TEXT = ANY(r.box_uids::TEXT[])
-      ) AS box_no_uids
-    FROM ims_box_override_request r
-    ${joins}
-    ${whereClause}
-    ORDER BY ${orderByColumn} ${orderDir}
-    LIMIT $${i++} OFFSET $${i++}
-  `;
-
-  const rows = await dbQuery(sql, queryValues);
-
-  return {
-    data: rows,
-    total,
-    page: safePage,
-    limit: safeLimit,
-    totalPages: Math.ceil(total / safeLimit)
-  };
-};
-
-export const getOverrideRequestById = async (request_id) => {
-  const [row] = await dbQuery(
-    `SELECT * FROM ims_box_override_request WHERE request_id = $1 LIMIT 1`,
-    [request_id]
-  );
-  return row || null;
-};
-
-export const updateOverrideRequest = async (request_id, fields = {}) => {
-  const fieldKeys = Object.keys(fields);
-  if (!fieldKeys.length) return null;
-  const set = fieldKeys.map((k, i) => `${k} = $${i + 2}`).join(", ");
-  const values = [request_id, ...Object.values(fields)];
-  const [row] = await dbQuery(
-    `UPDATE ims_box_override_request
-     SET ${set}
-     WHERE request_id = $1
-     RETURNING *`,
-    values
-  );
-  return row || null;
-};
+export { enrichOverrideCustomerListRows, getOverrideRequestById, insertOverrideRequest, listOverrideRequests, updateOverrideRequest } from "../utils/box/overrideCustomerList.js";
 
 // Inward Entry Controllers
 // After inward: set box location and in_uid

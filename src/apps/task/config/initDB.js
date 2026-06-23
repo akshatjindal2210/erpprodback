@@ -40,8 +40,6 @@ export async function initTaskDB() {
     await createTaskUpdatedAtTriggers();
 
     await syncTaskSequences();
-
-    console.log("✅ Task tables ready");
   } catch (err) {
     console.error("❌ Task DB initialization failed:", err.message);
     throw err;

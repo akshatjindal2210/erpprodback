@@ -32,9 +32,6 @@ export async function seedCoreRootUser() {
         true
       ],
     );
-    console.log("Root user created");
-  } else {
-    console.log("Root user already exists skipping");
   }
 
   // Ensure super_admin has local auth
@@ -43,7 +40,6 @@ export async function seedCoreRootUser() {
   `);
 
   await upsertModuleRows(MODULES);
-  console.log("Modules Seeded");
 
   const [superAdmin] = await dbQuery(`SELECT id FROM ${M.USERS} WHERE type = 'super_admin' LIMIT 1`);
 
@@ -65,6 +61,5 @@ export async function seedCoreRootUser() {
         [superAdmin.id, mod.id]
       );
     }
-    console.log("Super Admin Permissions Seeded");
   }
 }

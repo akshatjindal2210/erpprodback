@@ -59,7 +59,7 @@ const config = {
   jwt_secret: process.env.JWT_SECRET,
   node_env: process.env.NODE_ENV || "development",
   domain: process.env.DOMAIN || "localhost",
-  frontend_url: process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(",") : ["http://localhost:3000"],
+  frontend_url: process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",") : ["http://localhost:3000"],
   uploadPath: getUploadPath(),
   uploadPublicPath: "uploads",
   cookie_name: "auth_token",

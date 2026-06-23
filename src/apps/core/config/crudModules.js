@@ -125,6 +125,7 @@ export const CRUD_MODULES = {
     listFields: [
       "s.adjustment_id", "s.item_dcode", "s.item_dcode::text AS item_code", "s.qty", "s.unit", "s.remarks",
       "s.entry_type", "s.packing_number", "s.financial_year", "s.per_box_qty", "s.box_count_impact", "s.removed_box_ids",
+      "s.doc_dt", "s.job_card_no",
       "s.approved", "s.approved_by", "s.approved_at",
       "s.created_by", "s.created_at",
       "s.updated_by", "s.updated_at",
@@ -162,6 +163,17 @@ export const CRUD_MODULES = {
     ],
     filterFields: ["audit_id", "status", "approved", "from_date", "to_date"],
     searchFields: ["am.remarks"]
+  },
+  qc_hold_material: {
+    idField: "hold_id",
+    listFields: [
+      "q.hold_id", "q.packing_number", "q.item_dcode", "q.item_dcode::text AS item_code",
+      "q.hold_data", "q.remarks", "q.reason", "q.status",
+      "q.approved", "q.approved_by", "q.approved_at", "q.created_by", "q.created_at", "q.updated_by", "q.updated_at",
+      "u_cr.name AS created_by_name", "u_up.name AS updated_by_name", "u_ap.name AS approved_by_name"
+    ],
+    filterFields: ["hold_id", "packing_number", "item_dcode", "status", "approved", "from_date", "to_date", "open_only"],
+    searchFields: ["q.packing_number", "q.remarks", "q.reason", "q.status"]
   },
 };
 

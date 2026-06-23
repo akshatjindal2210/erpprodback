@@ -14,6 +14,7 @@ import { createCategoryTable } from "./tables/category.table.js";
 import { createStickerTypeTable } from "./tables/sticker_type.table.js";
 import { createAppConfigTable } from "./tables/app_config.table.js";
 import { createAuditTables } from "./tables/audit.table.js";
+import { createQcHoldMaterialTable } from "./tables/qc_hold_material.table.js";
 import { syncImsSequences } from "./syncSequences.js";
 
 export async function initImsDB() {
@@ -25,10 +26,11 @@ export async function initImsDB() {
   await createInventoryInwardsTable();
   await createForwardingNoteMasterTable();
   await createForwardingNoteItemWiseTable();
+  await createQcHoldMaterialTable();
   await createOutEntryTable();
+  await createDailyProdTable();
   await createStockAdjustmentTable();
   await createBoxTable();
-  await createDailyProdTable();
   await createBoxDownloadLogTable();
   await createBoxOverrideRequestTable();
   await createOutEntryScannedBoxTable();
@@ -37,5 +39,14 @@ export async function initImsDB() {
 
   await syncImsSequences();
 
-  console.log("✅ IMS tables ready");
+  // Legacy SA rows — after all schema patches.
+  if (process.env.BACKFILL_SA_PACKING_META !== "0") {
+    setImmediate(() => {
+      import("../utils/stock-adjustment/backfillStockAdjustmentPackingMeta.js")
+        .then(({ runStockAdjustmentPackingMetaBackfillOnStartup }) =>
+          runStockAdjustmentPackingMetaBackfillOnStartup()
+        )
+        .catch((err) => console.warn("⚠️ SA packing meta backfill skipped:", err.message));
+    });
+  }
 }

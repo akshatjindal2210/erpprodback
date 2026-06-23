@@ -1,5 +1,5 @@
 import { getAllAppConfig, setAppConfigValue, getAppConfigValue, APP_CONFIG_KEYS } from "../../core/models/appConfig.model.js";
-import { normalizeBoxNoUidPrefix } from "../../../global/boxUid.js";
+import { normalizeBoxNoUidPrefix } from "../utils/box/boxUid.js";
 
 const LIST_VIEW_SPAN_MIN = 1;
 const LIST_VIEW_SPAN_MAX = 3650;

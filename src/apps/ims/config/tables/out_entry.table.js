@@ -1,11 +1,13 @@
 import dbQuery from "../../../../config/db.js";
 import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
+import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
 
 export async function createOutEntryTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.OUT_ENTRY} (
       out_uid           SERIAL PRIMARY KEY,
       fuid              INTEGER REFERENCES ${T.FORWARDING_NOTE_MASTER}(fuid) ON DELETE CASCADE,
+      qc_hold_id        INTEGER REFERENCES ${T.QC_HOLD_MATERIAL}(hold_id) ON DELETE SET NULL,
       entry_type        VARCHAR(20) DEFAULT 'forwarding_note',
       packing_numbers   TEXT,
       item_codes        TEXT,
@@ -28,4 +30,10 @@ export async function createOutEntryTable() {
       reason            VARCHAR(200)
     );
   `);
+
+  await patchTableSchema(dbQuery, T.OUT_ENTRY, {
+    columns: [
+      patchCol("qc_hold_id", `INTEGER REFERENCES ${T.QC_HOLD_MATERIAL}(hold_id) ON DELETE SET NULL`),
+    ],
+  });
 }

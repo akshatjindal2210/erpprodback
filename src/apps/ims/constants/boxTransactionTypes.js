@@ -7,6 +7,7 @@ export const BOX_TX_TYPES = {
   OUT_LINK: "out_link",
   OUT_UNLINK: "out_unlink",
   OUT_OTHER_RETURN_TO_PACKING: "out_other_return_to_packing",
+  OUT_QC_AREA_RELEASE: "out_qc_area_release",
   SA_STOCK_IN: "sa_stock_in",
   SA_STOCK_OUT: "sa_stock_out",
   SA_REVERT: "sa_revert",
@@ -16,6 +17,10 @@ export const BOX_TX_TYPES = {
   OVERRIDE_CUSTOMER: "override_customer",
   AUDIT_MISSING: "audit_missing",
   AUDIT_EXTRA: "audit_extra",
+  QC_HOLD_APPLY: "qc_hold_apply",
+  QC_HOLD_COMPLETE: "qc_hold_complete",
+  QC_HOLD_SOURCE_CONSUME: "qc_hold_source_consume",
+  QC_HOLD_REVERT: "qc_hold_revert",
 };
 
 /** Simple Add / Remove labels for the logs UI (Out dispatch unchanged). */
@@ -36,4 +41,9 @@ export const BOX_TX_TYPE_LABELS = {
   [BOX_TX_TYPES.OVERRIDE_CUSTOMER]: "Customer override",
   [BOX_TX_TYPES.AUDIT_MISSING]: "Audit — Missing",
   [BOX_TX_TYPES.AUDIT_EXTRA]: "Audit — Extra",
+  [BOX_TX_TYPES.QC_HOLD_APPLY]: "QC Hold — On Hold",
+  [BOX_TX_TYPES.QC_HOLD_COMPLETE]: "QC Hold — Add",
+  [BOX_TX_TYPES.QC_HOLD_SOURCE_CONSUME]: "QC Hold — Delete",
+  [BOX_TX_TYPES.QC_HOLD_REVERT]: "QC Hold — Revert (no change)",
+  [BOX_TX_TYPES.OUT_QC_AREA_RELEASE]: "Out (QC Area) — Moved to QC area",
 };

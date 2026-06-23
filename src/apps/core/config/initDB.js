@@ -1,4 +1,3 @@
-import { MST_TABLES as T } from "../../../config/dbTables.js";
 import { createUsersTable } from "./tables/user.table.js";
 import { createModulesTable } from "./tables/module.table.js";
 import { createUserPermissionsTable } from "./tables/user_permissions.table.js";
@@ -9,29 +8,20 @@ import { createDepartmentsTable } from "./tables/department.table.js";
 import { createDesignationsTable } from "./tables/designation.table.js";
 import { createActivityLogsTable } from "./tables/activity_log.table.js";
 import { createInboxTable } from "./tables/inbox.table.js";
+// import { createUserAppPreferencesTable } from "./tables/user_app_preferences.table.js";
 import { createCoreUpdatedAtTriggers } from "./tables/triggers.table.js";
 
 export const initCoreDB = async () => {
   await createUsersTable();
-  console.log(`✅ ${T.USERS} ready`);
   await createModulesTable();
-  console.log(`✅ ${T.MODULES} ready`);
   await createUserPermissionsTable();
-  console.log(`✅ ${T.USER_PERMISSIONS} ready`);
   await createUserAppAccessTable();
-  console.log(`✅ ${T.USER_APP_ACCESS} ready`);
   await createTrainingVideosTable();
-  console.log(`✅ ${T.TRAINING_VIDEOS} ready`);
   await createModuleSopsTable();
-  console.log(`✅ ${T.MODULE_SOPS} ready`);
   await createDepartmentsTable();
-  console.log(`✅ ${T.DEPARTMENTS} ready`);
   await createDesignationsTable();
-  console.log(`✅ ${T.DESIGNATIONS} ready`);
   await createActivityLogsTable();
-  console.log(`✅ ${T.ACTIVITY_LOGS} ready`);
   await createInboxTable();
-  console.log(`✅ ${T.INBOX} ready`);
+  // await createUserAppPreferencesTable();
   await createCoreUpdatedAtTriggers();
-  console.log("✅ Core triggers ready");
 };

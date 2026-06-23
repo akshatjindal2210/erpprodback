@@ -1,118 +1,18 @@
 import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertForwardingNote, updateForwardingNotes, updateForwardingNoteBillNo, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters } from "../models/forwardingNote.model.js";
-import { buildForwardingAvailableBoxes, sumBoxQty } from "../utils/forwardingAvailableStock.js";
-import { logActivity } from "../utils/activityLogger.js";
+import { buildForwardingAvailableBoxes } from "../utils/forwarding-note/forwardingAvailableStock.js";
+import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo } from "../utils/forwarding-note/forwardingNoteList.js";
+import { saveForwardingNoteItems } from "../utils/forwarding-note/forwardingNoteItemsWrite.js";
+import { buildForwardingLockMessage } from "../utils/forwarding-note/forwardingNoteMessages.js";
+import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../utils/approval.js";
-import { insertForwardingNoteItem, deleteForwardingNoteItems, findForwardingNoteItems } from "../models/forwardingNoteItem.model.js";
+import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
+import { deleteForwardingNoteItems, findForwardingNoteItems } from "../models/forwardingNoteItem.model.js";
 import { sanitizeSearch, buildForwardingNoteBillDocument } from "../../core/utils/helper.js";
-import { enrichRowsWithIMS } from "../utils/imsLookup.js";
 import { fetchFromIMS } from "../services/ims.service.js";
-import { resolvePackingStickerMetaForPrint } from "../utils/stickerPrintMeta.js";
 
 const FORWARDING_CFG = getCrudModuleConfig("forwarding_note_master");
 const FORWARDING_ITEM_CFG = getCrudModuleConfig("forwarding_note_item_wise");
-
-async function enrichForwardingSummaryRows(rows = []) {
-  return enrichRowsWithIMS(rows, {
-    accCodeField: "acc_code",
-    accNameOut: "acc_name"
-  });
-}
-
-async function enrichForwardingItemRows(rows = []) {
-  return enrichRowsWithIMS(rows, {
-    accCodeField: "acc_code",
-    accNameOut: "acc_name",
-    itemCodeField: "item_dcode",
-    itemCodeOut: "item_code",
-    itemDescOut: "item_desc"
-  });
-}
-
-async function enrichForwardingNoteDetail(data) {
-  if (!data) return data;
-  const [summary] = await enrichForwardingSummaryRows([data]);
-  const accCode = data.acc_code;
-
-  const enrichedGroups = [];
-  for (const grp of data.items || []) {
-    const rowsToEnrich = [
-      { ...grp, acc_code: accCode },
-      ...(grp.breakdowns || []).map((b) => ({ ...b, acc_code: accCode })),
-    ];
-    const enriched = await enrichForwardingItemRows(rowsToEnrich);
-    const [enrichedGrp, ...enrichedBreakdowns] = enriched;
-
-    enrichedGroups.push({
-      ...enrichedGrp,
-      itemdesc: enrichedGrp.itemdesc ?? enrichedGrp.item_desc ?? null,
-      breakdowns: enrichedBreakdowns.map((row) => ({
-        ...row,
-        itemdesc: row.itemdesc ?? row.item_desc ?? null,
-      })),
-    });
-  }
-
-  return {
-    ...(summary || data),
-    items: enrichedGroups,
-  };
-}
-
-/** Limits client-supplied print header overrides (size / abuse). */
-const sanitizePrintCompanyInfo = (raw) => {
-  if (!raw || typeof raw !== "object") return {};
-  const limits = { name: 200, address: 800, gstin: 32, phone: 160 };
-  const out = {};
-  for (const key of Object.keys(limits)) {
-    if (typeof raw[key] !== "string") continue;
-    const t = raw[key].trim();
-    if (t) out[key] = t.slice(0, limits[key]);
-  }
-  return out;
-};
-
-/** Bill print only — fill missing packing doc_dt (dailyprod + IMS, same as sticker print). */
-async function enrichBillPackingDates(note) {
-  if (!note?.items?.length) return note;
-
-  const pending = new Map();
-  for (const grp of note.items) {
-    for (const line of grp.breakdowns || []) {
-      if (line.doc_dt != null && String(line.doc_dt).trim() !== "") continue;
-      const pn = String(line.packing_number ?? "").trim();
-      if (!pn) continue;
-      if (!pending.has(pn)) pending.set(pn, []);
-      pending.get(pn).push(line);
-    }
-  }
-
-  await Promise.all(
-    [...pending.entries()].map(async ([pn, lines]) => {
-      try {
-        const meta = await resolvePackingStickerMetaForPrint(pn);
-        const dt = meta?.doc_dt;
-        if (dt == null || String(dt).trim() === "") return;
-        for (const line of lines) line.doc_dt = dt;
-      } catch {
-        /* ignore lookup errors */
-      }
-    })
-  );
-
-  return note;
-}
-
-const buildLockMessage = (record) => {
-  const lockBy = record?.out_entry_locked_by_name || "another user";
-  const lockAt = record?.out_entry_locked_at
-    ? new Date(record.out_entry_locked_at).toLocaleString("en-IN")
-    : null;
-  return lockAt
-    ? `This forwarding note is locked for out entry by ${lockBy} since ${lockAt}.`
-    : `This forwarding note is locked for out entry by ${lockBy}.`;
-};
 
 export const getForwardingNotes = async (req, res) => {
   try {
@@ -177,67 +77,17 @@ export const getForwardingNoteById = async (req, res) => {
 
 export const createForwardingNote = async (req, res) => {
   try {
-    console.log("createForwardingNote - ", req.body);
     const { items = [], approved, ...rest } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
 
     // 1. Insert Master
     const row = await insertForwardingNote({ ...rest, created_by: req.user.id });
-    
-    console.log("row - ", row);
-    console.log("items - ", items);
-    
-    // 2. Insert Items (Item-wise breakdown)
-    for (const item of items) {
-      if (!item.is_pre_calculated && item.selected_boxes?.length) {
-        await assertForwardingSelectionWithinRemaining(item.item_dcode, item.selected_boxes, null);
-      }
 
-      if (item.is_pre_calculated) {
-        // Direct insertion for pre-calculated items (from edit mode without changes)
-        await insertForwardingNoteItem({
-          fuid:           row.fuid,
-          item_dcode:     item.item_dcode,
-          packing_number: item.packing_number,
-          box:            item.box,
-          box_qty:        item.box_qty,
-          loose_box:      item.loose_box,
-          loose_box_qty:  item.loose_box_qty,
-          total_qty:      item.total_qty,
-          created_by:     req.user.id,
-        });
-        continue;
-      }
-
-      // Group selected boxes by packing number to insert into ims_forwarding_note_item_wise
-      const groupedBoxes = (item.selected_boxes || []).reduce((acc, box) => {
-        const pNo = box.packing_number || "N/A";
-        if (!acc[pNo]) acc[pNo] = { open_boxes: 0, open_qty: 0, loose_boxes: 0, loose_qty: 0 };
-        
-        if (box.is_loose) {
-          acc[pNo].loose_boxes += 1;
-          acc[pNo].loose_qty += Number(box.qty);
-        } else {
-          acc[pNo].open_boxes += 1;
-          acc[pNo].open_qty += Number(box.qty);
-        }
-        return acc;
-      }, {});
-
-      for (const [packing_number, stats] of Object.entries(groupedBoxes)) {
-        await insertForwardingNoteItem({
-          fuid:           row.fuid,
-          item_dcode:     item.item_dcode,
-          packing_number: packing_number,
-          box:            stats.open_boxes,
-          box_qty:        stats.open_qty,
-          loose_box:      stats.loose_boxes,
-          loose_box_qty:  stats.loose_qty,
-          total_qty:      stats.open_qty + stats.loose_qty,
-          created_by:     req.user.id,
-        });
-      }
-    }
+    await saveForwardingNoteItems({
+      fuid: row.fuid,
+      items,
+      userId: req.user.id,
+    });
 
     // 3. Apply initial approval state when requested
     if (normalizedApproved === true) {
@@ -328,7 +178,7 @@ export const updateForwardingNote = async (req, res) => {
     if (await isForwardingNoteLockedForOutEntry(fuid)) {
       return res.status(409).json({
         success: false,
-        message: buildLockMessage(existing)
+        message: buildForwardingLockMessage(existing)
       });
     }
 
@@ -383,52 +233,13 @@ export const updateForwardingNote = async (req, res) => {
     await updateForwardingNotes(fields, { fuid });
 
     if (items.length > 0) {
-      // Soft delete existing items
       await deleteForwardingNoteItems({ fuid }, { deleted_by: req.user.id });
-
-      // Insert new items
-      for (const item of items) {
-        if (!item.is_pre_calculated && item.selected_boxes?.length) {
-          await assertForwardingSelectionWithinRemaining(item.item_dcode, item.selected_boxes, fuid);
-        }
-
-        if (item.is_pre_calculated) {
-          await insertForwardingNoteItem({
-            fuid,
-            item_dcode:     item.item_dcode,
-            packing_number: item.packing_number,
-            box:            item.box,
-            box_qty:        item.box_qty,
-            loose_box:      item.loose_box,
-            loose_box_qty:  item.loose_box_qty,
-            total_qty:      item.total_qty,
-            created_by:     req.user.id,
-          });
-          continue;
-        }
-
-        const groupedBoxes = (item.selected_boxes || []).reduce((acc, box) => {
-          const pNo = box.packing_number || "N/A";
-          if (!acc[pNo]) acc[pNo] = { open_boxes: 0, open_qty: 0, loose_boxes: 0, loose_qty: 0 };
-          if (box.is_loose) { acc[pNo].loose_boxes += 1; acc[pNo].loose_qty += Number(box.qty); }
-          else { acc[pNo].open_boxes += 1; acc[pNo].open_qty += Number(box.qty); }
-          return acc;
-        }, {});
-
-        for (const [packing_number, stats] of Object.entries(groupedBoxes)) {
-          await insertForwardingNoteItem({
-            fuid,
-            item_dcode:     item.item_dcode,
-            packing_number,
-            box:            stats.open_boxes,
-            box_qty:        stats.open_qty,
-            loose_box:      stats.loose_boxes,
-            loose_box_qty:  stats.loose_qty,
-            total_qty:      stats.open_qty + stats.loose_qty,
-            created_by:     req.user.id,
-          });
-        }
-      }
+      await saveForwardingNoteItems({
+        fuid,
+        items,
+        userId: req.user.id,
+        excludeFuid: fuid,
+      });
     }
 
     const data = await findForwardingNote({ fuid });
@@ -450,7 +261,7 @@ export const deleteForwardingNote = async (req, res) => {
     if (await isForwardingNoteLockedForOutEntry(fuid)) {
       return res.status(409).json({
         success: false,
-        message: buildLockMessage(existing)
+        message: buildForwardingLockMessage(existing)
       });
     }
 
@@ -582,22 +393,6 @@ export const getForwardingNoteBillNumbersViews = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
-
-async function assertForwardingSelectionWithinRemaining(item_dcode, selected_boxes = [], exclude_fuid = null) {
-  const clean = Number(item_dcode);
-  if (!Number.isFinite(clean) || !Array.isArray(selected_boxes) || !selected_boxes.length) return;
-
-  const physical = await findAvailableBoxes(clean);
-  const allowed = await buildForwardingAvailableBoxes(physical, clean, exclude_fuid);
-  const maxQty = sumBoxQty(allowed);
-  const pickQty = sumBoxQty(selected_boxes);
-
-  if (pickQty > maxQty + 0.0001) {
-    const err = new Error(`Dispatch qty exceeds remaining stock (max ${maxQty}).`);
-    err.statusCode = 400;
-    throw err;
-  }
-}
 
 export const getAvailableBoxesByItem = async (req, res) => {
   try {

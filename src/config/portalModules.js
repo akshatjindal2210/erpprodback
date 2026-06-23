@@ -40,11 +40,12 @@ export const MODULES = {
     { name: "box_transaction_logs", label: "Box Transaction Logs" },
     { name: "sticker_download_logs", label: "Sticker Download Logs" },
     { name: "audit", label: "Inventory Audit" },
+    { name: "qc_hold_material", label: "QC Hold Material" },
   ],
   task: [
     // { name: "cl_task", label: "CL Task" },
     // { name: "cl_task_verification", label: "CL Task Verification" },
-    // { name: "cl_task_report", label: "CL Task Report" },
+    // { name: "task_report", label: "CL Task Report" },
     // { name: "red_ticket", label: "Red Ticket" },
   ],
 };
@@ -72,9 +73,10 @@ export const SEED_MODULES = [
   { name: "departments",                  label: "Departments",                     sort_order: 20,       app_type: "core" },
   { name: "designations",                 label: "Designations",                    sort_order: 21,       app_type: "core" },
   { name: "audit",                        label: "Inventory Audit",                 sort_order: 22,       app_type: "ims" },
-  // { name: "cl_task",                      label: "CL Task",                         sort_order: 23,       app_type: "task" },
+  { name: "qc_hold_material",             label: "QC Hold Material",                sort_order: 23,       app_type: "ims" },
+  // { name: "cl_task",                      label: "CL Task",                         sort_order: 24,       app_type: "task" },
   // { name: "cl_task_verification",         label: "CL Task Verification",            sort_order: 24,       app_type: "task" },
-  // { name: "cl_task_report",               label: "CL Task Report",                  sort_order: 25,       app_type: "task" },
+  // { name: "task_report",                  label: "CL Task Report",                  sort_order: 25,       app_type: "task" },
   // { name: "red_ticket",                   label: "Red Ticket",                      sort_order: 26,       app_type: "task" },
 ];
 

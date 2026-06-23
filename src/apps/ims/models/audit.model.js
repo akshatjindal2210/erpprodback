@@ -1,178 +1,18 @@
 import dbQuery from "../../../config/db.js";
 import { MST_TABLES as M, IMS_TABLES as T } from "../../../config/dbTables.js";
 import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
-import { sqlBoxInHand } from "../utils/boxInventorySql.js";
-import { logBoxTransaction, singlePackingFromRows } from "../utils/logBoxTransaction.js";
-import { fetchBoxSnapshotForLocation, fetchBoxDetailsByUids, flattenScansFromLocations, mergeScannedBoxes, removeScannedBox, parseExpectedBoxes, parseScannedBoxes, compareLocationBoxSets, resolveLocationStatusAfterScan, isLocationClosed, isLocationPending, resolveBoxAccName, resolveAuditBoxAccName, pickAuditAccCode, enrichAuditBoxRows, buildAuditEnrichContext } from "../utils/auditBoxSnapshot.js";
+import { sqlBoxInHand } from "../utils/box/boxInventorySql.js";
+import { logBoxTransaction, singlePackingFromRows } from "../utils/box/logBoxTransaction.js";
+import { fetchBoxSnapshotForLocation, fetchBoxDetailsByUids, flattenScansFromLocations, mergeScannedBoxes, removeScannedBox, parseExpectedBoxes, parseScannedBoxes, compareLocationBoxSets, resolveLocationStatusAfterScan, isLocationClosed, isLocationPending, resolveBoxAccName, resolveAuditBoxAccName, pickAuditAccCode, enrichAuditBoxRows, buildAuditEnrichContext } from "../utils/audit/auditBoxSnapshot.js";
+import { findAudits, ASSIGNED_USERS_SUBQUERY, AUDIT_LIST_JOINS, AUDIT_DEFAULT_SELECT_FIELDS, AUDIT_LOCATIONS_JSON } from "../utils/audit/auditList.js";
+
+export { findAudits } from "../utils/audit/auditList.js";
 
 const ALLOWED_FILTER_FIELDS = ["audit_id", "status", "approved", "from_date", "to_date"];
-const ALLOWED_SORT_FIELDS = ["audit_id", "start_date", "end_date", "status", "created_at"];
 const ALLOWED_UPDATE_FIELDS = ["start_date", "end_date", "remarks", "status", "approved", "approved_by", "approved_at", "updated_by", "updated_at"];
 
-const ASSIGNED_USERS_SUBQUERY = `
-  (SELECT string_agg(DISTINCT u_al.name, ', ' ORDER BY u_al.name)
-   FROM ${T.AUDIT_LOCATIONS} al_names
-   LEFT JOIN ${M.USERS} u_al ON al_names.assigned_user_id = u_al.id
-   WHERE al_names.audit_id = am.audit_id)`;
-
-const JOINS = `
-  LEFT JOIN ${M.USERS} u_cr ON am.created_by = u_cr.id
-  LEFT JOIN ${M.USERS} u_up ON am.updated_by = u_up.id
-  LEFT JOIN ${M.USERS} u_ap ON am.approved_by = u_ap.id
-  LEFT JOIN ${M.USERS} u_dl ON am.deleted_by = u_dl.id
-`;
-
-const AUDIT_MASTER_COLUMNS = `
-  am.audit_id, am.start_date, am.end_date, am.remarks, am.status,
-  am.approved, am.approved_by, am.approved_at,
-  am.is_deleted, am.deleted_by, am.deleted_at,
-  am.created_by, am.created_at, am.updated_by, am.updated_at
-`;
-
-const DEFAULT_FIELDS = [
-  AUDIT_MASTER_COLUMNS,
-  "u_cr.name AS created_by_name",
-  "u_up.name AS updated_by_name",
-  "u_ap.name AS approved_by_name",
-  "u_dl.name AS deleted_by_name",
-];
-
-const AUDIT_LOCATIONS_JSON = `
-  (SELECT json_agg(al_row) FROM (
-     SELECT
-       al.assignment_id,
-       al.audit_id,
-       al.location_id,
-       al.assigned_user_id,
-       al.plan_assigned_user_id,
-       al.status,
-       al.expected_boxes,
-       al.scanned_boxes,
-       al.is_active,
-       al.reassigned_at,
-       al.score_pct,
-       al.score_at,
-       COALESCE(al.result_rejected, false) AS result_rejected,
-       COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no,
-       u_loc.name AS assigned_user_name,
-       u_plan.name AS plan_assigned_user_name
-     FROM ${T.AUDIT_LOCATIONS} al
-     JOIN ${T.LOCATION_MASTER} lm ON al.location_id = lm.location_id
-     LEFT JOIN ${M.USERS} u_loc ON al.assigned_user_id = u_loc.id
-     LEFT JOIN ${M.USERS} u_plan ON al.plan_assigned_user_id = u_plan.id
-     WHERE al.audit_id = am.audit_id
-     ORDER BY al.is_active ASC, al.reassigned_at ASC NULLS FIRST,
-       NULLIF(regexp_replace(lm.rack_no, '\\D', '', 'g'), '')::bigint ASC NULLS LAST, lm.shelf_no ASC NULLS LAST
-   ) al_row)`;
-
-export const findAudits = async (options = {}) => {
-  const { filters = {}, search, sort = {}, page = 1, limit = 10, fields = [], permission = {}, user = {} } = options;
-
-  const values = [];
-  let i = 1;
-
-  const conditions = ["am.is_deleted = false"];
-
-  // Visibility logic
-  if (user.type !== 'super_admin') {
-    const canAuthorize = Boolean(permission.can_authorize);
-    const canEdit = Boolean(permission.can_edit);
-    const canView = Boolean(permission.can_view);
-
-    if (canAuthorize || canEdit || canView) {
-      // Management sees all active audits
-    } else {
-      // Workers: currently assigned locations (active + in date) OR audits they created
-      conditions.push(`(
-        am.created_by = $${i++}
-        OR (
-          EXISTS (
-            SELECT 1 FROM ${T.AUDIT_LOCATIONS} al_vis
-            WHERE al_vis.audit_id = am.audit_id AND al_vis.assigned_user_id = $${i++}
-          )
-          AND am.approved = true
-          AND CURRENT_DATE BETWEEN am.start_date AND am.end_date
-        )
-      )`);
-      values.push(user.id, user.id);
-    }
-  }
-
-  // SAFE FILTERS
-  for (const [key, val] of Object.entries(filters)) {
-    if (val === undefined || val === null || val === "") continue;
-
-    if (key === "from_date") {
-      values.push(val);
-      conditions.push(`am.created_at >= $${i++}`);
-      continue;
-    }
-    if (key === "to_date") {
-      values.push(val);
-      conditions.push(`am.created_at <= $${i++}`);
-      continue;
-    }
-
-    if (!ALLOWED_FILTER_FIELDS.includes(key)) continue;
-
-    if (key === "status" && val === "pending") {
-      values.push("pending", "approved");
-      conditions.push(`(am.status = $${i++} OR am.status = $${i++})`);
-      continue;
-    }
-
-    values.push(val);
-    conditions.push(`am.${key} = $${i++}`);
-  }
-
-  if (search) {
-    const searchTerm = `%${search}%`;
-    values.push(searchTerm);
-    const idx = i++;
-    conditions.push(`(
-      am.remarks ILIKE $${idx}
-      OR ${ASSIGNED_USERS_SUBQUERY} ILIKE $${idx}
-    )`);
-  }
-
-  const where = `WHERE ${conditions.join(" AND ")}`;
-
-  const countRes = await dbQuery(`SELECT COUNT(*) AS count FROM ${T.AUDIT_MASTER} am ${JOINS} ${where}`, values);
-  const count = countRes[0]?.count || 0;
-
-  const safePage = Math.max(1, Number(page) || 1);
-  const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 10));
-  const offset = (safePage - 1) * safeLimit;
-
-  const sortByField = ALLOWED_SORT_FIELDS.includes(sort.by) ? sort.by : "audit_id";
-  const sortOrder = sort.order?.toUpperCase() === "DESC" ? "DESC" : "ASC";
-
-  let orderByClause = `am.${sortByField}`;
-  if (sortByField === "assigned_user_name") orderByClause = ASSIGNED_USERS_SUBQUERY;
-
-  const dataValues = [...values, safeLimit, offset];
-
-  const rows = await dbQuery(
-    `SELECT ${fields.length ? fields.join(", ") : DEFAULT_FIELDS.join(", ")},
-     ${ASSIGNED_USERS_SUBQUERY} AS assigned_user_names,
-     ${AUDIT_LOCATIONS_JSON} AS locations
-     FROM ${T.AUDIT_MASTER} am
-     ${JOINS}
-     ${where}
-     ORDER BY ${orderByClause} ${sortOrder}
-     LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
-    dataValues
-  );
-
-  return {
-    data: rows,
-    total: Number(count),
-    page: safePage,
-    limit: safeLimit,
-    totalPages: Math.ceil(count / safeLimit)
-  };
-};
-
+const JOINS = AUDIT_LIST_JOINS;
+const DEFAULT_FIELDS = AUDIT_DEFAULT_SELECT_FIELDS;
 export const findAudit = async (filters = {}) => {
   const keys = Object.keys(filters);
   if (!keys.length) return null;

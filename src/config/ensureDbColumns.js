@@ -1,48 +1,47 @@
 /**
  * Schema patch helpers — used in each *.table.js on server start (initDB).
  *
- * New database     → CREATE TABLE IF NOT EXISTS (full structure)
- * Existing database → ensure* calls below add/update only what is missing
+ * Naya column → usi table ki *.table.js mein:
+ *   1. CREATE TABLE mein column likho (naya DB)
+ *   2. patchTableSchema + patchCol (purana DB)
+ *   3. purana data fix → runIfColumnExists (optional, same file)
  *
- * When you add something new:
- *   1. Put the column in CREATE TABLE (new installs)
- *   2. Add the same column/type in patchTableSchema below (old installs)
- *
- * All helpers are idempotent — already correct → no-op.
- *
- * @example
- * import { patchTableSchema } from "../../../../config/ensureDbColumns.js";
- *
- * export async function createMyTable() {
- *   await dbQuery(`CREATE TABLE IF NOT EXISTS ${T.MY_TABLE} ( ... new_col TEXT, ... );`);
- *
- *   await patchTableSchema(dbQuery, T.MY_TABLE, {
- *     columns: [{ name: "new_col", addSql: "new_col TEXT" }],
- *     columnTypes: [{ name: "old_col", type: "text" }],
- *   });
- * }
+ * Example: audit.table.js, box_table.table.js
  */
+
+export async function columnExists(query, tableName, columnName) {
+  if (!tableName || !columnName) return false;
+  const rows = await query(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+     LIMIT 1`,
+    [tableName, columnName]
+  );
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+/** Shorthand — patchCol("qty", "INTEGER") → { name, addSql } */
+export function patchCol(name, definition) {
+  return { name, addSql: `${name} ${definition}` };
+}
 
 export async function ensureColumns(query, tableName, columns = []) {
   for (const col of columns) {
     const name = col?.name;
     const addSql = col?.addSql;
     if (!name || !addSql) continue;
-
-    const found = await query(
-      `SELECT 1 FROM information_schema.columns
-       WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
-       LIMIT 1`,
-      [tableName, name]
-    );
-
-    if (Array.isArray(found) && found.length > 0) continue;
-
+    if (await columnExists(query, tableName, name)) continue;
     await query(`ALTER TABLE ${tableName} ADD COLUMN ${addSql}`);
   }
 }
 
-/** Upgrade column type when needed (e.g. VARCHAR(50) → TEXT). No-op if already correct. */
+export async function ensureIndexes(query, indexes = []) {
+  for (const sql of indexes) {
+    if (!sql) continue;
+    await query(sql);
+  }
+}
+
 export async function ensureColumnType(query, tableName, columnName, targetType) {
   const target = String(targetType || "").toLowerCase().trim();
   if (!tableName || !columnName || !target) return;
@@ -65,7 +64,6 @@ export async function ensureColumnType(query, tableName, columnName, targetType)
   }
 }
 
-/** Drop NOT NULL when an old column was required but should allow NULL now. */
 export async function ensureColumnNullable(query, tableName, columnName) {
   if (!tableName || !columnName) return;
 
@@ -81,8 +79,11 @@ export async function ensureColumnNullable(query, tableName, columnName) {
   await query(`ALTER TABLE ${tableName} ALTER COLUMN ${columnName} DROP NOT NULL`);
 }
 
-/** Run column adds + type upgrades for one table after CREATE TABLE. */
-export async function patchTableSchema(query, tableName, { columns = [], columnTypes = [], nullable = [] } = {}) {
+export async function patchTableSchema(
+  query,
+  tableName,
+  { columns = [], columnTypes = [], nullable = [], indexes = [] } = {}
+) {
   await ensureColumns(query, tableName, columns);
 
   for (const col of columnTypes) {
@@ -94,4 +95,17 @@ export async function patchTableSchema(query, tableName, { columns = [], columnT
   for (const colName of nullable) {
     await ensureColumnNullable(query, tableName, colName);
   }
+
+  await ensureIndexes(query, indexes);
+}
+
+export async function runIfColumnExists(query, tableName, columnName, fn) {
+  if (!(await columnExists(query, tableName, columnName))) return;
+  await fn();
+}
+
+export async function dropColumnIfExists(query, tableName, columnName) {
+  if (!tableName || !columnName) return;
+  if (!(await columnExists(query, tableName, columnName))) return;
+  await query(`ALTER TABLE ${tableName} DROP COLUMN ${columnName}`);
 }

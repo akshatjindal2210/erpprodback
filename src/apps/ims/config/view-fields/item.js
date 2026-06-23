@@ -30,6 +30,8 @@ export function resolveItemViewsSelectFields(options = {}) {
     return [...forPicker];
   } else if (mod === "product_master" && (act === "add" || act === "edit" || act === "authorize")) {
     return [...forModal];
+  } else if (mod === "qc_hold_material" && (act === "view" || act === "add" || act === "edit" || act === "authorize")) {
+    return [...forPicker];
   }
 
   return null;

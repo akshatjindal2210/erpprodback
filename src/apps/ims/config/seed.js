@@ -32,7 +32,6 @@ export async function seedImsData() {
       [cat.name]
     );
   }
-  console.log("✅ IMS Categories Seeded");
 
   for (const stickerType of STICKER_TYPES) {
     await dbQuery(
@@ -42,7 +41,6 @@ export async function seedImsData() {
       [stickerType.name]
     );
   }
-  console.log("✅ IMS Sticker Type Seeded");
 
   for (const [config_key, config_value] of Object.entries(APP_CONFIG_SEEDS)) {
     await dbQuery(
@@ -52,5 +50,4 @@ export async function seedImsData() {
       [config_key, String(config_value ?? "")]
     );
   }
-  console.log("✅ IMS App Config Seeded");
 }
