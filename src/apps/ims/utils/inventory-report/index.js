@@ -1,4 +1,3 @@
-/** Inventory report — list query, customer hints, row enrich. */
+/** Inventory report — list query and customer hints. */
 export { findCustomerHintsForPackings } from "./customerHints.js";
-export { findInventoryReportFiltered, findPackingAreaSummary, getInventoryReportFilterOptions, getInventoryReportTotals } from "./inventoryReportList.js";
-export { enrichInventoryFilterOptions, enrichInventoryRows, resolveCustomerCodeMap, resolvePackDocDateMap } from "./inventoryReportEnrich.js";
+export { findInventoryReportFiltered } from "./inventoryReportList.js";

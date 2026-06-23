@@ -12,6 +12,7 @@ import { initRecurringTasksCron, /* initClTasksCron, */ initTaskNotificationsCro
 import { startLogCleanupCron } from "./src/logging/index.js";
 import { initSocket } from "./src/apps/core/utils/socket.js";
 import { deliverUnreadInboxToSocket } from "./src/apps/task/services/taskPwaPush.service.js";
+import { getImsMapsSafe } from "./src/apps/ims/utils/erp-api/imsLookup.js";
 
 const server = http.createServer(app);
 
@@ -62,6 +63,7 @@ async function startServer() {
     await initDB();
     await seedCoreRootUser();
     await seedImsData();
+    void getImsMapsSafe().catch(() => {});    // Fetch IMS maps in background (no await, no throw)
     initRecurringTasksCron();
     // initClTasksCron();
     initTaskNotificationsCron();

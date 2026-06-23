@@ -314,4 +314,4 @@ export const resetBoxesForInward = async (in_uid, userId = null, { client = null
   return resultRows;
 };
 
-export { findPackingAreaByPacking, findPackingAreaBoxes, fetchDailyprodDocMetaByPackings, fetchDailyprodDocMetaByContexts } from "../utils/inventory-inward/packingAreaList.js";
+export { findPackingAreaByPacking, findPackingAreaBoxes, fetchDailyprodDocMetaByPackings, fetchDailyprodDocMetaByContexts, fetchSaMetaByPackings, fetchLocalPackingMetaByPackings } from "../utils/inventory-inward/packingAreaList.js";

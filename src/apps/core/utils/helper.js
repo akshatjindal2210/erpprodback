@@ -444,7 +444,8 @@ const formatBillNosPrintHtml = (raw) => {
 
 /**
  * Print-ready forwarding note — layout aligned with classic handwritten FN
- * (company header, FORWARDING NOTE title, S.No./Date/Customer, 6-column grid, dotted footer).
+ * (company header, FORWARDING NOTE title, S.No./Date/Customer, 6-column grid: each packing
+ * on its own row under one S.No.; item total in Total Qty. on the last packing row, dotted footer).
  * @param {object} note - `findForwardingNote` row (includes `items` with `breakdowns`)
  * @param {object} companyInfo - optional `{ name, address, gstin?, phone? }`
  */
@@ -455,32 +456,54 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
   const phone = companyInfo?.phone || "Customer Care: info@jflindia.com";
   const items = Array.isArray(note.items) ? note.items : [];
 
-  let sr = 0;
+  let itemSr = 0;
   const rowChunks = [];
   let grandTotal = 0;
   let sumBoxCount = 0;
 
   for (const grp of items) {
     const breakdowns = Array.isArray(grp.breakdowns) ? grp.breakdowns : [];
-    for (const line of breakdowns) {
-      sr += 1;
+    if (!breakdowns.length) continue;
+
+    itemSr += 1;
+    const hpCode = escapeHtml(grp.item_code || breakdowns[0]?.item_code || "—");
+    const itemTotal = Math.round(
+      Number(grp.total_qty) ||
+        breakdowns.reduce((sum, line) => sum + Math.round(Number(line.total_qty || 0)), 0)
+    );
+    const multiPacking = breakdowns.length > 1;
+    const lastIdx = breakdowns.length - 1;
+
+    breakdowns.forEach((line, idx) => {
       const lineQty = Math.round(Number(line.total_qty || 0));
       if (Number.isFinite(lineQty)) grandTotal += lineQty;
       sumBoxCount += Number(line.box || 0) + Number(line.loose_box || 0);
-      const hpCode = escapeHtml(grp.item_code || line.item_code || "—");
       const pkgNo = escapeHtml(line.packing_number || "—");
       const pkgDate = fmtBillPackingDate(line);
       const qtyCell = fmtQtyPlain(line.total_qty);
+      const isFirst = idx === 0;
+      const isLast = idx === lastIdx;
+      const snCell = isFirst ? String(itemSr) : "&#160;";
+      const codeCell = isFirst ? hpCode : "&#160;";
+      let totalQtyCell;
+      if (!multiPacking) {
+        totalQtyCell = `<td class="fn-td fn-r fn-bold">${qtyCell}</td>`;
+      } else if (isLast) {
+        totalQtyCell = `<td class="fn-td fn-r fn-bold">${fmtQtyPlain(itemTotal)}</td>`;
+      } else {
+        totalQtyCell = `<td class="fn-td fn-c">&#160;</td>`;
+      }
+      const rowClass = !isFirst && multiPacking ? ` class="fn-tr-pack"` : "";
       rowChunks.push(`
-        <tr>
-          <td class="fn-td fn-c">${sr}</td>
-          <td class="fn-td fn-l">${hpCode}</td>
+        <tr${rowClass}>
+          <td class="fn-td fn-c">${snCell}</td>
+          <td class="fn-td fn-l">${codeCell}</td>
           <td class="fn-td fn-c">${pkgNo}</td>
           <td class="fn-td fn-c">${escapeHtml(pkgDate)}</td>
           <td class="fn-td fn-r">${qtyCell}</td>
-          <td class="fn-td fn-r fn-bold">${qtyCell}</td>
+          ${totalQtyCell}
         </tr>`);
-    }
+    });
   }
 
   grandTotal = Math.round(grandTotal);
@@ -650,6 +673,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
     .fn-l { text-align: left; }
     .fn-r { text-align: right; font-variant-numeric: tabular-nums; }
     .fn-bold { font-weight: 700; }
+    .fn-tr-pack .fn-td { border-top: 1px dotted #bbb; }
     .fn-col-sn { width: 8%; }
     .fn-col-code { width: 24%; }
     .fn-col-pkg { width: 16%; }

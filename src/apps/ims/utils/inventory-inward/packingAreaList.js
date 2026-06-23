@@ -178,6 +178,146 @@ export async function attachPackingDisplayMeta(rows = []) {
   return rows.map((row) => applyMetaToRow(row, metaMap.get(rowKey(row))));
 }
 
+/** Latest approved SA + dailyprod meta per packing (single round-trip). */
+export async function fetchLocalPackingMetaByPackings(packingNumbers = []) {
+  const nums = [...new Set((packingNumbers || []).map((n) => String(n).trim()).filter(Boolean))];
+  if (!nums.length) return { saMap: new Map(), dpMap: new Map() };
+
+  const rows = await dbQuery(
+    `SELECT
+       TRIM(x.pn::text) AS packing_number,
+       ${sqlDocDtText("sa.doc_dt")} AS sa_doc_dt,
+       sa.item_dcode AS sa_item_dcode,
+       ${SA_ITEM_CODE} AS sa_item_code,
+       ${SA_ITEM_DESC} AS sa_item_desc,
+       sa.acc_code AS sa_acc_code,
+       ${SA_ACC_NAME} AS sa_acc_name,
+       ${sqlDocDtFromDailyprod("dp")} AS dp_doc_dt,
+       dp.item_dcode AS dp_item_dcode,
+       ${DP_ITEM_CODE} AS dp_item_code,
+       ${DP_ITEM_DESC} AS dp_item_desc,
+       dp.acc_code AS dp_acc_code,
+       ${DP_ACC_NAME} AS dp_acc_name
+     FROM unnest($1::text[]) AS x(pn)
+     LEFT JOIN LATERAL (
+       SELECT
+         sa2.doc_dt,
+         sa2.item_dcode,
+         sa2.item_code,
+         sa2.item_desc,
+         sa2.acc_code,
+         sa2.acc_name
+       FROM ims_stock_adjustment sa2
+       WHERE sa2.is_deleted = false
+         AND sa2.approved = true
+         AND sa2.entry_type IN ('add', 'minus')
+         AND NULLIF(TRIM(sa2.packing_number::text), '') = NULLIF(TRIM(x.pn::text), '')
+       ORDER BY sa2.approved_at DESC NULLS LAST
+       LIMIT 1
+     ) sa ON true
+     LEFT JOIN LATERAL (
+       SELECT
+         dp2.doc_dt,
+         dp2.item_dcode,
+         dp2.item_code,
+         dp2.item_desc,
+         dp2.acc_code,
+         dp2.acc_name
+       FROM ims_dailyprod dp2
+       WHERE ${sqlDailyprodDocNoMatch("dp2.doc_no", "x.pn")}
+       ORDER BY
+         (CASE WHEN dp2.doc_dt IS NOT NULL THEN 0 ELSE 1 END) ASC,
+         dp2.doc_dt ASC NULLS LAST
+       LIMIT 1
+     ) dp ON true`,
+    [nums]
+  );
+
+  const saMap = new Map();
+  const dpMap = new Map();
+  for (const r of rows || []) {
+    const pn = String(r.packing_number).trim();
+    saMap.set(pn, {
+      doc_dt: r.sa_doc_dt,
+      item_dcode: r.sa_item_dcode,
+      item_code: r.sa_item_code,
+      item_desc: r.sa_item_desc,
+      acc_code: r.sa_acc_code,
+      acc_name: r.sa_acc_name,
+    });
+    dpMap.set(pn, {
+      doc_dt: r.dp_doc_dt,
+      item_dcode: r.dp_item_dcode,
+      item_code: r.dp_item_code,
+      item_desc: r.dp_item_desc,
+      acc_code: r.dp_acc_code,
+      acc_name: r.dp_acc_name,
+    });
+    if (/^\d+$/.test(pn)) {
+      const n = String(Number(pn));
+      saMap.set(n, saMap.get(pn));
+      dpMap.set(n, dpMap.get(pn));
+    }
+  }
+  for (const num of nums) {
+    if (saMap.has(num) && dpMap.has(num)) continue;
+    const n = String(num).trim();
+    if (/^\d+$/.test(n)) {
+      if (!saMap.has(n) && saMap.has(String(Number(n)))) saMap.set(n, saMap.get(String(Number(n))));
+      if (!dpMap.has(n) && dpMap.has(String(Number(n)))) dpMap.set(n, dpMap.get(String(Number(n))));
+    }
+  }
+  return { saMap, dpMap };
+}
+
+/** Latest approved SA row per packing (batch). */
+export async function fetchSaMetaByPackings(packingNumbers = []) {
+  const nums = [...new Set((packingNumbers || []).map((n) => String(n).trim()).filter(Boolean))];
+  if (!nums.length) return new Map();
+
+  const rows = await dbQuery(
+    `SELECT
+       TRIM(x.pn::text) AS packing_number,
+       ${sqlDocDtText("sa.doc_dt")} AS doc_dt,
+       sa.item_dcode,
+       ${SA_ITEM_CODE} AS item_code,
+       ${SA_ITEM_DESC} AS item_desc,
+       sa.acc_code,
+       ${SA_ACC_NAME} AS acc_name
+     FROM unnest($1::text[]) AS x(pn)
+     LEFT JOIN LATERAL (
+       SELECT
+         sa2.doc_dt,
+         sa2.item_dcode,
+         sa2.item_code,
+         sa2.item_desc,
+         sa2.acc_code,
+         sa2.acc_name
+       FROM ims_stock_adjustment sa2
+       WHERE sa2.is_deleted = false
+         AND sa2.approved = true
+         AND sa2.entry_type IN ('add', 'minus')
+         AND NULLIF(TRIM(sa2.packing_number::text), '') = NULLIF(TRIM(x.pn::text), '')
+       ORDER BY sa2.approved_at DESC NULLS LAST
+       LIMIT 1
+     ) sa ON true`,
+    [nums]
+  );
+
+  const map = new Map();
+  for (const r of rows || []) {
+    const pn = String(r.packing_number).trim();
+    map.set(pn, r);
+    if (/^\d+$/.test(pn)) map.set(String(Number(pn)), r);
+  }
+  for (const num of nums) {
+    if (map.has(num)) continue;
+    const n = String(num).trim();
+    if (/^\d+$/.test(n) && map.has(String(Number(n)))) map.set(n, map.get(String(Number(n))));
+  }
+  return map;
+}
+
 /** Local dailyprod snapshot — packing only (no item/customer context). */
 export async function fetchDailyprodDocMetaByPackings(packingNumbers = []) {
   const nums = [...new Set((packingNumbers || []).map((n) => String(n).trim()).filter(Boolean))];

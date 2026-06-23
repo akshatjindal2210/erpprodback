@@ -40,4 +40,10 @@ export async function createStockAdjustmentTable() {
       patchCol("acc_name", "VARCHAR(255)"),
     ],
   });
+
+  await dbQuery(`
+    CREATE INDEX IF NOT EXISTS idx_sa_packing_approved
+      ON ${T.STOCK_ADJUSTMENT}(packing_number)
+      WHERE is_deleted = false AND approved = true;
+  `);
 }
