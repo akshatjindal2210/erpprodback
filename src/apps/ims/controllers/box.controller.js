@@ -712,69 +712,45 @@ async function getImsMapsForStickerMgmtList() {
   return maps;
 }
 
-/** Fast list enrichment: one DB batch + at most one IMS pack fetch (no per-row print meta). */
+/** Fast list enrichment: one DB batch + minimal lookups (no per-row network calls for list). */
 async function enrichStickerManagementListRows(rows = []) {
+  if (!rows.length) return rows;
   const maps = await getImsMapsForStickerMgmtList();
+  
+  // 1. Basic enrichment from maps (item/ledger)
   const enriched = await enrichBoxRowsFromIMS(rows, maps);
 
+  // 2. Identify rows still missing customer names
   const needResolve = enriched.filter(
-    (r) => r?.packing_number && !(r.acc_name != null && String(r.acc_name).trim() !== "")
+    (r) => !r.acc_name || String(r.acc_name).trim() === "" || /^\d+$/.test(String(r.acc_name))
   );
   if (!needResolve.length) return enriched;
 
+  // 3. Try to resolve from local dailyprod hints (no network calls)
   const packingNums = [
     ...new Set(needResolve.map((r) => String(r.packing_number).trim()).filter(Boolean)),
   ];
-  const codeByPacking = new Map();
-
+  
   const hints = await findCustomerHintsForPackings(packingNums);
+  const codeByPacking = new Map();
   for (const h of hints || []) {
     const pn = String(h.packing_number ?? "").trim();
     const code = h.customer_code != null ? String(h.customer_code).trim() : "";
     if (pn && code) codeByPacking.set(pn, code);
   }
 
-  const hintByPn = new Map((hints || []).map((h) => [String(h.packing_number ?? "").trim(), h]));
-  const needFy = packingNums.filter((pn) => !codeByPacking.has(pn));
-  await Promise.all(
-    needFy.map(async (pn) => {
-      const fy = hintByPn.get(pn)?.financial_year;
-      if (fy == null || String(fy).trim() === "") return;
-      try {
-        const ims = await fetchPackRowsForFinancialYearDoc(String(fy).trim(), pn);
-        const acc = ims?.records?.[0]?.acc_code ?? ims?.records?.[0]?.Acc_Code;
-        if (acc != null && String(acc).trim() !== "") codeByPacking.set(pn, String(acc).trim());
-      } catch {
-        /* optional */
-      }
-    })
-  );
-
-  const needIms = packingNums.filter((pn) => !codeByPacking.has(pn));
-  if (needIms.length) {
-    try {
-      const filter = buildImsDocFilterMany(needIms);
-      const recs = filter ? await fetchFromIMS("pack", filter) : [];
-      for (const pn of needIms) {
-        const packRow = findImsPackByDocNo(recs, pn);
-        const acc = packRow?.acc_code ?? packRow?.Acc_Code ?? packRow?.acc_Code;
-        if (acc != null && String(acc).trim() !== "") codeByPacking.set(pn, String(acc).trim());
-      }
-    } catch {
-      /* optional IMS */
-    }
-  }
-
   return enriched.map((row) => {
+    if (row.acc_name && !/^\d+$/.test(String(row.acc_name))) return row;
+    
     const pn = String(row.packing_number ?? "").trim();
-    if (!pn || (row.acc_name != null && String(row.acc_name).trim() !== "")) return row;
-    const code = codeByPacking.get(pn);
+    const code = codeByPacking.get(pn) || row.acc_code;
     if (!code) return row;
+    
     const name = accNameFromLedger(maps.ledgerMap, code);
     return {
       ...row,
       acc_code: row.acc_code ?? code,
-      acc_name: name ?? code,
+      acc_name: name ?? row.acc_name ?? code,
     };
   });
 }

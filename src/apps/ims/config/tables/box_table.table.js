@@ -94,6 +94,7 @@ export async function createBoxDownloadLogTable() {
     CREATE INDEX IF NOT EXISTS idx_bdl_downloaded_by ON ${T.BOX_DOWNLOAD_LOG}(downloaded_by);
     CREATE INDEX IF NOT EXISTS idx_bdl_bulk_packing ON ${T.BOX_DOWNLOAD_LOG}(bulk_packing_number)
       WHERE bulk_packing_number IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_bdl_downloaded_at ON ${T.BOX_DOWNLOAD_LOG}(downloaded_at DESC);
   `);
 }
 

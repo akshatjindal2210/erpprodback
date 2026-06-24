@@ -29,8 +29,32 @@ export const listTransactionBoxes = async (req, res) => {
       req.user
     );
 
+    // Batch hydration to avoid N+1 queries
+    const rows = result.data || [];
+    const allBoxUids = new Set();
+    rows.forEach(row => {
+      const d = typeof row.details === 'string' ? JSON.parse(row.details) : (row.details || {});
+      if (Array.isArray(d.box_uids)) {
+        d.box_uids.forEach(uid => {
+          if (uid != null) allBoxUids.add(String(uid));
+        });
+      }
+    });
+
+    let boxesMap = new Map();
+    if (allBoxUids.size > 0) {
+      const boxes = await findBoxesByUids(Array.from(allBoxUids));
+      boxes.forEach(box => {
+        if (box.box_uid) boxesMap.set(String(box.box_uid), box);
+      });
+    }
+
+    const findBoxesBatch = async (uids) => {
+      return uids.map(uid => boxesMap.get(String(uid))).filter(Boolean);
+    };
+
     const data = await Promise.all(
-      (result.data || []).map((row) => hydrateTransactionBoxStickerEntries(row, findBoxesByUids))
+      rows.map((row) => hydrateTransactionBoxStickerEntries(row, findBoxesBatch))
     );
 
     res.json({

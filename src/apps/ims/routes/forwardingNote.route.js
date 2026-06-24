@@ -2,18 +2,27 @@ import express from "express";
 import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, updateForwardingNoteBill, deleteForwardingNote, getAvailableBoxesByItem, getForwardingNoteItems, lockForwardingNoteLock, unlockForwardingNoteLock, getForwardingNotesViews, getForwardingNoteViewById, printForwardingNoteBill, getForwardingNoteTransportersViews, getForwardingNoteBillNumbersViews } from "../controllers/forwardingNote.controller.js";
 
 import { authenticate, authorize } from "../middleware/auth.js";
-import { accessControl, dynamicAccessControl } from "../../core/middleware/accessControl.js";
+import { accessControl, accessControlAny, dynamicAccessControl } from "../../core/middleware/accessControl.js";
 
 const router = express.Router();
 
 // List
-router.post("/list", authenticate, accessControl("forwarding_note_master", "view"), getForwardingNotes);
+router.post("/list", authenticate, accessControlAny([
+  { moduleName: "forwarding_note_master", actions: "view" },
+  { moduleName: "out_entry", actions: "view" }
+]), getForwardingNotes);
 
 // List Item-wise
-router.post("/list-items", authenticate, accessControl("forwarding_note_master", "view"), getForwardingNoteItems);
+router.post("/list-items", authenticate, accessControlAny([
+  { moduleName: "forwarding_note_master", actions: "view" },
+  { moduleName: "out_entry", actions: "view" }
+]), getForwardingNoteItems);
 
 // Get single
-router.post("/get", authenticate, accessControl("forwarding_note_master", "view"), getForwardingNoteById);
+router.post("/get", authenticate, accessControlAny([
+  { moduleName: "forwarding_note_master", actions: "view" },
+  { moduleName: "out_entry", actions: "view" }
+]), getForwardingNoteById);
 
 // Printable bill (HTML ? user prints or saves as PDF)
 router.post("/print-bill", authenticate, accessControl("forwarding_note_master", "view"), printForwardingNoteBill);

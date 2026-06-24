@@ -4,7 +4,7 @@ import path from "path";
  * Log file retention — change DEFAULT_RETENTION_DAYS here, or set LOG_RETENTION_DAYS in .env.
  * Examples: 15 (two weeks), 30 (one month), 60 (two months).
  */
-export const DEFAULT_RETENTION_DAYS = 30;
+export const DEFAULT_RETENTION_DAYS = 3;
 
 /** Daily cleanup time (IST). Override with LOG_CLEANUP_CRON in .env. */
 export const DEFAULT_CLEANUP_CRON = "0 3 * * *";

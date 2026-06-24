@@ -3,8 +3,6 @@ export const OUT_ENTRY_TYPE = {
   INVENTORY_OUT: "inventory_out",
   PACKING_AREA: "packing_area",
   QC_AREA: "qc_area",
-  /** @deprecated use PACKING_AREA */
-  LEGACY_OTHER: "other",
 };
 
 export function isOutEntryInventoryOut(entryType) {

@@ -54,7 +54,7 @@ const resolveLoginCredentialKind = (user) => {
 const USER_CFG = getCrudModuleConfig("users");
 const ALLOWED_UPDATE_FIELDS = [
   "name", "username", "email", "phone", "type", "status", "auth_source", "usercode",
-  "department_id", "designation_id",
+  "department_id", "designation_id", "special_permissions",
 ];
 const ALLOWED_USER_TYPES = new Set([
   "super_admin", "admin", "user", "executive_assistant",
@@ -221,7 +221,7 @@ export const createUser = async (req, res) => {
   try {
     const {
       name, username, email, phone, password, type, status, permissions, app_access, auth_source, usercode,
-      department_id, designation_id,
+      department_id, designation_id, special_permissions,
     } = req.body;
 
     const trimmedName = String(name ?? "").trim();
@@ -315,6 +315,7 @@ export const createUser = async (req, res) => {
       auth_source: src,
       department_id: deptId,
       designation_id: desigId,
+      special_permissions: special_permissions || {},
     });
 
     if (permissions && typeof permissions === "object" && !Array.isArray(permissions)) {
@@ -348,7 +349,7 @@ export const updateUser = async (req, res) => {
   try {
     const {
       id, name, username, email, phone, type, status, password, permissions, app_access, auth_source, usercode,
-      department_id, designation_id,
+      department_id, designation_id, special_permissions,
     } = req.body;
     if (!id) return res.status(400).json({ success: false, message: "User ID required" });
 
@@ -356,7 +357,7 @@ export const updateUser = async (req, res) => {
     if (!existing) return res.status(404).json({ success: false, message: "User not found" });
 
     const rawFields = {
-      name, username, email, phone, type, status, auth_source, usercode, department_id, designation_id,
+      name, username, email, phone, type, status, auth_source, usercode, department_id, designation_id, special_permissions,
     };
     const fields = {};
     for (const key of ALLOWED_UPDATE_FIELDS) {
@@ -465,6 +466,7 @@ export const updateUser = async (req, res) => {
       const targetId = Number(id);
       const freshPermissions = await findUserPermissions(targetId);
       const freshAppAccess = await findUserAppAccess(targetId);
+      const freshUser = await findUser({ id: targetId });
       const cleaned = freshPermissions.map(cleanPermissionMap);
       clearCachedPermissions(targetId);
       setCachedPermissions(targetId, cleaned);
@@ -472,6 +474,7 @@ export const updateUser = async (req, res) => {
         user_id: targetId,
         permissions: cleaned,
         app_access: freshAppAccess,
+        special_permissions: freshUser?.special_permissions ?? {},
       });
     }
 
@@ -619,7 +622,7 @@ export const loginUser = async (req, res) => {
     const cleanedPermissions = permissions.map(cleanPermissionMap);
     setCachedPermissions(user.id, cleanedPermissions);
 
-    const { id, name, username: dbUsername, type: role, email } = user;
+    const { id, name, username: dbUsername, type: role, email, special_permissions } = user;
     const [default_list_view_span_days, inward_location_validation, box_no_uid_prefix] = await Promise.all([
       getDefaultListViewSpanDays(),
       isInwardLocationValidationEnabled(),
@@ -644,6 +647,7 @@ export const loginUser = async (req, res) => {
         role,
         type: role,
         email,
+        special_permissions,
         permissions: cleanedPermissions,
         app_access: appAccess,
         default_list_view_span_days,
@@ -714,6 +718,7 @@ export const getMe = async (req, res) => {
       data: {
         ...safeUser,
         role: user.type,
+        special_permissions: user.special_permissions ?? {},
         permissions: permissions.map(cleanPermissionMap),
         app_access: appAccess,
         default_list_view_span_days,

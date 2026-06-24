@@ -1,5 +1,6 @@
 import dbQuery from "../../../../config/db.js";
 import { MST_TABLES as T } from "../../../../config/dbTables.js";
+import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
 
 export async function createUsersTable() {
   await dbQuery(`
@@ -29,6 +30,13 @@ export async function createUsersTable() {
       CONSTRAINT users_auth_source_chk CHECK (auth_source IN ('local', 'erp'))
     );
   `);
+
+  // Patch for existing production DB
+  await patchTableSchema(dbQuery, T.USERS, {
+    columns: [
+      patchCol("special_permissions", "JSONB DEFAULT '{}'"),
+    ],
+  });
 
   await dbQuery(`
     CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique_active

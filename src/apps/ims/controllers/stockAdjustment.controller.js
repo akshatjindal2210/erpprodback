@@ -2,6 +2,7 @@ import { withTransaction } from "../../../config/db.js";
 import { findAdjustments, findAdjustmentById, insertAdjustment, updateAdjustments, insertAdjustmentTx, updateAdjustmentsTx, findFinancialYearForPacking } from "../models/stockAdjustment.model.js";
 import { findDailyProdByDocNo, findBoxesByUids, purgeSaStickerBoxesTx, resolveItemDcodeForMinusAdjustment } from "../models/box.model.js";
 import { boxBelongsToPackingNumber } from "../utils/box/boxInventory.js";
+import { resolveAccCodeFromBoxRows } from "../utils/box/boxCustomerOverride.js";
 import { fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../services/ims.service.js";
 import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";

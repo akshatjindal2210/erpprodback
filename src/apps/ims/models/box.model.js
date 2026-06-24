@@ -766,17 +766,17 @@ export const setBoxesQcHold = async (holdId, boxUids = []) => {
 /** Clear QC hold flag from all boxes linked to a hold. */
 export const clearBoxesQcHold = async (holdId) => {
   const pk = Number(holdId);
-  if (!Number.isFinite(pk) || pk <= 0) return { updated: 0 };
+  if (!Number.isFinite(pk) || pk <= 0) return { updated: 0, rows: [] };
   const rows = await dbQuery(
     `UPDATE ims_box_table
      SET qc_hold_id = NULL,
          updated_at = NOW()
      WHERE qc_hold_id = $1::integer
        AND is_deleted = false
-     RETURNING box_uid`,
+     RETURNING *`,
     [pk]
   );
-  return { updated: (rows || []).length };
+  return { updated: (rows || []).length, rows: rows || [] };
 };
 
 /** Sync box QC hold flags when hold box list changes. */
@@ -1394,6 +1394,7 @@ export const getProductionStickerPackingDocNos = async () => {
 const PRODUCTION_STICKER_BOX_FILTER = `
   b.is_deleted = false
   AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')
+  AND NOT (b.sa_entry_type = 'stock_in' AND b.sa_id IS NOT NULL)
 `;
 
 /** Production sticker UI only SA boxes use ims_stock_adjustment module + `checkSaStockInBoxesExist`. */
@@ -2533,40 +2534,34 @@ async function getStickerDownloadLogList(options = {}) {
   }
 
   if (search) {
-    values.push(`%${search}%`);
+    const s = `%${sanitizeSearch(search)}%`;
+    values.push(s);
     const idx = i++;
     conditions.push(`(
-      COALESCE(b.box_no_uid, '-') ILIKE $${idx} OR
-      COALESCE(l.box_uid::text, '-') ILIKE $${idx} OR
-      COALESCE(b.packing_number::text, TRIM(l.bulk_packing_number::text), '-') ILIKE $${idx} OR
-      COALESCE(l.cust_at_time, '-') ILIKE $${idx} OR
-      COALESCE(dp.item_dcode::text, '-') ILIKE $${idx} OR
-      COALESCE(b.override_cust::text, '-') ILIKE $${idx} OR
-      COALESCE(pack_box.pack_override_cust, '-') ILIKE $${idx} OR
-      COALESCE(dp.acc_code::text, '-') ILIKE $${idx} OR
-      COALESCE(l.download_source::text, '-') ILIKE $${idx}
+      b.box_no_uid ILIKE $${idx} OR
+      l.box_uid::text ILIKE $${idx} OR
+      b.packing_number::text ILIKE $${idx} OR
+      l.bulk_packing_number::text ILIKE $${idx} OR
+      l.cust_at_time ILIKE $${idx} OR
+      dp.item_code ILIKE $${idx} OR
+      dp.acc_name ILIKE $${idx}
     )`);
   }
 
   const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
-  const packingBoxCountSql = `(SELECT COUNT(*)::int FROM ims_box_table bt2 WHERE bt2.is_deleted = false AND TRIM(COALESCE(bt2.packing_number::text, '-')) = TRIM(COALESCE(l.bulk_packing_number::text, '-')))`;
-  /** Stickers included in one bulk_pack log row (matches incrementDownloadCountBulk). */
-  const bulkPackStickerCountSql = `GREATEST(1, COALESCE(NULLIF(l.bulk_sticker_count, 0), ${packingBoxCountSql}))`;
-
   const packingKeySql = `COALESCE(NULLIF(TRIM(b.packing_number::text), '-'), NULLIF(TRIM(l.bulk_packing_number::text), '-'))`;
-  const customerAccCodeSql = `COALESCE(NULLIF(TRIM(b.override_cust::text), '-'), pack_box.pack_override_cust, NULLIF(TRIM(dp.acc_code::text), '-'))`;
-  const customerDisplaySql = `COALESCE(NULLIF(TRIM(l.cust_at_time::text), '-'), ${customerAccCodeSql})`;
+  const customerAccCodeSql = `COALESCE(NULLIF(TRIM(b.override_cust::text), '-'), NULLIF(TRIM(dp.acc_code::text), '-'))`;
+  const customerDisplaySql = `COALESCE(NULLIF(TRIM(l.cust_at_time::text), '-'), dp.acc_name, ${customerAccCodeSql})`;
 
   const SORT_MAP = {
     last_downloaded_at: "l.downloaded_at",
     last_download_type: "l.download_type",
-    packing_number: "COALESCE(b.packing_number, NULLIF(TRIM(l.bulk_packing_number::text), '-'))",
+    packing_number: packingKeySql,
     box_no_uid: "b.box_no_uid",
     box_uid: "l.box_uid",
     created_at: "l.downloaded_at",
-    event_sticker_count: `CASE WHEN l.download_type = 'bulk_pack' THEN (${bulkPackStickerCountSql})::int ELSE 1 END`,
-    item_code: "dp.item_dcode",
+    item_code: "dp.item_code",
     acc_name: customerDisplaySql,
     download_source: "l.download_source",
   };
@@ -2582,25 +2577,12 @@ async function getStickerDownloadLogList(options = {}) {
     FROM ims_box_download_log l
     LEFT JOIN ${M.USERS} u ON u.id = l.downloaded_by
     LEFT JOIN ims_box_table b ON b.box_uid = l.box_uid AND b.is_deleted = false
-    LEFT JOIN LATERAL (
-      SELECT MAX(NULLIF(TRIM(bt.override_cust::text), '-')) AS pack_override_cust
-      FROM ims_box_table bt
-      WHERE bt.is_deleted = false
-        AND TRIM(COALESCE(bt.packing_number::text, '-')) = TRIM(${packingKeySql})
-        AND TRIM(${packingKeySql}) <> '-'
-    ) pack_box ON true
-    LEFT JOIN LATERAL (
-      SELECT dp.*
-      FROM ims_dailyprod dp
-      WHERE dp.doc_no::text = ${packingKeySql}
-      LIMIT 1
-    ) dp ON true
+    LEFT JOIN ims_dailyprod dp ON dp.doc_no::text = ${packingKeySql}
   `;
 
-  const countValues = [...values];
   const countResult = await dbQuery(
     `SELECT COUNT(*)::int AS count ${baseFrom} ${whereClause}`,
-    countValues
+    values
   );
   const count = countResult[0]?.count || 0;
 
@@ -2610,14 +2592,16 @@ async function getStickerDownloadLogList(options = {}) {
         l.log_id,
         l.box_uid,
         b.box_no_uid,
-        COALESCE(b.packing_number, NULLIF(TRIM(l.bulk_packing_number::text), '-')) AS packing_number,
+        ${packingKeySql} AS packing_number,
         b.override_cust,
         l.cust_at_time,
         ${customerAccCodeSql} AS acc_code,
         ${customerDisplaySql} AS acc_name,
         dp.item_dcode AS itemdcode,
+        dp.item_code,
+        dp.item_desc,
         CASE
-          WHEN l.download_type = 'bulk_pack' THEN (${bulkPackStickerCountSql})::int
+          WHEN l.download_type = 'bulk_pack' THEN COALESCE(l.bulk_sticker_count, 0)
           ELSE 1
         END AS event_sticker_count,
         l.downloaded_at AS last_downloaded_at,

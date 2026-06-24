@@ -54,7 +54,6 @@ function wantsListRefresh(body = {}) {
 /** Comparison tab — mismatch rows only (customer field ignored). */
 function hasComparisonMismatchForFilter(row) {
   if (row?.comparison?.missing_ims || row?.ims_missing) return true;
-  if (row?.comparison?.missing_local) return true;
   const fields = row?.comparison?.fields || {};
   return Object.entries(fields).some(([key, f]) => {
     if (key === "acc_name") return false;
@@ -442,7 +441,8 @@ async function loadGeneratedDocNosForKeys(docKeys = []) {
       `SELECT DISTINCT trim(packing_number::text) AS doc_no
        FROM ims_box_table
        WHERE is_deleted = false
-         AND trim(packing_number::text) = ANY($1::text[])`,
+         AND trim(packing_number::text) = ANY($1::text[])
+         AND NOT (sa_entry_type = 'stock_in' AND sa_id IS NOT NULL)`,
       [keys]
     ),
   ]);
@@ -713,70 +713,132 @@ async function buildPendingList(body, defaultSpanDays) {
     getImsMapsSafe(),
     fetchPackRecordsCached(imsPackFilter, "pending", forceRefresh),
   ]);
+
+  if (!records?.length) {
+    return { data: [], total: 0, page: 1, limit: limit || 50, totalPages: 1 };
+  }
+
   const generatedMap = await loadGeneratedDocNosForKeys(collectPackDocKeys(records));
 
   let data = [];
-  for (const r of records || []) {
-    if (pendingOnly) {
-      const docKey = normalizePackingDocNo(parsePackRow(r).doc_no);
-      if (docKey && generatedMap.has(docKey)) continue;
-    }
-    data.push(buildPendingRow(r, generatedMap, itemMap, ledgerMap, EMPTY_PARTY_RATE_MAP));
+  for (const r of records) {
+    const p = parsePackRow(r);
+    const docKey = normalizePackingDocNo(p.doc_no);
+    const isGenerated = docKey ? generatedMap.has(docKey) : false;
+
+    if (pendingOnly && isGenerated) continue;
+
+    data.push({
+      ...buildImsRow(p, itemMap, ledgerMap, EMPTY_PARTY_RATE_MAP),
+      sticker_generated: isGenerated,
+    });
   }
-  data = filterRows(data, {
-    acc_code,
-    item_dcode,
-    from_date,
-    to_date,
-    sticker_generated,
-    search,
-    dailyprodByDoc: new Map(),
-    panelMetaMap: new Map(),
-  });
+
+  if (acc_code || item_dcode || search) {
+    data = filterRows(data, {
+      acc_code,
+      item_dcode,
+      from_date,
+      to_date,
+      sticker_generated,
+      search,
+      dailyprodByDoc: new Map(),
+      panelMetaMap: new Map(),
+    });
+  }
+
   sortRows(data, sortBy, order);
-  return sliceList(data, page, limit);
+  const sliced = sliceList(data, page, limit);
+  sliced.data = await enrichGeneratedRowsPage(sliced.data, itemMap, ledgerMap, EMPTY_PARTY_RATE_MAP);
+  return sliced;
 }
 
-/** Generated tab — DB snapshot only (~95 rows): no IMS pack / party-rate fetch. */
+/** Generated tab — DB snapshot only: no IMS pack / party-rate fetch. */
 async function buildGeneratedList(body) {
   const { search, page, limit, sortBy, order, filters = {} } = body;
   const { acc_code, item_dcode, from_date, to_date } = filters;
   const { from, to } = trimYmdFilter(from_date, to_date);
 
-  const snapshotMaps = await loadDailyprodSnapshotsInRange(from || null, to || null);
-  const dailyprodByDoc = snapshotMaps.dailyprodByDoc;
+  const conditions = ["sticker_generated = true"];
+  const values = [];
+  let i = 1;
+
+  if (from) {
+    values.push(from);
+    conditions.push(`doc_dt::date >= $${i++}::date`);
+  }
+  if (to) {
+    values.push(to);
+    conditions.push(`doc_dt::date <= $${i++}::date`);
+  }
+  if (acc_code != null && acc_code !== "") {
+    values.push(acc_code);
+    conditions.push(`acc_code = $${i++}`);
+  }
+  if (item_dcode != null && item_dcode !== "") {
+    values.push(item_dcode);
+    conditions.push(`item_dcode = $${i++}`);
+  }
+
+  if (search) {
+    const s = `%${sanitizeSearch(search)}%`;
+    values.push(s);
+    const idx = i++;
+    conditions.push(`(
+      doc_no::text ILIKE $${idx} OR
+      job_card_no ILIKE $${idx} OR
+      item_code ILIKE $${idx} OR
+      item_desc ILIKE $${idx} OR
+      acc_name ILIKE $${idx}
+    )`);
+  }
+
+  const whereClause = `WHERE ${conditions.join(" AND ")}`;
+
+  const countRes = await dbQuery(
+    `SELECT COUNT(*)::int AS count FROM ims_dailyprod ${whereClause}`,
+    values
+  );
+  const total = countRes[0]?.count || 0;
+
+  const safePage = Math.max(1, parseInt(page, 10) || 1);
+  const safeLimit = Math.min(1000, Math.max(1, parseInt(limit, 10) || 50));
+  const offset = (safePage - 1) * safeLimit;
+
+  const allowedSort = ["doc_no", "doc_dt", "job_card_no", "total_qty", "acc_name", "item_code"];
+  const sortKey = allowedSort.includes(sortBy) ? sortBy : "doc_dt";
+  const sortOrder = ["ASC", "DESC"].includes(order?.toUpperCase()) ? order.toUpperCase() : "DESC";
+
+  values.push(safeLimit, offset);
+  const rows = await dbQuery(
+    `SELECT trim(doc_no::text) AS doc_no,
+            ${DAILYPROD_ROW_SELECT}
+     FROM ims_dailyprod
+     ${whereClause}
+     ORDER BY ${sortKey} ${sortOrder}, doc_no DESC
+     LIMIT $${i++} OFFSET $${i++}`,
+    values
+  );
+
+  const data = rows.map((dpRow) => buildGeneratedRowFromDp(dpRow, dpRow.doc_no));
 
   const ctx = {
-    generatedMap: new Set(dailyprodByDoc.keys()),
-    dailyprodByDoc,
-    dailyprodAccByDoc: snapshotMaps.dailyprodAccByDoc,
     panelMetaMap: new Map(),
+    dailyprodByDoc: new Map(data.map(r => [r.doc_no, r])),
     itemMap: new Map(),
     ledgerMap: new Map(),
     partyRateMap: EMPTY_PARTY_RATE_MAP,
   };
 
-  let data = [];
-  for (const [docKey, dpRow] of dailyprodByDoc) {
-    data.push(buildGeneratedRowFromDp(dpRow, docKey));
-  }
+  const enriched = await applyPanelMetaToGeneratedRows(data, ctx);
 
-  data = filterRows(data, {
-    acc_code,
-    item_dcode,
-    from_date,
-    to_date,
-    sticker_generated: true,
-    search,
-    dailyprodByDoc,
-    panelMetaMap: ctx.panelMetaMap,
-  });
-  sortRows(data, sortBy, order);
-  const sliced = sliceList(data, page, limit);
-  if (!body.list_view) {
-    sliced.data = await applyPanelMetaToGeneratedRows(sliced.data, ctx);
-  }
-  return sliced;
+  return {
+    data: enriched,
+    total,
+    page: safePage,
+    limit: safeLimit,
+    totalPages: Math.ceil(total / safeLimit) || 1,
+  };
 }
 
 async function buildFullList(body, defaultSpanDays) {
@@ -800,7 +862,7 @@ async function buildFullList(body, defaultSpanDays) {
   const ctx = { ...dbCtx, itemMap, ledgerMap, partyRateMap };
 
   let recordsToMap = records || [];
-  if (isComparison && ctx.generatedMap.size) {
+  if (isComparison) {
     recordsToMap = recordsToMap.filter((r) => {
       const docKey = normalizePackingDocNo(parsePackRow(r).doc_no);
       return docKey && ctx.generatedMap.has(docKey);
@@ -830,9 +892,7 @@ async function buildFullList(body, defaultSpanDays) {
   }
   sortRows(data, sortBy, order);
   const sliced = sliceList(data, page, limit);
-  if (!body.list_view) {
-    sliced.data = await enrichGeneratedRowsPage(sliced.data, itemMap, ledgerMap, partyRateMap);
-  }
+  sliced.data = await enrichGeneratedRowsPage(sliced.data, itemMap, ledgerMap, partyRateMap);
   return sliced;
 }
 

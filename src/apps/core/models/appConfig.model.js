@@ -21,6 +21,7 @@ export const APP_CONFIG_KEYS = {
   COMPANY_GSTIN: "company_gstin",
   COMPANY_STATE: "company_state",
   COMPANY_PINCODE: "company_pincode",
+  DYNAMIC_SHORTCUTS: "dynamic_shortcuts",
 };
 
 const COMPANY_INFO_DEFAULTS = Object.freeze({

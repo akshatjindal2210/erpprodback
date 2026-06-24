@@ -740,3 +740,12 @@ export const getDailyProdViews = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+export const getFinancialYears = async (req, res) => {
+  try {
+    const records = await fetchFromIMS("fyid");
+    res.json({ success: true, data: records });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};

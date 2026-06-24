@@ -12,7 +12,7 @@ const USER_LIST_JOIN = `
 
 const ALLOWED_SELECT_FIELDS = [
   "id", "name", "username", "usercode", "email", "phone", "type", "status",
-  "auth_source", "department_id", "designation_id", "created_at", "updated_at",
+  "auth_source", "department_id", "designation_id", "special_permissions", "created_at", "updated_at",
 ];
 const ALLOWED_FILTER_FIELDS = [
   "id", "usercode", "name", "username", "email", "phone", "type", "status",
@@ -20,7 +20,7 @@ const ALLOWED_FILTER_FIELDS = [
 ];
 const ALLOWED_UPDATE_FIELDS = [
   "id", "name", "username", "usercode", "email", "phone", "type", "status",
-  "auth_source", "department_id", "designation_id", "password", "updated_by", "updated_at",
+  "auth_source", "department_id", "designation_id", "special_permissions", "password", "updated_by", "updated_at",
 ];
 const ALLOWED_DELETE_FILTERS = ["id"];
 const ALLOWED_SORT_FIELDS = [
@@ -28,7 +28,7 @@ const ALLOWED_SORT_FIELDS = [
 ];
 
 const FIND_USER_COLUMNS =
-  "id, name, username, usercode, email, phone, type, status, auth_source, password, created_at";
+  "id, name, username, usercode, email, phone, type, status, auth_source, password, special_permissions, created_at";
 
 const assertField = (key, whitelist, context = "field") => {
   if (!whitelist.includes(key)) throw new Error(`Invalid ${context}: "${key}"`);
@@ -77,7 +77,7 @@ export const findUsers = async (options = {}) => {
   const safeFields = mappedSelect.length > 0
     ? mappedSelect.join(", ")
     : `u.id, u.name, u.username, u.usercode, u.email, u.phone, u.type, u.status, u.auth_source,
-       u.department_id, u.designation_id, d.name AS department_name, des.name AS designation_name, u.created_at`;
+       u.department_id, u.designation_id, u.special_permissions, d.name AS department_name, des.name AS designation_name, u.created_at`;
 
   const conditions = ["u.is_deleted = false"];
 
@@ -236,6 +236,7 @@ export const insertUser = async ({
   auth_source,
   department_id,
   designation_id,
+  special_permissions,
 }) => {
   const phoneVal = phone != null ? String(phone).trim() : "";
   if (!phoneVal) throw new Error("Phone is required");
@@ -256,9 +257,9 @@ export const insertUser = async ({
       : null;
 
   const [user] = await dbQuery(
-    `INSERT INTO ${TABLE} (name, username, email, phone, password, type, status, created_by, usercode, auth_source, department_id, designation_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-     RETURNING id, name, username, usercode, email, phone, type, status, auth_source, department_id, designation_id`,
+    `INSERT INTO ${TABLE} (name, username, email, phone, password, type, status, created_by, usercode, auth_source, department_id, designation_id, special_permissions)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     RETURNING id, name, username, usercode, email, phone, type, status, auth_source, department_id, designation_id, special_permissions`,
     [
       name,
       username,
@@ -272,6 +273,7 @@ export const insertUser = async ({
       auth_source || "erp",
       Number.isFinite(deptId) ? deptId : null,
       Number.isFinite(desigId) ? desigId : null,
+      special_permissions || {},
     ]
   );
   return user;
@@ -297,7 +299,7 @@ export const updateUsers = async (fields = {}, filters = {}) => {
   return await dbQuery(
     `UPDATE ${TABLE} SET ${setClause}
      WHERE ${whereClause} AND is_deleted = false
-     RETURNING id, name, username, usercode, email, phone, type, status, auth_source, department_id, designation_id`,
+     RETURNING id, name, username, usercode, email, phone, type, status, auth_source, department_id, designation_id, special_permissions`,
     values
   );
 };

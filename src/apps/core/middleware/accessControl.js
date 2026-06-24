@@ -41,6 +41,16 @@ export const accessControl = (moduleName, actions) => {
       // Ensure actions is an array
       const actionList = Array.isArray(actions) ? actions : [actions];
 
+      // Special case: app_configuration view is allowed for anyone with any app access (for shortcuts)
+      if (moduleName === "app_configuration" && actionList.length === 1 && actionList[0] === "view") {
+        const appAccess = await findUserAppAccess(user.id);
+        const hasAnyAppAccess = Object.values(appAccess).some(val => !!val);
+        if (hasAnyAppAccess) {
+          req.permission = { can_view: true, can_view_days: 0 };
+          return next();
+        }
+      }
+
       // Hard gate: module must be active right now.
       const [moduleRow] = await dbQuery(
         `SELECT is_active, app_type
@@ -234,6 +244,11 @@ export const accessControlAny = (alternatives) => {
 
 export const dynamicAccessControl = () => {
   return (req, res, next) => {
+    const user = req.user;
+    if (user && String(user.type || user.role || "").toLowerCase().trim() === "super_admin") {
+      return next();
+    }
+
     const moduleName = req.body?.permission_module;
     const action     = req.body?.permission_action;
 

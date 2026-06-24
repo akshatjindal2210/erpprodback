@@ -47,7 +47,13 @@ export const authenticate = async (req, res, next) => {
 };
 
 export const authorize = (...allowedTypes) => (req, res, next) => {
-  if (!req.user || !allowedTypes.includes(req.user.type))
+  if (!req.user) return res.status(401).json({ success: false, message: "Unauthorized no user" });
+  
+  const userType = String(req.user.type || "").toLowerCase().trim();
+  const normalizedAllowed = allowedTypes.map(t => String(t).toLowerCase().trim());
+
+  if (!normalizedAllowed.includes(userType))
     return res.status(403).json({ success: false, message: "Forbidden insufficient role" });
+  
   next();
 };

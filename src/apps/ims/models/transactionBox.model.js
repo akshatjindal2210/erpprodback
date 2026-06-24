@@ -55,7 +55,6 @@ export const findTransactionBoxes = async (options = {}, req_user = {}) => {
       tb.source_module ILIKE $${idx} OR
       tb.source_id::text ILIKE $${idx} OR
       tb.packing_number ILIKE $${idx} OR
-      tb.details::text ILIKE $${idx} OR
       u.name ILIKE $${idx}
     )`);
   }

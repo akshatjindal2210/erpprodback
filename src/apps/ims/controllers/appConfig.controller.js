@@ -18,6 +18,12 @@ export const APP_CONFIG_SECTIONS = [
     title: "Application settings",
     description: "IMS behaviour for all users (not server env / .env).",
   },
+  {
+    id: "shortcut",
+    scope: "global",
+    title: "Shortcut settings",
+    description: "Dynamic links and navigation configuration.",
+  },
 ];
 
 const VALID_SCOPES = new Set(["global", "ims", "task"]);
@@ -118,6 +124,14 @@ export const APP_CONFIG_DEFINITIONS = [
     description:
       "Sticker QR opens this URL with ?id=box_uid. Leave empty to encode box UID only.",
   },
+  {
+    key: APP_CONFIG_KEYS.DYNAMIC_SHORTCUTS,
+    scope: "global",
+    section: "shortcut",
+    label: "Dynamic Shortcuts JSON",
+    value_type: "text",
+    description: "JSON array of shortcut configurations for Sidenav and Home Page.",
+  },
 ];
 
 const DEF_BY_KEY = Object.fromEntries(APP_CONFIG_DEFINITIONS.map((d) => [d.key, d]));
@@ -194,13 +208,26 @@ function mergeDefinitionsWithRows(rows = [], scope = "global") {
 /** Super admin: list keys for a scope (global admin console or per-app). */
 export const getAppConfigList = async (req, res) => {
   try {
-    const scope = resolveAppConfigScope(req.body?.app ?? req.body?.scope);
+    const rawApp = req.body?.app ?? req.body?.scope;
+    const scope = resolveAppConfigScope(rawApp);
     const rows = await getAllAppConfig();
+    
+    let sections = sectionsForScope(scope);
+    let data = mergeDefinitionsWithRows(rows, scope);
+
+    // If the requested 'app' is actually a section ID, filter by it
+    const sectionId = String(rawApp ?? "").trim().toLowerCase();
+    const isSection = APP_CONFIG_SECTIONS.some(s => s.id === sectionId);
+    if (isSection) {
+      sections = sections.filter(s => s.id === sectionId);
+      data = data.filter(d => d.section === sectionId);
+    }
+
     res.json({
       success: true,
       scope,
-      sections: sectionsForScope(scope),
-      data: mergeDefinitionsWithRows(rows, scope),
+      sections,
+      data,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

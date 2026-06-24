@@ -1,15 +1,11 @@
 import express from "express";
-import { authenticate, authorize } from "../middleware/auth.js";
-import {
-  getAppConfigList,
-  updateAppConfig,
-} from "../controllers/appConfig.controller.js";
+import { authenticate } from "../middleware/auth.js";
+import { getAppConfigList, updateAppConfig } from "../controllers/appConfig.controller.js";
+import { dynamicAccessControl } from "../../core/middleware/accessControl.js";
 
 const router = express.Router();
 
-const superAdminOnly = authorize("super_admin");
-
-router.post("/list", authenticate, superAdminOnly, getAppConfigList);
-router.put("/", authenticate, superAdminOnly, updateAppConfig);
+router.post("/list", authenticate, dynamicAccessControl(), getAppConfigList);
+router.put("/", authenticate, dynamicAccessControl(), updateAppConfig);
 
 export default router;

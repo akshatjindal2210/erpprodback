@@ -3,18 +3,18 @@
  * Boxes aggregate + SA/dailyprod meta (DB columns, hash join). Filters on frontend.
  */
 
-import { sqlBoxSellable, sqlBoxOnQcHold, sqlBoxCountedAsOut, sqlDocDtFromDailyprod, sqlDocDtText } from "../box/boxInventorySql.js";
+import { sqlBoxSellable, sqlBoxOnQcHold, sqlBoxInHand, sqlBoxCountedAsOut, sqlDocDtFromDailyprod, sqlDocDtText } from "../box/boxInventorySql.js";
 
 const PN = (alias) => `NULLIF(TRIM(${alias}.packing_number::text), '')`;
 const TRIM_TXT = (expr) => `NULLIF(TRIM((${expr})::text), '')`;
 const LOC_LABEL = `NULLIF(TRIM(COALESCE(lm.location_no, CONCAT(lm.rack_no::text, UPPER(COALESCE(lm.shelf_no::text, ''))))), '')`;
 
+const IN_HAND = sqlBoxInHand("b");
 const SELLABLE = sqlBoxSellable("b");
 const IN_STORE = `${SELLABLE} AND b.location_id IS NOT NULL`;
-const QC_HOLD = sqlBoxOnQcHold("b");
-const QC_HOLD_LOC = `${QC_HOLD} AND b.location_id IS NOT NULL`;
+const QC_HOLD = `${sqlBoxOnQcHold("b")} AND ${IN_HAND}`;
 const PACKING_AREA = `${SELLABLE} AND b.location_id IS NULL`;
-const SHOW_LOC = `(${IN_STORE}) OR (${QC_HOLD_LOC})`;
+const SHOW_LOC = `(${IN_STORE}) OR (${QC_HOLD})`;
 const IS_OUT = sqlBoxCountedAsOut("b");
 
 /** One approved SA row per packing (full table scan once). */
@@ -77,7 +77,7 @@ const DP_META_CTE = `
 export function buildInventoryReportSql() {
   const stockHaving = `SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${IN_STORE})) > 0
        OR SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${PACKING_AREA})) > 0
-       OR SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${QC_HOLD_LOC})) > 0`;
+       OR SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${QC_HOLD})) > 0`;
 
   const groupedCte = `
     ${SA_META_CTE},
@@ -88,7 +88,7 @@ export function buildInventoryReportSql() {
         SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${SELLABLE}))::bigint AS fg_stock_qty,
         SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${IN_STORE}))::bigint AS in_store_qty,
         SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${PACKING_AREA}))::bigint AS packing_area_qty,
-        SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${QC_HOLD_LOC}))::bigint AS qc_hold_qty,
+        SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${QC_HOLD}))::bigint AS qc_hold_qty,
         SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${IS_OUT}))::bigint AS out_qty,
         COUNT(*) FILTER (WHERE (${IN_STORE}))::int AS in_store_boxes,
         COUNT(*) FILTER (WHERE (${PACKING_AREA}))::int AS packing_area_boxes,

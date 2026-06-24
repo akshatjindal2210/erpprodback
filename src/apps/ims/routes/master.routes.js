@@ -1,6 +1,6 @@
 import express from "express";
 import { authenticate } from "../middleware/auth.js";
-import { getItems, getItemById, getLedgers, getLedgerById, getPartyRates, getDailyProd, getPackByFinancialYearDoc, resolvePartyRateCustCodeForSticker, getItemsViews, getLedgersViews, getPartyRatesViews, getDailyProdViews } from "../controllers/master.controller.js";
+import { getItems, getItemById, getLedgers, getLedgerById, getPartyRates, getDailyProd, getPackByFinancialYearDoc, resolvePartyRateCustCodeForSticker, getItemsViews, getLedgersViews, getPartyRatesViews, getDailyProdViews, getFinancialYears } from "../controllers/master.controller.js";
 import { accessControl, dynamicAccessControl, accessControlAny } from "../../core/middleware/accessControl.js";
 
 const router = express.Router();
@@ -23,5 +23,6 @@ router.post("/items/helper", authenticate, dynamicAccessControl(), getItemsViews
 router.post("/ledgers/helper", authenticate, dynamicAccessControl(), getLedgersViews);
 router.post("/party-rates/helper", authenticate, dynamicAccessControl(), getPartyRatesViews);
 router.post("/daily-prod/helper", authenticate, dynamicAccessControl(), getDailyProdViews);
+router.post("/financial-years", authenticate, getFinancialYears);
 
 export default router;

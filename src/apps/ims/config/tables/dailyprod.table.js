@@ -17,6 +17,13 @@ export async function createDailyProdTable() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_dailyprod_doc_no_text ON ${T.DAILYPROD} ((TRIM(doc_no::text)));
+    CREATE INDEX IF NOT EXISTS idx_dailyprod_doc_dt ON ${T.DAILYPROD} (doc_dt);
+    CREATE INDEX IF NOT EXISTS idx_dailyprod_acc_code ON ${T.DAILYPROD} (acc_code);
+    CREATE INDEX IF NOT EXISTS idx_dailyprod_item_dcode ON ${T.DAILYPROD} (item_dcode);
+    CREATE INDEX IF NOT EXISTS idx_dailyprod_sticker_generated ON ${T.DAILYPROD} (sticker_generated);
+    CREATE INDEX IF NOT EXISTS idx_dailyprod_job_card_no ON ${T.DAILYPROD} (job_card_no);
+    CREATE INDEX IF NOT EXISTS idx_dailyprod_item_code ON ${T.DAILYPROD} (item_code);
+    CREATE INDEX IF NOT EXISTS idx_dailyprod_acc_name ON ${T.DAILYPROD} (acc_name);
   `);
 
   /** Extra sticker / display fields — columns only (no JSON snapshot). */

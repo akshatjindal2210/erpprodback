@@ -1,4 +1,5 @@
 import { findOutEntries, findOutEntry, insertOutEntry, updateOutEntries, deleteOutEntries, findFuidDetailsForOutEntry, findOutEntryLinkedBoxes, findQcHoldDetailsForOutEntry, clearOutEntryDraftScans, resetBoxesForOutEntry, findAnyOutEntryByFuid, findDistinctOutEntryReasons } from "../models/outEntry.model.js";
+import { findUser } from "../../core/models/user.model.js";
 import { findForwardingNote, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry } from "../models/forwardingNote.model.js";
 import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
@@ -65,6 +66,18 @@ export const createOutEntry = async (req, res) => {
     const userId = req.user.id;
     const entry_type = normalizeOutEntryType(rawEntryType);
     const normalizedApproved = normalizeApprovedInput(approved);
+
+    // Backend Permission Check for Inventory Out
+    if (isOutEntryInventoryOut(entry_type)) {
+      const user = await findUser({ id: userId });
+      const isSuperAdmin = user?.type === "super_admin";
+      if (!isSuperAdmin && !user?.special_permissions?.ims?.inventory_out) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "You do not have permission to perform Inventory Out." 
+        });
+      }
+    }
 
     if (isOutEntryInventoryOut(entry_type) || isOutEntryPackingArea(entry_type) || isOutEntryQcArea(entry_type)) {
       const normalizedReason = normalizeOutEntryReasonInput(reason, reason_text);
