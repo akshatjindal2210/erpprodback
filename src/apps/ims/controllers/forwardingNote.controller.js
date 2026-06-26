@@ -458,27 +458,6 @@ export const getForwardingNotesViews = async (req, res) => {
   }
 };
 
-export const getForwardingNoteViewById = async (req, res) => {
-  try {
-    const { fuid } = req.body || {};
-    if (!fuid) return res.status(400).json({ success: false, message: "fuid required" });
-    const data = await findForwardingNote({ fuid });
-    if (!data) return res.status(404).json({ success: false, message: "Not found" });
-    const [enriched] = await enrichForwardingSummaryRows([data]);
-    res.json({
-      success: true,
-      data: {
-        fuid: enriched?.fuid ?? data.fuid,
-        acc_code: enriched?.acc_code ?? data.acc_code,
-        acc_name: enriched?.acc_name ?? data.acc_name,
-        po_number: enriched?.po_number ?? data.po_number
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
 /** POST body: { fuid, company_info?: { name, address } } — returns HTML for browser print / Save as PDF */
 export const printForwardingNoteBill = async (req, res) => {
   try {

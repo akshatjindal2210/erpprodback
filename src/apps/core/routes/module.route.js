@@ -1,7 +1,7 @@
 import express from "express";
 import { getModules, getModuleById, createModule, updateModuleData, toggleModuleStatus, getModulesViews } from "../controllers/module.controller.js";
 import { authenticate } from "../middleware/auth.js";
-import { accessControl, dynamicAccessControl } from "../middleware/accessControl.js"; // updated middleware
+import { accessControl, dynamicAccessControl } from "../middleware/accessControl.js";
 
 const router = express.Router();
 

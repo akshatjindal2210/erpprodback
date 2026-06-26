@@ -1,26 +1,45 @@
 /**
  * Daily production list (packing entry): IMS pack rows + local sticker DB merge + comparison.
- * Pending tab uses a fast path (no panel-meta / comparison). Generated loads panel meta lazily.
+ * Pending tab uses a fast path (no panel-meta / comparison). Generated reads ims_dailyprod columns only.
  */
 import dbQuery from "../../../../config/db.js";
 import { fetchFromIMS } from "../../services/ims.service.js";
-import { getProductionStickerPanelMetaByPackingNumbers, getProductionStickerPackingDocNos } from "../../models/box.model.js";
+import { getProductionStickerPackingDocNos } from "../../models/box.model.js";
 import { pickProductionStickerPanelMeta } from "./productionStickerPanelMeta.js";
 import { getImsMapsSafe, canonicalCode } from "../erp-api/imsLookup.js";
 import { buildPartyRateAccNameMap, resolvePackingCustomerName } from "./packingEntryCustomers.js";
 import { dailyProdListFieldsFromRow, dailyProdSnapshotCoreFields, storedPackingCustomerName, stickerFetchRowFromDailyProd, DAILYPROD_STICKER_EXTRA_SELECT } from "./stickerGenerateSnapshot.js";
 import { sanitizeSearch } from "../../../core/utils/helper.js";
+import { buildImsDocFilterMany, imsPackRowToProduction } from "../erp-api/imsPackRow.js";
 import { buildImsPackDocdtFilter, normalizePackingDocNo, packRowInYmdRange, parsePackRow, toCalendarDateKey, trimYmdFilter } from "./packRowParse.js";
 
 const DAILYPROD_ROW_SELECT = `
-            doc_dt::text AS doc_dt,
-            job_card_no,
-            acc_code::text AS acc_code,
-            acc_name,
-            item_dcode,
-            item_code,
-            total_qty,
-            ${DAILYPROD_STICKER_EXTRA_SELECT}`;
+            dp.doc_dt::text AS doc_dt,
+            dp.job_card_no,
+            dp.acc_code::text AS acc_code,
+            dp.acc_name,
+            dp.item_dcode,
+            dp.item_code,
+            dp.total_qty,
+            dp.item_desc,
+            dp.party_rate_cust_code,
+            dp.unit,
+            dp.fg_location,
+            dp.category_id,
+            dp.category_name,
+            dp.qty_per_box,
+            dp.full_boxes_count,
+            dp.loose_box_qty,
+            dp.total_stickers,
+            dp.packing_standard_id,
+            dp.internal_create_user,
+            dp.internal_create_date,
+            dp.system_generate_user,
+            dp.system_generate_date,
+            dp.system_generate_user AS system_generate_user_name`;
+
+const DAILYPROD_FROM_JOIN = `
+     FROM ims_dailyprod dp`;
 
 const LIST_MAX_LIMIT = 100_000;
 const GENERATED_DOC_NOS_TTL_MS = 60_000;
@@ -205,6 +224,8 @@ function buildLocalSnapshot(dpRow, itemMap, ledgerMap, partyRateMap) {
       dpRow.total_qty != null && String(dpRow.total_qty).trim() !== ""
         ? String(dpRow.total_qty)
         : snapCore.total_qty ?? "0",
+    internal_create_user: dpRow.internal_create_user ?? null,
+    internal_create_date: dpRow.internal_create_date ?? null,
   };
 }
 
@@ -245,6 +266,89 @@ function resolveDbDocDt(docKey, dailyprodByDoc, panelMetaMap) {
   return null;
 }
 
+/** Merge frozen ims_dailyprod columns into a list row (no box/user joins). */
+function mergeDailyprodDbFieldsIntoRow(row, dpRow) {
+  if (!row?.sticker_generated || !dpRow) return row;
+
+  const next = { ...row, _display_source: "db_columns" };
+
+  if (dpRow.acc_code != null && String(dpRow.acc_code).trim() !== "") {
+    next.acc_code = String(dpRow.acc_code).trim();
+    const savedName = storedPackingCustomerName(dpRow);
+    if (savedName) next.acc_name = savedName;
+  }
+
+  const dbFields = dailyProdListFieldsFromRow(dpRow);
+  for (const key in dbFields) {
+    if (dbFields[key] !== null && dbFields[key] !== undefined) {
+      next[key] = dbFields[key];
+    }
+  }
+
+  const snapCore = dailyProdSnapshotCoreFields(dpRow);
+  if (snapCore.doc_dt || dpRow.doc_dt) {
+    next.doc_dt =
+      (snapCore.doc_dt ? toCalendarDateKey(snapCore.doc_dt) : null) ||
+      toCalendarDateKey(dpRow.doc_dt) ||
+      dpRow.doc_dt;
+  }
+  if (snapCore.job_card_no ?? dpRow.job_card_no) {
+    next.job_card_no = snapCore.job_card_no ?? dpRow.job_card_no;
+  }
+  if (snapCore.total_qty ?? dpRow.total_qty != null) {
+    next.total_qty = String(snapCore.total_qty ?? dpRow.total_qty);
+  }
+  if (snapCore.item_code ?? dpRow.item_code) {
+    next.item_code = snapCore.item_code ?? dpRow.item_code;
+  }
+  if (dpRow.item_desc && (!next.item_desc || next.item_desc === "N/A")) {
+    next.item_desc = dpRow.item_desc;
+  }
+
+  return next;
+}
+
+async function fillMissingInternalCreateFromIms(rows, dailyprodByDoc) {
+  const missingInternalKeys = rows
+    .filter((r) => {
+      if (!r.sticker_generated) return false;
+      const docKey = normalizePackingDocNo(r.doc_no);
+      const dpRow = dailyprodByDoc?.get(docKey);
+      return !r.internal_create_user || (dpRow && !dpRow.internal_create_user);
+    })
+    .map((r) => normalizePackingDocNo(r.doc_no))
+    .filter(Boolean);
+
+  if (!missingInternalKeys.length) return;
+
+  try {
+    const filter = buildImsDocFilterMany(missingInternalKeys);
+    const imsRecords = await fetchFromIMS("pack", filter);
+    const imsMap = new Map();
+    for (const r of imsRecords || []) {
+      const p = parsePackRow(r);
+      if (p.doc_no) imsMap.set(normalizePackingDocNo(p.doc_no), p);
+    }
+
+    for (const row of rows) {
+      const docKey = normalizePackingDocNo(row.doc_no);
+      if (
+        row.sticker_generated &&
+        (!row.internal_create_user ||
+          (dailyprodByDoc?.get(docKey) && !dailyprodByDoc.get(docKey).internal_create_user))
+      ) {
+        const p = imsMap.get(docKey);
+        if (p) {
+          row.internal_create_user = p.internal_create_user;
+          row.internal_create_date = p.internal_create_date;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Failed to fetch missing internal details from IMS for generated rows:", err);
+  }
+}
+
 function applyPanelMeta(row, panelMetaMap, dailyprodByDoc, itemMap, ledgerMap, partyRateMap) {
   const docKey = normalizePackingDocNo(row.doc_no);
   const panel =
@@ -283,7 +387,12 @@ function applyPanelMeta(row, panelMetaMap, dailyprodByDoc, itemMap, ledgerMap, p
   }
 
   if (row.sticker_generated && dpRow) {
-    Object.assign(next, dailyProdListFieldsFromRow(dpRow));
+    const dbFields = dailyProdListFieldsFromRow(dpRow);
+    for (const key in dbFields) {
+      if (dbFields[key] !== null && dbFields[key] !== undefined) {
+        next[key] = dbFields[key];
+      }
+    }
     const snapCore = dailyProdSnapshotCoreFields(dpRow);
     if (snapCore.doc_dt || dpRow.doc_dt) {
       next.doc_dt =
@@ -318,6 +427,8 @@ function buildImsRow(p, itemMap, ledgerMap, partyRateMap) {
     item_code: p.item_code_row ?? itemDetail?.item_code ?? "N/A",
     item_desc: p.itemdesc_row ?? itemDetail?.item_desc ?? "N/A",
     total_qty: String(p.qty ?? "0"),
+    internal_create_user: p.internal_create_user ?? null,
+    internal_create_date: p.internal_create_date ?? null,
   };
 }
 
@@ -442,6 +553,7 @@ async function loadGeneratedDocNosForKeys(docKeys = []) {
        FROM ims_box_table
        WHERE is_deleted = false
          AND trim(packing_number::text) = ANY($1::text[])
+         AND (sa_entry_type IS DISTINCT FROM 'stock_out')
          AND NOT (sa_entry_type = 'stock_in' AND sa_id IS NOT NULL)`,
       [keys]
     ),
@@ -513,10 +625,10 @@ async function loadDailyprodSnapshotsInRange(fromYmd, toYmd) {
     conditions.push(`doc_dt::date <= $${i++}::date`);
   }
   const rows = await dbQuery(
-    `SELECT trim(doc_no::text) AS doc_no,
+    `SELECT trim(dp.doc_no::text) AS doc_no,
             ${DAILYPROD_ROW_SELECT}
-     FROM ims_dailyprod
-     WHERE ${conditions.join(" AND ")}`,
+     ${DAILYPROD_FROM_JOIN}
+     WHERE ${conditions.join(" AND ").replace(/doc_dt/g, "dp.doc_dt")}`,
     values
   );
   return buildDailyprodMaps(rows);
@@ -525,10 +637,10 @@ async function loadDailyprodSnapshotsInRange(fromYmd, toYmd) {
 /** All dailyprod snapshots for generated packings (small query; panel meta is loaded lazily). */
 async function loadDailyprodSnapshots() {
   const rows = await dbQuery(
-    `SELECT trim(doc_no::text) AS doc_no,
+    `SELECT trim(dp.doc_no::text) AS doc_no,
             ${DAILYPROD_ROW_SELECT}
-     FROM ims_dailyprod
-     WHERE sticker_generated = true`
+     ${DAILYPROD_FROM_JOIN}
+     WHERE dp.sticker_generated = true`
   );
   return buildDailyprodMaps(rows);
 }
@@ -550,11 +662,11 @@ async function loadDailyprodForDocKeys(docKeys = []) {
   const keys = [...new Set(docKeys.map((d) => normalizePackingDocNo(d)).filter(Boolean))];
   if (!keys.length) return new Map();
   const rows = await dbQuery(
-    `SELECT trim(doc_no::text) AS doc_no,
+    `SELECT trim(dp.doc_no::text) AS doc_no,
             ${DAILYPROD_ROW_SELECT}
-     FROM ims_dailyprod
-     WHERE sticker_generated = true
-       AND trim(doc_no::text) = ANY($1::text[])`,
+     ${DAILYPROD_FROM_JOIN}
+     WHERE dp.sticker_generated = true
+       AND trim(dp.doc_no::text) = ANY($1::text[])`,
     [keys]
   );
   return buildDailyprodMaps(rows).dailyprodByDoc;
@@ -564,25 +676,14 @@ async function enrichGeneratedRowsPage(rows, itemMap, ledgerMap, partyRateMap) {
   const keys = collectGeneratedDocKeys(rows);
   if (!keys.size) return rows;
   const dailyprodByDoc = await loadDailyprodForDocKeys([...keys]);
-  const ctx = {
-    panelMetaMap: new Map(),
-    dailyprodByDoc,
-    itemMap,
-    ledgerMap,
-    partyRateMap,
-  };
-  await hydratePanelMeta(ctx, keys);
-  return applyPanelMetaToGeneratedRows(rows, ctx);
-}
-
-async function hydratePanelMeta(ctx, docKeys) {
-  const list = docKeys instanceof Set ? [...docKeys] : Array.isArray(docKeys) ? docKeys : [];
-  const nums = [...new Set(list.map((d) => normalizePackingDocNo(d)).filter(Boolean))];
-  if (!nums.length) return;
-  const fetched = await getProductionStickerPanelMetaByPackingNumbers(nums);
-  for (const [k, v] of fetched) {
-    if (!ctx.panelMetaMap.has(k)) ctx.panelMetaMap.set(k, v);
-  }
+  await fillMissingInternalCreateFromIms(rows, dailyprodByDoc);
+  return rows.map((row) => {
+    if (!row.sticker_generated) return row;
+    const docKey = normalizePackingDocNo(row.doc_no);
+    const dpRow = dailyprodByDoc.get(docKey);
+    const merged = mergeDailyprodDbFieldsIntoRow(row, dpRow);
+    return refreshRowComparison(merged, ledgerMap, partyRateMap, dailyprodByDoc, itemMap);
+  });
 }
 
 function collectGeneratedDocKeys(rows) {
@@ -680,24 +781,6 @@ function refreshRowComparison(row, ledgerMap, partyRateMap, dailyprodByDoc, item
   };
 }
 
-async function applyPanelMetaToGeneratedRows(rows, ctx) {
-  const keys = collectGeneratedDocKeys(rows);
-  if (!keys.size) return rows;
-  await hydratePanelMeta(ctx, keys);
-  return rows.map((row) => {
-    if (!row.sticker_generated) return row;
-    const withMeta = applyPanelMeta(
-      row,
-      ctx.panelMetaMap,
-      ctx.dailyprodByDoc,
-      ctx.itemMap,
-      ctx.ledgerMap,
-      ctx.partyRateMap
-    );
-    return refreshRowComparison(withMeta, ctx.ledgerMap, ctx.partyRateMap, ctx.dailyprodByDoc, ctx.itemMap);
-  });
-}
-
 function wantsPendingOnly(sticker_generated) {
   return sticker_generated === false || sticker_generated === "false";
 }
@@ -759,25 +842,25 @@ async function buildGeneratedList(body) {
   const { acc_code, item_dcode, from_date, to_date } = filters;
   const { from, to } = trimYmdFilter(from_date, to_date);
 
-  const conditions = ["sticker_generated = true"];
+  const conditions = ["dp.sticker_generated = true"];
   const values = [];
   let i = 1;
 
   if (from) {
     values.push(from);
-    conditions.push(`doc_dt::date >= $${i++}::date`);
+    conditions.push(`dp.doc_dt::date >= $${i++}::date`);
   }
   if (to) {
     values.push(to);
-    conditions.push(`doc_dt::date <= $${i++}::date`);
+    conditions.push(`dp.doc_dt::date <= $${i++}::date`);
   }
   if (acc_code != null && acc_code !== "") {
     values.push(acc_code);
-    conditions.push(`acc_code = $${i++}`);
+    conditions.push(`dp.acc_code = $${i++}`);
   }
   if (item_dcode != null && item_dcode !== "") {
     values.push(item_dcode);
-    conditions.push(`item_dcode = $${i++}`);
+    conditions.push(`dp.item_dcode = $${i++}`);
   }
 
   if (search) {
@@ -785,18 +868,18 @@ async function buildGeneratedList(body) {
     values.push(s);
     const idx = i++;
     conditions.push(`(
-      doc_no::text ILIKE $${idx} OR
-      job_card_no ILIKE $${idx} OR
-      item_code ILIKE $${idx} OR
-      item_desc ILIKE $${idx} OR
-      acc_name ILIKE $${idx}
+      dp.doc_no::text ILIKE $${idx} OR
+      dp.job_card_no ILIKE $${idx} OR
+      dp.item_code ILIKE $${idx} OR
+      dp.item_desc ILIKE $${idx} OR
+      dp.acc_name ILIKE $${idx}
     )`);
   }
 
   const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
   const countRes = await dbQuery(
-    `SELECT COUNT(*)::int AS count FROM ims_dailyprod ${whereClause}`,
+    `SELECT COUNT(*)::int AS count FROM ims_dailyprod dp ${whereClause}`,
     values
   );
   const total = countRes[0]?.count || 0;
@@ -805,35 +888,37 @@ async function buildGeneratedList(body) {
   const safeLimit = Math.min(1000, Math.max(1, parseInt(limit, 10) || 50));
   const offset = (safePage - 1) * safeLimit;
 
-  const allowedSort = ["doc_no", "doc_dt", "job_card_no", "total_qty", "acc_name", "item_code"];
-  const sortKey = allowedSort.includes(sortBy) ? sortBy : "doc_dt";
+  const sortMap = {
+    doc_no: "dp.doc_no",
+    doc_dt: "dp.doc_dt",
+    job_card_no: "dp.job_card_no",
+    total_qty: "dp.total_qty",
+    acc_name: "dp.acc_name",
+    item_code: "dp.item_code",
+  };
+  const sortKey = sortMap[sortBy] || "dp.doc_dt";
   const sortOrder = ["ASC", "DESC"].includes(order?.toUpperCase()) ? order.toUpperCase() : "DESC";
 
   values.push(safeLimit, offset);
   const rows = await dbQuery(
-    `SELECT trim(doc_no::text) AS doc_no,
+    `SELECT trim(dp.doc_no::text) AS doc_no,
             ${DAILYPROD_ROW_SELECT}
-     FROM ims_dailyprod
+     ${DAILYPROD_FROM_JOIN}
      ${whereClause}
-     ORDER BY ${sortKey} ${sortOrder}, doc_no DESC
+     ORDER BY ${sortKey} ${sortOrder}, dp.doc_no DESC
      LIMIT $${i++} OFFSET $${i++}`,
     values
   );
 
-  const data = rows.map((dpRow) => buildGeneratedRowFromDp(dpRow, dpRow.doc_no));
-
-  const ctx = {
-    panelMetaMap: new Map(),
-    dailyprodByDoc: new Map(data.map(r => [r.doc_no, r])),
-    itemMap: new Map(),
-    ledgerMap: new Map(),
-    partyRateMap: EMPTY_PARTY_RATE_MAP,
-  };
-
-  const enriched = await applyPanelMetaToGeneratedRows(data, ctx);
+  const { dailyprodByDoc } = buildDailyprodMaps(rows);
+  const data = rows.map((dpRow) => {
+    const docKey = normalizePackingDocNo(dpRow.doc_no) || dpRow.doc_no;
+    return buildGeneratedRowFromDp(dpRow, docKey);
+  });
+  await fillMissingInternalCreateFromIms(data, dailyprodByDoc);
 
   return {
-    data: enriched,
+    data,
     total,
     page: safePage,
     limit: safeLimit,

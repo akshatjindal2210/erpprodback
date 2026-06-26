@@ -1,7 +1,8 @@
 import express from "express";
 import { getOutEntries, getOutEntryById, createOutEntry, updateOutEntry, deleteOutEntry, verifyBoxSticker, batchScanOutEntryBoxes, getFuidDetailsForOutEntry, getQcHoldDetailsForOutEntry, getOutEntryLinkedBoxesController, lockFuidForOutEntry, getOutEntriesViews, getOutEntryReasonsViews } from "../controllers/outEntry.controller.js";
 import { authenticate } from "../middleware/auth.js";
-import { accessControl, dynamicAccessControl } from "../../core/middleware/accessControl.js";
+import { accessControl } from "../../core/middleware/accessControl.js";
+import { helperAccess } from "../config/helperViews.js";
 
 const router = express.Router();
 
@@ -35,7 +36,7 @@ router.post("/verify-box", authenticate, accessControl("out_entry", "view"), ver
 router.post("/batch-scan-boxes", authenticate, accessControl("out_entry", ["view", "add", "edit", "authorize"]), batchScanOutEntryBoxes);
 
 // Views (Helper API)
-router.post("/helper", authenticate, dynamicAccessControl(), getOutEntriesViews);
+router.post("/helper", authenticate, helperAccess("outEntries"), getOutEntriesViews);
 router.post("/reason-helper", authenticate, accessControl("out_entry", "view"), getOutEntryReasonsViews);
 
 export default router;

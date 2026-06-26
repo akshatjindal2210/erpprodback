@@ -1,4 +1,4 @@
-import { findBoxes, findBox, findBoxByUidOrNoUid, findBoxByStickerScan, findBoxesByUids, insertBox, insertBulkBoxes, updateBoxes, updateBoxesByUids, deleteBoxes, getStickerHistory, getStickerHistoryFromLiveRow, checkProductionStickersExist, checkSaStockInBoxesExist, incrementDownloadCount, incrementDownloadCountBulk, insertDownloadLog, getDownloadLogByBox, getDownloadSummaryByPacking, getStickerManagementList, updateDailyProdStickerStatus, findBoxesDetailed, findBoxDetailed, findBoxDetailedByUidOrNoUid, findBoxDetailedByStickerScan, permanentlyDeleteProductionBoxesForPackingNumber, resetDailyProdStickerGeneratedForDoc, findDailyProdByDocNo, findDailyProdStickerRow, findInHandBoxesByPackingNumber, findInHandBoxesByPackingForStockAdjustment, findStockAdjustmentMinusBoxesByPacking, findStockAdjustmentAddBoxesByPattern, findBoxesByPackingNumber } from "../models/box.model.js";
+import { findBoxes, findBox, findBoxByUidOrNoUid, findBoxByStickerScan, findBoxesByUids, insertBox, insertBulkBoxes, updateBoxes, updateBoxesByUids, deleteBoxes, getStickerHistory, getStickerHistoryFromLiveRow, checkProductionStickersExist, checkSaStockInBoxesExist, incrementDownloadCount, incrementDownloadCountBulk, insertDownloadLog, pickStickerLogFields, getDownloadLogByBox, getDownloadSummaryByPacking, getStickerManagementList, updateDailyProdStickerStatus, findBoxesDetailed, findBoxDetailed, findBoxDetailedByUidOrNoUid, findBoxDetailedByStickerScan, permanentlyDeleteProductionBoxesForPackingNumber, resetDailyProdStickerGeneratedForDoc, findDailyProdByDocNo, findDailyProdStickerRow, findInHandBoxesByPackingNumber, findInHandBoxesByPackingForStockAdjustment, findStockAdjustmentMinusBoxesByPacking, findStockAdjustmentAddBoxesByPattern, findBoxesByPackingNumber } from "../models/box.model.js";
 import { enrichOverrideCustomerListRows, listOverrideRequests as listOverrideRequestsQuery } from "../utils/box/overrideCustomerList.js";
 import { approveOverrideCustomerRequest, createOverrideCustomerRequest, updateOverrideCustomerRequest } from "../utils/box/overrideCustomerRequests.js";
 import { findPackingStandard } from "../models/packingStandard.model.js";
@@ -19,10 +19,11 @@ import { buildDailyProdStickerFields, stickerFetchRowFromDailyProd } from "../ut
 import { logActivity } from "../../core/utils/logActivity.js";
 import { logOverrideCustomerBatch } from "../utils/box/logBoxTransaction.js";
 import { buildPrintDocument, buildStickerPreviewDocument, buildStickerCardHtml, buildStickerPrintDocumentTitle, resolveStickerPackingNumber, sanitizeSearch } from "../../core/utils/helper.js";
-import { resolveBoxViewsSelectFields } from "../config/view-fields/box.js";
+import { resolveViewsFields } from "../config/helperViews.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
+import { fillMissingBoxItemFields } from "../utils/box/boxListItemMeta.js";
 
-const BOX_STORE_FILTER_FIELDS = [ "box_uid", "box_no_uid", "packing_number", "sa_id", "location_id", "in_uid", "out_uid", "from_date", "to_date" ];
+const BOX_STORE_FILTER_FIELDS = [ "box_uid", "box_no_uid", "packing_number", "sa_id", "location_id", "in_uid", "out_uid", "from_date", "to_date", "journey" ];
 
 const BOX_STORE_LIST_FIELDS = [
   "b.box_uid", "b.box_no_uid", "b.packing_number", "b.qty", "b.override_cust", "b.location_id",
@@ -31,8 +32,12 @@ const BOX_STORE_LIST_FIELDS = [
   "lm.rack_no", "lm.shelf_no",
   "COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no",
   "dp.item_dcode AS prod_item_dcode",
+  "dp.item_code AS prod_item_code",
+  "dp.item_desc AS prod_item_desc",
   "dp.acc_code AS prod_acc_code",
   "sa.item_dcode AS sa_item_dcode",
+  "sa.item_code AS sa_item_code",
+  "sa.item_desc AS sa_item_desc",
   "fnm.acc_code AS forward_acc_code",
 ];
 
@@ -454,13 +459,7 @@ export const getBoxesViews = async (req, res) => {
       });
     }
 
-    let fields = resolveBoxViewsSelectFields({ permission_module, permission_action });
-    if (fields == null) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid permission_module / permission_action for box views"
-      });
-    }
+    let fields = resolveViewsFields("boxes", { permission_module, permission_action });
 
     if (include_suggested_inward_location && permission_module === "inventory_inwards" && permission_action === "view") {
       const extra = ["b.override_cust", "dp.acc_code AS prod_acc_code", "dp.item_dcode AS itemdcode"];
@@ -640,8 +639,9 @@ function resolveBoxListStockZone(row) {
 async function enrichBoxRowsFromIMS(rows = [], maps = null) {
   if (!Array.isArray(rows) || rows.length === 0) return rows;
   const { itemMap, ledgerMap } = maps ?? (await getImsMapsSafe());
-  return rows.map((row) => {
-    const itemCodeRaw = row.sa_item_dcode ?? row.prod_item_dcode ?? row.itemdcode ?? row.item_dcode;
+  const mapped = rows.map((row) => {
+    const itemCodeRaw =
+      row.sa_item_dcode ?? row.prod_item_dcode ?? row.itemdcode ?? row.item_dcode;
     const itemCode = canonicalCode(itemCodeRaw);
     const item = itemCode ? itemMap.get(itemCode) : null;
     const packingAcc = canonicalCode(row.prod_acc_code ?? row.acc_code);
@@ -671,12 +671,23 @@ async function enrichBoxRowsFromIMS(rows = [], maps = null) {
     const forward_note_customer_name =
       dispatched && forwardCode ? ledgerMap.get(forwardCode) ?? forwardCode : "—";
 
+    const resolvedItemCode =
+      row.prod_item_code ?? row.sa_item_code ?? item?.item_code ?? row.item_code ?? null;
+    const resolvedItemDesc =
+      row.prod_item_desc ??
+      row.sa_item_desc ??
+      item?.item_desc ??
+      row.itemdesc ??
+      row.item_desc ??
+      null;
+
     return {
       ...row,
       item_dcode: itemCode ?? row.item_dcode ?? null,
-      item_code: item?.item_code ?? row.item_code ?? null,
-      itemdesc: item?.item_desc ?? row.itemdesc ?? row.item_desc ?? null,
-      item_desc: item?.item_desc ?? row.item_desc ?? row.itemdesc ?? null,
+      itemdcode: itemCode ?? row.itemdcode ?? null,
+      item_code: resolvedItemCode,
+      itemdesc: resolvedItemDesc,
+      item_desc: resolvedItemDesc,
       acc_code: accCode ?? row.acc_code ?? null,
       acc_name,
       forward_note_customer_name,
@@ -685,9 +696,11 @@ async function enrichBoxRowsFromIMS(rows = [], maps = null) {
       party_rate_cust_code: null,
       from_customer_name: (row.from_customer != null ? ledgerMap.get(String(row.from_customer)) : null) ?? row.from_customer_name ?? null,
       to_customer_name: (row.to_customer != null ? ledgerMap.get(String(row.to_customer)) : null) ?? row.to_customer_name ?? null,
-      item_name: item?.item_code ?? row.item_name ?? null
+      item_name: resolvedItemCode ?? row.item_name ?? null
     };
   });
+
+  return fillMissingBoxItemFields(mapped, itemMap);
 }
 
 function accNameFromLedger(ledgerMap, accCodeRaw) {
@@ -800,19 +813,23 @@ async function enrichStickerRowsFromIMS(rows = []) {
   ]);
 
   return rows.map((row) => {
-    const itemCode = canonicalCode(row.itemdcode);
-    const accCode = canonicalCode(row.acc_code);
+    const itemCode = canonicalCode(row.itemdcode ?? row.item_dcode ?? row.prod_item_dcode);
     const item = itemCode ? itemMap.get(itemCode) : null;
+    const accCode = canonicalCode(row.acc_code);
     const accName = accCode ? ledgerMap.get(accCode) : null;
     const rateAcc = partyRateAccCandidates(row.acc_code);
     const partyRateCustCode =
       pickPartyRateCustCode(partyRateMap, itemCode, rateAcc) ||
       pickPartyRateCustCode(partyRateMap, item?.item_code ?? row.item_code, rateAcc);
+    const resolvedItemCode =
+      row.prod_item_code ?? row.item_code ?? item?.item_code ?? null;
+    const resolvedItemDesc =
+      row.prod_item_desc ?? item?.item_desc ?? row.itemdesc ?? row.item_desc ?? null;
     return {
       ...row,
-      item_code: item?.item_code ?? row.item_code ?? null,
-      itemdesc: item?.item_desc ?? row.itemdesc ?? row.item_desc ?? null,
-      item_desc: item?.item_desc ?? row.item_desc ?? row.itemdesc ?? null,
+      item_code: resolvedItemCode,
+      itemdesc: resolvedItemDesc,
+      item_desc: resolvedItemDesc,
       acc_name: accName ?? row.acc_name ?? null,
       party_rate_cust_code: partyRateCustCode ?? row.party_rate_cust_code ?? null
     };
@@ -835,7 +852,7 @@ export const stickerFetchBox = async (req, res) => {
     if (productionStickersExistEarly) {
       const dpRow = await findDailyProdStickerRow(docNo);
       const snapRow = stickerFetchRowFromDailyProd(dpRow);
-      if (snapRow?.packing_details?.qty_per_box) {
+      if (snapRow && dpRow?.sticker_generated) {
         const sa_adjustment_boxes_exist = await checkSaStockInBoxesExist(docNo);
         return res.json({
           success: true,
@@ -1017,24 +1034,7 @@ export const stickerFetchBox = async (req, res) => {
 export const generateStickers = async (req, res) => {
   try {
     // 1. Validation: Basic fields check
-    const {
-      doc_no,
-      itemdcode,
-      item_code,
-      acc_name,
-      acc_code,
-      packing_config,
-      doc_dt,
-      job_card_no,
-      total_qty,
-      unit,
-      party_rate_cust_code,
-      category_id,
-      category_name,
-      itemdesc,
-      description,
-      fg_location,
-    } = req.body;
+    const { doc_no, itemdcode, item_code, acc_name, acc_code, packing_config, doc_dt, job_card_no, total_qty, unit, party_rate_cust_code, category_id, category_name, itemdesc, description, fg_location, internal_create_user, internal_create_date } = req.body;
     
     if (!doc_no || !itemdcode || !packing_config) {
       console.log("Validation failed. Missing fields:", { doc_no, itemdcode, packing_config });
@@ -1090,24 +1090,21 @@ export const generateStickers = async (req, res) => {
 
     // Daily prod row: freeze packing + customer snapshot at generate time (fast reads later).
     const stdId = packing_config.standard_id || null;
-    const stickerFields = buildDailyProdStickerFields({
-      doc_no,
-      itemdcode,
-      item_code,
-      acc_name,
-      acc_code,
-      doc_dt,
-      job_card_no,
-      total_qty,
-      unit,
-      party_rate_cust_code,
-      category_id,
-      category_name,
-      itemdesc: itemdesc ?? description,
-      fg_location,
-      packing_config,
+    const stickerFields = buildDailyProdStickerFields({ doc_no, itemdcode, item_code, acc_name, acc_code, doc_dt, job_card_no, total_qty, unit,
+      party_rate_cust_code, category_id, category_name, itemdesc: itemdesc ?? description, fg_location, internal_create_user, internal_create_date,
+      system_generate_user: req.user.name, system_generate_date: new Date().toISOString(), packing_config,
     });
-    await updateDailyProdStickerStatus(doc_no, stdId, stickerFields);
+    try {
+      await updateDailyProdStickerStatus(doc_no, stdId, stickerFields);
+    } catch (dailyprodErr) {
+      await permanentlyDeleteProductionBoxesForPackingNumber({
+        packing_number: docNo,
+        user_id: req.user?.id,
+      }).catch((rollbackErr) => {
+        console.error("generateStickers rollback failed:", rollbackErr.message);
+      });
+      throw dailyprodErr;
+    }
     invalidateDailyProdGeneratedCache();
 
     const data = inserted.map((row, idx) => ({
@@ -1295,7 +1292,7 @@ export const trackStickerDownload = async (req, res) => {
     // Log entry
     const log = await insertDownloadLog({
       box_uid,
-      cust_at_time: enrichedBox?.acc_name || enrichedBox?.override_cust || box.override_cust,
+      ...pickStickerLogFields(enrichedBox, box),
       downloaded_by: req.user.id,
       download_type: "single",
       download_source,
@@ -1341,12 +1338,12 @@ export const trackBulkDownload = async (req, res) => {
     const updatedRows = await incrementDownloadCountBulk(uids, req.user.id);
 
     await insertDownloadLog({
+      ...pickStickerLogFields(custRow),
+      packing_number: packingNo,
       box_uid: null,
-      cust_at_time: custRow?.acc_name || custRow?.override_cust || null,
       downloaded_by: req.user.id,
       download_type: "bulk_pack",
-      bulk_packing_number: packingNo,
-      bulk_sticker_count: uids.length,
+      sticker_count: uids.length,
       download_source,
     });
 
@@ -1413,7 +1410,7 @@ export const renderSingleSticker = async (req, res) => {
 
     await insertDownloadLog({
       box_uid,
-      cust_at_time: enrichedBox.acc_name || enrichedBox.override_cust,
+      ...pickStickerLogFields(enrichedBox, box),
       downloaded_by: req.user.id,
       download_type: "single",
       download_source,
@@ -1534,12 +1531,12 @@ export const renderBulkStickers = async (req, res) => {
     await incrementDownloadCountBulk(uids, req.user.id);
 
     await insertDownloadLog({
+      ...pickStickerLogFields(custRow),
+      packing_number: packingNo,
       box_uid: null,
-      cust_at_time: custRow?.acc_name || custRow?.override_cust || null,
       downloaded_by: req.user.id,
       download_type: "bulk_pack",
-      bulk_packing_number: packingNo,
-      bulk_sticker_count: totalBoxes,
+      sticker_count: totalBoxes,
       download_source,
     });
 
@@ -1651,20 +1648,24 @@ export const getPackingDownloadSummary = async (req, res) => {
 
 export const stickerManagementList = async (req, res) => {
   try {
-    const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, { sortBy: "last_downloaded_at", order: "DESC" });
+    const { page, limit = 100, filters, sortBy, order, search, isExport } = extractListParams(req.body, { sortBy: "last_downloaded_at", order: "DESC" });
     const list_mode = req.body?.list_mode;
+    const mode = String(list_mode || "log").toLowerCase();
 
     const result = await getStickerManagementList({
       filters: sanitizeFilters(filters, BOX_STORE_FILTER_FIELDS),
-      search: sanitizeSearch(search),
+      search: mode === "box" ? sanitizeSearch(search) : undefined,
       sort: { by: sortBy, order },
-      page,
-      limit,
+      page: isExport === "true" ? 1 : page,
+      limit: isExport === "true" ? 100000 : limit,
       list_mode,
     });
-    const enriched = await enrichStickerManagementListRows(result.data || []);
+    const rows =
+      mode === "box"
+        ? await enrichStickerManagementListRows(result.data || [])
+        : result.data || [];
     const { data, ...rest } = result;
-    return res.json({ success: true, ...rest, data: stripBoxRowsForClient(enriched || data) });
+    return res.json({ success: true, ...rest, data: stripBoxRowsForClient(rows) });
   } catch (err) {
     return res.status(500).json({success: false, message: err.message });
   }

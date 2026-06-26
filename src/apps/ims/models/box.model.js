@@ -4,6 +4,10 @@ import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
 import { logBoxTransaction, logBoxTransactionSafe, singlePackingFromRows } from "../utils/box/logBoxTransaction.js";
 import { sqlBoxInHand, sqlBoxOutUidEmpty, sqlBoxCustomerCode, sqlDailyprodLateralForBox, sqlBoxSellable, sqlBoxNotOnQcHold, sqlBoxOutwardDispatchAny, sqlBoxPackingNumberMatch, sqlDocDtText, sqlDocDtFromDailyprod, sqlOutEntryCustomerDispatch } from "../utils/box/boxInventorySql.js";
 import { normalizeDocDtForDb } from "../utils/packing-entry/packRowParse.js";
+import { insertDownloadLog, listStickerDownloadLogs, pickStickerLogFields } from "./stickerDownloadLog.model.js";
+import { hasJourneyFilter, appendBoxJourneyCondition } from "../utils/logJourneyFilter.js";
+
+export { insertDownloadLog, pickStickerLogFields };
 
 
 const ALLOWED_FILTER_FIELDS_BOX = [
@@ -17,6 +21,7 @@ const ALLOWED_FILTER_FIELDS_BOX = [
   "override_cust",
   "in_uid",
   "out_uid",
+  "journey",
 ];
 
 const ALLOWED_SORT_FIELDS_BOX = ["created_at", "qty", "box_no_uid", "packing_number", "rack_no", "acc_name"];
@@ -31,18 +36,34 @@ function normalizeSaEntryTypeForInsert(v) {
   return null;
 }
 
-const JOINS = `
-  LEFT JOIN ims_dailyprod dp        ON b.packing_number::TEXT = dp.doc_no::TEXT
+/** Main listing join: simple and fast. */
+const JOINS_SIMPLE = `
   LEFT JOIN ims_location_master lm  ON b.location_id          = lm.location_id
-  LEFT JOIN ims_inventory_inwards ii ON b.in_uid::TEXT        = ii.in_uid::TEXT
-  
-  LEFT JOIN ims_out_entry io        ON b.out_uid::TEXT        = io.out_uid::TEXT AND io.is_deleted = false
+  LEFT JOIN ims_inventory_inwards ii ON b.in_uid             = ii.in_uid
+  LEFT JOIN ims_out_entry io        ON b.out_uid             = io.out_uid AND io.is_deleted = false
   LEFT JOIN ims_forwarding_note_master fnm ON fnm.fuid = io.fuid AND fnm.is_deleted = false
   LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
-
+  LEFT JOIN ims_dailyprod dp ON trim(b.packing_number::text) = trim(dp.doc_no::text)
   LEFT JOIN ${M.USERS} u_cr    ON b.created_by  = u_cr.id
   LEFT JOIN ${M.USERS} u_upd   ON b.updated_by  = u_upd.id
   LEFT JOIN ${M.USERS} u_dl    ON b.deleted_by  = u_dl.id
+`;
+
+const JOINS_WITHOUT_LATERAL = `
+  LEFT JOIN ims_location_master lm  ON b.location_id          = lm.location_id
+  LEFT JOIN ims_inventory_inwards ii ON b.in_uid             = ii.in_uid
+  LEFT JOIN ims_out_entry io        ON b.out_uid             = io.out_uid AND io.is_deleted = false
+  LEFT JOIN ims_forwarding_note_master fnm ON fnm.fuid = io.fuid AND fnm.is_deleted = false
+  LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
+  LEFT JOIN ${M.USERS} u_cr    ON b.created_by  = u_cr.id
+  LEFT JOIN ${M.USERS} u_upd   ON b.updated_by  = u_upd.id
+  LEFT JOIN ${M.USERS} u_dl    ON b.deleted_by  = u_dl.id
+`;
+
+/** Expensive lateral join for specific logic (SA/QC). */
+const JOINS = `
+  ${JOINS_WITHOUT_LATERAL}
+  ${sqlDailyprodLateralForBox("b", "sa")}
 `;
 
 // Bare field names passed to findBoxes() are prefixed with b.; these live on joins instead.
@@ -90,14 +111,23 @@ export const findBoxes = async (options = {}) => {
     conditions.push("(b.sa_entry_type IS DISTINCT FROM 'stock_out')");
   }
 
-  // Permission-based date restriction (can_view_days)
-  if (permission?.can_view_days > 0) {
+  const journeyMode = hasJourneyFilter(filters);
+
+  // Permission-based date restriction (can_view_days) — skipped in journey mode (full history).
+  if (!journeyMode && permission?.can_view_days > 0) {
     conditions.push(`b.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
   }
 
   // SAFE FILTERS
   for (const [key, val] of Object.entries(filters)) {
     if (val === undefined || val === null || val === "") continue;
+
+    if (journeyMode && (key === "from_date" || key === "to_date")) continue;
+
+    if (key === "journey") {
+      i = appendBoxJourneyCondition(conditions, values, val, i);
+      continue;
+    }
 
     // DATE FILTERS
     if (key === "from_date") {
@@ -120,17 +150,29 @@ export const findBoxes = async (options = {}) => {
       continue;
     }
 
+    const isNumeric = ["box_uid", "sa_id", "location_id", "in_uid", "out_uid"].includes(key);
+    if (isNumeric) {
+      const numVal = parseInt(String(val), 10);
+      if (!isNaN(numVal)) {
+        values.push(numVal);
+        conditions.push(`b.${key} = $${i++}`);
+        continue;
+      }
+    }
+
     values.push(String(val));
     conditions.push(`b.${key}::TEXT = $${i++}::TEXT`);
   }
 
   // SEARCH
   if (search) {
-    const searchIndex = i;
+    const searchIndex = i++;
     const searchTerm = `%${search}%`;
     values.push(searchTerm);
 
-    conditions.push(`(
+    // Optimization: if search is numeric, try exact match on box_uid first (indexed)
+    const isSearchNumeric = /^\d+$/.test(search.trim());
+    let searchCondition = `(
       b.box_uid::TEXT ILIKE $${searchIndex} OR
       b.box_no_uid::TEXT ILIKE $${searchIndex} OR
       b.packing_number::TEXT ILIKE $${searchIndex} OR
@@ -138,10 +180,18 @@ export const findBoxes = async (options = {}) => {
       b.override_cust::TEXT ILIKE $${searchIndex} OR
       b.in_uid::TEXT ILIKE $${searchIndex} OR
       b.out_uid::TEXT ILIKE $${searchIndex} OR
-      lm.rack_no ILIKE $${searchIndex} OR
-      lm.location_no ILIKE $${searchIndex}
-    )`);
-    i++;
+      lm.rack_no::TEXT ILIKE $${searchIndex} OR
+      lm.location_no::TEXT ILIKE $${searchIndex}
+    )`;
+
+    if (isSearchNumeric) {
+      const searchNum = parseInt(search.trim(), 10);
+      values.push(searchNum);
+      const numIdx = i++;
+      searchCondition = `(b.box_uid = $${numIdx} OR ${searchCondition})`;
+    }
+
+    conditions.push(searchCondition);
   }
 
   const whereClause = `WHERE ${conditions.join(" AND ")}`;
@@ -149,13 +199,14 @@ export const findBoxes = async (options = {}) => {
   const skipCountQuery = skipCount || (!search && isExactBoxScanLookup(filters, limit));
   let totalCount = 0;
   if (!skipCountQuery) {
-    const countRes = await dbQuery(`SELECT COUNT(DISTINCT b.box_uid) AS count FROM ims_box_table b ${JOINS} ${whereClause}`, values);
+    // Optimization: count doesn't need lateral join on dailyprod
+    const countRes = await dbQuery(`SELECT COUNT(*) AS count FROM ims_box_table b ${JOINS_SIMPLE} ${whereClause}`, values);
     totalCount = Number(countRes[0]?.count || 0);
   }
 
   // PAGINATION & SORTING CONFIG
   const safePage = Math.max(1, Number(page) || 1);
-  const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 10));
+  const safeLimit = Math.min(100000, Math.max(1, Number(limit) || 10));
   const offset = (safePage - 1) * safeLimit;
 
   const sortByField = ALLOWED_SORT_FIELDS_BOX.includes(sort.by) ? sort.by : "created_at";
@@ -215,7 +266,7 @@ export const findBoxes = async (options = {}) => {
   const rows = await dbQuery(
     `SELECT ${selectFields}
      FROM ims_box_table b
-     ${JOINS}
+     ${JOINS_SIMPLE}
      ${whereClause}
      ORDER BY ${orderByClause} ${sortOrder} 
      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
@@ -247,7 +298,7 @@ export const findInHandBoxesByScanCodes = async (scanCodes = []) => {
      WHERE b.is_deleted = false
        AND ${sqlBoxSellable("b")}
        AND (
-         b.box_no_uid::text = ANY($1::text[])
+         b.box_no_uid = ANY($1::text[])
          OR (cardinality($2::text[]) > 0 AND b.box_uid::text = ANY($2::text[]))
        )`,
     [raw, numericOnly]
@@ -266,7 +317,7 @@ export const findBoxesByScanCodesAny = async (scanCodes = []) => {
      FROM ims_box_table b
      WHERE b.is_deleted = false
        AND (
-         b.box_no_uid::text = ANY($1::text[])
+         b.box_no_uid = ANY($1::text[])
          OR (cardinality($2::text[]) > 0 AND b.box_uid::text = ANY($2::text[]))
        )`,
     [raw, numericOnly]
@@ -321,7 +372,7 @@ export const findBoxByUidOrNoUid = async (id) => {
      FROM ims_box_table b
      WHERE b.is_deleted = false
        AND (
-         b.box_no_uid::text = $1::text
+         b.box_no_uid = $1::text
          OR ($2::boolean AND b.box_uid::text = $1::text)
        )
      LIMIT 1`,
@@ -344,9 +395,9 @@ export const findBoxByStickerScan = async ({ box_no_uid, box_uid } = {}) => {
     const [row] = await dbQuery(
       `SELECT b.*, b.override_cust::text AS acc_name
        FROM ims_box_table b
-       WHERE b.is_deleted = false AND b.box_uid::text = $1::text
+       WHERE b.is_deleted = false AND b.box_uid = $1::integer
        LIMIT 1`,
-      [uid]
+      [parseInt(uid, 10)]
     );
     if (row) return row;
   }
@@ -376,7 +427,7 @@ export const findBoxesByPackingNumber = async (packing_number) => {
   return await dbQuery(
     `SELECT b.*
      FROM ims_box_table b
-     WHERE b.packing_number::text = $1::text
+     WHERE trim(b.packing_number::text) = trim($1::text)
        AND b.is_deleted = false
        AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')
      ORDER BY b.box_uid ASC`,
@@ -407,11 +458,16 @@ export const findDailyProdStickerRow = async (doc_no) => {
             qty_per_box,
             full_boxes_count,
             loose_box_qty,
-            total_stickers
+            total_stickers,
+            internal_create_user,
+            internal_create_date,
+            system_generate_user,
+            system_generate_date,
+            system_generate_user AS system_generate_user_name
      FROM ims_dailyprod
-     WHERE doc_no::text = trim($1::text)
+     WHERE doc_no = $1::integer
      LIMIT 1`,
-    [String(doc_no)]
+    [parseInt(String(doc_no), 10)]
   );
   return row ?? null;
 };
@@ -422,9 +478,9 @@ export const findDailyProdByDocNo = async (doc_no) => {
   const [row] = await dbQuery(
     `SELECT dp.acc_code, dp.job_card_no, dp.item_dcode AS itemdcode, ${sqlDocDtText("dp.doc_dt")} AS doc_dt
      FROM ims_dailyprod dp
-     WHERE dp.doc_no::text = trim($1::text)
+     WHERE dp.doc_no = $1::integer
      LIMIT 1`,
-    [String(doc_no)]
+    [parseInt(String(doc_no), 10)]
   );
   return row ?? null;
 };
@@ -507,7 +563,7 @@ export const resolveItemDcodeForMinusAdjustment = async ({ packing_number, boxRo
   const [saAdd] = await dbQuery(
     `SELECT item_dcode AS itemdcode
      FROM ims_stock_adjustment
-     WHERE trim(packing_number::text) = trim($1::text)
+     WHERE packing_number = $1
        AND entry_type = 'add'
        AND is_deleted = false
        AND item_dcode IS NOT NULL
@@ -535,7 +591,7 @@ export const resolveItemDcodeForMinusAdjustment = async ({ packing_number, boxRo
        END
      ) AS itemdcode
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '-') = NULLIF(TRIM(dp.doc_no::text), '-')
+     LEFT JOIN ims_dailyprod dp ON trim(b.packing_number::text) = trim(dp.doc_no::text)
      LEFT JOIN ims_stock_adjustment sa_adj
        ON b.sa_id = sa_adj.adjustment_id
       AND sa_adj.is_deleted = false
@@ -658,13 +714,13 @@ export const findDispatchedOutwardLinesByPacking = async (packing_number) => {
       `SELECT ${dispatchSelect}
        FROM ims_box_table b
        LEFT JOIN ims_out_entry io
-         ON b.out_uid::text = io.out_uid::text
+         ON b.out_uid = io.out_uid
         AND io.is_deleted = false
        LEFT JOIN ims_forwarding_note_master fnm
          ON fnm.fuid = io.fuid
         AND fnm.is_deleted = false
        LEFT JOIN ims_dailyprod dp
-         ON NULLIF(TRIM(b.packing_number::text), '') = NULLIF(TRIM(dp.doc_no::text), '')
+         ON b.packing_number = dp.doc_no::text
        WHERE ${outwardSql}
          AND ${packingSql}
          AND ${customerDispatchSql}
@@ -692,13 +748,13 @@ export const findDispatchedOutwardLinesByPacking = async (packing_number) => {
          ON io.out_uid = d.out_uid
         AND io.is_deleted = false
        INNER JOIN ims_box_table b
-         ON b.box_no_uid::text = d.box_no_uid
+         ON b.box_no_uid = d.box_no_uid
         AND b.is_deleted = false
        LEFT JOIN ims_forwarding_note_master fnm
          ON fnm.fuid = io.fuid
         AND fnm.is_deleted = false
        LEFT JOIN ims_dailyprod dp
-         ON NULLIF(TRIM(b.packing_number::text), '') = NULLIF(TRIM(dp.doc_no::text), '')
+         ON b.packing_number = dp.doc_no::text
        WHERE ${packingSql}
          AND ${sqlBoxOutUidEmpty("b")}
          AND ${customerDispatchSql}
@@ -754,7 +810,7 @@ export const setBoxesQcHold = async (holdId, boxUids = []) => {
      WHERE b.is_deleted = false
        AND ${sqlBoxSellable("b")}
        AND (
-         b.box_no_uid::text = ANY($2::text[])
+         b.box_no_uid = ANY($2::text[])
          OR (cardinality($3::text[]) > 0 AND b.box_uid::text = ANY($3::text[]))
        )
      RETURNING b.*`,
@@ -791,14 +847,14 @@ export const syncBoxesQcHold = async (holdId, prevUids = [], nextUids = []) => {
 
   if (toRelease.length) {
     const numericOnly = toRelease.filter((c) => /^\d+$/.test(c));
-    await dbQuery(
+      await dbQuery(
       `UPDATE ims_box_table
        SET qc_hold_id = NULL,
            updated_at = NOW()
        WHERE qc_hold_id = $1::integer
          AND is_deleted = false
          AND (
-           box_no_uid::text = ANY($2::text[])
+           box_no_uid = ANY($2::text[])
            OR (cardinality($3::text[]) > 0 AND box_uid::text = ANY($3::text[]))
          )`,
       [pk, toRelease, numericOnly]
@@ -871,7 +927,7 @@ export const findItemDcodesWithInHandStock = async () => {
          END
        )::int::text AS itemdcode
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '-') = NULLIF(TRIM(dp.doc_no::text), '-')
+     LEFT JOIN ims_dailyprod dp ON trim(b.packing_number::text) = trim(dp.doc_no::text)
      LEFT JOIN ims_stock_adjustment sa_adj
        ON b.sa_id = sa_adj.adjustment_id
       AND b.sa_entry_type = 'stock_in'
@@ -896,9 +952,9 @@ export const findStandardQtyPerBoxForPackingNumber = async (doc_no) => {
      LEFT JOIN ims_packing_standard ps
        ON ps.standard_id = dp.packing_standard_id
       AND ps.is_deleted = false
-     WHERE trim(dp.doc_no::text) = trim($1::text)
+     WHERE dp.doc_no = $1::integer
      LIMIT 1`,
-    [String(doc_no)]
+    [parseInt(String(doc_no), 10)]
   );
   const q = row?.standard_qty_per_box;
   if (q == null || q === "") return null;
@@ -928,13 +984,10 @@ export const findBoxesByNoUids = async (box_no_uids = []) => {
   const uids = [...new Set((box_no_uids || []).map((u) => String(u).trim()).filter(Boolean))];
   if (!uids.length) return [];
   return dbQuery(
-    `SELECT b.*,
-            dp.acc_code AS prod_acc_code,
-            dp.item_dcode AS itemdcode
+    `SELECT b.*, dp.acc_code AS prod_acc_code, dp.item_dcode AS itemdcode
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::TEXT), '-') = NULLIF(TRIM(dp.doc_no::TEXT), '-')
-     WHERE b.is_deleted = false
-       AND b.box_no_uid::text = ANY($1::text[])
+     LEFT JOIN ims_dailyprod dp ON trim(b.packing_number::text) = trim(dp.doc_no::text)
+     WHERE b.is_deleted = false AND b.box_no_uid = ANY($1::text[])
      ORDER BY b.box_uid ASC`,
     [uids]
   );
@@ -958,15 +1011,15 @@ export const findBoxesByUids = async (box_uids = []) => {
         )::text AS itemdcode,
         dp.total_qty AS prod_total_qty
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::TEXT), '-') = NULLIF(TRIM(dp.doc_no::TEXT), '-')
+     LEFT JOIN ims_dailyprod dp ON trim(b.packing_number::text) = trim(dp.doc_no::text)
      LEFT JOIN ims_stock_adjustment sa_adj
        ON b.sa_id = sa_adj.adjustment_id
       AND b.sa_entry_type = 'stock_in'
       AND sa_adj.is_deleted = false
-     WHERE b.box_uid::TEXT = ANY($1::TEXT[])
+     WHERE b.box_uid = ANY($1::integer[])
        AND b.is_deleted = false
      ORDER BY b.box_uid ASC`,
-    [box_uids.map((id) => String(id))]
+    [box_uids.map((id) => parseInt(id, 10))]
   );
 };
 
@@ -1035,12 +1088,12 @@ export const updateBoxesByUids = async (box_uids = [], fields = {}) => {
   if (!fieldKeys.length) return [];
 
   const set = fieldKeys.map((k, i) => `${k} = $${i + 1}`).join(", ");
-  const values = [...Object.values(fields), box_uids.map((id) => String(id))];
+  const values = [...Object.values(fields), box_uids.map((id) => parseInt(id, 10))];
 
   const rows = await dbQuery(
     `UPDATE ims_box_table
      SET ${set}, updated_at = NOW()
-     WHERE box_uid::text = ANY($${fieldKeys.length + 1}::text[])
+     WHERE box_uid = ANY($${fieldKeys.length + 1}::integer[])
      RETURNING *`,
     values
   );
@@ -1085,7 +1138,7 @@ export const permanentlyDeleteProductionBoxesForPackingNumber = async ({
 
   const rows = await dbQuery(
     `DELETE FROM ims_box_table b
-     WHERE b.packing_number::text = $1::text
+     WHERE trim(b.packing_number::text) = trim($1::text)
        AND b.is_deleted = false
        AND NOT (b.sa_entry_type = 'stock_in' AND b.sa_id IS NOT NULL)
      RETURNING box_uid, box_no_uid, qty, is_loose`,
@@ -1114,6 +1167,7 @@ export const resetDailyProdStickerGeneratedForDoc = async (doc_no) => {
     `UPDATE ims_dailyprod
      SET sticker_generated = false,
          packing_standard_id = NULL,
+         acc_name = NULL,
          item_desc = NULL,
          party_rate_cust_code = NULL,
          unit = 'PCS',
@@ -1123,7 +1177,9 @@ export const resetDailyProdStickerGeneratedForDoc = async (doc_no) => {
          qty_per_box = NULL,
          full_boxes_count = NULL,
          loose_box_qty = NULL,
-         total_stickers = NULL
+         total_stickers = NULL,
+         system_generate_user = NULL,
+         system_generate_date = NULL
      WHERE doc_no = trim(COALESCE($1::text, '-'))::integer`,
     [String(doc_no)]
   );
@@ -1148,9 +1204,11 @@ export const getStickerHistory = async (doc_no, category_id = null) => {
         dp.sticker_generated,
         dp.packing_standard_id,
         dp.item_code,
-        dp.item_desc AS itemdesc
+        dp.item_desc AS itemdesc,
+        dp.internal_create_user,
+        dp.internal_create_date
       FROM ims_dailyprod dp
-      WHERE dp.doc_no::text = $1::text
+      WHERE dp.doc_no = $1::integer
     ),
     ranked_standards AS (
       SELECT
@@ -1201,6 +1259,8 @@ export const getStickerHistory = async (doc_no, category_id = null) => {
       b.acc_code,
       b.acc_name,
       b.sticker_generated,
+      b.internal_create_user,
+      b.internal_create_date,
       rs.standard_id,
       rs.qty AS standard_qty_per_box,
       rs.unit,
@@ -1238,7 +1298,9 @@ export const getStickerHistoryFromLiveRow = async (live = {}, category_id = null
     live.acc_code != null ? String(live.acc_code) : null,
     Boolean(live.sticker_generated),
     packingStdIdRaw,
-    category_id != null && String(category_id).trim() !== "" ? String(category_id).trim() : null
+    category_id != null && String(category_id).trim() !== "" ? String(category_id).trim() : null,
+    live.internal_create_user != null ? String(live.internal_create_user) : null,
+    live.internal_create_date != null ? String(live.internal_create_date) : null
   ];
 
   return dbQuery(
@@ -1252,7 +1314,9 @@ export const getStickerHistoryFromLiveRow = async (live = {}, category_id = null
         COALESCE(NULLIF(trim($5::text), '-')::numeric, 0)::numeric AS total_qty,
         NULLIF(trim($6::text), '-') AS acc_code,
         COALESCE($7::boolean, false) AS sticker_generated,
-        CASE WHEN $8::text IS NULL OR trim($8::text) = '-' THEN NULL ELSE trim($8::text)::bigint END AS packing_standard_id
+        CASE WHEN $8::text IS NULL OR trim($8::text) = '-' THEN NULL ELSE trim($8::text)::bigint END AS packing_standard_id,
+        $10::text AS internal_create_user,
+        $11::text AS internal_create_date
     ),
     base AS (
       SELECT
@@ -1264,6 +1328,8 @@ export const getStickerHistoryFromLiveRow = async (live = {}, category_id = null
         r.acc_code,
         r.sticker_generated,
         r.packing_standard_id,
+        r.internal_create_user,
+        r.internal_create_date,
         NULL::text AS item_code,
         NULL::text AS itemdesc,
         NULL::text AS acc_name
@@ -1318,6 +1384,8 @@ export const getStickerHistoryFromLiveRow = async (live = {}, category_id = null
       b.acc_code,
       b.acc_name,
       b.sticker_generated,
+      b.internal_create_user,
+      b.internal_create_date,
       rs.standard_id,
       rs.qty AS standard_qty_per_box,
       rs.unit,
@@ -1367,7 +1435,7 @@ export const checkProductionStickersExist = async (packing_number) => {
   const [row] = await dbQuery(
     `SELECT 1 AS ok
      FROM ims_box_table
-     WHERE packing_number = $1
+     WHERE trim(packing_number::text) = trim($1::text)
        AND is_deleted = false
        AND (sa_entry_type IS DISTINCT FROM 'stock_out')
        AND NOT (sa_entry_type = 'stock_in' AND sa_id IS NOT NULL)
@@ -1380,7 +1448,7 @@ export const checkProductionStickersExist = async (packing_number) => {
 /** ERP packing numbers that have production stickers in `ims_box_table` (panel DB source of truth). */
 export const getProductionStickerPackingDocNos = async () => {
   const rows = await dbQuery(
-    `SELECT DISTINCT packing_number::text AS doc_no
+    `SELECT DISTINCT trim(packing_number::text) AS doc_no
      FROM ims_box_table
      WHERE is_deleted = false
        AND packing_number IS NOT NULL
@@ -1922,6 +1990,10 @@ export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, f
     f.total_stickers != null && String(f.total_stickers).trim() !== ""
       ? String(f.total_stickers).trim()
       : null;
+  const snapInternalUser = f.internal_create_user != null && String(f.internal_create_user).trim() !== "" ? String(f.internal_create_user).trim() : null;
+  const snapInternalDate = f.internal_create_date != null && String(f.internal_create_date).trim() !== "" ? String(f.internal_create_date).trim() : null;
+  const snapSystemUser = f.system_generate_user != null && String(f.system_generate_user).trim() !== "" ? String(f.system_generate_user).trim() : null;
+  const snapSystemDate = f.system_generate_date != null ? f.system_generate_date : null;
 
   const updated = await dbQuery(
     `UPDATE ims_dailyprod
@@ -1959,7 +2031,19 @@ export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, f
          qty_per_box = COALESCE(NULLIF(trim($16::text), '')::numeric, qty_per_box),
          full_boxes_count = COALESCE(NULLIF(trim($17::text), '')::integer, full_boxes_count),
          loose_box_qty = COALESCE(NULLIF(trim($18::text), '')::numeric, loose_box_qty),
-         total_stickers = COALESCE(NULLIF(trim($19::text), '')::integer, total_stickers)
+         total_stickers = COALESCE(NULLIF(trim($19::text), '')::integer, total_stickers),
+         internal_create_user = COALESCE(NULLIF(trim($20::text), ''), internal_create_user),
+         internal_create_date = COALESCE(
+           CASE WHEN $21::text IS NOT NULL AND trim($21::text) <> '' AND trim($21::text) <> '-'
+             THEN trim($21::text)::timestamp with time zone ELSE NULL END,
+           internal_create_date
+         ),
+         system_generate_user = COALESCE(NULLIF(trim($22::text), ''), system_generate_user),
+         system_generate_date = COALESCE(
+           CASE WHEN $23::text IS NOT NULL AND trim($23::text) <> '' AND trim($23::text) <> '-'
+             THEN trim($23::text)::timestamp with time zone ELSE NULL END,
+           system_generate_date
+         )
      WHERE doc_no = trim(COALESCE($1::text, '-'))::integer
      RETURNING doc_no`,
     [
@@ -1982,6 +2066,10 @@ export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, f
       snapFullBoxes,
       snapLooseQty,
       snapTotalStickers,
+      snapInternalUser,
+      snapInternalDate,
+      snapSystemUser,
+      snapSystemDate,
     ]
   );
 
@@ -1996,29 +2084,34 @@ export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, f
     `INSERT INTO ims_dailyprod (
        doc_no, doc_dt, job_card_no, acc_code, acc_name, item_dcode, item_code, item_desc,
        total_qty, sticker_generated, packing_standard_id, party_rate_cust_code, unit,
-       fg_location, category_id, category_name, qty_per_box, full_boxes_count, loose_box_qty, total_stickers
+       fg_location, category_id, category_name, qty_per_box, full_boxes_count, loose_box_qty, total_stickers,
+       internal_create_user, internal_create_date, system_generate_user, system_generate_date
      )
      VALUES (
        trim(COALESCE($1::text, '-'))::integer,
-       CASE WHEN trim(COALESCE($2::text, '-')) = '-' THEN NULL::date ELSE trim($2::text)::date END,
+       CASE WHEN trim(COALESCE($2::text, '')) IN ('', '-') THEN NULL::date ELSE trim($2::text)::date END,
        NULLIF(trim(COALESCE($3::text, '-')), '-'),
-       CASE WHEN trim(COALESCE($4::text, '-')) = '-' THEN NULL::integer ELSE trim($4::text)::integer END,
+       CASE WHEN trim(COALESCE($4::text, '')) IN ('', '-') THEN NULL::integer ELSE trim($4::text)::integer END,
        NULLIF(trim(COALESCE($5::text, '-')), '-'),
-       CASE WHEN trim(COALESCE($6::text, '-')) = '-' THEN NULL::bigint ELSE trim($6::text)::bigint END,
+       CASE WHEN trim(COALESCE($6::text, '')) IN ('', '-') THEN NULL::bigint ELSE trim($6::text)::bigint END,
        NULLIF(trim(COALESCE($7::text, '-')), '-'),
        NULLIF(trim(COALESCE($8::text, '-')), '-'),
-       COALESCE(NULLIF(trim(COALESCE($9::text, '-')), '-')::numeric, 0),
+       COALESCE(NULLIF(trim(COALESCE($9::text, '')) , ''), '0')::numeric,
        true,
-       CASE WHEN trim(COALESCE($10::text, '-')) = '-' THEN NULL::bigint ELSE trim($10::text)::bigint END,
+       CASE WHEN trim(COALESCE($10::text, '')) IN ('', '-') THEN NULL::bigint ELSE trim($10::text)::bigint END,
        NULLIF(trim(COALESCE($11::text, '-')), '-'),
-       COALESCE(NULLIF(trim(COALESCE($12::text, '-')), '-'), 'PCS'),
+       COALESCE(NULLIF(trim(COALESCE($12::text, '')) , ''), 'PCS'),
        NULLIF(trim(COALESCE($13::text, '-')), '-'),
-       CASE WHEN trim(COALESCE($14::text, '-')) = '-' THEN NULL::integer ELSE trim($14::text)::integer END,
+       CASE WHEN trim(COALESCE($14::text, '')) IN ('', '-') THEN NULL::integer ELSE trim($14::text)::integer END,
        NULLIF(trim(COALESCE($15::text, '-')), '-'),
-       NULLIF(trim(COALESCE($16::text, '-')), '-')::numeric,
-       NULLIF(trim(COALESCE($17::text, '-')), '-')::integer,
-       NULLIF(trim(COALESCE($18::text, '-')), '-')::numeric,
-       NULLIF(trim(COALESCE($19::text, '-')), '-')::integer
+       NULLIF(trim(COALESCE($16::text, '')), '')::numeric,
+       NULLIF(trim(COALESCE($17::text, '')), '')::integer,
+       NULLIF(trim(COALESCE($18::text, '')), '')::numeric,
+       NULLIF(trim(COALESCE($19::text, '')), '')::integer,
+       NULLIF(trim(COALESCE($20::text, '-')), '-'),
+       CASE WHEN trim(COALESCE($21::text, '')) IN ('', '-') THEN NULL::timestamp with time zone ELSE trim($21::text)::timestamp with time zone END,
+       NULLIF(trim(COALESCE($22::text, '-')), '-'),
+       CASE WHEN trim(COALESCE($23::text, '')) IN ('', '-') THEN NULL::timestamp with time zone ELSE trim($23::text)::timestamp with time zone END
      )
      ON CONFLICT (doc_no) DO UPDATE SET
        sticker_generated = true,
@@ -2039,7 +2132,11 @@ export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, f
        qty_per_box = COALESCE(EXCLUDED.qty_per_box, ims_dailyprod.qty_per_box),
        full_boxes_count = COALESCE(EXCLUDED.full_boxes_count, ims_dailyprod.full_boxes_count),
        loose_box_qty = COALESCE(EXCLUDED.loose_box_qty, ims_dailyprod.loose_box_qty),
-       total_stickers = COALESCE(EXCLUDED.total_stickers, ims_dailyprod.total_stickers)
+       total_stickers = COALESCE(EXCLUDED.total_stickers, ims_dailyprod.total_stickers),
+       internal_create_user = COALESCE(EXCLUDED.internal_create_user, ims_dailyprod.internal_create_user),
+       internal_create_date = COALESCE(EXCLUDED.internal_create_date, ims_dailyprod.internal_create_date),
+       system_generate_user = COALESCE(EXCLUDED.system_generate_user, ims_dailyprod.system_generate_user),
+       system_generate_date = COALESCE(EXCLUDED.system_generate_date, ims_dailyprod.system_generate_date)
      RETURNING doc_no`,
     [
       d,
@@ -2061,6 +2158,10 @@ export const updateDailyProdStickerStatus = async (doc_no, standard_id = null, f
       snapFullBoxes ?? "",
       snapLooseQty ?? "",
       snapTotalStickers ?? "",
+      snapInternalUser ?? "",
+      snapInternalDate ?? "",
+      snapSystemUser ?? "",
+      snapSystemDate ?? "",
     ]
   );
 };
@@ -2119,7 +2220,7 @@ const FIND_BOX_DETAILED_SELECT = `
       ps.unit,
       NULL::text AS party_rate_cust_code
     FROM ims_box_table b
-    LEFT JOIN ims_dailyprod j ON TRIM(b.packing_number::TEXT) = TRIM(j.doc_no::TEXT)
+    LEFT JOIN ims_dailyprod j ON b.packing_number = j.doc_no::text
     LEFT JOIN ims_stock_adjustment sa_adj
       ON b.sa_id = sa_adj.adjustment_id
      AND b.sa_entry_type = 'stock_in'
@@ -2135,7 +2236,7 @@ export const findBoxDetailed = async ({ box_uid, box_no_uid } = {}) => {
   if (noUid) {
     const rows = await dbQuery(
       `${FIND_BOX_DETAILED_SELECT}
-       WHERE b.box_no_uid::text = $1::text
+       WHERE b.box_no_uid = $1::text
        LIMIT 1`,
       [noUid]
     );
@@ -2144,9 +2245,9 @@ export const findBoxDetailed = async ({ box_uid, box_no_uid } = {}) => {
   if (uid) {
     const rows = await dbQuery(
       `${FIND_BOX_DETAILED_SELECT}
-       WHERE b.box_uid::text = $1::text
+       WHERE b.box_uid = $1::integer
        LIMIT 1`,
-      [uid]
+      [parseInt(uid, 10)]
     );
     if (rows?.[0]) return rows[0];
   }
@@ -2176,7 +2277,7 @@ export const findBoxDetailedByUidOrNoUid = async (id) => {
   const rows = await dbQuery(
     `${FIND_BOX_DETAILED_SELECT}
      WHERE (
-       b.box_no_uid::text = $1::text
+       b.box_no_uid = $1::text
        OR ($2::boolean AND b.box_uid::text = $1::text)
      )
      LIMIT 1`,
@@ -2208,7 +2309,7 @@ export const findBoxesDetailed = async ({ box_uids, packing_number }) => {
       ps.unit,
       NULL::text AS party_rate_cust_code
     FROM ims_box_table b
-    LEFT JOIN ims_dailyprod j ON TRIM(b.packing_number::TEXT) = TRIM(j.doc_no::TEXT)
+    LEFT JOIN ims_dailyprod j ON b.packing_number = j.doc_no::text
     LEFT JOIN ims_stock_adjustment sa_adj
       ON b.sa_id = sa_adj.adjustment_id
      AND b.sa_entry_type = 'stock_in'
@@ -2219,10 +2320,10 @@ export const findBoxesDetailed = async ({ box_uids, packing_number }) => {
 
   const params = [];
   if (box_uids && box_uids.length > 0) {
-    query += ` b.box_uid::TEXT = ANY($1::TEXT[]) `;
-    params.push(box_uids.map(id => String(id)));
+    query += ` b.box_uid = ANY($1::integer[]) `;
+    params.push(box_uids.map(id => parseInt(id, 10)));
   } else {
-    query += ` b.packing_number::TEXT = $1::TEXT `;
+    query += ` b.packing_number = $1 `;
     params.push(String(packing_number));
   }
 
@@ -2230,54 +2331,6 @@ export const findBoxesDetailed = async ({ box_uids, packing_number }) => {
 
   const rows = await dbQuery(query, params);
   return rows || [];
-};
-
-export const insertDownloadLog = async ({
-  box_uid,
-  cust_at_time,
-  downloaded_by,
-  download_type = "single",
-  bulk_packing_number = null,
-  bulk_sticker_count = null,
-  download_source = null,
-}) => {
-  const isBulkPack =
-    String(download_type || "").toLowerCase() === "bulk_pack" &&
-    bulk_packing_number != null &&
-    String(bulk_packing_number).trim() !== "";
-  const uid =
-    isBulkPack
-      ? null
-      : box_uid != null && Number.isFinite(Number(box_uid)) && Number(box_uid) > 0
-        ? Number(box_uid)
-        : null;
-  if (!isBulkPack && uid == null) {
-    throw new Error("insertDownloadLog: box_uid required for non bulk_pack rows");
-  }
-
-  const src =
-    download_source != null && String(download_source).trim() !== ""
-      ? String(download_source).trim().slice(0, 48)
-      : null;
-
-  const [row] = await dbQuery(
-    `INSERT INTO ims_box_download_log
-      (box_uid, cust_at_time, downloaded_by, download_type, bulk_packing_number, bulk_sticker_count, download_source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING *`,
-    [
-      uid,
-      cust_at_time,
-      downloaded_by,
-      download_type,
-      bulk_packing_number != null && String(bulk_packing_number).trim() !== ""
-        ? String(bulk_packing_number).trim()
-        : null,
-      bulk_sticker_count != null && Number(bulk_sticker_count) > 0 ? Number(bulk_sticker_count) : null,
-      src,
-    ]
-  );
-  return row;
 };
 
 export const getDownloadLogByBox = async (box_uid) => {
@@ -2288,7 +2341,7 @@ export const getDownloadLogByBox = async (box_uid) => {
         l.log_id,
         l.downloaded_at,
         l.download_type,
-        l.cust_at_time,
+        l.acc_name,
         l.download_source
       FROM ims_box_download_log l
       WHERE l.box_uid = $1
@@ -2297,13 +2350,13 @@ export const getDownloadLogByBox = async (box_uid) => {
         l2.log_id,
         l2.downloaded_at,
         l2.download_type,
-        l2.cust_at_time,
+        l2.acc_name,
         l2.download_source
       FROM ims_box_download_log l2
       INNER JOIN ims_box_table b ON b.box_uid = $1
       WHERE l2.download_type = 'bulk_pack'
-        AND l2.bulk_packing_number IS NOT NULL
-        AND l2.bulk_packing_number = b.packing_number::text
+        AND l2.packing_number IS NOT NULL
+        AND l2.packing_number = b.packing_number::text
     ) x
     ORDER BY x.downloaded_at DESC
   `,
@@ -2312,7 +2365,8 @@ export const getDownloadLogByBox = async (box_uid) => {
 };
 
 export const getDownloadSummaryByPacking = async (packing_number) => {
-  return await dbQuery(`
+  const pn = String(packing_number);
+  const boxes = await dbQuery(`
     SELECT
       b.box_uid,
       b.box_no_uid,
@@ -2320,35 +2374,55 @@ export const getDownloadSummaryByPacking = async (packing_number) => {
       b.is_loose,
       b.override_cust,
       b.download_count,
-      b.packing_number as packing_no,
-      COALESCE(
-        JSON_AGG(
-          JSON_BUILD_OBJECT(
-            'log_id',           l.log_id,
-            'downloaded_at',    l.downloaded_at,
-            'type',             l.download_type,
-            'cust_at_time',     l.cust_at_time,
-            'download_source',  l.download_source
-          ) ORDER BY l.downloaded_at DESC
-        ) FILTER (WHERE l.log_id IS NOT NULL),
-        '[]'
-      ) AS download_history
+      b.packing_number as packing_no
     FROM ims_box_table b
-    LEFT JOIN ims_box_download_log l ON (
-      l.box_uid = b.box_uid
-      OR (
-        l.download_type = 'bulk_pack'
-        AND l.bulk_packing_number IS NOT NULL
-        AND l.bulk_packing_number = b.packing_number::text
-      )
-    )
-    WHERE b.packing_number::text = $1::text
+    WHERE b.packing_number = $1
       AND b.is_deleted = false
       AND NOT (b.sa_entry_type = 'stock_in' AND b.sa_id IS NOT NULL)
       ${SQL_EXCLUDE_SA_BOX_NO_UID}
-    GROUP BY b.box_uid
     ORDER BY b.box_uid ASC
-  `, [String(packing_number)]);
+  `, [pn]);
+
+  if (!boxes.length) return [];
+
+  const boxUids = boxes.map(b => b.box_uid);
+  const logs = await dbQuery(`
+    SELECT
+      l.log_id,
+      l.box_uid,
+      l.downloaded_at,
+      l.download_type,
+      l.acc_name,
+      l.download_source,
+      l.packing_number
+    FROM ims_box_download_log l
+    WHERE (l.box_uid = ANY($1::int[]) OR (l.download_type = 'bulk_pack' AND l.packing_number = $2::text))
+    ORDER BY l.downloaded_at DESC
+  `, [boxUids, pn]);
+
+  return boxes.map(box => {
+    const boxLogs = logs.filter(l => 
+      l.box_uid === box.box_uid || 
+      (l.download_type === 'bulk_pack' && l.packing_number === box.packing_no)
+    );
+    return {
+      ...box,
+      box_uid: box.box_uid,
+      box_no_uid: box.box_no_uid,
+      qty: box.qty,
+      is_loose: box.is_loose,
+      override_cust: box.override_cust,
+      download_count: box.download_count,
+      packing_no: box.packing_no,
+      download_history: boxLogs.map(l => ({
+        log_id: l.log_id,
+        downloaded_at: l.downloaded_at,
+        type: l.download_type,
+        acc_name: l.acc_name,
+        download_source: l.download_source
+      }))
+    };
+  });
 };
 
 
@@ -2362,48 +2436,25 @@ async function getStickerBoxManagementList(options = {}) {
     sort = {} 
   } = options;
 
-  /** Packing-wide `bulk_pack` lives on `bulk_packing_number` (box_uid NULL). Per-box singles stay on `box_uid`. */
+  /** Packing-wide `bulk_pack` rows use `packing_number` with `box_uid` NULL. */
   const lastLogLateral = `
     LEFT JOIN LATERAL (
-      SELECT
-        ev.downloaded_at,
-        ev.downloaded_by_name,
-        ev.download_type,
-        ev.bulk_sticker_count
-      FROM LATERAL (
-        SELECT
-          dl.downloaded_at,
-          u.name AS downloaded_by_name,
-          dl.download_type,
-          NULL::integer AS bulk_sticker_count
-        FROM ims_box_download_log dl
-        LEFT JOIN ${M.USERS} u ON u.id = dl.downloaded_by
-        WHERE dl.box_uid = b.box_uid
-          AND (dl.download_type IS DISTINCT FROM 'bulk_pack')
-        UNION
-        SELECT
-          dl2.downloaded_at,
-          u2.name AS downloaded_by_name,
-          dl2.download_type,
-          dl2.bulk_sticker_count
-        FROM ims_box_download_log dl2
-        LEFT JOIN ${M.USERS} u2 ON u2.id = dl2.downloaded_by
-        WHERE dl2.download_type = 'bulk_pack'
-          AND dl2.bulk_packing_number IS NOT NULL
-          AND TRIM(dl2.bulk_packing_number::text) = TRIM(b.packing_number::text)
-      ) ev
-      ORDER BY ev.downloaded_at DESC NULLS LAST
-      LIMIT 1
-    ) last_log ON true
+      SELECT dl.downloaded_at, u.name AS downloaded_by_name, dl.download_type, dl.sticker_count
+      FROM ims_box_download_log dl
+      LEFT JOIN ${M.USERS} u ON u.id = dl.downloaded_by
+      WHERE dl.box_uid = b.box_uid
+      ORDER BY dl.downloaded_at DESC LIMIT 1
+    ) last_single ON true
+    LEFT JOIN LATERAL (
+      SELECT dl.downloaded_at, u.name AS downloaded_by_name, dl.download_type, dl.sticker_count
+      FROM ims_box_download_log dl
+      LEFT JOIN ${M.USERS} u ON u.id = dl.downloaded_by
+      WHERE dl.download_type = 'bulk_pack' AND dl.packing_number = b.packing_number::text
+      ORDER BY dl.downloaded_at DESC LIMIT 1
+    ) last_bulk ON true
   `;
 
-  const packingBulkMaxAt = `
-    (SELECT MAX(bl.downloaded_at)
-     FROM ims_box_download_log bl
-     WHERE bl.download_type = 'bulk_pack'
-       AND bl.bulk_packing_number IS NOT NULL
-       AND TRIM(bl.bulk_packing_number::text) = TRIM(b.packing_number::text))
-  `;
+  const lastDownloadedAtSql = `GREATEST(COALESCE(last_single.downloaded_at, '1900-01-01'), COALESCE(last_bulk.downloaded_at, '1900-01-01'), b.created_at)`;
 
   const values = [];
   let i = 1;
@@ -2413,30 +2464,12 @@ async function getStickerBoxManagementList(options = {}) {
   if (filters.from_date) {
     values.push(filters.from_date);
     const fromIdx = i++;
-    conditions.push(`(
-      COALESCE(last_log.downloaded_at, b.created_at) >= $${fromIdx}::timestamp
-      OR EXISTS (
-        SELECT 1 FROM ims_box_download_log bl
-        WHERE bl.download_type = 'bulk_pack'
-          AND bl.bulk_packing_number IS NOT NULL
-          AND TRIM(bl.bulk_packing_number::text) = TRIM(b.packing_number::text)
-          AND bl.downloaded_at >= $${fromIdx}::timestamp
-      )
-    )`);
+    conditions.push(`${lastDownloadedAtSql} >= $${fromIdx}::timestamp`);
   }
   if (filters.to_date) {
     values.push(filters.to_date);
     const toIdx = i++;
-    conditions.push(`(
-      COALESCE(last_log.downloaded_at, b.created_at) <= $${toIdx}::timestamp
-      OR EXISTS (
-        SELECT 1 FROM ims_box_download_log bl
-        WHERE bl.download_type = 'bulk_pack'
-          AND bl.bulk_packing_number IS NOT NULL
-          AND TRIM(bl.bulk_packing_number::text) = TRIM(b.packing_number::text)
-          AND bl.downloaded_at <= $${toIdx}::timestamp
-      )
-    )`);
+    conditions.push(`${lastDownloadedAtSql} <= $${toIdx}::timestamp`);
   }
 
   if (search) {
@@ -2462,24 +2495,23 @@ async function getStickerBoxManagementList(options = {}) {
     "item_code": "dp.item_dcode",
     "acc_name": "COALESCE(b.override_cust::text, dp.acc_code::text)",
     "download_count": "b.download_count",
-    "last_downloaded_at": `COALESCE(last_log.downloaded_at, ${packingBulkMaxAt}, b.created_at)`,
+    "last_downloaded_at": lastDownloadedAtSql,
   };
 
   const sortByField = ALLOWED_SORT_FIELDS[sort.by] || "b.created_at";
   const sortOrder = sort.order?.toUpperCase() === "ASC" ? "ASC" : "DESC";
 
   const safePage = Math.max(1, parseInt(page) || 1);
-  const safeLimit = Math.min(1000, Math.max(1, parseInt(limit) || 10));
+  const safeLimit = Math.min(100000, Math.max(1, parseInt(limit) || 10));
   const offset = (safePage - 1) * safeLimit;
 
-  const countValues = [...values];
   const countResult = await dbQuery(
     `SELECT COUNT(*) AS count 
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '-') = NULLIF(TRIM(dp.doc_no::text), '-')
+     LEFT JOIN ims_dailyprod dp ON trim(b.packing_number::text) = trim(dp.doc_no::text)
      ${lastLogLateral}
      ${whereClause}`,
-    countValues
+    values
   );
   const count = countResult[0]?.count || 0;
 
@@ -2493,13 +2525,18 @@ async function getStickerBoxManagementList(options = {}) {
       b.override_cust,
       b.download_count,
       dp.item_dcode AS itemdcode,
+      dp.item_code,
+      dp.item_desc,
       COALESCE(b.override_cust::text, dp.acc_code::text) AS acc_name, 
-      COALESCE(last_log.downloaded_at, ${packingBulkMaxAt}, b.created_at) AS last_downloaded_at,
-      last_log.downloaded_by_name AS last_downloaded_by_name,
-      last_log.download_type AS last_download_type,
-      last_log.bulk_sticker_count AS last_bulk_sticker_count
+      ${lastDownloadedAtSql} AS last_downloaded_at,
+      CASE WHEN last_single.downloaded_at >= COALESCE(last_bulk.downloaded_at, '1900-01-01') 
+           THEN last_single.downloaded_by_name ELSE last_bulk.downloaded_by_name END AS last_downloaded_by_name,
+      CASE WHEN last_single.downloaded_at >= COALESCE(last_bulk.downloaded_at, '1900-01-01') 
+           THEN last_single.download_type ELSE last_bulk.download_type END AS last_download_type,
+      CASE WHEN last_single.downloaded_at >= COALESCE(last_bulk.downloaded_at, '1900-01-01') 
+           THEN last_single.sticker_count ELSE last_bulk.sticker_count END AS last_bulk_sticker_count
     FROM ims_box_table b
-    LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '-') = NULLIF(TRIM(dp.doc_no::text), '-')
+    LEFT JOIN ims_dailyprod dp ON trim(b.packing_number::text) = trim(dp.doc_no::text)
     ${lastLogLateral}
     ${whereClause}
     ORDER BY ${sortByField} ${sortOrder} NULLS LAST
@@ -2516,124 +2553,10 @@ async function getStickerBoxManagementList(options = {}) {
   };
 }
 
-/** One row per `ims_box_download_log` entry (default for sticker management UI). */
-async function getStickerDownloadLogList(options = {}) {
-  const { filters = {}, search = null, page = 1, limit = 10, sort = {} } = options;
-
-  const values = [];
-  let i = 1;
-  const conditions = ["1=1"];
-
-  if (filters.from_date) {
-    values.push(filters.from_date);
-    conditions.push(`l.downloaded_at >= $${i++}::timestamp`);
-  }
-  if (filters.to_date) {
-    values.push(filters.to_date);
-    conditions.push(`l.downloaded_at <= $${i++}::timestamp`);
-  }
-
-  if (search) {
-    const s = `%${sanitizeSearch(search)}%`;
-    values.push(s);
-    const idx = i++;
-    conditions.push(`(
-      b.box_no_uid ILIKE $${idx} OR
-      l.box_uid::text ILIKE $${idx} OR
-      b.packing_number::text ILIKE $${idx} OR
-      l.bulk_packing_number::text ILIKE $${idx} OR
-      l.cust_at_time ILIKE $${idx} OR
-      dp.item_code ILIKE $${idx} OR
-      dp.acc_name ILIKE $${idx}
-    )`);
-  }
-
-  const whereClause = `WHERE ${conditions.join(" AND ")}`;
-
-  const packingKeySql = `COALESCE(NULLIF(TRIM(b.packing_number::text), '-'), NULLIF(TRIM(l.bulk_packing_number::text), '-'))`;
-  const customerAccCodeSql = `COALESCE(NULLIF(TRIM(b.override_cust::text), '-'), NULLIF(TRIM(dp.acc_code::text), '-'))`;
-  const customerDisplaySql = `COALESCE(NULLIF(TRIM(l.cust_at_time::text), '-'), dp.acc_name, ${customerAccCodeSql})`;
-
-  const SORT_MAP = {
-    last_downloaded_at: "l.downloaded_at",
-    last_download_type: "l.download_type",
-    packing_number: packingKeySql,
-    box_no_uid: "b.box_no_uid",
-    box_uid: "l.box_uid",
-    created_at: "l.downloaded_at",
-    item_code: "dp.item_code",
-    acc_name: customerDisplaySql,
-    download_source: "l.download_source",
-  };
-
-  const sortByField = SORT_MAP[sort.by] || "l.downloaded_at";
-  const sortOrder = sort.order?.toUpperCase() === "ASC" ? "ASC" : "DESC";
-
-  const safePage = Math.max(1, parseInt(page) || 1);
-  const safeLimit = Math.min(1000, Math.max(1, parseInt(limit) || 10));
-  const offset = (safePage - 1) * safeLimit;
-
-  const baseFrom = `
-    FROM ims_box_download_log l
-    LEFT JOIN ${M.USERS} u ON u.id = l.downloaded_by
-    LEFT JOIN ims_box_table b ON b.box_uid = l.box_uid AND b.is_deleted = false
-    LEFT JOIN ims_dailyprod dp ON dp.doc_no::text = ${packingKeySql}
-  `;
-
-  const countResult = await dbQuery(
-    `SELECT COUNT(*)::int AS count ${baseFrom} ${whereClause}`,
-    values
-  );
-  const count = countResult[0]?.count || 0;
-
-  values.push(safeLimit, offset);
-  const rows = await dbQuery(
-    `SELECT
-        l.log_id,
-        l.box_uid,
-        b.box_no_uid,
-        ${packingKeySql} AS packing_number,
-        b.override_cust,
-        l.cust_at_time,
-        ${customerAccCodeSql} AS acc_code,
-        ${customerDisplaySql} AS acc_name,
-        dp.item_dcode AS itemdcode,
-        dp.item_code,
-        dp.item_desc,
-        CASE
-          WHEN l.download_type = 'bulk_pack' THEN COALESCE(l.bulk_sticker_count, 0)
-          ELSE 1
-        END AS event_sticker_count,
-        l.downloaded_at AS last_downloaded_at,
-        u.name AS last_downloaded_by_name,
-        l.download_type AS last_download_type,
-        l.bulk_sticker_count AS last_bulk_sticker_count,
-        l.download_source,
-        CASE
-          WHEN b.box_no_uid IS NOT NULL AND TRIM(b.box_no_uid::text) <> '-' THEN b.box_no_uid
-          WHEN l.download_type = 'bulk_pack' THEN 'ALL'
-          ELSE COALESCE(l.box_uid::text, CONCAT('log-', l.log_id::text))
-        END AS primary_label
-    ${baseFrom}
-    ${whereClause}
-    ORDER BY ${sortByField} ${sortOrder} NULLS LAST
-    LIMIT $${i++} OFFSET $${i++}`,
-    values
-  );
-
-  return {
-    data: rows,
-    total: parseInt(count, 10),
-    page: safePage,
-    limit: safeLimit,
-    totalPages: Math.ceil(parseInt(count, 10) / safeLimit),
-  };
-}
-
 export const getStickerManagementList = async (options = {}) => {
   const mode = String(options.list_mode || "log").toLowerCase();
   if (mode === "box") return getStickerBoxManagementList(options);
-  return getStickerDownloadLogList(options);
+  return listStickerDownloadLogs(options);
 };
 
 export { enrichOverrideCustomerListRows, getOverrideRequestById, insertOverrideRequest, listOverrideRequests, updateOverrideRequest } from "../utils/box/overrideCustomerList.js";

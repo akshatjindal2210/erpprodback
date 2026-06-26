@@ -7,6 +7,9 @@ import { IMS_TABLES as T } from "../../../../config/dbTables.js";
 import { canonicalCode, getImsMapsSafe } from "../erp-api/imsLookup.js";
 import { buildPartyRateAccNameMap, resolvePackingCustomerName } from "./packingEntryCustomers.js";
 import { invalidateDailyProdGeneratedCache } from "./dailyProdList.js";
+import { fetchFromIMS } from "../../services/ims.service.js";
+import { buildImsDocFilterMany } from "../erp-api/imsPackRow.js";
+import { parsePackRow } from "./packRowParse.js";
 
 function isMissingAccName(name) {
   if (name == null || String(name).trim() === "") return true;
@@ -46,7 +49,11 @@ export async function backfillDailyprodStickerColumns() {
        bx.total_stickers AS bx_total_stickers,
        bx.full_boxes_count AS bx_full_boxes_count,
        bx.qty_per_box AS bx_qty_per_box,
-       bx.loose_box_qty AS bx_loose_box_qty
+       bx.loose_box_qty AS bx_loose_box_qty,
+       bx.system_generate_date AS bx_system_generate_date,
+       bx.system_generate_user_name AS bx_system_generate_user_name,
+       dp.internal_create_user,
+       dp.internal_create_date
      FROM ${T.DAILYPROD} dp
      LEFT JOIN ${T.PACKING_STANDARD} ps
        ON ps.standard_id = dp.packing_standard_id AND ps.is_deleted = false
@@ -56,7 +63,9 @@ export async function backfillDailyprodStickerColumns() {
          COUNT(*)::int AS total_stickers,
          COUNT(*) FILTER (WHERE NOT COALESCE(b.is_loose, false))::int AS full_boxes_count,
          MAX(b.qty) FILTER (WHERE NOT COALESCE(b.is_loose, false)) AS qty_per_box,
-         MAX(b.qty) FILTER (WHERE COALESCE(b.is_loose, false)) AS loose_box_qty
+         MAX(b.qty) FILTER (WHERE COALESCE(b.is_loose, false)) AS loose_box_qty,
+         MIN(b.created_at) AS system_generate_date,
+         (SELECT u.name FROM ${T.BOX_TABLE} b2 LEFT JOIN mst_users u ON u.id = b2.created_by WHERE b2.packing_number = dp.doc_no::text AND b2.is_deleted = false ORDER BY b2.created_at ASC LIMIT 1) AS system_generate_user_name
        FROM ${T.BOX_TABLE} b
        WHERE b.is_deleted = false
          AND trim(b.packing_number::text) = trim(dp.doc_no::text)
@@ -69,6 +78,9 @@ export async function backfillDailyprodStickerColumns() {
          OR dp.item_desc IS NULL OR trim(dp.item_desc) = ''
          OR dp.qty_per_box IS NULL
          OR dp.total_stickers IS NULL
+         OR dp.system_generate_date IS NULL
+         OR dp.internal_create_user IS NULL
+         OR dp.internal_create_date IS NULL
        )`
   );
 
@@ -78,6 +90,30 @@ export async function backfillDailyprodStickerColumns() {
     getImsMapsSafe(),
     buildPartyRateAccNameMap(),
   ]);
+
+  // Batch fetch missing internal info from IMS
+  const missingInternalDocs = rows
+    .filter(r => !r.internal_create_user || !r.internal_create_date)
+    .map(r => r.doc_no);
+  
+  const imsInfoMap = new Map();
+  if (missingInternalDocs.length > 0) {
+    try {
+      const filter = buildImsDocFilterMany(missingInternalDocs);
+      const imsRecords = await fetchFromIMS("pack", filter);
+      for (const r of imsRecords || []) {
+        const p = parsePackRow(r);
+        if (p.doc_no) {
+          imsInfoMap.set(String(p.doc_no), {
+            user: p.internal_create_user,
+            date: p.internal_create_date
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Backfill: Failed to fetch IMS info", err);
+    }
+  }
 
   let updated = 0;
   for (const row of rows) {
@@ -93,6 +129,12 @@ export async function backfillDailyprodStickerColumns() {
     const category_id = row.category_id ?? row.ps_category_id ?? null;
     const category_name = row.category_name ?? row.ps_category_name ?? null;
     const unit = row.unit ?? row.ps_unit ?? "PCS";
+    const system_generate_date = row.bx_system_generate_date ?? null;
+    const system_generate_user = row.bx_system_generate_user_name ?? null;
+
+    const imsInfo = imsInfoMap.get(String(row.doc_no));
+    const internal_create_user = row.internal_create_user ?? imsInfo?.user ?? null;
+    const internal_create_date = row.internal_create_date ?? imsInfo?.date ?? null;
 
     await dbQuery(
       `UPDATE ${T.DAILYPROD}
@@ -111,7 +153,11 @@ export async function backfillDailyprodStickerColumns() {
              CASE WHEN $12::text IS NOT NULL AND trim($12::text) <> '' THEN $12::date ELSE NULL END
            ),
            job_card_no = COALESCE(NULLIF(trim(job_card_no), ''), NULLIF(trim($13::text), '')),
-           total_qty = COALESCE(total_qty, NULLIF(trim($14::text), '')::numeric)
+           total_qty = COALESCE(total_qty, NULLIF(trim($14::text), '')::numeric),
+           system_generate_date = COALESCE(system_generate_date, $15::timestamp with time zone),
+           system_generate_user = COALESCE(system_generate_user, $16::text),
+           internal_create_user = COALESCE(internal_create_user, $17::text),
+           internal_create_date = COALESCE(internal_create_date, $18::timestamp with time zone)
        WHERE doc_no = $1::integer`,
       [
         row.doc_no,
@@ -128,6 +174,10 @@ export async function backfillDailyprodStickerColumns() {
         row.doc_dt,
         row.job_card_no,
         row.total_qty != null ? String(row.total_qty) : null,
+        system_generate_date,
+        system_generate_user,
+        internal_create_user,
+        internal_create_date,
       ]
     );
     updated += 1;

@@ -2,7 +2,8 @@ import express from "express";
 import { getInventoryInwards, getPackingAreaList, getPackingAreaBoxesList, getInventoryInwardById, createInventoryInward, updateInventoryInward, deleteInventoryInward, getInventoryInwardsViews, validateInwardBoxAtLocation, batchScanInwardBoxes } from "../controllers/inventoryInward.controller.js";
 
 import { authenticate } from "../middleware/auth.js";
-import { accessControl, dynamicAccessControl } from "../../core/middleware/accessControl.js";
+import { accessControl } from "../../core/middleware/accessControl.js";
+import { helperAccess } from "../config/helperViews.js";
 
 const router = express.Router();
 
@@ -32,6 +33,6 @@ router.post("/update", authenticate, accessControl("inventory_inwards", ["edit",
 router.post("/delete", authenticate, accessControl("inventory_inwards", "delete"), deleteInventoryInward);
 
 // Views (Helper API)
-router.post("/helper", authenticate, dynamicAccessControl(), getInventoryInwardsViews);
+router.post("/helper", authenticate, helperAccess("inventoryInwards"), getInventoryInwardsViews);
 
 export default router;

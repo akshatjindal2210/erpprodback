@@ -3,7 +3,7 @@ import { findPackingStandards, findPackingStandard, findPackingStandardDuplicate
 import { logActivity } from "../../core/utils/logActivity.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
-import { resolvePackingStandardViewsSelectFields } from "../config/view-fields/packingStandard.js";
+import { resolveViewsFields } from "../config/helperViews.js";
 import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { enrichRowsWithIMS } from "../utils/erp-api/imsLookup.js";
@@ -258,13 +258,7 @@ export const getPackingStandardsViews = async (req, res) => {
       });
     }
 
-    const fields = resolvePackingStandardViewsSelectFields({ permission_module, permission_action });
-    if (fields == null) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid permission_module / permission_action for packing standard views"
-      });
-    }
+    const fields = resolveViewsFields("packingStandard", { permission_module, permission_action });
 
     const result = await findPackingStandards({
       filters: { approved: true },

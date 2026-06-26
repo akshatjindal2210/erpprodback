@@ -22,8 +22,6 @@ export async function createDailyProdTable() {
     CREATE INDEX IF NOT EXISTS idx_dailyprod_item_dcode ON ${T.DAILYPROD} (item_dcode);
     CREATE INDEX IF NOT EXISTS idx_dailyprod_sticker_generated ON ${T.DAILYPROD} (sticker_generated);
     CREATE INDEX IF NOT EXISTS idx_dailyprod_job_card_no ON ${T.DAILYPROD} (job_card_no);
-    CREATE INDEX IF NOT EXISTS idx_dailyprod_item_code ON ${T.DAILYPROD} (item_code);
-    CREATE INDEX IF NOT EXISTS idx_dailyprod_acc_name ON ${T.DAILYPROD} (acc_name);
   `);
 
   /** Extra sticker / display fields — columns only (no JSON snapshot). */
@@ -41,11 +39,27 @@ export async function createDailyProdTable() {
       patchCol("full_boxes_count", "INTEGER"),
       patchCol("loose_box_qty", "NUMERIC(18,3)"),
       patchCol("total_stickers", "INTEGER"),
+      patchCol("internal_create_user", "VARCHAR(255)"),
+      patchCol("internal_create_date", "TIMESTAMP WITH TIME ZONE"),
+      patchCol("system_generate_user", "VARCHAR(255)"),
+      patchCol("system_generate_date", "TIMESTAMP WITH TIME ZONE"),
+    ],
+    indexes: [
+      `CREATE INDEX IF NOT EXISTS idx_dailyprod_item_code ON ${T.DAILYPROD} (item_code)`,
+      `CREATE INDEX IF NOT EXISTS idx_dailyprod_acc_name ON ${T.DAILYPROD} (acc_name)`,
     ],
   });
+}
 
+/** Run after ims_box_table schema is ready (uses box.packing_number). */
+export async function backfillDailyProdStickerColumnsOnStartup() {
+  const { columnExists } = await import("../../../../config/ensureDbColumns.js");
+  if (!(await columnExists(dbQuery, T.BOX_TABLE, "packing_number"))) {
+    return { updated: 0 };
+  }
   const { updated } = await backfillDailyprodStickerColumns();
   if (updated > 0) {
     console.log(`✅ Backfilled ${updated} ims_dailyprod sticker column row(s)`);
   }
+  return { updated };
 }

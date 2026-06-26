@@ -123,7 +123,7 @@ export const getModulesViews = async (req, res) => {
       sort: { by: sortBy || "sort_order", order: normalizedOrder },
       page: page || 1,
       limit: limit || 5000,
-      fields: ["id", "name", "label", "app_type", "sort_order"],
+      fields: ["id", "name", "label", "app_type", "sort_order", "is_active"],
       filters: { is_active: true }
     });
     

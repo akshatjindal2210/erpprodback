@@ -50,6 +50,8 @@ const BOX_SORT = {
   packing_number: "packing_number",
   qty: "b.qty",
   created_at: "b.created_at",
+  doc_dt: "sa.doc_dt",
+  job_card_no: "sa.job_card_no",
 };
 
 function resolveBoxOrder(sortCol, sortOrder) {
@@ -166,6 +168,8 @@ function packingAreaBaseSql(whereClause) {
       ${BOX_ITEM_SQL} AS item_dcode,
       ${BOX_CUST_SQL} AS acc_code,
       NULLIF(TRIM(sa.financial_year::text), '') AS sa_financial_year,
+      sa.doc_dt,
+      sa.job_card_no,
       COALESCE(b.qty, 0)::int AS qty
     FROM ims_box_table b
     LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
@@ -512,6 +516,8 @@ export async function findPackingAreaByPacking(options = {}) {
     `WITH grouped AS (
        SELECT packing_number, item_dcode, acc_code,
          MAX(sa_financial_year) AS sa_financial_year,
+         MAX(doc_dt) AS doc_dt,
+         MAX(job_card_no) AS job_card_no,
          SUM(qty)::bigint AS stock_qty,
          COUNT(*)::int AS box_count
        FROM (${baseSql}) raw
@@ -588,7 +594,9 @@ export async function findPackingAreaBoxes(options = {}) {
        COALESCE(b.qty, 0)::int AS qty,
        COALESCE(b.is_loose, false) AS is_loose,
        b.created_at,
-       sa.financial_year AS sa_financial_year
+       sa.financial_year AS sa_financial_year,
+       sa.doc_dt,
+       sa.job_card_no
      FROM ims_box_table b
      LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
      ${where}

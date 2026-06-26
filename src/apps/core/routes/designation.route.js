@@ -1,7 +1,7 @@
 import express from "express";
 import { getDesignations, getDesignationById, createDesignation, updateDesignationData, deleteDesignationData, getDesignationsHelper } from "../controllers/designation.controller.js";
 import { authenticate } from "../middleware/auth.js";
-import { accessControl, dynamicAccessControl } from "../middleware/accessControl.js";
+import { accessControl } from "../middleware/accessControl.js";
 
 const router = express.Router();
 

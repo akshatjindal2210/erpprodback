@@ -52,6 +52,8 @@ export const DB_TABLES = {
     "ims_box_download_log",
     "ims_box_override_request",
     "ims_dailyprod",
+    "ims_schedule_plan",
+    "ims_schedule_plan_transaction",
     "ims_transaction_box",
     "ims_audit_master",
     "ims_audit_locations",

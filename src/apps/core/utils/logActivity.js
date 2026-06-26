@@ -31,6 +31,7 @@ export const logActivity = async (
 
     await ActivityLog.create({
       user_id: userId || req?.user?.id || null,
+      user_name: req?.user?.name || null,
       app_type: appType,
       module: entity,
       action_type: String(action).toUpperCase(),

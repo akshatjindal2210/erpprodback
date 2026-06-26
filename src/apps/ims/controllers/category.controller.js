@@ -1,6 +1,6 @@
 import { findCategories, findCategory } from "../models/category.model.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { resolveCategoryViewsSelectFields } from "../config/view-fields/category.js";
+import { resolveViewsFields } from "../config/helperViews.js";
 import { extractListParams } from "../../core/utils/queryHelper.js";
 
 export const getCategories = async (req, res) => {
@@ -50,13 +50,7 @@ export const getCategoriesViews = async (req, res) => {
       return res.json({ success: true, data: { id: data.id, name: data.name } });
     }
 
-    const fields = resolveCategoryViewsSelectFields({ permission_module, permission_action });
-    if (fields == null) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid permission_module / permission_action for category views"
-      });
-    }
+    const fields = resolveViewsFields("category", { permission_module, permission_action });
 
     const result = await findCategories({
       filters: {},

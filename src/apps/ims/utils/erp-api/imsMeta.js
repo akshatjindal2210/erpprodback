@@ -2,6 +2,15 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 const imsAls = new AsyncLocalStorage();
 
+const IMS_INTERNAL_MSG = /requested\s*data|requested\s*date|`requested/i;
+
+/** Strip IMS-internal keys (`requestedData`, etc.) — never show those on the client. */
+export function toPublicImsMessage(message, fallback = "ERP (IMS) data could not be loaded.") {
+  const m = String(message ?? "").trim();
+  if (!m || IMS_INTERNAL_MSG.test(m)) return fallback;
+  return m;
+}
+
 /**
  * Express middleware: tracks IMS / internal-ERP issues during a request and merges `ims_meta` into successful JSON responses so the client can show a warning toast.
  */
@@ -36,5 +45,13 @@ export function noteImsIssue(message) {
   const s = imsAls.getStore();
   if (!s || message == null || String(message).trim() === "") return;
   s.unavailable = true;
-  s.reasons.push(String(message).trim());
+  s.reasons.push(toPublicImsMessage(message));
+}
+
+/** Schedule-planning (and similar) APIs: plain JSON only — no `ims_meta` on the response. */
+export function clearImsMetaForResponse() {
+  const s = imsAls.getStore();
+  if (!s) return;
+  s.unavailable = false;
+  s.reasons.length = 0;
 }

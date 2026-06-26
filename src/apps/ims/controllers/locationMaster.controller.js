@@ -1,7 +1,7 @@
 import { findLocations, findLocation, findLocationDuplicate, insertLocation, updateLocations, deleteLocations, LOCATION_DEFAULT_FIELDS } from "../models/locationMaster.model.js";
 import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
-import { resolveLocationViewsSelectFields } from "../config/view-fields/location.js";
+import { resolveViewsFields } from "../config/helperViews.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
@@ -315,7 +315,10 @@ export const getLocationsViews = async (req, res) => {
     const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, { sortBy: "location_no", order: "ASC" });
 
     if (id) {
-      const fields = resolveLocationViewsSelectFields({ permission_module: req.body.permission_module, permission_action: req.body.permission_action });
+      const fields = resolveViewsFields("locations", {
+        permission_module: req.body.permission_module,
+        permission_action: req.body.permission_action,
+      });
       const location = await findLocation({ location_id: id, approved: true, is_deleted: false }, { fields: fields || LOCATION_DEFAULT_FIELDS });
       if (!location) return res.json({ success: true, data: null });
       const [enriched] = await enrichLocationRows([location]);
@@ -337,13 +340,10 @@ export const getLocationsViews = async (req, res) => {
       });
     }
 
-    const fields = resolveLocationViewsSelectFields({ permission_module: req.body.permission_module, permission_action: req.body.permission_action });
-    if (fields == null) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid permission_module / permission_action for location views"
-      });
-    }
+    const fields = resolveViewsFields("locations", {
+      permission_module: req.body.permission_module,
+      permission_action: req.body.permission_action,
+    });
 
     const result = await findLocations({
       filters: {...sanitizeFilters(filters, CFG.filterFields), approved: true, is_deleted: false },
@@ -376,32 +376,5 @@ export const getLocationsViews = async (req, res) => {
     return res.json({ success: true, ...result, data: enrichedRows });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const getLocationViewById = async (req, res) => {
-  try {
-    const { id } = req.body;
-    if (!id) return res.status(400).json({ success: false, message: "ID required" });
-    const location = await findLocation({ location_id: id });
-    if (!location) return res.status(404).json({ success: false, message: "Location not found" });
-    const [enriched] = await enrichLocationRows([location]);
-    res.json({
-      success: true,
-      data: {
-        id: enriched.location_id,
-        location_id: enriched.location_id,
-        rack_no: enriched.rack_no,
-        shelf_no: enriched.shelf_no,
-        location_no: enriched.location_no || `${enriched.rack_no}${(enriched.shelf_no || "").toString().toUpperCase()}`,
-        acc_name: enriched.acc_name,
-        item_code: enriched.item_code,
-        item_desc: enriched.item_desc,
-        total_capacity: enriched.total_capacity,
-        approved: enriched.approved
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
   }
 };

@@ -11,7 +11,7 @@ const CFG = getCrudModuleConfig("box_transaction_logs");
 
 export const listTransactionBoxes = async (req, res) => {
   try {
-    const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, {
+    const { page, limit = 100, filters, sortBy, order, search, isExport } = extractListParams(req.body, {
       sortBy: "created_at",
       order: "DESC",
     });
@@ -21,8 +21,8 @@ export const listTransactionBoxes = async (req, res) => {
         filters: sanitizeFilters(filters, CFG.filterFields),
         search,
         sort: { by: sortBy, order },
-        page,
-        limit,
+        page: isExport === "true" ? 1 : page,
+        limit: isExport === "true" ? 100000 : limit,
         fields: CFG.listFields,
         permission: req.permission,
       },

@@ -176,6 +176,8 @@ export function parsePackRow(r) {
   const item_code_row = r.item_code ?? r.Item_Code ?? r.ItemCode;
   const itemdesc_row = r.itemdesc ?? r.ItemDesc ?? r.item_desc;
   const qty = r.QTY ?? r.qty ?? r.Total_Qty ?? r.TotalQty ?? r.total_qty;
+  const internal_create_user = r.userc ?? r.Userc ?? r.UserC;
+  const internal_create_date = r.datec ?? r.Datec ?? r.DateC;
   const doc_dt =
     normalizeDocDtForDb(formatPackDocDate(rawDate) ?? rawDate) ||
     (rawDate != null ? String(rawDate) : null);
@@ -190,6 +192,8 @@ export function parsePackRow(r) {
     item_code_row,
     itemdesc_row,
     qty,
+    internal_create_user,
+    internal_create_date,
   };
 }
 

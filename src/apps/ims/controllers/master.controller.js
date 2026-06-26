@@ -6,8 +6,7 @@ import dbQuery from "../../../config/db.js";
 import { getDefaultListViewSpanDays } from "../../core/models/appConfig.model.js";
 import { resolveStandardQtyPerBoxForPacking } from "../utils/stock-adjustment/stockAdjustmentPacking.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { resolveItemViewsSelectFields } from "../config/view-fields/item.js";
-import { resolveLedgerViewsSelectFields } from "../config/view-fields/ledger.js";
+import { resolveViewsFields } from "../config/helperViews.js";
 import { extractListParams } from "../../core/utils/queryHelper.js";
 import { findPackingEntryCustomerByAccCode, listPackingEntryCustomersForItem } from "../utils/packing-entry/packingEntryCustomers.js";
 
@@ -413,13 +412,7 @@ export const getItemsViews = async (req, res) => {
       });
     }
 
-    const fields = resolveItemViewsSelectFields({ permission_module, permission_action });
-    if (fields == null) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid permission_module / permission_action for item views"
-      });
-    }
+    const fields = resolveViewsFields("items", { permission_module, permission_action });
 
     let filtered = rows;
     const s = sanitizeSearch(search);
@@ -546,13 +539,7 @@ export const getLedgersViews = async (req, res) => {
       });
     }
 
-    const fields = resolveLedgerViewsSelectFields({ permission_module, permission_action });
-    if (fields == null) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid permission_module / permission_action for ledger views"
-      });
-    }
+    const fields = resolveViewsFields("ledgers", { permission_module, permission_action });
 
     const itemScopedCustomer =
       LEDGER_ITEM_CUSTOMER_MODULES.has(permission_module) &&

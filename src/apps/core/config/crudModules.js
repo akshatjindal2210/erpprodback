@@ -138,8 +138,8 @@ export const CRUD_MODULES = {
   },
   box_transaction_logs: {
     idField: "id",
-    listFields: ["tb.id", "tb.transaction_type", "tb.source_module", "tb.source_id", "tb.packing_number", "tb.user_id", "tb.details", "tb.created_at", "u.name AS user_name"],
-    filterFields: ["id","transaction_type","source_module","source_id","packing_number","from_date","to_date","fromDate","toDate"],
+    listFields: ["tb.id", "tb.transaction_type", "tb.source_module", "tb.source_id", "tb.packing_number", "tb.user_id", "tb.user_name", "tb.details", "tb.created_at"],
+    filterFields: ["id","transaction_type","source_module","source_id","packing_number","from_date","to_date","fromDate","toDate","journey"],
     searchFields: ["tb.transaction_type", "tb.source_module", "tb.packing_number", "tb.details"],
   },
   departments: {

@@ -42,6 +42,9 @@ export function imsPackRowToProduction(r) {
     normalizeDocDtForDb(formatPackDocDate(rawDate) ?? rawDate) ??
     (rawDate != null ? String(rawDate) : null);
 
+  const internal_create_user = r.userc ?? r.Userc ?? r.UserC ?? null;
+  const internal_create_date = r.datec ?? r.Datec ?? r.DateC ?? null;
+
   return {
     doc_no,
     doc_dt,
@@ -50,7 +53,9 @@ export function imsPackRowToProduction(r) {
     itemdcode: itemDcode,
     total_qty: String(qty ?? "0"),
     sticker_generated: false,
-    packing_standard_id: null
+    packing_standard_id: null,
+    internal_create_user,
+    internal_create_date,
   };
 }
 
@@ -74,6 +79,8 @@ export function imsPackToDisplayMeta(r) {
     acc_name: r.acc_name ?? r.Acc_Name ?? r.AccName ?? null,
     acc_code: prod?.acc_code ?? r.acc_code ?? r.Acc_Code ?? null,
     item_desc: r.itemdesc ?? r.item_desc ?? r.ItemDesc ?? null,
+    internal_create_user: prod?.internal_create_user ?? r.userc ?? r.Userc ?? r.UserC ?? null,
+    internal_create_date: prod?.internal_create_date ?? r.datec ?? r.Datec ?? r.DateC ?? null,
   };
 }
 

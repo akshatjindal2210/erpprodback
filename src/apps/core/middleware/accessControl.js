@@ -242,33 +242,27 @@ export const accessControlAny = (alternatives) => {
   };
 };
 
+/** Body se permission_module + permission_action leke user ki page permission check karo. */
 export const dynamicAccessControl = () => {
   return (req, res, next) => {
+    const moduleName = req.body?.permission_module;
+    const action = req.body?.permission_action;
+
+    if (!moduleName || !action) {
+      return res.status(400).json({
+        success: false,
+        message: "permission_module and permission_action required in request body",
+      });
+    }
+
     const user = req.user;
     if (user && String(user.type || user.role || "").toLowerCase().trim() === "super_admin") {
       return next();
     }
 
-    const moduleName = req.body?.permission_module;
-    const action     = req.body?.permission_action;
-
-    if (!moduleName || !action) {
-      return res.status(400).json({
-        success: false,
-        message: "permission_module and permission_action required in request body"
-      });
-    }
-
     accessControl(moduleName, action)(req, res, next);
   };
 };
-
-/** Run module access check inside a controller; returns false if response already sent (denied). */
-export async function ensureModuleAccess(req, res, moduleName, actions) {
-  let allowed = false;
-  await accessControl(moduleName, actions)(req, res, () => { allowed = true; });
-  return allowed;
-}
 
 export const superAdminOnly = (req, res, next) => {
   const user = req.user;

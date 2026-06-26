@@ -1,5 +1,6 @@
 import { findInHandBoxesByPackingNumber, findDispatchedOutwardLinesByPacking } from "../../models/box.model.js";
 import { findForwardedQtyByItemAndPacking } from "../../models/forwardingNote.model.js";
+import { forwardedTotalQtyForPacking } from "../forwarding-note/forwardingAvailableStock.js";
 import { resolveStockAdjustmentPackingMeta } from "../stock-adjustment/stockAdjustmentPacking.js";
 import { isBoxOnQcHold } from "../box/boxInventory.js";
 import { enrichRowsWithIMS } from "../erp-api/imsLookup.js";
@@ -90,7 +91,7 @@ export async function resolveQcHoldPackingMeta(packing_number) {
   const forwardedMap = itemDcode
     ? await findForwardedQtyByItemAndPacking(itemDcode)
     : {};
-  const dispatchQty = Number(forwardedMap[pn] || forwardedMap[String(Number(pn))] || 0);
+  const dispatchQty = forwardedTotalQtyForPacking(forwardedMap, pn);
   const sellableQty = sumQty(sellableBoxes);
   const qcHoldQty = sumQty(heldBoxes);
   const dispatchLines = await enrichDispatchLines(dispatchRaw, packingMeta);

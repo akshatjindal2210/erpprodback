@@ -7,11 +7,11 @@
  */
 
 export function sqlBoxOutUidEmpty(alias = "b") {
-  return `(${alias}.out_uid IS NULL OR NULLIF(TRIM(${alias}.out_uid::text), '') IS NULL)`;
+  return `${alias}.out_uid IS NULL`;
 }
 
 export function sqlBoxSaIdSet(alias = "b") {
-  return `(${alias}.sa_id IS NOT NULL)`;
+  return `${alias}.sa_id IS NOT NULL`;
 }
 
 /** Case 1 — physically in hand (includes QC hold). */
@@ -47,7 +47,7 @@ export function sqlBoxStockAdjustmentOut(alias = "b") {
       ${alias}.sa_entry_type = 'stock_out'
       OR (
         ${sqlBoxSaIdSet(alias)}
-        AND ${alias}.out_uid::text = ${alias}.sa_id::text
+        AND ${alias}.out_uid = ${alias}.sa_id
       )
     )
   `.trim();
@@ -63,7 +63,7 @@ export function sqlBoxCountedAsOut(alias = "b") {
         NOT ${sqlBoxOutUidEmpty(alias)}
         AND EXISTS (
           SELECT 1 FROM ims_out_entry o
-          WHERE o.out_uid::text = ${alias}.out_uid::text
+          WHERE o.out_uid = ${alias}.out_uid
             AND o.approved = true
             AND o.is_deleted = false
             AND ${sqlOutEntryCustomerDispatch("o")}
@@ -81,11 +81,11 @@ export function sqlBoxPackingNumber(alias = "b") {
 /** Match packing on column (numeric-safe). */
 export function sqlBoxPackingNumberMatch(alias, paramRef) {
   return `(
-    trim(${alias}.packing_number::text) = trim(${paramRef}::text)
+    ${alias}.packing_number = ${paramRef}::text
     OR (
-      nullif(trim(${alias}.packing_number::text), '-') ~ '^[0-9]+$'
-      AND nullif(trim(${paramRef}::text), '-') ~ '^[0-9]+$'
-      AND trim(${alias}.packing_number::text)::numeric = trim(${paramRef}::text)::numeric
+      ${alias}.packing_number ~ '^[0-9]+$'
+      AND ${paramRef}::text ~ '^[0-9]+$'
+      AND ${alias}.packing_number::numeric = ${paramRef}::numeric
     )
   )`;
 }
@@ -153,12 +153,10 @@ export function sqlDailyprodMatchOrder(itemExpr, customerExpr, dpAlias = "dp2") 
 /** Match ims_dailyprod.doc_no to a packing number (text or numeric). */
 export function sqlDailyprodDocNoMatch(dpDocCol, packingExpr) {
   return `(
-    NULLIF(TRIM(${dpDocCol}::text), '') = NULLIF(TRIM(${packingExpr}::text), '')
-    OR NULLIF(TRIM(${dpDocCol}::text), '-') = NULLIF(TRIM(${packingExpr}::text), '-')
+    ${dpDocCol}::text = ${packingExpr}::text
     OR (
-      NULLIF(TRIM(${dpDocCol}::text), '') ~ '^[0-9]+$'
-      AND NULLIF(TRIM(${packingExpr}::text), '') ~ '^[0-9]+$'
-      AND TRIM(${dpDocCol}::text)::numeric = TRIM(${packingExpr}::text)::numeric
+      ${packingExpr}::text ~ '^[0-9]+$'
+      AND ${dpDocCol} = ${packingExpr}::integer
     )
   )`;
 }
@@ -170,7 +168,15 @@ export function sqlDailyprodDocNoMatch(dpDocCol, packingExpr) {
 export function sqlDailyprodLateralForBox(boxAlias = "b", saAlias = "sa", pnExpr) {
   const pn = pnExpr || sqlBoxPackingNumber(boxAlias);
   return `LEFT JOIN LATERAL (
-    SELECT ${sqlDocDtFromDailyprod("dp2")} AS doc_dt, dp2.job_card_no, dp2.item_dcode, dp2.acc_code, dp2.total_qty
+    SELECT
+      dp2.doc_no,
+      ${sqlDocDtFromDailyprod("dp2")} AS doc_dt,
+      dp2.job_card_no,
+      dp2.item_dcode,
+      dp2.item_code,
+      dp2.item_desc,
+      dp2.acc_code,
+      dp2.total_qty
     FROM ims_dailyprod dp2
     WHERE ${sqlDailyprodDocNoMatch("dp2.doc_no", pn)}
     ORDER BY
@@ -192,7 +198,7 @@ export function sqlBoxOutwardDispatchAny(alias = "b") {
       ${alias}.sa_entry_type IS NOT DISTINCT FROM 'stock_out'
       OR (
         ${sqlBoxSaIdSet(alias)}
-        AND ${alias}.out_uid::text = ${alias}.sa_id::text
+        AND ${alias}.out_uid = ${alias}.sa_id
       )
     )
   `.trim();
@@ -212,12 +218,12 @@ export function sqlBoxOutwardDispatch(alias = "b") {
       ${alias}.sa_entry_type IS NOT DISTINCT FROM 'stock_out'
       OR (
         ${sqlBoxSaIdSet(alias)}
-        AND ${alias}.out_uid::text = ${alias}.sa_id::text
+        AND ${alias}.out_uid = ${alias}.sa_id
       )
     )
     AND EXISTS (
       SELECT 1 FROM ims_out_entry o
-      WHERE o.out_uid::text = ${alias}.out_uid::text
+      WHERE o.out_uid = ${alias}.out_uid
         AND o.approved = true
         AND o.is_deleted = false
     )

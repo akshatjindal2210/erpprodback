@@ -1,7 +1,8 @@
 import express from "express";
-import { getLocations, getLocationById, createLocation, updateLocation, deleteLocation, getLocationsViews, getLocationViewById } from "../controllers/locationMaster.controller.js";
+import { getLocations, getLocationById, createLocation, updateLocation, deleteLocation, getLocationsViews } from "../controllers/locationMaster.controller.js";
 import { authenticate } from "../middleware/auth.js";
-import { accessControl, dynamicAccessControl } from "../../core/middleware/accessControl.js";
+import { accessControl } from "../../core/middleware/accessControl.js";
+import { helperAccess } from "../config/helperViews.js";
 
 const router = express.Router();
 
@@ -20,8 +21,6 @@ router.post("/update", authenticate, accessControl("location_master", ["edit", "
 // Delete
 router.post("/delete", authenticate, accessControl("location_master", "delete"), deleteLocation);
 
-// Views (Helper API)
-router.post("/helper", authenticate, dynamicAccessControl(), getLocationsViews);
-// router.post("/view-get", authenticate, dynamicAccessControl(), getLocationViewById);
+router.post("/helper", authenticate, helperAccess("locations"), getLocationsViews);
 
 export default router;

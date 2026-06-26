@@ -32,6 +32,12 @@ export async function createStockAdjustmentTable() {
   /** Packing meta frozen in columns (no JSON snapshot). */
   await patchTableSchema(dbQuery, T.STOCK_ADJUSTMENT, {
     columns: [
+      patchCol("packing_number", "VARCHAR(128)"),
+      patchCol("entry_type", "VARCHAR(16)"),
+      patchCol("financial_year", "VARCHAR(32)"),
+      patchCol("per_box_qty", "INTEGER"),
+      patchCol("box_count_impact", "INTEGER"),
+      patchCol("removed_box_ids", "TEXT"),
       patchCol("doc_dt", "DATE"),
       patchCol("job_card_no", "VARCHAR(50)"),
       patchCol("item_code", "VARCHAR(50)"),
@@ -39,11 +45,8 @@ export async function createStockAdjustmentTable() {
       patchCol("acc_code", "INTEGER"),
       patchCol("acc_name", "VARCHAR(255)"),
     ],
+    indexes: [
+      `CREATE INDEX IF NOT EXISTS idx_sa_packing_approved ON ${T.STOCK_ADJUSTMENT}(packing_number) WHERE is_deleted = false AND approved = true`,
+    ],
   });
-
-  await dbQuery(`
-    CREATE INDEX IF NOT EXISTS idx_sa_packing_approved
-      ON ${T.STOCK_ADJUSTMENT}(packing_number)
-      WHERE is_deleted = false AND approved = true;
-  `);
 }

@@ -272,8 +272,15 @@ export const findDailyProd = async ({ search, acc_code, item_dcode, from_date, t
         i.Item_Code AS "item_code",
         i.ItemDesc AS "item_desc",
         dp.Total_Qty AS "total_qty",
-        dp.sticker_generated AS "sticker_generated"
-    ${joinClause}
+        dp.sticker_generated AS "sticker_generated",
+        dp.internal_create_user AS "internal_create_user",
+        dp.internal_create_date AS "internal_create_date",
+        dp.system_generate_user AS "system_generate_user",
+        dp.system_generate_date AS "system_generate_date",
+        dp.system_generate_user AS "system_generate_user_name"
+    FROM DailyProd dp
+    LEFT JOIN Item i ON dp.ItemDcode = i.ItemDcode
+    LEFT JOIN Ledger l ON dp.Acc_Code = l.Acc_Code
     ${whereClause}
     ORDER BY ${sortColumn} ${sortOrder}, dp.Doc_No DESC
     LIMIT $${limitIdx} OFFSET $${offsetIdx}

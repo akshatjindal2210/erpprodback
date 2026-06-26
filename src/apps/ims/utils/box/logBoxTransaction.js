@@ -1,4 +1,5 @@
 import dbQuery from "../../../../config/db.js";
+import { MST_TABLES as T } from "../../../../config/dbTables.js";
 import { BOX_TX_TYPES } from "../../constants/boxTransactionTypes.js";
 import { buildBoxLogDetails } from "./boxTransactionDetails.js";
 
@@ -17,24 +18,35 @@ export function singlePackingFromRows(rows = []) {
  * source_id     = record id (in_uid, out_uid, adjustment_id, packing no)
  * transaction_type = action (inward_link, sa_stock_in, out_link, …)
  */
-export async function logBoxTransaction({ client = null, transaction_type, source_module, source_id = null, packing_number = null, user_id = null, details = {}, rows = [] }) {
+export async function logBoxTransaction({ client = null, transaction_type, source_module, source_id = null, packing_number = null, user_id = null, user_name = null, details = {}, rows = [] }) {
   if (!transaction_type || !source_module) return;
 
   const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+
+  let finalUserName = user_name;
+  if (!finalUserName && user_id) {
+    try {
+      const [u] = await dbQuery(`SELECT name FROM ${T.USERS} WHERE id = $1 LIMIT 1`, [user_id]);
+      if (u) finalUserName = u.name;
+    } catch (err) {
+      console.error("[logBoxTransaction] failed to fetch user name:", err.message);
+    }
+  }
 
   const merged = buildBoxLogDetails(rows, details);
   const detailsJson = JSON.stringify(merged);
 
   await run(
     `INSERT INTO ims_transaction_box
-      (transaction_type, source_module, source_id, packing_number, user_id, details)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+      (transaction_type, source_module, source_id, packing_number, user_id, user_name, details)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
     [
       String(transaction_type),
       String(source_module),
       source_id != null && source_id !== "" ? String(source_id) : null,
       packing_number != null && packing_number !== "" ? String(packing_number) : null,
       user_id != null && user_id !== "" ? Number(user_id) : null,
+      finalUserName != null && finalUserName !== "" ? String(finalUserName) : null,
       detailsJson,
     ]
   );

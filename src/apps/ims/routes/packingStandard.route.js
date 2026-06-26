@@ -2,7 +2,8 @@ import express from "express";
 import { getPackingStandards, getPackingStandardById, createPackingStandard, updatePackingStandard, deletePackingStandard, getPackingStandardsViews } from "../controllers/packingStandard.controller.js";
 
 import { authenticate } from "../middleware/auth.js";
-import { accessControl, dynamicAccessControl } from "../../core/middleware/accessControl.js";
+import { accessControl } from "../../core/middleware/accessControl.js";
+import { helperAccess } from "../config/helperViews.js";
 
 const router = express.Router();
 
@@ -22,6 +23,6 @@ router.post("/update", authenticate, accessControl("packing_standard", ["edit", 
 router.post("/delete", authenticate, accessControl("packing_standard", "delete"), deletePackingStandard);
 
 // Views (Helper API)
-router.post("/helper", authenticate, dynamicAccessControl(), getPackingStandardsViews);
+router.post("/helper", authenticate, helperAccess("packingStandard"), getPackingStandardsViews);
 
 export default router;

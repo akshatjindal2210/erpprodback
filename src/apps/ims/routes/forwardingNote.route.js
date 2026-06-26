@@ -1,8 +1,9 @@
 import express from "express";
-import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, updateForwardingNoteBill, deleteForwardingNote, getAvailableBoxesByItem, getForwardingNoteItems, lockForwardingNoteLock, unlockForwardingNoteLock, getForwardingNotesViews, getForwardingNoteViewById, printForwardingNoteBill, getForwardingNoteTransportersViews, getForwardingNoteBillNumbersViews } from "../controllers/forwardingNote.controller.js";
+import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, updateForwardingNoteBill, deleteForwardingNote, getAvailableBoxesByItem, getForwardingNoteItems, lockForwardingNoteLock, unlockForwardingNoteLock, getForwardingNotesViews, printForwardingNoteBill, getForwardingNoteTransportersViews, getForwardingNoteBillNumbersViews } from "../controllers/forwardingNote.controller.js";
 
 import { authenticate, authorize } from "../middleware/auth.js";
-import { accessControl, accessControlAny, dynamicAccessControl } from "../../core/middleware/accessControl.js";
+import { accessControl, accessControlAny } from "../../core/middleware/accessControl.js";
+import { helperAccess } from "../config/helperViews.js";
 
 const router = express.Router();
 
@@ -47,13 +48,12 @@ router.post("/lock-lock", authenticate, authorize("super_admin"), lockForwarding
 router.post("/unlock-lock", authenticate, authorize("super_admin"), unlockForwardingNoteLock);
 
 // Views (Helper API)
-router.post("/helper", authenticate, dynamicAccessControl(), getForwardingNotesViews);
+router.post("/helper", authenticate, helperAccess("forwardingNotes"), getForwardingNotesViews);
 
 // Transporter suggestions from past forwarding notes (helper)
 router.post("/transporter-helper", authenticate, accessControl("forwarding_note_master", "view"), getForwardingNoteTransportersViews);
 
 // Bill numbers from live IMS (helper)
 router.post("/bill-helper", authenticate, accessControl("forwarding_note_master", "view"), getForwardingNoteBillNumbersViews);
-// router.post("/view-get", authenticate, getForwardingNoteViewById);
 
 export default router;

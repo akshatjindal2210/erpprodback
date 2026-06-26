@@ -10,7 +10,7 @@ import { findAvailableBoxes } from "../../models/forwardingNote.model.js";
 import { findBoxesByNoUids } from "../../models/box.model.js";
 import { insertForwardingNoteItem } from "../../models/forwardingNoteItem.model.js";
 import { docNoFromStandardBoxNoUid } from "../box/boxUid.js";
-import { buildForwardingAvailableBoxes, sumBoxQty } from "./forwardingAvailableStock.js";
+import { buildForwardingAvailableBoxes, isForwardingLooseBox, sumBoxQty } from "./forwardingAvailableStock.js";
 
 async function enrichSelectedBoxes(selected_boxes = []) {
   if (!selected_boxes?.length) return [];
@@ -41,7 +41,7 @@ function groupSelectedBoxesByPacking(selected_boxes = []) {
     const pNo = String(box.packing_number ?? "").trim() || "N/A";
     if (!acc[pNo]) acc[pNo] = { open_boxes: 0, open_qty: 0, loose_boxes: 0, loose_qty: 0 };
 
-    if (box.is_loose) {
+    if (isForwardingLooseBox(box)) {
       acc[pNo].loose_boxes += 1;
       acc[pNo].loose_qty += Number(box.qty);
     } else {

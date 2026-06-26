@@ -1,4 +1,5 @@
 import dbQuery from "../../../config/db.js";
+import { buildJourneyFilter, hasJourneyFilter } from "../utils/logJourneyFilter.js";
 import { MST_TABLES as M } from "../../../config/dbTables.js";
 
 export const findTransactionBoxes = async (options = {}, req_user = {}) => {
@@ -15,12 +16,27 @@ export const findTransactionBoxes = async (options = {}, req_user = {}) => {
   const values = [];
   let i = 1;
   const conditions = [];
+  let journeyCte = "";
+  const journeyMode = hasJourneyFilter(filters);
 
-  if (permission?.can_view_days > 0) {
+  if (!journeyMode && permission?.can_view_days > 0) {
     conditions.push(`tb.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
   }
 
+  if (journeyMode) {
+    const built = buildJourneyFilter({ alias: "tb", journey: filters.journey, values });
+    if (built) {
+      journeyCte = `WITH ${built.cte}`;
+      conditions.push(built.condition);
+    }
+    i = values.length + 1;
+  }
+
   for (const [key, val] of Object.entries(filters)) {
+    if (key === "journey") continue;
+    if (journeyMode && (key === "from_date" || key === "fromDate" || key === "to_date" || key === "toDate")) {
+      continue;
+    }
     if (key === "from_date" || key === "fromDate") {
       values.push(val);
       conditions.push(`tb.created_at >= $${i++}`);
@@ -55,7 +71,7 @@ export const findTransactionBoxes = async (options = {}, req_user = {}) => {
       tb.source_module ILIKE $${idx} OR
       tb.source_id::text ILIKE $${idx} OR
       tb.packing_number ILIKE $${idx} OR
-      u.name ILIKE $${idx}
+      tb.user_name ILIKE $${idx}
     )`);
   }
 
@@ -70,7 +86,7 @@ export const findTransactionBoxes = async (options = {}, req_user = {}) => {
       : `ORDER BY ${sortBy} ASC, tb.id ASC`;
 
   const safePage = Math.max(1, parseInt(page, 10) || 1);
-  const safeLimit = Math.min(1000, Math.max(1, parseInt(limit, 10) || 20));
+  const safeLimit = Math.min(100000, Math.max(1, parseInt(limit, 10) || 20));
   const offset = (safePage - 1) * safeLimit;
 
   values.push(safeLimit, offset);
@@ -79,8 +95,7 @@ export const findTransactionBoxes = async (options = {}, req_user = {}) => {
   const countValues = values.slice(0, values.length - 2);
 
   const [{ count }] = await dbQuery(
-    `SELECT COUNT(*)::int AS count FROM ims_transaction_box tb
-     LEFT JOIN ${M.USERS} u ON u.id = tb.user_id
+    `${journeyCte ? `${journeyCte} ` : ""}SELECT COUNT(*)::int AS count FROM ims_transaction_box tb
      ${whereClause}`,
     countValues
   );
@@ -93,16 +108,15 @@ export const findTransactionBoxes = async (options = {}, req_user = {}) => {
         "tb.source_id",
         "tb.packing_number",
         "tb.user_id",
+        "tb.user_name",
         "tb.details",
         "tb.created_at",
-        "u.name AS user_name",
       ]
     : fields;
 
   const rows = await dbQuery(
-    `SELECT ${selectFields.join(", ")}
+    `${journeyCte ? `${journeyCte} ` : ""}SELECT ${selectFields.join(", ")}
      FROM ims_transaction_box tb
-     LEFT JOIN ${M.USERS} u ON u.id = tb.user_id
      ${whereClause}
      ${orderClause}
      ${paginationClause}`,

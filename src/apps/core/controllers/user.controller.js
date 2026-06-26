@@ -80,8 +80,8 @@ const normalizePermissionsForSave = async (permissions) => {
     page: 1,
     limit: 5000,
     sort: { by: "sort_order", order: "ASC" },
-    fields: ["id", "name", "app_type"],
-    filters: {},
+    fields: ["id", "name", "app_type", "is_active"],
+    filters: { is_active: true },
   });
   const byId = new Map(rows.map((r) => [r.id, r]));
   return formatPermissions(permissions).filter(

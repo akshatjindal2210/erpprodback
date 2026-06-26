@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { loginUser, logoutUser, getUsers, getImsUsers, createUser, updateUser, deleteUser, getMe, changePassword, getUserStats, getUserById, getUsersViews } from "../controllers/user.controller.js";
 import { authenticate } from "../middleware/auth.js";
-import { accessControl, dynamicAccessControl } from "../middleware/accessControl.js";
+import { accessControl } from "../middleware/accessControl.js";
 
 const router = Router();
 

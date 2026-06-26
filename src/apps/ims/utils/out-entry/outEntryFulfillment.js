@@ -7,6 +7,7 @@ import {
 } from "../../models/box.model.js";
 import { findFuidDetailsForOutEntry } from "../../models/outEntry.model.js";
 import { isBoxAvailableForOutEntryScan, isBoxInHand, isBoxInStore, isBoxStockAdjustmentOut } from "../box/boxInventory.js";
+import { isForwardingLooseBox } from "../forwarding-note/forwardingAvailableStock.js";
 
 function itemKeyFromRow(row) {
   const code = String(row?.item_dcode ?? "").trim();
@@ -95,7 +96,7 @@ function countScannedByPacking(scannedRows = []) {
   for (const box of scannedRows) {
     const key = packingKey(box.packing_number);
     const cur = byPacking.get(key) || { standard: 0, loose: 0 };
-    if (box.is_loose) cur.loose += 1;
+    if (isForwardingLooseBox(box)) cur.loose += 1;
     else cur.standard += 1;
     byPacking.set(key, cur);
   }
@@ -493,7 +494,7 @@ export async function resolveOutEntryBatchScan({fuid, forOutUid = null, items = 
     const pk = packingKey(hit.packing_number);
     const req = reqByPacking.get(pk) || { box: 0, loose_box: 0 };
     const running = runningByPacking.get(pk) || { standard: 0, loose: 0 };
-    const isLoose = dbRow.is_loose === true || dbRow.is_loose === 1 || dbRow.is_loose === "true";
+    const isLoose = isForwardingLooseBox(dbRow);
     const limit = isLoose ? Number(req.loose_box) || 0 : Number(req.box) || 0;
     const already = isLoose ? running.loose : running.standard;
 
@@ -630,7 +631,7 @@ export async function resolveOutEntryOtherBatchScan({
       message: null,
       packing_number: dbRow?.packing_number ?? inHand?.packing_number ?? null,
       qty: Number(dbRow?.qty ?? inHand?.qty) || 0,
-      is_loose: dbRow?.is_loose === true || dbRow?.is_loose === 1,
+      is_loose: isForwardingLooseBox(dbRow),
     });
   }
 
@@ -738,7 +739,7 @@ export async function resolveOutEntryInventoryOutBatchScan({
       message: null,
       packing_number: dbRow?.packing_number ?? inHand?.packing_number ?? null,
       qty: Number(dbRow?.qty ?? inHand?.qty) || 0,
-      is_loose: dbRow?.is_loose === true || dbRow?.is_loose === 1,
+      is_loose: isForwardingLooseBox(dbRow),
     });
   }
 
@@ -887,7 +888,7 @@ export async function resolveOutEntryQcAreaBatchScan({
       message: null,
       packing_number: dbRow?.packing_number ?? null,
       qty: Number(dbRow?.qty) || 0,
-      is_loose: dbRow?.is_loose === true || dbRow?.is_loose === 1,
+      is_loose: isForwardingLooseBox(dbRow),
     });
   }
 

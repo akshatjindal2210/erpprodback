@@ -40,6 +40,10 @@ export function buildDailyProdStickerFields(body = {}) {
     full_boxes_count: pc.full_boxes_count ?? null,
     loose_box_qty: pc.loose_box_qty ?? null,
     total_stickers: pc.total_stickers ?? null,
+    internal_create_user: body.internal_create_user ?? body.userc ?? null,
+    internal_create_date: body.internal_create_date ?? body.datec ?? null,
+    system_generate_user: body.system_generate_user ?? body.sticker_created_by ?? null,
+    system_generate_date: body.system_generate_date ?? body.sticker_created_at ?? null,
   };
 }
 
@@ -55,7 +59,11 @@ export const DAILYPROD_STICKER_EXTRA_SELECT = `
   full_boxes_count,
   loose_box_qty,
   total_stickers,
-  packing_standard_id
+  packing_standard_id,
+  internal_create_user,
+  internal_create_date,
+  system_generate_user,
+  system_generate_date
 `;
 
 /** Core production fields from ims_dailyprod row (comparison / local_source). */
@@ -97,6 +105,11 @@ export function dailyProdListFieldsFromRow(dpRow) {
     party_rate_cust_code: dpRow.party_rate_cust_code ?? null,
     sticker_unit: dpRow.unit ?? "PCS",
     fg_location: dpRow.fg_location ?? null,
+    internal_create_user: dpRow.internal_create_user ?? null,
+    internal_create_date: dpRow.internal_create_date ?? null,
+    system_generate_user: dpRow.system_generate_user ?? null,
+    system_generate_user_name: dpRow.system_generate_user ?? null,
+    system_generate_date: dpRow.system_generate_date ?? null,
   };
 }
 
@@ -134,6 +147,11 @@ export function stickerFetchRowFromDailyProd(dpRow) {
     ims_category: categoryName,
     category: categoryName,
     fg_location: dpRow.fg_location ?? null,
+    internal_create_user: dpRow.internal_create_user ?? null,
+    internal_create_date: dpRow.internal_create_date ?? null,
+    system_generate_user: dpRow.system_generate_user ?? null,
+    system_generate_user_name: dpRow.system_generate_user ?? null,
+    system_generate_date: dpRow.system_generate_date ?? null,
     packing_details: {
       package_num: docNo,
       standard_id: dpRow.packing_standard_id ?? null,

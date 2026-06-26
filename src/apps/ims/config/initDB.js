@@ -2,7 +2,9 @@ import dbQuery from "../../../config/db.js";
 import { createLocationMasterTable } from "./tables/location_master.table.js";
 import { createPackingStandardTable } from "./tables/packing_standard.table.js";
 import { createBoxDownloadLogTable, createBoxOverrideRequestTable, createBoxTable } from "./tables/box_table.table.js";
-import { createDailyProdTable } from "./tables/dailyprod.table.js";
+import { createDailyProdTable, backfillDailyProdStickerColumnsOnStartup } from "./tables/dailyprod.table.js";
+import { createSchedulePlanTable } from "./tables/schedule_plan.table.js";
+import { createSchedulePlanTransactionTable } from "./tables/schedule_plan_transaction.table.js";
 import { createInventoryInwardsTable } from "./tables/inventory_inwards.table.js";
 import { createForwardingNoteMasterTable } from "./tables/forwarding_note_master.table.js";
 import { createForwardingNoteItemWiseTable } from "./tables/forwarding_note_item_wise.table.js";
@@ -28,14 +30,18 @@ export async function initImsDB() {
   await createForwardingNoteItemWiseTable();
   await createQcHoldMaterialTable();
   await createOutEntryTable();
-  await createDailyProdTable();
-  await createStockAdjustmentTable();
   await createBoxTable();
+  await createDailyProdTable();
+  await createSchedulePlanTable();
+  await createSchedulePlanTransactionTable();
+  await createStockAdjustmentTable();
   await createBoxDownloadLogTable();
   await createBoxOverrideRequestTable();
   await createOutEntryScannedBoxTable();
   await createTransactionBoxTable();
   await createAuditTables();
+
+  await backfillDailyProdStickerColumnsOnStartup();
 
   await syncImsSequences();
 

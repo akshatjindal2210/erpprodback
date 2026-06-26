@@ -522,7 +522,10 @@ export const findForwardedQtyByItemAndPacking = async (item_dcode, exclude_fuid 
       : null;
 
   const rows = await dbQuery(
-    `SELECT TRIM(fi.packing_number::text) AS packing_number, COALESCE(SUM(fi.total_qty), 0)::float AS forwarded_qty
+    `SELECT TRIM(fi.packing_number::text) AS packing_number,
+            COALESCE(SUM(fi.box_qty), 0)::float AS open_qty,
+            COALESCE(SUM(fi.loose_box_qty), 0)::float AS loose_qty,
+            COALESCE(SUM(fi.total_qty), 0)::float AS total_qty
      FROM ims_forwarding_note_item_wise fi
      INNER JOIN ims_forwarding_note_master f
        ON f.fuid = fi.fuid AND f.is_deleted = false
@@ -544,7 +547,11 @@ export const findForwardedQtyByItemAndPacking = async (item_dcode, exclude_fuid 
   for (const r of rows || []) {
     const pn = String(r.packing_number ?? "").trim();
     if (!pn) continue;
-    map[pn] = Number(r.forwarded_qty) || 0;
+    map[pn] = {
+      open_qty: Number(r.open_qty) || 0,
+      loose_qty: Number(r.loose_qty) || 0,
+      total_qty: Number(r.total_qty) || 0,
+    };
   }
   return map;
 };
