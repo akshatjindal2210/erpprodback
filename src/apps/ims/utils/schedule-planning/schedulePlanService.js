@@ -740,20 +740,20 @@ export async function submitScheduleShortage(body = {}, userId = null, userName 
   };
 
   console.log("[schedule-planning] shortage request", filter);
-  // const ims = await fetchImsDataRaw("shortage", filter);
-  // console.log("[schedule-planning] shortage response", JSON.stringify(ims, null, 2));
+  const ims = await fetchImsDataRaw("shortgoogle", filter);
+  console.log("[schedule-planning] shortage response", JSON.stringify(ims, null, 2));
 
-  // const row = Array.isArray(ims?.records) ? ims.records[0] : ims?.records;
-  // const id = ims?.id ?? row?.id ?? null;
-  // const msg = ims?.msg ?? ims?.message ?? row?.msg ?? row?.message ?? null;
+  const row = Array.isArray(ims?.records) ? ims.records[0] : ims?.records;
+  const id = ims?.id ?? row?.id ?? null;
+  const msg = ims?.msg ?? ims?.message ?? row?.msg ?? row?.message ?? null;
 
-  // if (ims?.success !== true) {
-  //   return {
-  //     success: false,
-  //     status: 400,
-  //     message: toPublicImsMessage(msg || ims?.message, "Could not submit shortage."),
-  //   };
-  // }
+  if (ims?.success !== true) {
+    return {
+      success: false,
+      status: 400,
+      message: toPublicImsMessage(msg || ims?.message, "Could not submit shortage."),
+    };
+  }
 
   return {
     success: true,

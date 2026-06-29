@@ -147,26 +147,23 @@ export const getScheduleItemTransactions = async (req, res) => {
 
 export const submitScheduleShortagePlanning = async (req, res) => {
   try {
-    console.log("[schedule-planning] shortage request", req.body);
-    // const out = await submitScheduleShortage(req.body || {}, req.user?.id ?? null, req.user?.name ?? null);
+    // console.log("[schedule-planning] shortage request", req.body);
+    const out = await submitScheduleShortage(req.body || {}, req.user?.id ?? null, req.user?.name ?? null);
 
-    // if (out?.success === false) {
-    //   return sendSimple(res, {
-    //     success: false,
-    //     message: out.message || "Could not submit shortage.",
-    //     data: null,
-    //     status: out.status || 400,
-    //   });
-    // }
+    if (out?.success === false) {
+      return sendSimple(res, {
+        success: false,
+        message: out.message || "Could not submit shortage.",
+        data: null,
+        status: out.status || 400,
+      });
+    }
+    
     return sendSimple(res, {
       success: true,
-      message:"Shortage submitted successfully.",
+      message: out.message || "Shortage submitted successfully.",
+      data: out.data ?? null,
     });
-    // return sendSimple(res, {
-    //   success: true,
-    //   message: out.message || "Shortage submitted successfully.",
-    //   data: out.data ?? null,
-    // });
   } catch {
     return sendSimple(res, { success: false, message: "Could not submit shortage.", data: null, status: 500 });
   }
