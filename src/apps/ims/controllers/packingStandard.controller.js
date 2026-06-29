@@ -6,17 +6,34 @@ import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { resolveViewsFields } from "../config/helperViews.js";
 import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { enrichRowsWithIMS } from "../utils/erp-api/imsLookup.js";
+import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../utils/erp-api/imsLookup.js";
 
 const CFG = getCrudModuleConfig("packing_standard");
 
+function rowKg(weight, qty) {
+  const w = Number(weight);
+  const q = Number(qty);
+  if (!Number.isFinite(w) || !Number.isFinite(q)) return null;
+  return w * q;
+}
+
 async function enrichPackingRows(rows = []) {
-  return enrichRowsWithIMS(rows, {
+  const { itemMap, ledgerMap } = await getImsMapsSafe();
+  const enriched = await enrichRowsWithIMS(rows, {
     itemCodeField: "item_dcode",
     accCodeField: "acc_code",
     itemCodeOut: "item_code",
     itemDescOut: "item_desc",
-    accNameOut: "acc_name"
+    accNameOut: "acc_name",
+    maps: { itemMap, ledgerMap },
+  });
+  return enriched.map((row) => {
+    const itemWeight = itemMap.get(canonicalCode(row.item_dcode))?.weight ?? null;
+    return {
+      ...row,
+      item_weight: itemWeight,
+      row_kg: rowKg(itemWeight, row.qty),
+    };
   });
 }
   

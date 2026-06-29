@@ -26,7 +26,7 @@ const ALLOWED_FILTER_FIELDS_BOX = [
 
 const ALLOWED_SORT_FIELDS_BOX = ["created_at", "qty", "box_no_uid", "packing_number", "rack_no", "acc_name"];
 
-const ALLOWED_UPDATE_FIELDS_BOX = ["box_no_uid", "packing_number", "qty", "override_cust", "location_id", "in_uid", "out_uid", "updated_by", "updated_at"];
+const ALLOWED_UPDATE_FIELDS_BOX = ["box_no_uid", "packing_number", "qty", "override_cust", "location_id", "in_uid", "out_uid", "category_id", "updated_by", "updated_at"];
 
 /** `sa_entry_type` must match `ims_box_table` CHECK: 'stock_in' | 'stock_out'. */
 function normalizeSaEntryTypeForInsert(v) {
@@ -1651,6 +1651,7 @@ function mapRowsToBulkInsertArrays(rows) {
   const created_bys = [];
   const sa_ids = [];
   const sa_entry_types = [];
+  const category_ids = [];
 
   for (const row of rows) {
     box_no_uids.push(row.box_no_uid);
@@ -1661,6 +1662,7 @@ function mapRowsToBulkInsertArrays(rows) {
     created_bys.push(row.created_by);
     sa_ids.push(row.sa_id != null ? row.sa_id : null);
     sa_entry_types.push(normalizeSaEntryTypeForInsert(row.sa_entry_type));
+    category_ids.push(row.category_id != null && row.category_id !== "" ? Number(row.category_id) : null);
   }
 
   return {
@@ -1672,13 +1674,14 @@ function mapRowsToBulkInsertArrays(rows) {
     created_bys,
     sa_ids,
     sa_entry_types,
+    category_ids,
   };
 }
 
 const BULK_INSERT_SQL = `
   INSERT INTO ims_box_table
-    (box_no_uid, packing_number, qty, is_loose, override_cust, created_by, sa_id, sa_entry_type)
-  SELECT u, p, q, l, o, c, s, e
+    (box_no_uid, packing_number, qty, is_loose, override_cust, created_by, sa_id, sa_entry_type, category_id)
+  SELECT u, p, q, l, o, c, s, e, ci
   FROM unnest(
     $1::text[],
     $2::text[],
@@ -1687,8 +1690,9 @@ const BULK_INSERT_SQL = `
     $5::text[],
     $6::int[],
     $7::int[],
-    $8::text[]
-  ) AS t(u, p, q, l, o, c, s, e)
+    $8::text[],
+    $9::int[]
+  ) AS t(u, p, q, l, o, c, s, e, ci)
   RETURNING *`;
 
 export const insertBulkBoxes = async (rows) => {
@@ -1704,6 +1708,7 @@ export const insertBulkBoxes = async (rows) => {
       arrays.created_bys,
       arrays.sa_ids,
       arrays.sa_entry_types,
+      arrays.category_ids,
     ]);
     const packing = rows[0]?.packing_number ?? inserted[0]?.packing_number;
     const isSa = rows[0]?.sa_entry_type === "stock_in";
@@ -1736,6 +1741,7 @@ export const insertBulkBoxesTx = async (client, rows) => {
     arrays.created_bys,
     arrays.sa_ids,
     arrays.sa_entry_types,
+    arrays.category_ids,
   ]);
   const packing = rows[0]?.packing_number ?? inserted[0]?.packing_number;
   const isSa = rows[0]?.sa_entry_type === "stock_in";

@@ -35,6 +35,12 @@ export const SCHEDULE_LIST_FILTER = {
   HOLD: "hold",
 };
 
+/** Report view — Default = current month via IMS; Custom = month/date filter via internal API. */
+export const SCHEDULE_REPORT_FILTER = {
+  DEFAULT: "default",
+  CUSTOM: "custom",
+};
+
 const ACTIVE_SCHEDULE_STATUSES = [
   SCHEDULE_PLAN_STATUS.PLANNED,
   SCHEDULE_PLAN_STATUS.RUNNING,

@@ -13,7 +13,7 @@ const ALLOWED_SORT_FIELDS = ["created_at", "approved_at", "updated_at", "po_numb
 
 const ALLOWED_UPDATE_FIELDS = [
   "acc_code", "po_number", "remarks", "transporter_name", "transporter_id",
-  "vehicle_number", "cartage", "total_items", "bill_no",
+  "vehicle_number", "cartage", "total_items", "bill_no", "packing_category_id",
   "bill_updated_by", "bill_updated_at",
   "approved", "approved_by", "approved_at", "updated_by", "updated_at"
 ];
@@ -240,7 +240,7 @@ export const findForwardingNote = async (filters = {}) => {
 };
 
 export const insertForwardingNote = async (data) => {
-  const fields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage", "total_items", "bill_no", "approved", "created_by"];
+  const fields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage", "total_items", "packing_category_id", "bill_no", "approved", "created_by"];
   const hasBill = data.bill_no != null && String(data.bill_no).trim() !== "";
   if (hasBill) {
     fields.push("bill_updated_by", "bill_updated_at");
@@ -462,6 +462,25 @@ export const findForwardingNoteTransporters = async ({ acc_code, search, limit =
   return rows || [];
 };
 
+/** Last packing category used for this customer on forwarding notes. */
+export const findLastForwardingPackingCategory = async (acc_code) => {
+  if (acc_code == null || acc_code === "") return null;
+  const n = Number(acc_code);
+  if (!Number.isFinite(n)) return null;
+
+  const [row] = await dbQuery(
+    `SELECT packing_category_id
+     FROM ims_forwarding_note_master
+     WHERE is_deleted = false
+       AND acc_code = $1
+       AND packing_category_id IS NOT NULL
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [n]
+  );
+  return row?.packing_category_id != null ? Number(row.packing_category_id) : null;
+};
+
 export const findAvailableBoxes = async (item_dcode) => {
   const query = `
     SELECT
@@ -472,6 +491,7 @@ export const findAvailableBoxes = async (item_dcode) => {
       b.location_id,
       b.is_loose,
       b.override_cust,
+      COALESCE(b.category_id, sa_adj.category_id, dp.category_id, ps.type) AS category_id,
       dp.doc_no,
       ${sqlDocDtText("dp.doc_dt")} AS doc_dt,
       dp.job_card_no,
@@ -487,6 +507,9 @@ export const findAvailableBoxes = async (item_dcode) => {
       ON b.sa_id = sa_adj.adjustment_id
      AND b.sa_entry_type = 'stock_in'
      AND sa_adj.is_deleted = false
+    LEFT JOIN ims_packing_standard ps
+      ON ps.standard_id = dp.packing_standard_id
+     AND ps.is_deleted = false
     WHERE b.is_deleted = false
       AND ${sqlBoxSellable("b")}
       AND (
@@ -509,6 +532,81 @@ export const findAvailableBoxes = async (item_dcode) => {
   `;
 
   return await dbQuery(query, [Number(item_dcode)]);
+};
+
+/** All sellable in-hand boxes (every item) — for forwarding item dropdown catalog. */
+export const findAllSellableForwardingBoxes = async () => {
+  const query = `
+    SELECT
+      b.box_uid,
+      b.box_no_uid,
+      b.packing_number,
+      b.qty,
+      b.location_id,
+      b.is_loose,
+      b.override_cust,
+      COALESCE(b.category_id, sa_adj.category_id, dp.category_id, ps.type) AS category_id,
+      dp.doc_no,
+      ${sqlDocDtText("dp.doc_dt")} AS doc_dt,
+      dp.job_card_no,
+      COALESCE(NULLIF(trim(b.override_cust::text), ''), dp.acc_code::text) AS acc_code,
+      CASE
+        WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL
+          THEN sa_adj.item_dcode
+        ELSE dp.item_dcode
+      END::int AS itemdcode
+    FROM ims_box_table b
+    LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '') = NULLIF(TRIM(dp.doc_no::text), '')
+    LEFT JOIN ims_stock_adjustment sa_adj
+      ON b.sa_id = sa_adj.adjustment_id
+     AND b.sa_entry_type = 'stock_in'
+     AND sa_adj.is_deleted = false
+    LEFT JOIN ims_packing_standard ps
+      ON ps.standard_id = dp.packing_standard_id
+     AND ps.is_deleted = false
+    WHERE b.is_deleted = false
+      AND ${sqlBoxSellable("b")}
+      AND (
+        CASE
+          WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL
+            THEN sa_adj.item_dcode
+          ELSE dp.item_dcode
+        END
+      ) IS NOT NULL
+    ORDER BY b.created_at ASC
+  `;
+
+  return await dbQuery(query);
+};
+
+/** Forwarding reserves for all items (per packing). Excludes `exclude_fuid` when editing. */
+export const findAllForwardedReservesByItemAndPacking = async (exclude_fuid = null) => {
+  const exclude =
+    exclude_fuid != null && exclude_fuid !== "" && Number.isFinite(Number(exclude_fuid))
+      ? Number(exclude_fuid)
+      : null;
+
+  return dbQuery(
+    `SELECT fi.item_dcode::int AS itemdcode,
+            TRIM(fi.packing_number::text) AS packing_number,
+            COALESCE(SUM(fi.box_qty), 0)::float AS open_qty,
+            COALESCE(SUM(fi.loose_box_qty), 0)::float AS loose_qty,
+            COALESCE(SUM(fi.total_qty), 0)::float AS total_qty
+     FROM ims_forwarding_note_item_wise fi
+     INNER JOIN ims_forwarding_note_master f
+       ON f.fuid = fi.fuid AND f.is_deleted = false
+     WHERE fi.is_deleted = false
+       AND ($1::bigint IS NULL OR fi.fuid <> $1::bigint)
+       AND NOT EXISTS (
+         SELECT 1
+         FROM ims_out_entry oe
+         WHERE oe.fuid = f.fuid
+           AND oe.is_deleted = false
+           AND COALESCE(oe.scan_complete, false) = true
+       )
+     GROUP BY fi.item_dcode::int, TRIM(fi.packing_number::text)`,
+    [exclude]
+  );
 };
 
 /** Qty already on other forwarding notes for this item (per packing). Excludes `exclude_fuid` when editing. */

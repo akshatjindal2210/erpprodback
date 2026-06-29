@@ -23,6 +23,14 @@ export async function syncAdjustmentMetadataOnly(client, { existing, body, userI
   }
 
   if (entryType === "add") {
+    if (body.category_id !== undefined) {
+      const catId = parseInt(String(body.category_id), 10);
+      if (Number.isFinite(catId) && catId > 0) {
+        fields.category_id = catId;
+        touched = true;
+      }
+    }
+
     const toRemove = Array.isArray(body.remove_add_box_uids) ? body.remove_add_box_uids : [];
     const extra = parseInt(String(body.add_extra_boxes ?? 0), 10) || 0;
     const hasPlan =

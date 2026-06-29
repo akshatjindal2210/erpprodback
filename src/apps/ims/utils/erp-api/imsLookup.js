@@ -35,7 +35,8 @@ export function buildImsItemMap(items = []) {
     if (!dcode) continue;
     map.set(dcode, {
       item_code: row.Item_Code ?? row.item_code ?? null,
-      item_desc: row.ItemDesc ?? row.itemdesc ?? row.item_desc ?? null
+      item_desc: row.ItemDesc ?? row.itemdesc ?? row.item_desc ?? null,
+      weight: row.weight ?? row.Weight ?? null,
     });
   }
   return map;

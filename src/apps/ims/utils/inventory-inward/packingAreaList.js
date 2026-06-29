@@ -6,6 +6,7 @@
  */
 
 import dbQuery from "../../../../config/db.js";
+import { MST_TABLES as M } from "../../../../config/dbTables.js";
 import { sqlBoxSellable, sqlBoxPackingNumber, sqlDailyprodDocNoMatch, sqlDailyprodMatchOrder, sqlDocDtFromDailyprod, sqlDocDtText } from "../box/boxInventorySql.js";
 
 const TRIM = (expr) => `NULLIF(TRIM((${expr})::text), '')`;
@@ -170,7 +171,9 @@ function packingAreaBaseSql(whereClause) {
       NULLIF(TRIM(sa.financial_year::text), '') AS sa_financial_year,
       sa.doc_dt,
       sa.job_card_no,
-      COALESCE(b.qty, 0)::int AS qty
+      COALESCE(b.qty, 0)::int AS qty,
+      b.created_at,
+      b.created_by
     FROM ims_box_table b
     LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
     WHERE ${whereClause}`;
@@ -180,6 +183,27 @@ export async function attachPackingDisplayMeta(rows = []) {
   if (!rows?.length) return rows;
   const metaMap = await resolvePackingDisplayMeta(rows);
   return rows.map((row) => applyMetaToRow(row, metaMap.get(rowKey(row))));
+}
+
+/** Resolve creator display names for packing-area summary rows. */
+async function attachPackingCreatedByMeta(rows = []) {
+  if (!rows?.length) return rows;
+
+  const ids = [...new Set(rows.map((row) => row?.created_by).filter((id) => id != null))];
+  if (!ids.length) {
+    return rows.map((row) => ({ ...row, created_by_name: null }));
+  }
+
+  const users = await dbQuery(
+    `SELECT id, name FROM ${M.USERS} WHERE id = ANY($1::int[])`,
+    [ids]
+  );
+  const nameMap = new Map((users || []).map((u) => [Number(u.id), u.name]));
+
+  return rows.map((row) => ({
+    ...row,
+    created_by_name: row?.created_by != null ? nameMap.get(Number(row.created_by)) ?? null : null,
+  }));
 }
 
 /** Latest approved SA + dailyprod meta per packing (single round-trip). */
@@ -513,13 +537,15 @@ export async function findPackingAreaByPacking(options = {}) {
   const offsetIdx = values.length + 2;
 
   const rows = await dbQuery(
-    `WITH grouped AS (
+     `WITH grouped AS (
        SELECT packing_number, item_dcode, acc_code,
          MAX(sa_financial_year) AS sa_financial_year,
          MAX(doc_dt) AS doc_dt,
          MAX(job_card_no) AS job_card_no,
          SUM(qty)::bigint AS stock_qty,
-         COUNT(*)::int AS box_count
+         COUNT(*)::int AS box_count,
+         MIN(created_at) AS created_at,
+         (array_agg(created_by ORDER BY created_at ASC NULLS LAST, created_by ASC NULLS LAST))[1] AS created_by
        FROM (${baseSql}) raw
        GROUP BY packing_number, item_dcode, acc_code
      )
@@ -529,8 +555,10 @@ export async function findPackingAreaByPacking(options = {}) {
     [...values, safeLimit, offset]
   );
 
+  const withCreator = await attachPackingCreatedByMeta(rows);
+
   return {
-    data: await attachPackingDisplayMeta(rows),
+    data: await attachPackingDisplayMeta(withCreator),
     total: Number(count),
     page: safePage,
     limit: safeLimit,

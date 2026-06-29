@@ -15,9 +15,8 @@ router.post("/get", authenticate, accessControl("out_entry", "view"), getOutEntr
 // Create
 router.post("/create", authenticate, accessControl("out_entry", "add"), createOutEntry);
 
-
-// Update (allow both edit users and authorize users)
-router.post("/update", authenticate, accessControl("out_entry", ["edit", "authorize"]), updateOutEntry);
+// Update — add included so draft save (add) ke baad submit bhi same user kar sake
+router.post("/update", authenticate, accessControl("out_entry", ["add", "edit", "authorize"]), updateOutEntry);
 
 // Delete
 router.post("/delete", authenticate, accessControl("out_entry", "delete"), deleteOutEntry);

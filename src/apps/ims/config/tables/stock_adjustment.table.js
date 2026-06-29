@@ -1,5 +1,5 @@
 import dbQuery from "../../../../config/db.js";
-import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
+import { patchTableSchema, patchCol, dropColumnIfExists } from "../../../../config/ensureDbColumns.js";
 import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
 
 export async function createStockAdjustmentTable() {
@@ -44,9 +44,12 @@ export async function createStockAdjustmentTable() {
       patchCol("item_desc", "TEXT"),
       patchCol("acc_code", "INTEGER"),
       patchCol("acc_name", "VARCHAR(255)"),
+      patchCol("category_id", "INTEGER"),
     ],
     indexes: [
       `CREATE INDEX IF NOT EXISTS idx_sa_packing_approved ON ${T.STOCK_ADJUSTMENT}(packing_number) WHERE is_deleted = false AND approved = true`,
     ],
   });
+
+  await dropColumnIfExists(dbQuery, T.STOCK_ADJUSTMENT, "category_name");
 }

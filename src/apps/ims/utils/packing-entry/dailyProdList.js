@@ -432,6 +432,84 @@ function buildImsRow(p, itemMap, ledgerMap, partyRateMap) {
   };
 }
 
+/** Same box math as sticker generate preview (`box.controller` packing_details). */
+function computePackingBoxBreakdown(totalQty, qtyPerBox) {
+  const total = parseFloat(String(totalQty ?? "0"));
+  const std = parseFloat(String(qtyPerBox ?? "0"));
+  if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(std) || std <= 0) {
+    return {
+      qty_per_box: null,
+      full_boxes_count: null,
+      loose_boxes_count: null,
+      total_boxes: null,
+      loose_box_qty: null,
+    };
+  }
+  const full = Math.floor(total / std);
+  const looseQty = total % std;
+  const looseBoxes = looseQty > 0 ? 1 : 0;
+  return {
+    qty_per_box: std,
+    full_boxes_count: full,
+    loose_boxes_count: looseBoxes,
+    total_boxes: full + looseBoxes,
+    loose_box_qty: looseQty > 0 ? Number(looseQty.toFixed(3)) : 0,
+  };
+}
+
+async function loadApprovedStandardsForItems(itemDcodes = []) {
+  const ids = [
+    ...new Set(
+      (itemDcodes || [])
+        .map((d) => parseInt(String(d), 10))
+        .filter((n) => Number.isFinite(n))
+    ),
+  ];
+  if (!ids.length) return [];
+  return dbQuery(
+    `SELECT ps.item_dcode, ps.acc_code, ps.qty, ps.approved_at, ps.standard_id, ps.type
+     FROM ims_packing_standard ps
+     WHERE ps.item_dcode = ANY($1::int[])
+       AND ps.is_deleted = false
+       AND ps.approved = true`,
+    [ids]
+  );
+}
+
+/** Match packing standard like sticker modal — item + customer, single category only. */
+function pickStandardQtyPerBox(standards, itemdcode, accCode) {
+  const itemD = itemdcode != null ? String(itemdcode).trim() : "";
+  if (!itemD) return null;
+  const acc = accCode != null ? String(accCode).trim() : null;
+  const rows = (standards || []).filter((s) => String(s.item_dcode) === itemD);
+  if (!rows.length) return null;
+
+  const typeSet = new Set(rows.map((r) => (r.type != null ? String(r.type) : "")));
+  if (typeSet.size > 1) return null;
+
+  const ranked = [...rows].sort((a, b) => {
+    const aAcc = acc && a.acc_code != null && String(a.acc_code).trim() === acc ? 0 : 1;
+    const bAcc = acc && b.acc_code != null && String(b.acc_code).trim() === acc ? 0 : 1;
+    if (aAcc !== bAcc) return aAcc - bAcc;
+    const atA = a.approved_at ? new Date(a.approved_at).getTime() : 0;
+    const atB = b.approved_at ? new Date(b.approved_at).getTime() : 0;
+    if (atB !== atA) return atB - atA;
+    return (Number(b.standard_id) || 0) - (Number(a.standard_id) || 0);
+  });
+
+  const q = parseFloat(ranked[0]?.qty);
+  return Number.isFinite(q) && q > 0 ? q : null;
+}
+
+async function enrichPendingRowsWithBoxPlan(rows) {
+  if (!rows?.length) return rows;
+  const standards = await loadApprovedStandardsForItems(rows.map((r) => r.itemdcode));
+  return rows.map((row) => {
+    const stdQty = pickStandardQtyPerBox(standards, row.itemdcode, row.acc_code);
+    return { ...row, ...computePackingBoxBreakdown(row.total_qty, stdQty) };
+  });
+}
+
 /** Pending tab: IMS row + sticker flag only (no comparison / panel meta). */
 function buildPendingRow(r, generatedMap, itemMap, ledgerMap, partyRateMap) {
   const p = parsePackRow(r);
@@ -832,6 +910,9 @@ async function buildPendingList(body, defaultSpanDays) {
 
   sortRows(data, sortBy, order);
   const sliced = sliceList(data, page, limit);
+  if (pendingOnly) {
+    sliced.data = await enrichPendingRowsWithBoxPlan(sliced.data);
+  }
   sliced.data = await enrichGeneratedRowsPage(sliced.data, itemMap, ledgerMap, EMPTY_PARTY_RATE_MAP);
   return sliced;
 }

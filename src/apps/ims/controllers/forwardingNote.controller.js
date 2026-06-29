@@ -1,5 +1,7 @@
-import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertForwardingNote, updateForwardingNotes, updateForwardingNoteBillNo, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters } from "../models/forwardingNote.model.js";
-import { buildForwardingAvailableBoxes } from "../utils/forwarding-note/forwardingAvailableStock.js";
+import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertForwardingNote, updateForwardingNotes, updateForwardingNoteBillNo, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters, findLastForwardingPackingCategory } from "../models/forwardingNote.model.js";
+import { buildForwardingAvailableBoxes, findItemDcodesWithForwardingAvailableStock } from "../utils/forwarding-note/forwardingAvailableStock.js";
+import { buildPackingNumberSet, filterForwardingBoxesByCategoryId, filterErpStockByCategory } from "../utils/forwarding-note/forwardingPackingCategory.js";
+import { enrichRowsWithIMS } from "../utils/erp-api/imsLookup.js";
 import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo } from "../utils/forwarding-note/forwardingNoteList.js";
 import { saveForwardingNoteItems } from "../utils/forwarding-note/forwardingNoteItemsWrite.js";
 import { buildForwardingLockMessage } from "../utils/forwarding-note/forwardingNoteMessages.js";
@@ -10,9 +12,24 @@ import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/
 import { deleteForwardingNoteItems, findForwardingNoteItems } from "../models/forwardingNoteItem.model.js";
 import { sanitizeSearch, buildForwardingNoteBillDocument } from "../../core/utils/helper.js";
 import { fetchFromIMS } from "../services/ims.service.js";
+import { findCategories } from "../models/category.model.js";
+import { fetchErpFgStockForItem, summarizeErpFgRecords } from "../utils/erp-api/erpFgStock.js";
 
 const FORWARDING_CFG = getCrudModuleConfig("forwarding_note_master");
 const FORWARDING_ITEM_CFG = getCrudModuleConfig("forwarding_note_item_wise");
+
+function parseForwardingPackingCategoryId(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function resolveForwardingCategoryPackings(boxes, packing_category_id) {
+  const catId = parseForwardingPackingCategoryId(packing_category_id);
+  if (!catId) return null;
+  const filtered = filterForwardingBoxesByCategoryId(boxes, catId);
+  return buildPackingNumberSet(filtered.map((b) => b.packing_number));
+}
 
 export const getForwardingNotes = async (req, res) => {
   try {
@@ -396,7 +413,7 @@ export const getForwardingNoteBillNumbersViews = async (req, res) => {
 
 export const getAvailableBoxesByItem = async (req, res) => {
   try {
-    let { item_dcode, exclude_fuid } = req.body;
+    let { item_dcode, exclude_fuid, packing_category_id } = req.body;
 
     if (!item_dcode) {
       return res.status(400).json({ success: false, message: "item_dcode is required" });
@@ -412,10 +429,145 @@ export const getAvailableBoxesByItem = async (req, res) => {
     const exclude = exclude_fuid != null && exclude_fuid !== "" && Number.isFinite(Number(exclude_fuid)) ? Number(exclude_fuid) : null;
 
     const rows = await findAvailableBoxes(clean_dcode);
-    const data = await buildForwardingAvailableBoxes(rows, clean_dcode, exclude);
+    let data = await buildForwardingAvailableBoxes(rows, clean_dcode, exclude);
+
+    const catId = parseForwardingPackingCategoryId(packing_category_id);
+    if (catId) {
+      data = filterForwardingBoxesByCategoryId(data, catId);
+    }
+
     res.json({ success: true, count: data.length, data });
   } catch (err) {
     res.status(500).json({ success: false, message: "Internal Server Error: " + err.message });
+  }
+};
+
+/** Items with FG stock available for forwarding (dropdown — excludes fully reserved / empty). */
+export const getAvailableItemsForForwarding = async (req, res) => {
+  try {
+    const exclude_fuid =
+      req.body?.exclude_fuid != null &&
+      req.body.exclude_fuid !== "" &&
+      Number.isFinite(Number(req.body.exclude_fuid))
+        ? Number(req.body.exclude_fuid)
+        : null;
+
+    const ids = await findItemDcodesWithForwardingAvailableStock(exclude_fuid);
+    if (!ids.length) {
+      return res.json({ success: true, data: [], total: 0 });
+    }
+
+    const stubs = ids.map((id) => ({
+      itemdcode: id,
+      item_code: String(id),
+      itemdesc: "",
+    }));
+    const enriched = await enrichRowsWithIMS(stubs, {
+      itemCodeField: "itemdcode",
+      itemCodeOut: "item_code",
+      itemDescOut: "itemdesc",
+    });
+
+    const data = enriched.map((item) => ({
+      id: item.itemdcode,
+      itemdcode: item.itemdcode,
+      item_code: item.item_code,
+      itemdesc: item.itemdesc,
+    }));
+
+    res.json({ success: true, data, total: data.length });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message, data: [], total: 0 });
+  }
+};
+
+/** ERP FG stock for forwarding note item row (`requestedData: erpfg`). */
+export const getErpFgStockByItem = async (req, res) => {
+  try {
+    const item_dcode = Number(req.body?.item_dcode);
+    if (!Number.isFinite(item_dcode) || item_dcode <= 0) {
+      return res.status(400).json({ success: false, message: "Valid item_dcode is required" });
+    }
+
+    const ims = await fetchErpFgStockForItem(item_dcode);
+    const summary = summarizeErpFgRecords(ims?.records);
+
+    const exclude =
+      req.body?.exclude_fuid != null &&
+      req.body.exclude_fuid !== "" &&
+      Number.isFinite(Number(req.body.exclude_fuid))
+        ? Number(req.body.exclude_fuid)
+        : null;
+    const boxRows = await findAvailableBoxes(item_dcode);
+    const builtBoxes = await buildForwardingAvailableBoxes(boxRows, item_dcode, exclude);
+    const allowedPackings = resolveForwardingCategoryPackings(
+      builtBoxes,
+      req.body?.packing_category_id
+    );
+    const filtered = allowedPackings
+      ? filterErpStockByCategory(summary, allowedPackings)
+      : {
+          total: summary.total,
+          byPacking: summary.byPacking,
+          records: summary.records,
+        };
+
+    res.json({
+      success: ims?.success !== false,
+      total: filtered.total,
+      by_packing: filtered.byPacking,
+      records: filtered.records,
+      message: ims?.message,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** All categories + customer's last used category on forwarding notes (default OEM if none). */
+export const getForwardingNoteCustomerCategory = async (req, res) => {
+  try {
+    const acc_code = Number(req.body?.acc_code);
+    if (!Number.isFinite(acc_code)) {
+      return res.status(400).json({ success: false, message: "Valid acc_code is required" });
+    }
+
+    const [categoriesResult, lastId] = await Promise.all([
+      findCategories({
+        sort: { by: "name", order: "ASC" },
+        page: 1,
+        limit: 1000,
+        fields: ["id", "name"],
+      }),
+      findLastForwardingPackingCategory(acc_code),
+    ]);
+
+    const options = (categoriesResult?.data || []).map((c) => ({
+      id: c.id,
+      name: c.name,
+    }));
+
+    let packing_category_id = lastId;
+    if (
+      packing_category_id != null &&
+      !options.some((o) => Number(o.id) === Number(packing_category_id))
+    ) {
+      packing_category_id = null;
+    }
+    if (packing_category_id == null) {
+      const oem = options.find((o) => String(o.name || "").trim().toLowerCase() === "oem");
+      packing_category_id = oem?.id ?? options[0]?.id ?? null;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        packing_category_id,
+        options,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 

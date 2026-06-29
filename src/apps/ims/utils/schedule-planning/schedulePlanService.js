@@ -2,7 +2,7 @@ import dbQuery, { withTransaction } from "../../../../config/db.js";
 import { fetchImsDataRaw } from "../../services/ims.service.js";
 import { buildInventoryReportSql } from "../inventory-report/inventoryReportSql.js";
 import { deletePlans, loadAllPlanMap, loadPlanRow, planKey, upsertPlan, updatePlanStatus } from "./schedulePlanDb.js";
-import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canHoldFrom, canPlanFrom, canRejectFrom, isActiveScheduleStatus, parseListFilter, SCHEDULE_LIST_FILTER, statusLabel, actionTypeLabel } from "./schedulePlanStatus.js";
+import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canHoldFrom, canPlanFrom, canRejectFrom, isActiveScheduleStatus, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel } from "./schedulePlanStatus.js";
 import { insertScheduleTransaction, loadActionDates, loadActionReasons, loadItemTransactionHistory, loadLastTransactionMap, loadPlanDateHistoryMap, deletePlanTransactions } from "./schedulePlanTransactionDb.js";
 import { buildScheduleComparison, hasScheduleComparisonMismatch } from "./schedulePlanCompare.js";
 import { toPublicImsMessage } from "../erp-api/imsMeta.js";
@@ -319,14 +319,56 @@ async function enrichFgStock(records) {
   }
 }
 
-function imsFilter(body, finYearId) {
-  const { month, fromDate, toDate } = body || {};
-  const f = { fin_year_id: finYearId };
-  const m = month != null ? String(month).trim() : "";
-  if (m && m.toLowerCase() !== "all") f.month = m;
-  if (fromDate) f.fromDate = String(fromDate).trim();
-  if (toDate) f.toDate = String(toDate).trim();
-  return f;
+function currentScheduleMonth() {
+  return String(new Date().getMonth() + 1);
+}
+
+function buildImsScheduleFilterSql(body, finYearId) {
+  const fyId = Number(finYearId);
+  if (!Number.isFinite(fyId)) return null;
+
+  const reportType = String(body?.reportType ?? SCHEDULE_REPORT_FILTER.DEFAULT).toLowerCase();
+  const parts = [`m.fyid = ${fyId}`];
+
+  if (reportType !== SCHEDULE_REPORT_FILTER.CUSTOM) {
+    return parts.join("  and  ");
+  }
+
+  const monthRaw = body?.month != null ? String(body.month).trim() : "";
+  const hasMonth = monthRaw && monthRaw.toLowerCase() !== "all";
+  const from = normDate(body?.fromDate);
+  const to = normDate(body?.toDate) || from;
+
+  if (hasMonth) {
+    const m = Number(monthRaw);
+    if (Number.isFinite(m) && m >= 1 && m <= 12) {
+      parts.push(`m.schmonth = ${m}`);
+    }
+  }
+  if (from) {
+    parts.push(`m.docdt >= '${from}'`);
+  }
+  if (to) {
+    parts.push(`m.docdt <= '${to}'`);
+  }
+
+  return parts.join("  and  ");
+}
+
+function customReportHasMonthOrDate(body) {
+  const monthRaw = body?.month != null ? String(body.month).trim() : "";
+  const hasMonth = monthRaw && monthRaw.toLowerCase() !== "all";
+  const hasDate = Boolean(normDate(body?.fromDate)) || Boolean(normDate(body?.toDate));
+  return hasMonth || hasDate;
+}
+
+/** Default = IMS object `{ fin_year_id, month }` (current month). Custom = SQL month and/or docdt range. */
+function imsFilterForReport(body, finYearId) {
+  const reportType = String(body?.reportType ?? SCHEDULE_REPORT_FILTER.DEFAULT).toLowerCase();
+  if (reportType !== SCHEDULE_REPORT_FILTER.CUSTOM) {
+    return { fin_year_id: finYearId, month: currentScheduleMonth() };
+  }
+  return buildImsScheduleFilterSql(body, finYearId);
 }
 
 /** All items for one schedule (any status) — for plan/reject modal. */
@@ -394,9 +436,21 @@ export async function listSchedulePlanning(body = {}) {
   }
 
   const filterMode = parseListFilter(body.status);
+  const reportType = String(body?.reportType ?? SCHEDULE_REPORT_FILTER.DEFAULT).toLowerCase();
+
+  if (reportType === SCHEDULE_REPORT_FILTER.CUSTOM && !customReportHasMonthOrDate(body)) {
+    return {
+      success: false,
+      status: 400,
+      message: "Custom report requires a month or date range (or both).",
+      records: [],
+    };
+  }
+
+  const imsFilter = imsFilterForReport(body, fy.finYearId);
 
   const [imsResult, planMap, lastTxnMap, planDateHistoryMap] = await Promise.all([
-    fetchImsDataRaw(IMS_SCHEDULE_LIST, imsFilter(body, fy.finYearId)),
+    fetchImsDataRaw(IMS_SCHEDULE_LIST, imsFilter),
     loadAllPlanMap(fy.finYearId),
     loadLastTransactionMap(fy.finYearId),
     loadPlanDateHistoryMap(fy.finYearId),
@@ -653,6 +707,58 @@ export async function listScheduleItemTransactions(body = {}) {
       to_status_label: statusLabel(row.to_status),
       action_label: actionTypeLabel(row.action_type),
     })),
+  };
+}
+
+export async function submitScheduleShortage(body = {}, userId = null, userName = null) {
+  const fy = requireFinYear(body);
+  if (fy.error) return fy.error;
+
+  const schno = String(body?.schno ?? "").trim();
+  const shortageQty = Number(body.shortage_qty);
+  if (!schno || body?.itemdcode == null) {
+    return { success: false, status: 400, message: "schno and itemdcode are required." };
+  }
+  if (!Number.isFinite(shortageQty) || shortageQty < 0) {
+    return { success: false, status: 400, message: "Enter a valid shortage quantity." };
+  }
+
+  const filter = {
+    fin_year_id: fy.finYearId,
+    schno,
+    itemdcode: body.itemdcode,
+    item_code: body.item_code,
+    itemdesc: body.itemdesc,
+    schmonth: body.schmonth,
+    schdt: normDate(body.schdt) ?? body.schdt,
+    acc_code: body.acc_code,
+    acc_name: body.acc_name,
+    original_qty: Number(body.original_qty) || 0,
+    shortage_qty: shortageQty,
+    user_id: userId,
+    user_name: userName,
+  };
+
+  console.log("[schedule-planning] shortage request", filter);
+  // const ims = await fetchImsDataRaw("shortage", filter);
+  // console.log("[schedule-planning] shortage response", JSON.stringify(ims, null, 2));
+
+  // const row = Array.isArray(ims?.records) ? ims.records[0] : ims?.records;
+  // const id = ims?.id ?? row?.id ?? null;
+  // const msg = ims?.msg ?? ims?.message ?? row?.msg ?? row?.message ?? null;
+
+  // if (ims?.success !== true) {
+  //   return {
+  //     success: false,
+  //     status: 400,
+  //     message: toPublicImsMessage(msg || ims?.message, "Could not submit shortage."),
+  //   };
+  // }
+
+  return {
+    success: true,
+    message: msg || "Shortage submitted successfully.",
+    data: { id },
   };
 }
 

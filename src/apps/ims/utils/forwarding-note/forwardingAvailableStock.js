@@ -1,10 +1,11 @@
-import { findForwardedQtyByItemAndPacking } from "../../models/forwardingNote.model.js";
+import { findForwardedQtyByItemAndPacking, findAllSellableForwardingBoxes, findAllForwardedReservesByItemAndPacking } from "../../models/forwardingNote.model.js";
+import {
+  enrichForwardingBoxesWithPackingStd,
+  inferForwardingPackingStandardQty,
+  isForwardingLooseBox,
+} from "../box/boxLooseKind.js";
 
-/** Full/open vs loose — read `ims_box_table.is_loose` (set at sticker / adjustment create). */
-export function isForwardingLooseBox(box) {
-  const v = box?.is_loose;
-  return v === true || v === 1 || v === "true" || v === "t";
-}
+export { enrichForwardingBoxesWithPackingStd, inferForwardingPackingStandardQty, isForwardingLooseBox };
 
 function normalizeForwardedReserveEntry(v) {
   if (v == null || v === "") return { open_qty: 0, loose_qty: 0, total_qty: 0 };
@@ -33,7 +34,8 @@ export function forwardedTotalQtyForPacking(forwardedByPacking = {}, packingNumb
 
 /** Same FIFO order as ForwardingModal `sortBoxesForFifo`. */
 export function sortBoxesForForwardingFifo(boxes = []) {
-  return [...boxes].sort((a, b) => {
+  const enriched = enrichForwardingBoxesWithPackingStd(boxes);
+  return [...enriched].sort((a, b) => {
     const pA = Number(a?.packing_number ?? 0);
     const pB = Number(b?.packing_number ?? 0);
     if (pA !== pB) return pA - pB;
@@ -88,13 +90,14 @@ export function reduceBoxesByForwardedQty(boxes = [], forwardedByPacking = {}) {
   for (const pNo of packingOrder) {
     const reserve = lookupForwardedReserve(forwardedByPacking, pNo);
     const packingBoxes = byPacking.get(pNo) || [];
-    const openBoxes = packingBoxes.filter((b) => !isForwardingLooseBox(b));
-    const looseBoxes = packingBoxes.filter((b) => isForwardingLooseBox(b));
+    const stdQty = inferForwardingPackingStandardQty(packingBoxes);
+    const openBoxes = packingBoxes.filter((b) => !isForwardingLooseBox(b, stdQty));
+    const looseBoxes = packingBoxes.filter((b) => isForwardingLooseBox(b, stdQty));
 
     result.push(...applyQtySkipToBoxes(openBoxes, reserve.open_qty));
     result.push(...applyQtySkipToBoxes(looseBoxes, reserve.loose_qty));
   }
-  return result;
+  return enrichForwardingBoxesWithPackingStd(result);
 }
 
 export async function buildForwardingAvailableBoxes(boxes = [], item_dcode, exclude_fuid = null) {
@@ -104,4 +107,47 @@ export async function buildForwardingAvailableBoxes(boxes = [], item_dcode, excl
 
 export function sumBoxQty(boxes = []) {
   return (boxes || []).reduce((s, b) => s + (Number(b.qty) || 0), 0);
+}
+
+function buildForwardedMapByItem(rows = []) {
+  const byItem = new Map();
+  for (const row of rows || []) {
+    const itemId = String(row.itemdcode ?? "").trim();
+    const pn = String(row.packing_number ?? "").trim();
+    if (!itemId || !pn) continue;
+    if (!byItem.has(itemId)) byItem.set(itemId, {});
+    byItem.get(itemId)[pn] = {
+      open_qty: Number(row.open_qty) || 0,
+      loose_qty: Number(row.loose_qty) || 0,
+      total_qty: Number(row.total_qty) || 0,
+    };
+  }
+  return byItem;
+}
+
+/** Item dcodes with FG stock available for a new forwarding note row (after other-note reserves). */
+export async function findItemDcodesWithForwardingAvailableStock(exclude_fuid = null) {
+  const [allBoxes, forwardRows] = await Promise.all([
+    findAllSellableForwardingBoxes(),
+    findAllForwardedReservesByItemAndPacking(exclude_fuid),
+  ]);
+
+  const boxesByItem = new Map();
+  for (const box of allBoxes || []) {
+    const itemId = String(box.itemdcode ?? "").trim();
+    if (!itemId) continue;
+    if (!boxesByItem.has(itemId)) boxesByItem.set(itemId, []);
+    boxesByItem.get(itemId).push(box);
+  }
+
+  const forwardByItem = buildForwardedMapByItem(forwardRows);
+  const available = [];
+
+  for (const [itemId, boxes] of boxesByItem.entries()) {
+    const forwarded = forwardByItem.get(itemId) || {};
+    const reduced = reduceBoxesByForwardedQty(boxes, forwarded);
+    if (sumBoxQty(reduced) > 0) available.push(itemId);
+  }
+
+  return available;
 }

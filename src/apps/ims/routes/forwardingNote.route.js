@@ -1,5 +1,5 @@
 import express from "express";
-import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, updateForwardingNoteBill, deleteForwardingNote, getAvailableBoxesByItem, getForwardingNoteItems, lockForwardingNoteLock, unlockForwardingNoteLock, getForwardingNotesViews, printForwardingNoteBill, getForwardingNoteTransportersViews, getForwardingNoteBillNumbersViews } from "../controllers/forwardingNote.controller.js";
+import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, updateForwardingNoteBill, deleteForwardingNote, getAvailableBoxesByItem, getAvailableItemsForForwarding, getForwardingNoteItems, lockForwardingNoteLock, unlockForwardingNoteLock, getForwardingNotesViews, printForwardingNoteBill, getForwardingNoteTransportersViews, getForwardingNoteBillNumbersViews, getErpFgStockByItem, getForwardingNoteCustomerCategory } from "../controllers/forwardingNote.controller.js";
 
 import { authenticate, authorize } from "../middleware/auth.js";
 import { accessControl, accessControlAny } from "../../core/middleware/accessControl.js";
@@ -42,6 +42,15 @@ router.post("/delete", authenticate, accessControl("forwarding_note_master", "de
 
 // Get available boxes for an item (for forwarding note creation)
 router.post("/available-boxes", authenticate, accessControl("forwarding_note_master", "view"), getAvailableBoxesByItem);
+
+// Items with dispatchable FG stock (forwarding note item dropdown)
+router.post("/available-items", authenticate, accessControl("forwarding_note_master", "view"), getAvailableItemsForForwarding);
+
+// ERP FG stock for item (internal API erpfg)
+router.post("/erp-stock", authenticate, accessControl("forwarding_note_master", "view"), getErpFgStockByItem);
+
+// Customer last category + all category options
+router.post("/customer-category", authenticate, accessControl("forwarding_note_master", "view"), getForwardingNoteCustomerCategory);
 
 // Super-admin manual lock / unlock for Out Entry lock
 router.post("/lock-lock", authenticate, authorize("super_admin"), lockForwardingNoteLock);

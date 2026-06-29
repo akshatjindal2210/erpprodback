@@ -46,6 +46,7 @@ export async function createBoxTable() {
       patchCol("download_count", "INTEGER DEFAULT 0"),
       patchCol("is_loose", "BOOLEAN DEFAULT false"),
       patchCol("sa_entry_type", "VARCHAR(20)"),
+      patchCol("category_id", "INTEGER"),
     ],
     indexes: [
       `CREATE INDEX IF NOT EXISTS idx_box_packing_number ON ${T.BOX_TABLE}(packing_number)`,
@@ -56,8 +57,11 @@ export async function createBoxTable() {
       `CREATE INDEX IF NOT EXISTS idx_box_packing_number_trimmed ON ${T.BOX_TABLE} (NULLIF(TRIM(packing_number::text), ''))`,
       `CREATE INDEX IF NOT EXISTS idx_box_no_uid_trgm ON ${T.BOX_TABLE} USING gin (box_no_uid gin_trgm_ops)`,
       `CREATE INDEX IF NOT EXISTS idx_box_packing_number_trgm ON ${T.BOX_TABLE} USING gin (packing_number gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS idx_box_category_id ON ${T.BOX_TABLE}(category_id) WHERE category_id IS NOT NULL`,
     ],
   });
+
+  await dropColumnIfExists(dbQuery, T.BOX_TABLE, "category_name");
 
   await runIfColumnExists(dbQuery, T.BOX_TABLE, "sa_entry_type", async () => {
     await dbQuery(`

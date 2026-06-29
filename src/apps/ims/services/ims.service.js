@@ -11,20 +11,27 @@ function imsFailureMessage(err) {
   return m;
 }
 
+function normalizeImsFilter(filter) {
+  if (filter == null) return undefined;
+  if (typeof filter === "object" && !Array.isArray(filter)) return filter;
+  const trimmed = String(filter).trim();
+  if (trimmed === "") return undefined;
+  const asNum = Number(trimmed);
+  if (Number.isFinite(asNum) && String(asNum) === trimmed) return asNum;
+  return trimmed;
+}
+
 async function imsPostJsonBody(requestedData, filter) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.erpInternalApi.timeoutMs || 15000);
+  const normalizedFilter = normalizeImsFilter(filter);
   try {
     const response = await fetch(config.erpInternalApi.url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         requestedData,
-        ...(filter != null && typeof filter === "object" && !Array.isArray(filter)
-          ? { filter }
-          : filter != null && String(filter).trim() !== ""
-            ? { filter: String(filter).trim() }
-            : {}),
+        ...(normalizedFilter != null ? { filter: normalizedFilter } : {}),
       }),
       signal: controller.signal,
     });

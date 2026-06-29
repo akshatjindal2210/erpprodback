@@ -20,6 +20,7 @@ const ALLOWED_UPDATE_FIELDS = [
   "item_code",
   "item_desc",
   "acc_name",
+  "category_id",
   "approved",
   "approved_by",
   "approved_at",

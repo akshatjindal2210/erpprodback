@@ -76,12 +76,9 @@ export function formatStockAdjustmentBoxNoUid(packingNumber, saToken, totalBoxes
   return pfx ? `${pfx}_${core}` : core;
 }
 
-//  True when per-box qty is below packing standard (treat as loose).
-export function isLooseBoxComparedToStandard(perBoxQty, standardQtyPerBox) {
-  const p = parseInt(String(perBoxQty ?? ""), 10);
-  const s = parseInt(String(standardQtyPerBox ?? ""), 10);
-  return Number.isFinite(p) && p > 0 && Number.isFinite(s) && s > 0 && p < s;
-}
+import { inferStandardQtyFromBoxQtys, isLooseBoxComparedToStandard } from "../box/boxLooseKind.js";
+
+export { isLooseBoxComparedToStandard, inferStandardQtyFromBoxQtys };
 
 // Standard pcs/box for UI or inserts: linked `ims_dailyprod` standard first, else latest approved for item.
 export async function resolveStandardQtyPerBoxForPacking({ packingNumber, itemDcode }) {
@@ -89,7 +86,10 @@ export async function resolveStandardQtyPerBoxForPacking({ packingNumber, itemDc
   if (!doc) return null;
   const fromDoc = await findStandardQtyPerBoxForPackingNumber(doc);
   if (fromDoc != null) return fromDoc;
-  return findLatestApprovedStandardQtyForItem(itemDcode);
+  const fromItem = await findLatestApprovedStandardQtyForItem(itemDcode);
+  if (fromItem != null) return fromItem;
+  const inHand = await findInHandBoxesByPackingNumber(doc);
+  return inferStandardQtyFromBoxQtys(inHand);
 }
 
 /** Customer acc_code for SA boxes / stickers — dailyprod, in-hand boxes, then IMS pack row. */
@@ -290,6 +290,7 @@ export function buildStockAdjustmentAddBoxInsertRows({
   userId,
   boxNoUidPrefix = "",
   override_cust = null,
+  category_id = null,
 }) {
   const pn = String(packingNumber ?? "").trim();
   const nb = parseInt(String(totalBoxes), 10);
@@ -308,7 +309,8 @@ export function buildStockAdjustmentAddBoxInsertRows({
       override_cust: cust,
       created_by: userId,
       sa_id: adjustmentId,
-      sa_entry_type: "stock_in"
+      sa_entry_type: "stock_in",
+      category_id,
     });
   }
   return rows;
@@ -326,6 +328,7 @@ export function buildStockAdjustmentAddExtraBoxRows({
   userId,
   boxNoUidPrefix = "",
   override_cust = null,
+  category_id = null,
 }) {
   const pn = String(packingNumber ?? "").trim();
   const extra = parseInt(String(extraCount), 10);
@@ -347,7 +350,8 @@ export function buildStockAdjustmentAddExtraBoxRows({
       override_cust: cust,
       created_by: userId,
       sa_id: adjustmentId,
-      sa_entry_type: "stock_in"
+      sa_entry_type: "stock_in",
+      category_id,
     });
   }
   return rows;

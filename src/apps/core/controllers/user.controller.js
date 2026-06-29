@@ -750,16 +750,19 @@ export const getUsersViews = async (req, res) => {
     }
 
     const fields = resolveUserViewsSelectFields({ permission_module, permission_action });
-    
-    // If no module/action provided, fallback to all fields (including relations) for Task app
-    const finalFields = fields || [];
+    if (!fields?.length) {
+      return res.status(403).json({
+        success: false,
+        message: "This helper is not allowed from this page",
+      });
+    }
 
     const result = await findUsers({
       search: sanitizeSearch(search),
       sort: { by: sortBy || "created_at", order: order || "DESC" },
       page: 1,
       limit: 5000,
-      fields: finalFields,
+      fields,
       filters: { status: "active" },
     });
 

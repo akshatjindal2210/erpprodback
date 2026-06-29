@@ -80,6 +80,7 @@ export async function applyStockAdjustmentOnApproveTx(client, { adjustment, user
       userId,
       boxNoUidPrefix,
       override_cust,
+      category_id: adjustment.category_id ?? null,
     });
     await insertBulkBoxesTx(client, boxRows);
 

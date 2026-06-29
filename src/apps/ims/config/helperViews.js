@@ -155,6 +155,9 @@ function fieldsForPackingStandard(mod, act) {
   if (mod === "packing_entry" && act === VIEW) return [...psPicker];
   if (mod === "packing_entry" && isForm(act)) return [...psModal];
 
+  if (mod === "stock_adjustment" && act === VIEW) return [...psPicker];
+  if (mod === "stock_adjustment" && isForm(act)) return [...psModal];
+
   return null;
 }
 
@@ -167,6 +170,9 @@ function fieldsForCategory(mod, act) {
 
   if (mod === "packing_standard" && act === VIEW) return [...catPicker];
   if (mod === "packing_standard" && isForm(act)) return [...catModal];
+
+  if (mod === "stock_adjustment" && act === VIEW) return [...catPicker];
+  if (mod === "stock_adjustment" && isForm(act)) return [...catModal];
 
   return null;
 }
@@ -186,7 +192,11 @@ function fieldsForDailyProd(mod, act) {
 }
 
 function fieldsForForwardingNotes(mod, act) {
-  return allowOnly(mod, act, "out_entry", [VIEW]);
+  if (mod == null || act == null) return null;
+  const allowed = [VIEW, ...FORM_ACTIONS];
+  if (mod === "out_entry" && allowed.includes(act)) return [];
+  if (mod === "forwarding_note_master" && allowed.includes(act)) return [];
+  return null;
 }
 
 function fieldsForInventoryInwards(mod, act) {

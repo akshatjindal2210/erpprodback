@@ -1,4 +1,4 @@
-import { listSchedulePlanning, listScheduleActionDates, saveSchedulePlan, rejectSchedulePlan, holdSchedulePlan, listScheduleItemTransactions, removeSchedulePlan } from "../utils/schedule-planning/schedulePlanService.js";
+import { listSchedulePlanning, listScheduleActionDates, saveSchedulePlan, rejectSchedulePlan, holdSchedulePlan, listScheduleItemTransactions, removeSchedulePlan, submitScheduleShortage } from "../utils/schedule-planning/schedulePlanService.js";
 import { clearImsMetaForResponse, toPublicImsMessage } from "../utils/erp-api/imsMeta.js";
 
 // Sends a simple JSON response
@@ -147,22 +147,26 @@ export const getScheduleItemTransactions = async (req, res) => {
 
 export const submitScheduleShortagePlanning = async (req, res) => {
   try {
-    const body = req.body || {};
-    const shortageQty = Number(body.shortage_qty);
-    if (!Number.isFinite(shortageQty) || shortageQty < 0) {
-      return sendSimple(res, {
-        success: false,
-        message: "Enter a valid shortage quantity.",
-        data: null,
-        status: 400,
-      });
-    }
-    console.log("[schedule-planning] shortage", JSON.stringify({ ...body, shortage_qty: shortageQty, user_id: req.user?.id ?? null }, null, 2));
+    console.log("[schedule-planning] shortage request", req.body);
+    // const out = await submitScheduleShortage(req.body || {}, req.user?.id ?? null, req.user?.name ?? null);
+
+    // if (out?.success === false) {
+    //   return sendSimple(res, {
+    //     success: false,
+    //     message: out.message || "Could not submit shortage.",
+    //     data: null,
+    //     status: out.status || 400,
+    //   });
+    // }
     return sendSimple(res, {
       success: true,
-      message: "Shortage submitted successfully.",
-      data: null,
+      message:"Shortage submitted successfully.",
     });
+    // return sendSimple(res, {
+    //   success: true,
+    //   message: out.message || "Shortage submitted successfully.",
+    //   data: out.data ?? null,
+    // });
   } catch {
     return sendSimple(res, { success: false, message: "Could not submit shortage.", data: null, status: 500 });
   }

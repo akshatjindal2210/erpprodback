@@ -101,12 +101,12 @@ export const findForwardingNoteItems = async (options = {}) => {
 
     if (key === "from_date") {
       values.push(val);
-      conditions.push(`fi.created_at >= $${i++}`);
+      conditions.push(`COALESCE(fnm.timestamp, fnm.created_at, fi.created_at) >= $${i++}`);
       continue;
     }
     if (key === "to_date") {
       values.push(val);
-      conditions.push(`fi.created_at <= $${i++}`);
+      conditions.push(`COALESCE(fnm.timestamp, fnm.created_at, fi.created_at) <= $${i++}`);
       continue;
     }
 
@@ -135,12 +135,17 @@ export const findForwardingNoteItems = async (options = {}) => {
     values.push(searchTerm);
     conditions.push(`(
       fi.fuid::text ILIKE $${i} OR
-      fi.item_dcode::text ILIKE $${i} OR 
+      fi.item_dcode::text ILIKE $${i} OR
       fnm.po_number ILIKE $${i} OR
       fnm.acc_code::text ILIKE $${i} OR
       fnm.vehicle_number ILIKE $${i} OR
       fnm.bill_no ILIKE $${i} OR
-      fi.packing_number ILIKE $${i}
+      fi.packing_number ILIKE $${i} OR
+      EXISTS (
+        SELECT 1 FROM ims_dailyprod dp
+        WHERE NULLIF(TRIM(fi.packing_number::text), '') = NULLIF(TRIM(dp.doc_no::text), '')
+          AND (dp.item_code ILIKE $${i} OR dp.item_desc ILIKE $${i})
+      )
     )`);
     i++;
   }

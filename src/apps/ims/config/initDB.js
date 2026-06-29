@@ -45,6 +45,24 @@ export async function initImsDB() {
 
   await syncImsSequences();
 
+  if (process.env.BACKFILL_BOX_CATEGORY !== "0") {
+    try {
+      const { runBoxCategoryBackfillOnStartup } = await import("../utils/box/backfillBoxCategory.js");
+      await runBoxCategoryBackfillOnStartup();
+    } catch (err) {
+      console.warn("Box category backfill skipped:", err.message);
+    }
+  }
+
+  if (process.env.BACKFILL_BOX_IS_LOOSE !== "0") {
+    try {
+      const { runBoxIsLooseBackfillOnStartup } = await import("../utils/box/backfillBoxCategory.js");
+      await runBoxIsLooseBackfillOnStartup();
+    } catch (err) {
+      console.warn("Box is_loose backfill skipped:", err.message);
+    }
+  }
+
   // Legacy SA rows — after all schema patches.
   if (process.env.BACKFILL_SA_PACKING_META !== "0") {
     setImmediate(() => {
@@ -52,7 +70,8 @@ export async function initImsDB() {
         .then(({ runStockAdjustmentPackingMetaBackfillOnStartup }) =>
           runStockAdjustmentPackingMetaBackfillOnStartup()
         )
-        .catch((err) => console.warn("⚠️ SA packing meta backfill skipped:", err.message));
+        .catch((err) => console.warn("SA packing meta backfill skipped:", err.message));
     });
   }
+
 }

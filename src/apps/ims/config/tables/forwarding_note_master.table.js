@@ -1,5 +1,5 @@
 import dbQuery from "../../../../config/db.js";
-import { patchTableSchema } from "../../../../config/ensureDbColumns.js";
+import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
 import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
 
 export async function createForwardingNoteMasterTable() {
@@ -16,6 +16,7 @@ export async function createForwardingNoteMasterTable() {
       cartage               NUMERIC,
       total_items           INTEGER,
       bill_no               TEXT,
+      packing_category_id   INTEGER,
       bill_updated_by       INTEGER REFERENCES ${C.USERS}(id),
       bill_updated_at       TIMESTAMP,
       out_entry_locked      BOOLEAN DEFAULT false,
@@ -35,6 +36,7 @@ export async function createForwardingNoteMasterTable() {
   `);
 
   await patchTableSchema(dbQuery, T.FORWARDING_NOTE_MASTER, {
+    columns: [patchCol("packing_category_id", "INTEGER")],
     columnTypes: [{ name: "bill_no", type: "text" }],
   });
 }

@@ -54,7 +54,8 @@ export const createAdjustment = async (req, res) => {
   try {
     const normalizedApproved = normalizeApprovedInput(req.body.approved);
     const { item_dcode: bodyItemDcode, qty: bodyQty, unit, remarks, entry_type, packing_number: rawPacking, financial_year,
-      per_box_qty, box_count_impact, no_of_boxes, removed_box_uids, acc_code: bodyAccCode } = req.body;
+      per_box_qty, box_count_impact, no_of_boxes, removed_box_uids, acc_code: bodyAccCode,
+      category_id: bodyCategoryId } = req.body;
 
     let item_dcode = bodyItemDcode;
     let acc_code = bodyAccCode;
@@ -99,6 +100,10 @@ export const createAdjustment = async (req, res) => {
           success: false,
           message: "Number of boxes and per-box quantity must both be positive integers."
         });
+      }
+      const categoryId = parseInt(String(bodyCategoryId ?? ""), 10);
+      if (!Number.isFinite(categoryId) || categoryId <= 0) {
+        return res.status(400).json({ success: false, message: "Packing category is required." });
       }
       qty = box_count_impact_v * per_box_qty_v;
     } else if (entry_type === "minus") {
@@ -182,6 +187,10 @@ export const createAdjustment = async (req, res) => {
       data.per_box_qty = entry_type === "add" ? per_box_qty_v : null;
       data.box_count_impact = box_count_impact_v;
       if (entry_type === "minus") data.removed_box_ids = removed_box_ids_json;
+      if (entry_type === "add") {
+        const categoryId = parseInt(String(bodyCategoryId ?? ""), 10);
+        data.category_id = categoryId;
+      }
     }
 
     let adjustment;

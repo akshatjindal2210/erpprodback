@@ -2,6 +2,8 @@ import { Router } from "express";
 import { loginUser, logoutUser, getUsers, getImsUsers, createUser, updateUser, deleteUser, getMe, changePassword, getUserStats, getUserById, getUsersViews } from "../controllers/user.controller.js";
 import { authenticate } from "../middleware/auth.js";
 import { accessControl } from "../middleware/accessControl.js";
+import { pageHelperAccess } from "../middleware/pageHelperAccess.js";
+import { resolveUserViewsSelectFields } from "../config/view-fields/user.js";
 
 const router = Router();
 
@@ -17,6 +19,6 @@ router.post("/users/get", authenticate, accessControl("users", "view"), getUserB
 router.post("/users/create", authenticate, accessControl("users", "add"), createUser);
 router.post("/users/update", authenticate, accessControl("users", "edit"), updateUser);
 router.post("/users/delete", authenticate, accessControl("users", "delete"), deleteUser);
-router.post("/users/helper", authenticate, getUsersViews);
+router.post("/users/helper", authenticate, pageHelperAccess(resolveUserViewsSelectFields), getUsersViews);
 
 export default router;

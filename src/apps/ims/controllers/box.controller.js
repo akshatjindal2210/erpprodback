@@ -1067,6 +1067,9 @@ export const generateStickers = async (req, res) => {
     // SA add boxes (e.g. *_SA*_* UIDs) may exist on the same packing; production stickers use normal UIDs only.
 
     const boxNoUidPrefix = await getBoxNoUidPrefix();
+    const stickerCategoryId = parseInt(String(category_id ?? ""), 10);
+    const boxCategoryId =
+      Number.isFinite(stickerCategoryId) && stickerCategoryId > 0 ? stickerCategoryId : null;
     const rowsToInsert = [];
     for (let i = 1; i <= total_stickers; i++) {
       const isLoose = i > full_boxes_count;
@@ -1078,7 +1081,8 @@ export const generateStickers = async (req, res) => {
         qty            : Number(isLoose ? loose_box_qty : qty_per_box),
         is_loose       : isLoose,
         override_cust  : null,
-        created_by     : req.user.id
+        created_by     : req.user.id,
+        ...(boxCategoryId != null ? { category_id: boxCategoryId } : {}),
       });
     }
 

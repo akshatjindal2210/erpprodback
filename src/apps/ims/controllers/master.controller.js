@@ -16,18 +16,20 @@ const LEDGER_ITEM_CUSTOMER_MODULES = new Set(["packing_entry", "stock_adjustment
 
 function mapItemRecord(r) {
   return {
-    itemdcode: r.ItemDcode,
-    item_code: r.Item_Code,
-    itemdesc: r.ItemDesc,
-    grpname: r.Grpname,
-    minqty: r.minqty,
-    maxqty: r.maxqty,
-    reorderqty: r.Reorderqty,
-    primitemdcode: r.PrimItemdcode,
-    primitemdesc: r.PrimItemdesc,
-    apvitem: r.apvitem,
+    itemdcode: r.ItemDcode ?? r.Itemdcode ?? r.itemdcode,
+    item_code: r.Item_Code ?? r.item_code,
+    itemdesc: r.ItemDesc ?? r.Itemdesc ?? r.itemdesc,
+    grpname: r.Grpname ?? r.grpname,
+    minqty: r.minqty ?? r.Minqty ?? 0,
+    maxqty: r.maxqty ?? r.Maxqty ?? 0,
+    reorderqty: r.Reorderqty ?? r.reorderqty ?? 0,
+    primitemdcode: r.PrimItemdcode ?? r.primitemdcode,
+    primitem_code: r.primitem_code ?? r.Primitem_code ?? r.PrimItem_Code ?? null,
+    primitemdesc: r.PrimItemdesc ?? r.primItemDesc ?? r.primitemdesc ?? null,
+    weight: r.weight ?? r.Weight ?? null,
+    apvitem: r.apvitem ?? r.Apvitem ?? r.ITAPV,
     unit: r.Unit ?? r.unit,
-    category_id: r.Category_Id ?? r.category_id
+    category_id: r.Category_Id ?? r.category_id,
   };
 }
 
