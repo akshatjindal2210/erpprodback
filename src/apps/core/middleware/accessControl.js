@@ -270,7 +270,7 @@ export const superAdminOnly = (req, res, next) => {
     return res.status(401).json({ success: false, message: "Unauthorized user not found" });
   }
   const userType = String(user.type || user.role || "").toLowerCase().trim();
-  if (userType !== "super_admin") {
+  if (userType !== "super_admin" && userType !== "super admin") {
     return res.status(403).json({ success: false, message: "Only super admin can perform this action" });
   }
   next();

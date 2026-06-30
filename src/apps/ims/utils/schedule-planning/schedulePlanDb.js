@@ -89,6 +89,39 @@ export async function updatePlanStatus({ fin_year_id, schno, itemdcode, is_plann
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
+/**
+ * Dispatch-plan helper — no fin_year_id required.
+ * Returns plan items whose latest "plan" transaction action_date falls in [fromDate, toDate].
+ * Used by the Forwarding Note "Today Dispatch Plan" tab.
+ */
+export async function loadDispatchPlanItems(fromDate, toDate) {
+  const rows = await dbQuery(
+    `SELECT
+       sp.plan_id, sp.fin_year_id, sp.schno, sp.itemdcode, sp.schmonth, sp.schdt::text AS schdt,
+       sp.acc_code, sp.acc_name, sp.item_code, sp.itemdesc, sp.totalqty,
+       sp.is_planned,
+       lt.action_date::text AS action_date,
+       lt.remark AS item_remark
+     FROM ${T.SCHEDULE_PLAN} sp
+     LEFT JOIN LATERAL (
+       SELECT action_date, remark
+       FROM ${T.SCHEDULE_PLAN_TRANSACTION}
+       WHERE fin_year_id = sp.fin_year_id
+         AND schno       = sp.schno
+         AND itemdcode   = sp.itemdcode
+         AND LOWER(TRIM(action_type)) = 'plan'
+         AND action_date IS NOT NULL
+       ORDER BY created_at DESC, txn_id DESC
+       LIMIT 1
+     ) lt ON true
+     WHERE lt.action_date BETWEEN $1::date AND $2::date
+       AND sp.is_planned != 3
+     ORDER BY lt.action_date ASC, sp.schno, sp.item_code`,
+    [fromDate, toDate]
+  );
+  return rows || [];
+}
+
 export async function deletePlans({ fin_year_id, schno, itemdcode }, client = null) {
   const run = client?.query
     ? async (sql, params) => {

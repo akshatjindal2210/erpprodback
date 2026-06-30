@@ -1,4 +1,4 @@
-import { listSchedulePlanning, listScheduleActionDates, saveSchedulePlan, rejectSchedulePlan, holdSchedulePlan, listScheduleItemTransactions, removeSchedulePlan, submitScheduleShortage } from "../utils/schedule-planning/schedulePlanService.js";
+import { listSchedulePlanning, listScheduleActionDates, saveSchedulePlan, rejectSchedulePlan, holdSchedulePlan, listScheduleItemTransactions, removeSchedulePlan, submitScheduleShortage, listScheduleDispatchPlan, completeSchedulePlan } from "../utils/schedule-planning/schedulePlanService.js";
 import { clearImsMetaForResponse, toPublicImsMessage } from "../utils/erp-api/imsMeta.js";
 
 // Sends a simple JSON response
@@ -166,6 +166,40 @@ export const submitScheduleShortagePlanning = async (req, res) => {
     });
   } catch {
     return sendSimple(res, { success: false, message: "Could not submit shortage.", data: null, status: 500 });
+  }
+};
+
+export const getScheduleDispatchPlan = async (req, res) => {
+  try {
+    const out = await listScheduleDispatchPlan(req.body || {});
+    return sendSimple(res, {
+      success: out?.success !== false,
+      message: out?.success !== false ? undefined : (out?.message || "Could not load dispatch plan."),
+      data: Array.isArray(out?.records) ? out.records : [],
+    });
+  } catch {
+    return sendSimple(res, { success: false, message: "Could not load dispatch plan.", data: [] });
+  }
+};
+
+export const completeSchedulePlanning = async (req, res) => {
+  try {
+    const out = await completeSchedulePlan(req.body || {}, req.user?.id ?? null);
+    if (out?.success === false) {
+      return sendSimple(res, {
+        success: false,
+        message: out.message || "Could not mark as complete.",
+        data: null,
+        status: out.status || 400,
+      });
+    }
+    return sendSimple(res, {
+      success: true,
+      message: out.message || "Marked as complete.",
+      data: out.data ?? null,
+    });
+  } catch {
+    return sendSimple(res, { success: false, message: "Could not mark as complete.", data: null, status: 500 });
   }
 };
 

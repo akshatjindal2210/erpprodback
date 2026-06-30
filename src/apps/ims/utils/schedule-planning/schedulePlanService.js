@@ -1,8 +1,8 @@
 import dbQuery, { withTransaction } from "../../../../config/db.js";
 import { fetchImsDataRaw } from "../../services/ims.service.js";
 import { buildInventoryReportSql } from "../inventory-report/inventoryReportSql.js";
-import { deletePlans, loadAllPlanMap, loadPlanRow, planKey, upsertPlan, updatePlanStatus } from "./schedulePlanDb.js";
-import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canHoldFrom, canPlanFrom, canRejectFrom, isActiveScheduleStatus, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel } from "./schedulePlanStatus.js";
+import { deletePlans, loadAllPlanMap, loadDispatchPlanItems, loadPlanRow, planKey, upsertPlan, updatePlanStatus } from "./schedulePlanDb.js";
+import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canRejectFrom, isActiveScheduleStatus, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel } from "./schedulePlanStatus.js";
 import { insertScheduleTransaction, loadActionDates, loadActionReasons, loadItemTransactionHistory, loadLastTransactionMap, loadPlanDateHistoryMap, deletePlanTransactions } from "./schedulePlanTransactionDb.js";
 import { buildScheduleComparison, hasScheduleComparisonMismatch } from "./schedulePlanCompare.js";
 import { toPublicImsMessage } from "../erp-api/imsMeta.js";
@@ -791,4 +791,112 @@ export async function removeSchedulePlan(body = {}) {
     deleted_count: planDeleted,
     txn_deleted_count: txnDeleted,
   };
+}
+
+export async function completeSchedulePlan(body = {}, userId = null) {
+  const fy = requireFinYear(body);
+  if (fy.error) return fy.error;
+
+  const { schno, itemdcode, item_remark } = body || {};
+  if (schno == null || itemdcode == null) {
+    return { success: false, status: 400, message: "schno and itemdcode are required." };
+  }
+
+  const existingRow = await loadPlanRow(fy.finYearId, schno, itemdcode);
+  if (!existingRow) {
+    return { success: false, status: 404, message: "Schedule plan not found." };
+  }
+
+  const fromStatus = Number(existingRow.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);
+  if (!canCompleteFrom(fromStatus)) {
+    return { success: false, status: 400, message: "Cannot complete from current status." };
+  }
+
+  const updated = await updatePlanStatus({
+    fin_year_id: fy.finYearId, schno, itemdcode,
+    is_planned: SCHEDULE_PLAN_STATUS.COMPLETE,
+    user_id: userId,
+  });
+
+  if (!updated) return { success: false, status: 500, message: "Could not mark as complete." };
+
+  await recordTransaction({
+    fin_year_id: fy.finYearId, schno, itemdcode, plan_id: updated.plan_id ?? existingRow.plan_id,
+    action_type: SCHEDULE_PLAN_ACTION.COMPLETE, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.COMPLETE,
+    action_date: localTodayYmd(), action_reason: null, remark: item_remark ?? null,
+    user_id: userId,
+  });
+
+  const snap = pickSnap(body);
+  const lastTxn = txnSnapshot({
+    action_type: SCHEDULE_PLAN_ACTION.COMPLETE,
+    action_date: localTodayYmd(),
+    action_reason: null,
+    remark: item_remark ?? null,
+  });
+  return {
+    success: true,
+    message: "Marked as complete.",
+    data: planToRow({ ...existingRow, is_planned: SCHEDULE_PLAN_STATUS.COMPLETE }, snap, lastTxn),
+  };
+}
+
+/**
+ * Dispatch-plan helper for Forwarding Note.
+ * Returns current month's non-complete planned items (1st of month → today).
+ */
+export async function listScheduleDispatchPlan(_body = {}) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+
+  try {
+    const rows = await loadDispatchPlanItems(
+      `${year}-${month}-01`,
+      `${year}-${month}-${day}`
+    );
+
+    const records = (rows || []).map((row) => ({
+      // identifiers needed for complete / reschedule actions
+      plan_id:    row.plan_id,
+      fin_year_id: row.fin_year_id,
+      schno:      row.schno,
+      itemdcode:  row.itemdcode,
+      schmonth:   row.schmonth,
+      schdt:      row.schdt,
+      acc_code:   row.acc_code,
+      acc_name:   row.acc_name,
+      item_code:  row.item_code,
+      itemdesc:   row.itemdesc,
+      totalqty:   row.totalqty,
+      is_planned: row.is_planned,
+      // last planned transaction — target date + remark
+      action_date:  row.action_date  ?? null,
+      item_remark:  row.item_remark  ?? null,
+      // fg stock enriched below
+      in_hand_qty:  0,
+      fg_stock_qty: 0,
+      // --- fields available for future use (not sent to client currently) ---
+      // created_at:         row.created_at,
+      // updated_at:         row.updated_at,
+      // created_by_name:    row.created_by_name,
+      // updated_by_name:    row.updated_by_name,
+      // last_action_type:   row.last_action_type,
+      // action_reason:      row.action_reason,
+      // last_action_at:     row.last_action_at,
+      // last_action_by_name: row.last_action_by_name,
+      // status_label:       statusLabel(row.is_planned),
+      // status:             statusLabel(row.is_planned).toLowerCase(),
+      // last_action_label:  actionTypeLabel(row.last_action_type),
+      // plan_date_history:  [],
+      // previous_plan_dates: [],
+    }));
+
+    const enriched = await enrichFgStock(records);
+    return { success: true, records: enriched };
+  } catch (err) {
+    console.error("[schedule-planning] dispatch helper error:", err?.message || err);
+    return { success: false, records: [], message: "Could not load dispatch plan data." };
+  }
 }

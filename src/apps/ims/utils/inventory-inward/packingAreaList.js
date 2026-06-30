@@ -172,6 +172,7 @@ function packingAreaBaseSql(whereClause) {
       sa.doc_dt,
       sa.job_card_no,
       COALESCE(b.qty, 0)::int AS qty,
+      COALESCE(b.is_loose, false)  AS is_loose,
       b.created_at,
       b.created_by
     FROM ims_box_table b
@@ -544,6 +545,10 @@ export async function findPackingAreaByPacking(options = {}) {
          MAX(job_card_no) AS job_card_no,
          SUM(qty)::bigint AS stock_qty,
          COUNT(*)::int AS box_count,
+         COUNT(*) FILTER (WHERE NOT raw.is_loose)::int  AS full_box_count,
+         COUNT(*) FILTER (WHERE raw.is_loose)::int      AS loose_box_count,
+         MAX(raw.qty) FILTER (WHERE NOT raw.is_loose)   AS full_box_qty,
+         SUM(raw.qty) FILTER (WHERE raw.is_loose)::bigint AS loose_total_qty,
          MIN(created_at) AS created_at,
          (array_agg(created_by ORDER BY created_at ASC NULLS LAST, created_by ASC NULLS LAST))[1] AS created_by
        FROM (${baseSql}) raw

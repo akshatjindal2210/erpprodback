@@ -199,6 +199,14 @@ function fieldsForForwardingNotes(mod, act) {
   return null;
 }
 
+function fieldsForSchedulePlanning(mod, act) {
+  if (mod == null || act == null) return null;
+  const allowed = [VIEW, ...FORM_ACTIONS];
+  if (mod === "schedule_planning" && allowed.includes(act)) return [];
+  if (mod === "forwarding_note_master" && allowed.includes(act)) return [];
+  return null;
+}
+
 function fieldsForInventoryInwards(mod, act) {
   return allowOnly(mod, act, "inventory_inwards", [VIEW, ...FORM_ACTIONS]);
 }
@@ -222,6 +230,7 @@ const BY_HELPER = {
   partyRates: fieldsForPartyRates,
   dailyProd: fieldsForDailyProd,
   forwardingNotes: fieldsForForwardingNotes,
+  schedulePlanning: fieldsForSchedulePlanning,
   inventoryInwards: fieldsForInventoryInwards,
   outEntries: fieldsForOutEntries,
   stockAdjustment: fieldsForStockAdjustment,

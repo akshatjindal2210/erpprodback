@@ -22,6 +22,7 @@ export const SCHEDULE_PLAN_ACTION = {
   PLAN: "plan",
   HOLD: "hold",
   REJECT: "reject",
+  COMPLETE: "complete",
 };
 
 /** List page filter modes (sent as body.status). */
@@ -96,6 +97,7 @@ export function actionTypeLabel(actionType) {
     plan: "Planned",
     hold: "Hold",
     reject: "Rejected",
+    complete: "Completed",
   };
   return map[String(actionType || "").toLowerCase()] ?? String(actionType || "—");
 }
@@ -145,5 +147,13 @@ export function canHoldFrom(status) {
     SCHEDULE_PLAN_STATUS.PLANNED,
     SCHEDULE_PLAN_STATUS.RUNNING,
     SCHEDULE_PLAN_STATUS.REJECT,
+  ].includes(s);
+}
+
+export function canCompleteFrom(status) {
+  const s = Number(status);
+  return [
+    SCHEDULE_PLAN_STATUS.PLANNED,
+    SCHEDULE_PLAN_STATUS.RUNNING,
   ].includes(s);
 }
