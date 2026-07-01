@@ -111,8 +111,7 @@ export const getModulesViews = async (req, res) => {
 
     if (id) {
       const module = await findModule({ id });
-      if (!module || !module.is_active) return res.json({ success: true, data: null });
-      return res.json({ success: true, data: { id: module.id, name: module.name, label: module.label } });
+      return res.json({ success: true, data: module });
     }
 
     const rawOrder = order != null && String(order).trim() !== "" ? String(order).trim().toUpperCase() : "ASC";
@@ -124,7 +123,7 @@ export const getModulesViews = async (req, res) => {
       page: page || 1,
       limit: limit || 5000,
       fields: ["id", "name", "label", "app_type", "sort_order", "is_active"],
-      filters: { is_active: true }
+      filters: {} // Always return all modules for helper views
     });
     
     return res.json({ success: true, data: result.data, total: result.total });
