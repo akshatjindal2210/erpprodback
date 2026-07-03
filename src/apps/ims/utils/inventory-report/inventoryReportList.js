@@ -11,6 +11,7 @@ const SORT_COL = {
   item_desc: "item_dcode",
   customer_name: "customer_code",
   doc_dt: "doc_dt",
+  job_card_no: "job_card_no",
   fg_stock_qty: "fg_stock_qty",
   in_store_qty: "in_store_qty",
   packing_area_qty: "packing_area_qty",

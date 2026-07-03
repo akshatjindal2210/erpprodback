@@ -8,6 +8,8 @@ import { createDepartmentsTable } from "./tables/department.table.js";
 import { createDesignationsTable } from "./tables/designation.table.js";
 import { createActivityLogsTable } from "./tables/activity_log.table.js";
 import { createInboxTable } from "./tables/inbox.table.js";
+import { createPushSubscriptionTable } from "./tables/push_subscription.table.js";
+import { createPushDeliveryLogTable } from "./tables/push_delivery_log.table.js";
 // import { createUserAppPreferencesTable } from "./tables/user_app_preferences.table.js";
 import { createCoreUpdatedAtTriggers } from "./tables/triggers.table.js";
 
@@ -22,6 +24,8 @@ export const initCoreDB = async () => {
   await createDesignationsTable();
   await createActivityLogsTable();
   await createInboxTable();
+  await createPushSubscriptionTable();
+  await createPushDeliveryLogTable();
   // await createUserAppPreferencesTable();
   await createCoreUpdatedAtTriggers();
 };

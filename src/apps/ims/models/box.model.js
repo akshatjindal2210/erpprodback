@@ -1158,17 +1158,20 @@ export const permanentlyDeleteProductionBoxesForPackingNumber = async ({
   return rows;
 };
 
-/** @deprecated Use `permanentlyDeleteProductionBoxesForPackingNumber` kept as alias. */
-export const permanentlyDeleteBoxesForPackingNumber = permanentlyDeleteProductionBoxesForPackingNumber;
-
 /** After all live boxes for a doc are removed, allow packing entry to generate again from ERP. */
 export const resetDailyProdStickerGeneratedForDoc = async (doc_no) => {
   return dbQuery(
     `UPDATE ims_dailyprod
      SET sticker_generated = false,
          packing_standard_id = NULL,
+         acc_code = NULL,
          acc_name = NULL,
+         item_dcode = NULL,
+         item_code = NULL,
          item_desc = NULL,
+         total_qty = NULL,
+         doc_dt = NULL,
+         job_card_no = NULL,
          party_rate_cust_code = NULL,
          unit = 'PCS',
          fg_location = NULL,
@@ -1178,6 +1181,8 @@ export const resetDailyProdStickerGeneratedForDoc = async (doc_no) => {
          full_boxes_count = NULL,
          loose_box_qty = NULL,
          total_stickers = NULL,
+         internal_create_user = NULL,
+         internal_create_date = NULL,
          system_generate_user = NULL,
          system_generate_date = NULL
      WHERE doc_no = trim(COALESCE($1::text, '-'))::integer`,

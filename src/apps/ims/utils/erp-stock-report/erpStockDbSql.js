@@ -15,7 +15,8 @@ const SA_META_CTE = `
       item_dcode,
       ${TRIM_TXT("item_code")} AS item_code,
       ${TRIM_TXT("item_desc")} AS item_desc,
-      ${sqlDocDtText("sa.doc_dt")} AS doc_dt
+      ${sqlDocDtText("sa.doc_dt")} AS doc_dt,
+      ${TRIM_TXT("job_card_no")} AS job_card_no
     FROM (
       SELECT
         ${PN("sa")} AS packing_number,
@@ -23,6 +24,7 @@ const SA_META_CTE = `
         sa.item_code,
         sa.item_desc,
         sa.doc_dt,
+        sa.job_card_no,
         sa.approved_at
       FROM ims_stock_adjustment sa
       WHERE sa.is_deleted = false
@@ -40,14 +42,16 @@ const DP_META_CTE = `
       item_dcode,
       ${TRIM_TXT("item_code")} AS item_code,
       ${TRIM_TXT("item_desc")} AS item_desc,
-      ${sqlDocDtFromDailyprod("dp")} AS doc_dt
+      ${sqlDocDtFromDailyprod("dp")} AS doc_dt,
+      ${TRIM_TXT("job_card_no")} AS job_card_no
     FROM (
       SELECT
         NULLIF(TRIM(dp_inner.doc_no::text), '') AS packing_number,
         dp_inner.item_dcode,
         dp_inner.item_code,
         dp_inner.item_desc,
-        dp_inner.doc_dt
+        dp_inner.doc_dt,
+        dp_inner.job_card_no
       FROM ims_dailyprod dp_inner
       WHERE NULLIF(TRIM(dp_inner.doc_no::text), '') IS NOT NULL
     ) dp
@@ -75,6 +79,7 @@ export function sqlErpStockDbRows() {
       TRIM(COALESCE(sa.item_code, dp.item_code, sa.item_dcode::text, dp.item_dcode::text)) AS item_code,
       NULLIF(TRIM(COALESCE(sa.item_desc, dp.item_desc, '')), '') AS item_desc,
       COALESCE(sa.doc_dt, dp.doc_dt) AS doc_dt,
+      COALESCE(sa.job_card_no, dp.job_card_no) AS job_card_no,
       COALESCE(g.db_stock, 0)::bigint AS db_stock
     FROM grouped g
     LEFT JOIN sa_meta sa ON sa.packing_number = g.packing_number

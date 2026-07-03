@@ -4,7 +4,8 @@ import config, { getSessionMaxAgeMs } from "../../../config/config.js";
 import { findUsers, findUser, findUserByUsernameInsensitive, insertUser, updateUsers, deleteUsers } from "../models/user.model.js";
 import { fetchFromIMS, fetchImsDataRaw } from "../../ims/services/ims.service.js";
 import { findModules } from "../models/module.model.js";
-import { findUserPermissions, findUserAppAccess, upsertBulkPermissions, upsertBulkAppAccess, syncAppGateChildPermissions } from "../models/permission.model.js";
+import { findUserPermissions, findUserAppAccess, findActiveUserIdsWithAppAccess, upsertBulkPermissions, upsertBulkAppAccess, syncAppGateChildPermissions } from "../models/permission.model.js";
+import { resolveUserHelperAppKey } from "../utils/userHelperAppFilter.js";
 import { logActivity } from "../utils/logActivity.js";
 import { emitToUser } from "../utils/socket.js";
 import { setCachedPermissions, clearCachedPermissions } from "../../../config/permissionCache.js";
@@ -757,6 +758,14 @@ export const getUsersViews = async (req, res) => {
       });
     }
 
+    const { data: moduleRows } = await findModules({
+      filters: { name: permission_module },
+      fields: ["app_type"],
+      page: 1,
+      limit: 1,
+    });
+    const appKey = resolveUserHelperAppKey(permission_module, moduleRows[0]?.app_type);
+
     const result = await findUsers({
       search: sanitizeSearch(search),
       sort: { by: sortBy || "created_at", order: order || "DESC" },
@@ -766,7 +775,13 @@ export const getUsersViews = async (req, res) => {
       filters: { status: "active" },
     });
 
-    res.json({ success: true, data: result.data });
+    let data = result.data;
+    if (appKey) {
+      const allowedIds = await findActiveUserIdsWithAppAccess(appKey);
+      data = data.filter((u) => allowedIds.has(u.id) || allowedIds.has(Number(u.id)));
+    }
+
+    res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

@@ -1,4 +1,5 @@
 import Inbox from "../models/inbox.model.js";
+import { markPushDeliveryReadAllForUser, markPushDeliveryReadByInbox } from "../services/webPush.service.js";
 
 function userId(req) {
   return req.user?.id;
@@ -43,7 +44,10 @@ export async function getInboxUnreadCount(req, res) {
 
 export async function markInboxRead(req, res) {
   try {
-    await Inbox.markRead(req.params.id, userId(req));
+    const uid = userId(req);
+    const inboxId = req.params.id;
+    await Inbox.markRead(inboxId, uid);
+    void markPushDeliveryReadByInbox(inboxId, uid).catch(() => {});
     res.json({ success: true, message: "Marked as read" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -53,7 +57,9 @@ export async function markInboxRead(req, res) {
 export async function markAllInboxRead(req, res) {
   try {
     const app_type = req.query.app_type || null;
-    await Inbox.markAllRead(userId(req), { app_type });
+    const uid = userId(req);
+    await Inbox.markAllRead(uid, { app_type });
+    void markPushDeliveryReadAllForUser(uid, { app_type }).catch(() => {});
     res.json({ success: true, message: "All marked as read" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

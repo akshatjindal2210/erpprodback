@@ -380,7 +380,7 @@ export const evaluateAuditLocationProgress = async (
     location_status: nextStatus,
     audit_status: auditStatus,
     comparison,
-    auto_completed: nextStatus === "completed" && comparison.exact,
+    auto_completed: Boolean(forceComplete) && nextStatus === "completed" && comparison.exact,
   };
 };
 

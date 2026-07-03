@@ -61,6 +61,37 @@ export const upsertBulkAppAccess = async (user_id, app_access = {}, meta = {}) =
   }
 };
 
+/** Active users who may use the given portal app (ims / task). Super admins always included. */
+export const findActiveUserIdsWithAppAccess = async (appKey) => {
+  const rows = await dbQuery(
+    `SELECT u.id
+     FROM ${M.USERS} u
+     WHERE u.is_deleted = false
+       AND u.status = 'active'
+       AND (
+         LOWER(TRIM(u.type)) = 'super_admin'
+         OR EXISTS (
+           SELECT 1 FROM ${M.USER_APP_ACCESS} ua
+           WHERE ua.user_id = u.id AND ua.app_key = $1 AND ua.can_access = true
+         )
+         OR (
+           NOT EXISTS (SELECT 1 FROM ${M.USER_APP_ACCESS} ua WHERE ua.user_id = u.id)
+           AND EXISTS (
+             SELECT 1 FROM ${M.USER_PERMISSIONS} up
+             JOIN ${M.MODULES} m ON m.id = up.module_id
+             WHERE up.user_id = u.id
+               AND up.is_deleted = false
+               AND m.app_type = $1
+               AND m.is_active = true
+               AND up.can_view = true
+           )
+         )
+       )`,
+    [appKey]
+  );
+  return new Set(rows.map((r) => r.id));
+};
+
 export const findPermissions = async ({ filters = {}, search, sort = { by: "up.id", order: "DESC" }, page = 1, limit = 10 } = {}) => {
   const values = [];
   const conditions = ["up.is_deleted = false"];

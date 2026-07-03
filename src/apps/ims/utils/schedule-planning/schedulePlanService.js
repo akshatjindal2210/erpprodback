@@ -841,20 +841,41 @@ export async function completeSchedulePlan(body = {}, userId = null) {
   };
 }
 
+function parseDispatchStatusFilter(rawStatus) {
+  const mode = String(rawStatus ?? "all").trim().toLowerCase();
+  if (mode === "plan" || mode === "pending") {
+    return [SCHEDULE_PLAN_STATUS.PLANNED];
+  }
+  if (mode === "hold") {
+    return [SCHEDULE_PLAN_STATUS.HOLD];
+  }
+  if (mode === "all") {
+    return [
+      SCHEDULE_PLAN_STATUS.PLANNED,
+      SCHEDULE_PLAN_STATUS.HOLD,
+    ];
+  }
+  return [
+    SCHEDULE_PLAN_STATUS.PLANNED,
+    SCHEDULE_PLAN_STATUS.HOLD,
+  ];
+}
+
 /**
  * Dispatch-plan helper for Forwarding Note.
  * Returns current month's non-complete planned items (1st of month → today).
  */
-export async function listScheduleDispatchPlan(_body = {}) {
+export async function listScheduleDispatchPlan(body = {}) {
   const now = new Date();
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const day = String(now.getDate()).padStart(2, "0");
-
+  const statusCodes = parseDispatchStatusFilter(body?.status);
   try {
     const rows = await loadDispatchPlanItems(
       `${year}-${month}-01`,
-      `${year}-${month}-${day}`
+      `${year}-${month}-${day}`,
+      statusCodes
     );
 
     const records = (rows || []).map((row) => ({

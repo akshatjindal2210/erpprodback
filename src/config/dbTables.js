@@ -32,6 +32,9 @@ export const DB_TABLES = {
     "mst_designations",
     "mst_activity_logs",
     "mst_inbox",
+    "mst_push_subscriptions",
+    "mst_push_delivery_log",
+    "mst_dashboard_configs",
     // "mst_user_app_preferences",
   ],
 

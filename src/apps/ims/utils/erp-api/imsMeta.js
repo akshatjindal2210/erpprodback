@@ -4,10 +4,13 @@ const imsAls = new AsyncLocalStorage();
 
 const IMS_INTERNAL_MSG = /requested\s*data|requested\s*date|`requested/i;
 
-/** Strip IMS-internal keys (`requestedData`, etc.) — never show those on the client. */
+/** Strip IMS-internal keys (`requestedData`, etc.) and raw fetch URLs — never show those on the client. */
 export function toPublicImsMessage(message, fallback = "ERP (IMS) data could not be loaded.") {
   const m = String(message ?? "").trim();
   if (!m || IMS_INTERNAL_MSG.test(m)) return fallback;
+  if (/^request to https?:\/\//i.test(m) || /socket hang up|ECONNREFUSED|ETIMEDOUT|fetch failed/i.test(m)) {
+    return "IMS ERP server unreachable. Contact admin or try again when the IMS service is online.";
+  }
   return m;
 }
 

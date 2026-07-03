@@ -74,16 +74,6 @@ export function parseListFilter(raw) {
   return map[s] ?? SCHEDULE_LIST_FILTER.PENDING;
 }
 
-/** @deprecated use parseListFilter */
-export function parseListStatus(raw) {
-  const f = parseListFilter(raw);
-  if (f === SCHEDULE_LIST_FILTER.SCHEDULE) return SCHEDULE_PLAN_STATUS.PLANNED;
-  if (f === SCHEDULE_LIST_FILTER.COMPLETE) return SCHEDULE_PLAN_STATUS.COMPLETE;
-  if (f === SCHEDULE_LIST_FILTER.REJECT) return SCHEDULE_PLAN_STATUS.REJECT;
-  if (f === SCHEDULE_LIST_FILTER.HOLD) return SCHEDULE_PLAN_STATUS.HOLD;
-  return SCHEDULE_PLAN_STATUS.PENDING;
-}
-
 export function isActiveScheduleStatus(code) {
   return ACTIVE_SCHEDULE_STATUSES.includes(Number(code));
 }

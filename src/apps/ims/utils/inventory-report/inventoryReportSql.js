@@ -27,7 +27,8 @@ const SA_META_CTE = `
       ${TRIM_TXT("item_desc")} AS item_desc,
       acc_code,
       ${TRIM_TXT("acc_name")} AS acc_name,
-      ${sqlDocDtText("sa.doc_dt")} AS doc_dt
+      ${sqlDocDtText("sa.doc_dt")} AS doc_dt,
+      ${TRIM_TXT("job_card_no")} AS job_card_no
     FROM (
       SELECT
         ${PN("sa")} AS packing_number,
@@ -37,6 +38,7 @@ const SA_META_CTE = `
         sa.acc_code,
         sa.acc_name,
         sa.doc_dt,
+        sa.job_card_no,
         sa.approved_at
       FROM ims_stock_adjustment sa
       WHERE sa.is_deleted = false
@@ -57,7 +59,8 @@ const DP_META_CTE = `
       ${TRIM_TXT("item_desc")} AS item_desc,
       acc_code,
       ${TRIM_TXT("acc_name")} AS acc_name,
-      ${sqlDocDtFromDailyprod("dp")} AS doc_dt
+      ${sqlDocDtFromDailyprod("dp")} AS doc_dt,
+      ${TRIM_TXT("job_card_no")} AS job_card_no
     FROM (
       SELECT
         NULLIF(TRIM(dp_inner.doc_no::text), '') AS packing_number,
@@ -66,7 +69,8 @@ const DP_META_CTE = `
         dp_inner.item_desc,
         dp_inner.acc_code,
         dp_inner.acc_name,
-        dp_inner.doc_dt
+        dp_inner.doc_dt,
+        dp_inner.job_card_no
       FROM ims_dailyprod dp_inner
       WHERE NULLIF(TRIM(dp_inner.doc_no::text), '') IS NOT NULL
     ) dp
@@ -117,7 +121,8 @@ export function buildInventoryReportSql() {
         COALESCE(sa.item_desc, dp.item_desc, '—') AS item_desc,
         COALESCE(sa.acc_code::text, dp.acc_code::text, '') AS customer_code,
         COALESCE(sa.acc_name, dp.acc_name, '—') AS customer_name,
-        COALESCE(sa.doc_dt, dp.doc_dt) AS doc_dt
+        COALESCE(sa.doc_dt, dp.doc_dt) AS doc_dt,
+        COALESCE(sa.job_card_no, dp.job_card_no) AS job_card_no
       FROM grouped g
       LEFT JOIN sa_meta sa ON sa.packing_number = g.packing_number
       LEFT JOIN dp_meta dp ON dp.packing_number = g.packing_number
@@ -156,7 +161,8 @@ export function sqlPageSlice({ sortBy, sortCol, sortDir, limitIdx, offsetIdx }) 
       COALESCE(f.qc_hold_qty, 0)::bigint AS qc_hold_qty,
       COALESCE(f.out_qty, 0)::bigint AS out_qty,
       COALESCE(f.in_store_boxes, 0)::int AS in_store_boxes,
-      f.doc_dt
+      f.doc_dt,
+      f.job_card_no
     FROM filtered f
     ORDER BY ${order}
     LIMIT $${limitIdx} OFFSET $${offsetIdx}`;

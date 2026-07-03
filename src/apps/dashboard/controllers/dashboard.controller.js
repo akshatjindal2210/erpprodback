@@ -1,7 +1,21 @@
 import dbQuery from "../../../config/db.js";
-import { createWidget, deleteWidget, ensureWidgetsTable, getUserViewableModuleNames, listActiveWidgets, listWidgets, publishWidget, updateWidget } from "../models/widget.model.js";
+import { getCachedPermissions, setCachedPermissions } from "../../../config/permissionCache.js";
+import { MST_TABLES as M } from "../../../config/dbTables.js";
+import { getDashboardConfigByKey, getGlobalDashboardConfig, getUserDashboardConfig, listDashboardConfigs, getDashboardWidgetsFromConfig, saveDashboardWidgetsToConfig, upsertDashboardConfig, deactivateDashboardByKey } from "../models/dashboardConfig.model.js";
+import { parseDashboardDocument, sanitizeLayoutCoords, widgetToRuntimeRow, widgetToStoredJson } from "../utils/dashboardJsonSchema.js";
 import { executeReadOnlyWidgetQuery } from "../utils/queryExecutor.js";
 import { validateSelectSql } from "../utils/sqlGenerator.js";
+import { fetchImsDataRaw } from "../../ims/services/ims.service.js";
+
+const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings"]);
+const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql"]);
+const ALLOWED_AUDIENCE_SCOPES = new Set(["global", "users"]);
+const APP_TABLE_PREFIX = {
+  ims: ["ims_"],
+  task: ["task_"],
+  settings: ["mst_", "sys_"],
+  home: [],
+};
 
 const TABLE_MODULE_OVERRIDES = {
   ims_location_master: "location_master",
@@ -50,16 +64,174 @@ function modulesFromQuery(rawSql = "") {
   return [...modules];
 }
 
-function canUserSeeWidgetByQuery(widgetQuery, allowedModuleSet, isSuperAdmin) {
+function canUserSeeWidgetByAudience(widget, userId, isSuperAdmin) {
   if (isSuperAdmin) return true;
-  const requiredModules = modulesFromQuery(widgetQuery);
-  if (requiredModules.length === 0) return true;
-  return requiredModules.some((moduleName) => allowedModuleSet.has(moduleName));
+  const scope = String(widget?.audience_scope || "global").toLowerCase();
+  if (scope !== "users") return true;
+  const ids = Array.isArray(widget?.target_user_ids) ? widget.target_user_ids : [];
+  const numericUserId = Number(userId);
+  return ids.some((value) => Number(value) === numericUserId);
+}
+
+async function userCanViewPageModule(user, pageModule) {
+  const moduleName = String(pageModule || "").trim();
+  if (!moduleName) return true;
+  const userType = String(user?.type || user?.role || "").toLowerCase().trim();
+  if (userType === "super_admin" || userType === "super admin") return true;
+  if (!user?.id) return false;
+
+  let permissions = getCachedPermissions(user.id);
+  if (!permissions) {
+    permissions = await dbQuery(
+      `SELECT up.can_view, m.name AS module_name, m.is_active AS module_is_active
+         FROM ${M.USER_PERMISSIONS} up
+         JOIN ${M.MODULES} m ON m.id = up.module_id
+        WHERE up.user_id = $1
+          AND m.is_active = true`,
+      [user.id],
+    );
+    setCachedPermissions(user.id, permissions);
+  }
+
+  const perm = permissions.find((row) => String(row?.module_name || "") === moduleName);
+  return Boolean(perm?.can_view);
+}
+
+function dedupeWidgets(rows = []) {
+  const byId = new Map();
+  for (const row of rows) {
+    const id = String(row?.id ?? "").trim();
+    if (!id) continue;
+    if (!byId.has(id)) {
+      byId.set(id, row);
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => (Number(a?.id) || 0) - (Number(b?.id) || 0));
+}
+
+function normalizeDashboardJson(raw = {}) {
+  const { doc, widgets } = parseDashboardDocument(raw);
+  return { ...doc, widgets };
+}
+
+async function getWidgetsForBuilder(appKey, pageKey, dashboardKey = "default") {
+  const storedWidgets = await getDashboardWidgetsFromConfig(appKey, pageKey, dashboardKey);
+  return storedWidgets.map((widget, idx) => widgetToRuntimeRow(widget, idx));
+}
+
+async function saveWidgetsForBuilder({
+  appKey,
+  pageKey,
+  dashboardKey = "default",
+  dashboardName = "Default",
+  scope = "global",
+  targetUserIds = [],
+  widgets = [],
+  actorId = null,
+  isPublished,
+}) {
+  let publishedFlag = isPublished;
+  if (publishedFlag === undefined) {
+    const existing = await getDashboardConfigByKey(appKey, pageKey, dashboardKey, { publishedOnly: false });
+    const { meta } = parseDashboardDocument(existing?.dashboard_json);
+    publishedFlag = meta?.published === true;
+  }
+
+  const storedWidgets = widgets.map((widget) => widgetToStoredJson(widget));
+  await saveDashboardWidgetsToConfig({
+    appKey,
+    pageKey,
+    dashboardKey,
+    dashboardName,
+    scope,
+    targetUserIds,
+    widgets: storedWidgets,
+    actorId,
+    isPublished: publishedFlag,
+  });
+}
+
+function normalizeAppKey(rawValue = "ims") {
+  const appKey = String(rawValue || "ims").trim().toLowerCase();
+  return ALLOWED_APP_KEYS.has(appKey) ? appKey : "ims";
+}
+
+function normalizeDbSource(rawValue = "ims_postgresql") {
+  const source = String(rawValue || "ims_postgresql").trim().toLowerCase();
+  return ALLOWED_DB_SOURCES.has(source) ? source : "ims_postgresql";
+}
+
+function normalizeAudienceScope(rawValue = "global") {
+  const scope = String(rawValue || "global").trim().toLowerCase();
+  return ALLOWED_AUDIENCE_SCOPES.has(scope) ? scope : "global";
+}
+
+function normalizeDashboardKey(rawValue = "default") {
+  return (
+    String(rawValue || "default")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "default"
+  );
+}
+
+function isAppMainDashboardView(appKey = "ims", viewPageKey = "dashboard") {
+  const normalizedAppKey = String(appKey || "ims").trim().toLowerCase();
+  const normalizedPageKey = String(viewPageKey || "dashboard").trim().toLowerCase();
+  if (normalizedAppKey === "home") {
+    return normalizedPageKey === "default" || normalizedPageKey === "dashboard";
+  }
+  return normalizedPageKey === "dashboard";
+}
+
+function normalizeTargetUserIds(rawValue) {
+  if (!Array.isArray(rawValue)) return [];
+  return rawValue
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+function normalizeWidgetFilters(rawFilters = {}) {
+  const fromDate = rawFilters?.fromDate ? String(rawFilters.fromDate).trim() : "";
+  const toDate = rawFilters?.toDate ? String(rawFilters.toDate).trim() : "";
+  const userIdRaw = rawFilters?.userId;
+  const userId = userIdRaw !== undefined && userIdRaw !== null && String(userIdRaw).trim() !== ""
+    ? Number(userIdRaw)
+    : null;
+  return {
+    fromDate,
+    toDate,
+    userId: Number.isInteger(userId) && userId > 0 ? userId : null,
+  };
+}
+
+function isSuperAdminUser(user) {
+  const userType = String(user?.type || user?.role || "").toLowerCase().trim();
+  return userType === "super_admin" || userType === "super admin";
+}
+
+function resolveWidgetFiltersForUser(req, rawFilters = {}) {
+  const normalized = normalizeWidgetFilters(rawFilters);
+  if (isSuperAdminUser(req.user)) {
+    return normalized;
+  }
+  return { ...normalized, userId: null };
 }
 
 export const getTables = async (req, res) => {
   try {
-    await ensureWidgetsTable();
+    const appKey = normalizeAppKey(req.query?.app || req.body?.app_key || "ims");
+    const dbSource = normalizeDbSource(req.query?.db_source || req.body?.db_source || "ims_postgresql");
+    if (dbSource === "erp_mssql") {
+      const imsRes = await fetchImsDataRaw("dashboard_tables");
+      const rows = Array.isArray(imsRes?.records) ? imsRes.records : [];
+      const values = rows
+        .map((row) => String(row?.table_name || row?.name || "").trim())
+        .filter(Boolean);
+      return res.json({ success: true, data: values });
+    }
+
     const query = `
       SELECT table_name 
       FROM information_schema.tables 
@@ -67,7 +239,15 @@ export const getTables = async (req, res) => {
       AND table_type = 'BASE TABLE'
     `;
     const tables = await dbQuery(query);
-    res.json({ success: true, data: tables.map((t) => t.table_name) });
+    const allowedPrefixes = APP_TABLE_PREFIX[appKey] || [];
+    const filtered = tables
+      .map((t) => String(t.table_name || "").trim())
+      .filter(Boolean)
+      .filter((tableName) => {
+        if (allowedPrefixes.length === 0) return true;
+        return allowedPrefixes.some((prefix) => tableName.startsWith(prefix));
+      });
+    res.json({ success: true, data: filtered });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -76,7 +256,6 @@ export const getTables = async (req, res) => {
 export const getColumns = async (req, res) => {
   const { table } = req.params;
   try {
-    await ensureWidgetsTable();
     if (!/^[a-zA-Z0-9_]+$/.test(table)) {
       return res.status(400).json({ success: false, message: "Invalid table name." });
     }
@@ -98,10 +277,12 @@ function sanitizeWidgetBody(body = {}) {
   const title = String(body.title || "").trim();
   const type = String(body.type || "").trim().toLowerCase();
   const query = String(body.query || "").trim();
+  const dbSource = normalizeDbSource(body?.chart_config?.data_source || "ims_postgresql");
   const requiresQuery = type === "count" || type === "sum" || type === "table" || type === "graph";
 
   if (!allowedTypes.has(type)) throw new Error("Invalid widget type.");
-  if (requiresQuery) {
+  if (requiresQuery && !query) throw new Error("Query is required.");
+  if (requiresQuery && dbSource !== "erp_mssql") {
     validateSelectSql(query);
   }
 
@@ -118,27 +299,62 @@ function sanitizeWidgetBody(body = {}) {
               ? "Dashboard Heading"
               : "Section";
 
+  const audienceScope = normalizeAudienceScope(body.audience_scope || "global");
+  const targetUserIds = normalizeTargetUserIds(body.target_user_ids);
+
   return {
+    audience_scope: audienceScope,
+    target_user_ids: audienceScope === "users" ? targetUserIds : [],
     title: title || autoTitle,
     description: String(body.description || "").trim(),
     type,
     query: requiresQuery ? query : "",
-    chart_config: body.chart_config && typeof body.chart_config === "object" ? body.chart_config : {},
+    chart_config: {
+      ...(body.chart_config && typeof body.chart_config === "object" ? body.chart_config : {}),
+      data_source: dbSource,
+      erp_filter:
+        body?.chart_config?.erp_filter && typeof body.chart_config.erp_filter === "object"
+          ? body.chart_config.erp_filter
+          : {},
+    },
     layout: body.layout && typeof body.layout === "object" ? body.layout : {},
-    permission_key: null,
+    app_key: normalizeAppKey(body.app_key),
+    page_key: String(body.page_key || "default").trim().toLowerCase() || "default",
+    dashboard_key: normalizeDashboardKey(body.dashboard_key || "default"),
+    dashboard_name: String(body.dashboard_name || "Default").trim() || "Default",
+    dashboard_scope: String(body.dashboard_scope || "global").trim().toLowerCase() === "users" ? "users" : "global",
+    dashboard_target_user_ids: normalizeTargetUserIds(body.dashboard_target_user_ids || body.target_user_ids || []),
     is_active: body.is_active !== false,
-    // create/update should always stay draft; publish endpoint makes it live.
-    is_published: false,
+    is_published: body.is_published !== false,
   };
+}
+
+function createWidgetId() {
+  return `w_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 }
 
 export const createWidgetHandler = async (req, res) => {
   try {
-    await ensureWidgetsTable();
     const payload = sanitizeWidgetBody(req.body);
-    const row = await createWidget({
+    const widgets = await getWidgetsForBuilder(payload.app_key, payload.page_key, payload.dashboard_key);
+    const row = {
       ...payload,
-      created_by: req.user?.id ?? null,
+      target_page_key: String(req.body?.target_page_key || "dashboard").trim().toLowerCase() || "dashboard",
+      target_page_module: req.body?.target_page_module || null,
+      id: createWidgetId(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    widgets.push(row);
+    await saveWidgetsForBuilder({
+      appKey: payload.app_key,
+      pageKey: payload.page_key,
+      dashboardKey: payload.dashboard_key,
+      dashboardName: payload.dashboard_name,
+      scope: payload.dashboard_scope,
+      targetUserIds: payload.dashboard_target_user_ids,
+      widgets,
+      actorId: req.user?.id ?? null,
     });
     res.status(201).json({ success: true, data: row });
   } catch (error) {
@@ -148,14 +364,33 @@ export const createWidgetHandler = async (req, res) => {
 
 export const updateWidgetHandler = async (req, res) => {
   try {
-    await ensureWidgetsTable();
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) {
+    const id = String(req.params.id || "").trim();
+    if (!id) {
       return res.status(400).json({ success: false, message: "Invalid widget id." });
     }
     const payload = sanitizeWidgetBody(req.body);
-    const row = await updateWidget(id, payload);
-    if (!row) return res.status(404).json({ success: false, message: "Widget not found." });
+    const widgets = await getWidgetsForBuilder(payload.app_key, payload.page_key, payload.dashboard_key);
+    const index = widgets.findIndex((widget) => String(widget.id) === id);
+    if (index < 0) return res.status(404).json({ success: false, message: "Widget not found." });
+    const row = {
+      ...widgets[index],
+      ...payload,
+      target_page_key: String(req.body?.target_page_key || widgets[index]?.target_page_key || "dashboard").trim().toLowerCase() || "dashboard",
+      target_page_module: req.body?.target_page_module ?? widgets[index]?.target_page_module ?? null,
+      id,
+      updated_at: new Date().toISOString(),
+    };
+    widgets[index] = row;
+    await saveWidgetsForBuilder({
+      appKey: payload.app_key,
+      pageKey: payload.page_key,
+      dashboardKey: payload.dashboard_key,
+      dashboardName: payload.dashboard_name,
+      scope: payload.dashboard_scope,
+      targetUserIds: payload.dashboard_target_user_ids,
+      widgets,
+      actorId: req.user?.id ?? null,
+    });
     res.json({ success: true, data: row });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -164,13 +399,33 @@ export const updateWidgetHandler = async (req, res) => {
 
 export const deleteWidgetHandler = async (req, res) => {
   try {
-    await ensureWidgetsTable();
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) {
+    const id = String(req.params.id || "").trim();
+    if (!id) {
       return res.status(400).json({ success: false, message: "Invalid widget id." });
     }
-    const deleted = await deleteWidget(id);
-    if (!deleted) return res.status(404).json({ success: false, message: "Widget not found." });
+    const appKey = normalizeAppKey(req.body?.app_key || req.query?.app);
+    const pageKey = String(req.body?.page_key || req.query?.page_key || "default").trim().toLowerCase() || "default";
+    const dashboardKey = normalizeDashboardKey(req.body?.dashboard_key || req.query?.dashboard_key || "default");
+    const dashboardName = String(req.body?.dashboard_name || req.query?.dashboard_name || "Default").trim() || "Default";
+    const dashboardScope =
+      String(req.body?.dashboard_scope || req.query?.dashboard_scope || "global").toLowerCase() === "users"
+        ? "users"
+        : "global";
+    const dashboardUsers = normalizeTargetUserIds(req.body?.dashboard_target_user_ids || req.query?.dashboard_target_user_ids || []);
+    const widgets = await getWidgetsForBuilder(appKey, pageKey, dashboardKey);
+    const index = widgets.findIndex((widget) => String(widget.id) === id);
+    if (index < 0) return res.status(404).json({ success: false, message: "Widget not found." });
+    const [deleted] = widgets.splice(index, 1);
+    await saveWidgetsForBuilder({
+      appKey,
+      pageKey,
+      dashboardKey,
+      dashboardName,
+      scope: dashboardScope,
+      targetUserIds: dashboardUsers,
+      widgets,
+      actorId: req.user?.id ?? null,
+    });
     res.json({ success: true, data: deleted });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -179,12 +434,73 @@ export const deleteWidgetHandler = async (req, res) => {
 
 export const publishWidgetHandler = async (req, res) => {
   try {
-    await ensureWidgetsTable();
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) {
+    const id = String(req.params.id || "").trim();
+    if (!id) {
       return res.status(400).json({ success: false, message: "Invalid widget id." });
     }
-    const row = await publishWidget(id);
+    const appKey = normalizeAppKey(req.body?.app_key || req.query?.app);
+    const pageKey = String(req.body?.page_key || req.query?.page_key || "default").trim().toLowerCase() || "default";
+    const dashboardKey = normalizeDashboardKey(req.body?.dashboard_key || req.query?.dashboard_key || "default");
+    const dashboardName = String(req.body?.dashboard_name || req.query?.dashboard_name || "Default").trim() || "Default";
+    const dashboardScope =
+      String(req.body?.dashboard_scope || req.query?.dashboard_scope || "global").toLowerCase() === "users"
+        ? "users"
+        : "global";
+    const dashboardUsers = normalizeTargetUserIds(req.body?.dashboard_target_user_ids || req.query?.dashboard_target_user_ids || []);
+    const widgets = await getWidgetsForBuilder(appKey, pageKey, dashboardKey);
+    const index = widgets.findIndex((widget) => String(widget.id) === id);
+    if (index < 0) return res.status(404).json({ success: false, message: "Widget not found." });
+    const row = { ...widgets[index], is_published: true, updated_at: new Date().toISOString() };
+    widgets[index] = row;
+    await saveWidgetsForBuilder({
+      appKey,
+      pageKey,
+      dashboardKey,
+      dashboardName,
+      scope: dashboardScope,
+      targetUserIds: dashboardUsers,
+      widgets,
+      actorId: req.user?.id ?? null,
+      isPublished: true,
+    });
+    if (!row) return res.status(404).json({ success: false, message: "Widget not found." });
+    res.json({ success: true, data: row });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const unpublishWidgetHandler = async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) {
+      return res.status(400).json({ success: false, message: "Invalid widget id." });
+    }
+    const appKey = normalizeAppKey(req.body?.app_key || req.query?.app);
+    const pageKey = String(req.body?.page_key || req.query?.page_key || "default").trim().toLowerCase() || "default";
+    const dashboardKey = normalizeDashboardKey(req.body?.dashboard_key || req.query?.dashboard_key || "default");
+    const dashboardName = String(req.body?.dashboard_name || req.query?.dashboard_name || "Default").trim() || "Default";
+    const dashboardScope =
+      String(req.body?.dashboard_scope || req.query?.dashboard_scope || "global").toLowerCase() === "users"
+        ? "users"
+        : "global";
+    const dashboardUsers = normalizeTargetUserIds(req.body?.dashboard_target_user_ids || req.query?.dashboard_target_user_ids || []);
+    const widgets = await getWidgetsForBuilder(appKey, pageKey, dashboardKey);
+    const index = widgets.findIndex((widget) => String(widget.id) === id);
+    if (index < 0) return res.status(404).json({ success: false, message: "Widget not found." });
+    const row = { ...widgets[index], is_published: false, updated_at: new Date().toISOString() };
+    widgets[index] = row;
+    await saveWidgetsForBuilder({
+      appKey,
+      pageKey,
+      dashboardKey,
+      dashboardName,
+      scope: dashboardScope,
+      targetUserIds: dashboardUsers,
+      widgets,
+      actorId: req.user?.id ?? null,
+      isPublished: false,
+    });
     if (!row) return res.status(404).json({ success: false, message: "Widget not found." });
     res.json({ success: true, data: row });
   } catch (error) {
@@ -194,8 +510,10 @@ export const publishWidgetHandler = async (req, res) => {
 
 export const listWidgetsHandler = async (_req, res) => {
   try {
-    await ensureWidgetsTable();
-    const rows = await listWidgets();
+    const appKey = normalizeAppKey(_req.body?.app_key || _req.query?.app);
+    const storagePageKey = "default";
+    const dashboardKey = normalizeDashboardKey(_req.body?.dashboard_key || _req.query?.dashboard_key || "default");
+    const rows = await getWidgetsForBuilder(appKey, storagePageKey, dashboardKey);
     res.json({ success: true, data: rows });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -204,49 +522,393 @@ export const listWidgetsHandler = async (_req, res) => {
 
 export const previewWidgetHandler = async (req, res) => {
   try {
-    await ensureWidgetsTable();
     const rawSql = String(req.body?.query || req.query?.query || "").trim();
-    validateSelectSql(rawSql);
-    const data = await executeReadOnlyWidgetQuery(rawSql);
+    const dbSource = normalizeDbSource(req.body?.db_source || req.query?.db_source || "ims_postgresql");
+    const filters = resolveWidgetFiltersForUser(req, req.body?.filters || req.query?.filters || {});
+    const erpFilter =
+      req.body?.erp_filter && typeof req.body.erp_filter === "object" ? req.body.erp_filter : {};
+    if (dbSource !== "erp_mssql") {
+      validateSelectSql(rawSql);
+    } else if (!String(rawSql || "").trim()) {
+      throw new Error("requestedData is required for MSSQL source.");
+    }
+    const data = await executeReadOnlyWidgetQuery(rawSql, { source: dbSource, filters, erpFilter });
     res.json({ success: true, data });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
   }
 };
 
+async function resolveRuntimeDashboardConfig(appKey, userId, requestedDashboardKey = "default") {
+  const storagePageKey = "default";
+
+  if (requestedDashboardKey !== "default") {
+    return getDashboardConfigByKey(appKey, storagePageKey, requestedDashboardKey, { publishedOnly: true });
+  }
+
+  // Priority: assigned user clone (published) -> global default (published) -> none (welcome screen)
+  const userDashboard = await getUserDashboardConfig(appKey, storagePageKey, userId, { publishedOnly: true });
+  if (userDashboard) return userDashboard;
+
+  return getGlobalDashboardConfig(appKey, storagePageKey, { publishedOnly: true });
+}
+
+function resolveDashboardScopeAndUsers({
+  dashboardKey = "default",
+  scope = "global",
+  targetUserIds = [],
+  existingMeta = {},
+} = {}) {
+  const normalizedKey = normalizeDashboardKey(dashboardKey);
+  const incomingUsers = normalizeTargetUserIds(targetUserIds);
+  const existingUsers = normalizeTargetUserIds(existingMeta?.targetUserIds || []);
+  const existingScope = String(existingMeta?.scope || "global").toLowerCase();
+
+  if (normalizedKey === "default") {
+    return { scope: "global", targetUserIds: [] };
+  }
+
+  if (String(scope || "").toLowerCase() === "users" || existingScope === "users") {
+    return {
+      scope: "users",
+      targetUserIds: incomingUsers.length ? incomingUsers : existingUsers,
+    };
+  }
+
+  return {
+    scope: incomingUsers.length ? "users" : "global",
+    targetUserIds: incomingUsers.length ? incomingUsers : [],
+  };
+}
+
+export const getDashboardStatusHandler = async (req, res) => {
+  try {
+    const appKey = normalizeAppKey(req.body?.app_key || req.query?.app_key || req.query?.app || "ims");
+    const requestedDashboardKey = normalizeDashboardKey(
+      req.body?.dashboard_key || req.query?.dashboard_key || "default",
+    );
+    const configRow = await resolveRuntimeDashboardConfig(appKey, req.user?.id, requestedDashboardKey);
+    res.json({
+      success: true,
+      data: {
+        active: Boolean(configRow),
+        published: Boolean(configRow),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 export const getDashboardWidgetsHandler = async (req, res) => {
   try {
-    await ensureWidgetsTable();
+    const appKey = normalizeAppKey(req.body?.app_key || req.query?.app);
+    const viewPageKey = String(req.body?.page_key || req.query?.page_key || "dashboard").trim().toLowerCase() || "dashboard";
+    const requestedDashboardKey = normalizeDashboardKey(req.body?.dashboard_key || req.query?.dashboard_key || "default");
     const userType = String(req.user?.type || "").toLowerCase().trim();
     const isSuperAdmin = userType === "super_admin" || userType === "super admin";
-    const allWidgets = await listActiveWidgets();
+    const runtimeFilters = resolveWidgetFiltersForUser(req, req.body?.filters || req.query?.filters || {});
 
-    let allowedModuleSet = null;
-    if (!isSuperAdmin) {
-      const moduleNames = await getUserViewableModuleNames(req.user.id);
-      allowedModuleSet = new Set(moduleNames);
+    const configRow = await resolveRuntimeDashboardConfig(appKey, req.user?.id, requestedDashboardKey);
+    const allWidgets = configRow
+      ? normalizeDashboardJson(configRow.dashboard_json).widgets.map((widget, idx) => widgetToRuntimeRow(widget, idx))
+      : [];
+
+    // Page Access controls which widgets a user sees on the main dashboard (by permission).
+    // Widgets are NOT embedded on individual app pages.
+    const pageWidgets = isAppMainDashboardView(appKey, viewPageKey) ? allWidgets : [];
+
+    const visible = [];
+    for (const widget of pageWidgets) {
+      const canByAudience = canUserSeeWidgetByAudience(widget, req.user?.id, isSuperAdmin);
+      if (!canByAudience) continue;
+      const canViewPage = await userCanViewPageModule(req.user, widget?.target_page_module);
+      if (!canViewPage) continue;
+      visible.push(widget);
     }
+    const dedupedVisible = dedupeWidgets(visible);
 
-    const visible = allWidgets.filter((w) =>
-      canUserSeeWidgetByQuery(w.query, allowedModuleSet || new Set(), isSuperAdmin),
-    );
+    const toPublicWidget = (widget, extra = {}) => {
+      const chartConfig = widget?.chart_config && typeof widget.chart_config === "object" ? widget.chart_config : {};
+      const layout = widget?.layout && typeof widget.layout === "object" ? widget.layout : {};
+      return {
+        id: widget.id,
+        title: widget.title || "",
+        description: widget.description || "",
+        type: widget.type,
+        chart_config: chartConfig,
+        layout,
+        audience_scope: String(widget.audience_scope || "global").toLowerCase(),
+        target_user_ids: Array.isArray(widget.target_user_ids) ? widget.target_user_ids : [],
+        ...extra,
+      };
+    };
 
     const results = [];
-    for (const widget of visible) {
+    for (const widget of dedupedVisible) {
       try {
         if (widget.type === "heading" || widget.type === "section") {
-          results.push({ ...widget, data: [], error: null });
+          results.push(toPublicWidget(widget, { data: [], error: null }));
           continue;
         }
-        const data = await executeReadOnlyWidgetQuery(widget.query);
-        results.push({ ...widget, data, error: null });
+        const widgetSource = normalizeDbSource(widget?.chart_config?.data_source || "ims_postgresql");
+        const erpFilter =
+          widget?.chart_config?.erp_filter && typeof widget.chart_config.erp_filter === "object"
+            ? widget.chart_config.erp_filter
+            : {};
+        const data = await executeReadOnlyWidgetQuery(widget.query, {
+          source: widgetSource,
+          filters: runtimeFilters,
+          erpFilter,
+        });
+        results.push(toPublicWidget(widget, { data, error: null }));
       } catch (error) {
         // Keep dashboard resilient: one bad widget should not break all.
-        results.push({ ...widget, data: [], error: error.message });
+        results.push(toPublicWidget(widget, { data: [], error: "Failed to load this widget." }));
       }
     }
 
     res.json({ success: true, data: results });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const saveDashboardDraftHandler = async (req, res) => {
+  try {
+    const appKey = normalizeAppKey(req.body?.app_key || "ims");
+    const pageKey = String(req.body?.page_key || "default").trim().toLowerCase() || "default";
+    const dashboardKey = normalizeDashboardKey(req.body?.dashboard_key || "default");
+    const dashboardName = String(req.body?.dashboard_name || dashboardKey || "Dashboard").trim() || "Dashboard";
+    const dashboardJson = normalizeDashboardJson(req.body?.dashboard_json || {});
+    const scope = String(req.body?.scope || "global").trim().toLowerCase();
+    const targetUserIds = normalizeTargetUserIds(req.body?.target_user_ids);
+    if (!dashboardJson.widgets.length) {
+      return res.status(400).json({ success: false, message: "Dashboard widgets are required." });
+    }
+
+    const existing = await getDashboardConfigByKey(appKey, pageKey, dashboardKey, { publishedOnly: false });
+    const { meta: existingMeta } = parseDashboardDocument(existing?.dashboard_json);
+    const keepPublished = existingMeta?.published === true;
+    const { scope: resolvedScope, targetUserIds: resolvedTargetUserIds } = resolveDashboardScopeAndUsers({
+      dashboardKey,
+      scope,
+      targetUserIds,
+      existingMeta,
+    });
+
+    let idCounter = Date.now();
+    const normalizedWidgets = dashboardJson.widgets.map((widget) => {
+      const stored = widgetToStoredJson(widget);
+      const idText = String(stored.id || "").trim();
+      if (!idText || idText.startsWith("tmp_")) {
+        stored.id = idCounter;
+        idCounter += 1;
+      }
+      if (stored.layout && typeof stored.layout === "object") {
+        stored.layout = { ...stored.layout, i: String(stored.id) };
+      }
+      return stored;
+    });
+
+    const row = await upsertDashboardConfig({
+      appKey,
+      pageKey,
+      dashboardKey,
+      dashboardName,
+      scope: resolvedScope,
+      targetUserIds: resolvedTargetUserIds,
+      dashboardJson: { ...dashboardJson, widgets: normalizedWidgets },
+      actorId: req.user?.id ?? null,
+      isPublished: keepPublished,
+      pageModule: null,
+    });
+    res.json({ success: true, data: row });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const publishDashboardConfigHandler = async (req, res) => {
+  try {
+    const appKey = normalizeAppKey(req.body?.app_key || "ims");
+    const pageKey = String(req.body?.page_key || "default").trim().toLowerCase() || "default";
+    const dashboardKey = normalizeDashboardKey(req.body?.dashboard_key || "default");
+    const dashboardName = String(req.body?.dashboard_name || dashboardKey || "Dashboard").trim() || "Dashboard";
+    const dashboardJson = normalizeDashboardJson(req.body?.dashboard_json || {});
+    const scope = String(req.body?.scope || "global").trim().toLowerCase();
+    const targetUserIds = normalizeTargetUserIds(req.body?.target_user_ids);
+    if (!dashboardJson.widgets.length) {
+      return res.status(400).json({ success: false, message: "Dashboard widgets are required." });
+    }
+    const existing = await getDashboardConfigByKey(appKey, pageKey, dashboardKey, { publishedOnly: false });
+    const { meta: existingMeta } = parseDashboardDocument(existing?.dashboard_json || {});
+    const { scope: resolvedScope, targetUserIds: resolvedTargetUserIds } = resolveDashboardScopeAndUsers({
+      dashboardKey,
+      scope,
+      targetUserIds,
+      existingMeta,
+    });
+    const normalizedWidgets = dashboardJson.widgets.map((widget, idx) => {
+      const stored = widgetToStoredJson(widget, idx);
+      stored.layout = sanitizeLayoutCoords(stored.layout, stored.id, idx);
+      return stored;
+    });
+    const row = await upsertDashboardConfig({
+      appKey,
+      pageKey,
+      dashboardKey,
+      dashboardName,
+      scope: resolvedScope,
+      targetUserIds: resolvedTargetUserIds,
+      dashboardJson: { ...dashboardJson, widgets: normalizedWidgets },
+      actorId: req.user?.id ?? null,
+      isPublished: true,
+      pageModule: null,
+    });
+    res.json({ success: true, data: row });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const unpublishDashboardConfigHandler = async (req, res) => {
+  try {
+    const appKey = normalizeAppKey(req.body?.app_key || "ims");
+    const pageKey = String(req.body?.page_key || "default").trim().toLowerCase() || "default";
+    const dashboardKey = normalizeDashboardKey(req.body?.dashboard_key || "default");
+    const existing = await getDashboardConfigByKey(appKey, pageKey, dashboardKey, { publishedOnly: false });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Dashboard not found." });
+    }
+    const { doc, meta, widgets } = parseDashboardDocument(existing.dashboard_json);
+    const row = await upsertDashboardConfig({
+      appKey: meta.appKey || appKey,
+      pageKey: meta.pageKey || pageKey,
+      dashboardKey: meta.dashboardKey || dashboardKey,
+      dashboardName: meta.dashboardName || dashboardKey,
+      scope: meta.scope || "global",
+      targetUserIds: meta.targetUserIds || [],
+      dashboardJson: { version: doc.version || 1, widgets },
+      actorId: req.user?.id ?? null,
+      isPublished: false,
+    });
+    res.json({ success: true, data: row });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteDashboardConfigHandler = async (req, res) => {
+  try {
+    const appKey = normalizeAppKey(req.body?.app_key || "ims");
+    const pageKey = String(req.body?.page_key || "default").trim().toLowerCase() || "default";
+    const dashboardKey = normalizeDashboardKey(req.body?.dashboard_key || "default");
+    if (dashboardKey === "default") {
+      return res.status(400).json({ success: false, message: 'Default dashboard cannot be deleted.' });
+    }
+    const existing = await getDashboardConfigByKey(appKey, pageKey, dashboardKey, { publishedOnly: false });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Dashboard not found." });
+    }
+    const row = await deactivateDashboardByKey(appKey, pageKey, dashboardKey, req.user?.id ?? null);
+    if (!row) {
+      return res.status(404).json({ success: false, message: "Dashboard not found." });
+    }
+    res.json({ success: true, data: { dashboard_key: dashboardKey, deleted: true } });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const cloneDashboardToUsersHandler = async (req, res) => {
+  try {
+    const appKey = normalizeAppKey(req.body?.app_key || "ims");
+    const pageKey = String(req.body?.page_key || "default").trim().toLowerCase() || "default";
+    const sourceDashboardKey = normalizeDashboardKey(req.body?.source_dashboard_key || "default");
+    const dashboardName = String(req.body?.dashboard_name || "").trim() || `Clone ${Date.now()}`;
+    const dashboardKey = normalizeDashboardKey(req.body?.dashboard_key || dashboardName);
+    const cloneForAll = Boolean(req.body?.clone_for_all);
+    const userIds = Array.isArray(req.body?.user_ids)
+      ? req.body.user_ids.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0)
+      : [];
+    if (!userIds.length) {
+      return res.status(400).json({
+        success: false,
+        message: cloneForAll
+          ? "No active users found to assign this clone."
+          : "Select at least one user for this clone.",
+      });
+    }
+
+    const sourceConfig = await getDashboardConfigByKey(appKey, pageKey, sourceDashboardKey, { publishedOnly: false });
+    let dashboardJson = req.body?.dashboard_json
+      ? normalizeDashboardJson(req.body.dashboard_json)
+      : sourceConfig
+        ? normalizeDashboardJson(sourceConfig.dashboard_json)
+        : { version: 1, widgets: [] };
+    if (!dashboardJson.widgets.length && sourceConfig) {
+      dashboardJson = {
+        ...dashboardJson,
+        widgets: normalizeDashboardJson(sourceConfig.dashboard_json).widgets,
+      };
+    }
+    if (!dashboardJson.widgets.length) {
+      return res.status(400).json({ success: false, message: "No widgets found to clone. Add widgets first." });
+    }
+    if (dashboardKey === "default") {
+      return res.status(400).json({ success: false, message: 'Clone dashboard key cannot be "default".' });
+    }
+
+    const normalizedWidgets = dashboardJson.widgets.map((widget, idx) => {
+      const stored = widgetToStoredJson(widget, idx);
+      stored.layout = sanitizeLayoutCoords(stored.layout, stored.id, idx);
+      return stored;
+    });
+    dashboardJson = { ...dashboardJson, widgets: normalizedWidgets };
+
+    const row = await upsertDashboardConfig({
+      appKey,
+      pageKey,
+      dashboardKey,
+      dashboardName,
+      scope: "users",
+      targetUserIds: userIds,
+      dashboardJson,
+      actorId: req.user?.id ?? null,
+      isPublished: true,
+    });
+    res.json({
+      success: true,
+      data: {
+        id: row?.id,
+        dashboard_key: dashboardKey,
+        dashboard_name: dashboardName,
+        target_user_ids: cloneForAll ? "all" : userIds,
+      },
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const listDashboardConfigsHandler = async (req, res) => {
+  try {
+    const appKey = normalizeAppKey(req.body?.app_key || req.query?.app_key || "ims");
+    const pageKey = String(req.body?.page_key || req.query?.page_key || "default").trim().toLowerCase() || "default";
+    const rows = await listDashboardConfigs(appKey, pageKey, { includeDraft: true });
+    const data = rows.map((row) => {
+      const { meta } = parseDashboardDocument(row?.dashboard_json);
+      return {
+        id: row.id,
+        dashboard_key: String(meta.dashboardKey || "default"),
+        dashboard_name: String(meta.dashboardName || meta.dashboardKey || "Dashboard"),
+        scope: String(meta.scope || "global"),
+        target_user_ids: Array.isArray(meta.targetUserIds) ? meta.targetUserIds : [],
+        published: meta.published === true,
+      };
+    });
+    res.json({ success: true, data });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

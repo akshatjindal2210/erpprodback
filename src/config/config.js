@@ -83,6 +83,12 @@ const config = {
     url: process.env.WA_API_URL || "http://192.168.1.100:3200/send/wa",
     timeoutMs: 15000,
   },
+  /** Web Push (VAPID) — background notifications when app/tab is closed */
+  web_push: {
+    publicKey: process.env.VAPID_PUBLIC_KEY || "",
+    privateKey: process.env.VAPID_PRIVATE_KEY || "",
+    subject: process.env.VAPID_SUBJECT || "mailto:sagar@jflindia.com",
+  },
 };
 
 if (config.node_env === "production" && !config.jwt_secret) {

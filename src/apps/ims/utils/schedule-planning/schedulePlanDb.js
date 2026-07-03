@@ -12,6 +12,25 @@ const PLAN_COLS = `
 
 const sel = (a) => PLAN_COLS.replace(/\bp\./g, `${a}.`);
 
+function normalizeDispatchStatuses(rawStatuses = []) {
+  const input = Array.isArray(rawStatuses) ? rawStatuses : [rawStatuses];
+  const allowed = new Set([
+    SCHEDULE_PLAN_STATUS.PLANNED,
+    SCHEDULE_PLAN_STATUS.HOLD,
+  ]);
+  const seen = new Set();
+  const out = [];
+  for (const status of input) {
+    const n = Number(status);
+    if (!Number.isFinite(n) || !allowed.has(n) || seen.has(n)) continue;
+    seen.add(n);
+    out.push(n);
+  }
+  return out.length > 0
+    ? out
+    : [SCHEDULE_PLAN_STATUS.PLANNED];
+}
+
 export async function loadAllPlanMap(finYearId) {
   const rows = await dbQuery(
     `SELECT ${sel("sp")} FROM ${T.SCHEDULE_PLAN} sp
@@ -94,30 +113,34 @@ export async function updatePlanStatus({ fin_year_id, schno, itemdcode, is_plann
  * Returns plan items whose latest "plan" transaction action_date falls in [fromDate, toDate].
  * Used by the Forwarding Note "Today Dispatch Plan" tab.
  */
-export async function loadDispatchPlanItems(fromDate, toDate) {
+export async function loadDispatchPlanItems(fromDate, toDate, statuses = []) {
+  const dispatchStatuses = normalizeDispatchStatuses(statuses);
   const rows = await dbQuery(
     `SELECT
        sp.plan_id, sp.fin_year_id, sp.schno, sp.itemdcode, sp.schmonth, sp.schdt::text AS schdt,
        sp.acc_code, sp.acc_name, sp.item_code, sp.itemdesc, sp.totalqty,
-       sp.is_planned,
-       lt.action_date::text AS action_date,
-       lt.remark AS item_remark
+      sp.is_planned,
+      COALESCE(lt.action_date, sp.schdt::date)::text AS action_date,
+      lt.remark AS item_remark
      FROM ${T.SCHEDULE_PLAN} sp
      LEFT JOIN LATERAL (
-       SELECT action_date, remark
+      SELECT action_date, remark
        FROM ${T.SCHEDULE_PLAN_TRANSACTION}
        WHERE fin_year_id = sp.fin_year_id
          AND schno       = sp.schno
          AND itemdcode   = sp.itemdcode
-         AND LOWER(TRIM(action_type)) = 'plan'
-         AND action_date IS NOT NULL
+         AND LOWER(TRIM(action_type)) IN ('plan', 'hold', 'reject')
        ORDER BY created_at DESC, txn_id DESC
        LIMIT 1
      ) lt ON true
-     WHERE lt.action_date BETWEEN $1::date AND $2::date
-       AND sp.is_planned != 3
-     ORDER BY lt.action_date ASC, sp.schno, sp.item_code`,
-    [fromDate, toDate]
+      WHERE sp.schmonth = EXTRACT(MONTH FROM $2::date)::int
+      AND (
+        lt.action_date IS NULL
+        OR lt.action_date BETWEEN $1::date AND $2::date
+      )
+       AND sp.is_planned = ANY($3::int[])
+     ORDER BY COALESCE(lt.action_date, sp.schdt::date) ASC, sp.schno, sp.item_code`,
+    [fromDate, toDate, dispatchStatuses]
   );
   return rows || [];
 }

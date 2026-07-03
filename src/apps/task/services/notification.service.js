@@ -50,7 +50,7 @@ function logWhatsAppResult({ task_id, user_id, template_key, sendVia, recipient,
 export function getChannelStatus() {
   return {
     gateway: { id: "gateway", label: "ERP Gateway", configured: true },
-    pwa_push: { id: "pwa_push", label: "PWA (Socket)", configured: isPwaPushConfigured() },
+    pwa_push: { id: "pwa_push", label: "PWA Push (Socket + Web Push)", configured: isPwaPushConfigured() },
     free: { id: "free", label: "Free", configured: true },
     paid: { id: "paid", label: "Paid", configured: true },
   };
@@ -93,16 +93,18 @@ export async function sendTaskNotification(
   if (tpl.pwa_enabled) {
     sendTaskPwaPush({ userId: uid, subject, body, message, task_id, template_key })
       .then((pwa) => {
-        writeLog({
-          task_id: task_id ?? null,
-          user_id: uid,
-          template_key,
-          channel: "pwa_push",
-          recipient: `user:${uid}`,
-          message,
-          status: pwa.ok ? "sent" : pwa.skipped ? "skipped" : "failed",
-          error_detail: pwa.ok ? null : pwa.error ?? "PWA notify failed",
-        });
+        if (!pwa.ok && !pwa.skipped) {
+          writeLog({
+            task_id: task_id ?? null,
+            user_id: uid,
+            template_key,
+            channel: "pwa_push",
+            recipient: `user:${uid}`,
+            message,
+            status: "failed",
+            error_detail: pwa.error ?? "PWA notify failed",
+          });
+        }
       })
       .catch((err) => console.error(`[Task notify] PWA ${template_key}:`, err.message));
   }
@@ -201,16 +203,18 @@ export async function sendDirectNotification(
         task_id,
         template_key,
       });
-      writeLog({
-        task_id: task_id ?? null,
-        user_id: uid,
-        template_key,
-        channel: "pwa_push",
-        recipient: `user:${uid}`,
-        message,
-        status: pwa.ok ? "sent" : pwa.skipped ? "skipped" : "failed",
-        error_detail: pwa.ok ? null : pwa.error ?? "PWA notify failed",
-      });
+      if (!pwa.ok && !pwa.skipped) {
+        writeLog({
+          task_id: task_id ?? null,
+          user_id: uid,
+          template_key,
+          channel: "pwa_push",
+          recipient: `user:${uid}`,
+          message,
+          status: "failed",
+          error_detail: pwa.error ?? "PWA notify failed",
+        });
+      }
       pwaOk = !!pwa.ok;
       if (!pwa.ok && pwa.error) errors.push(pwa.error);
     } catch (err) {

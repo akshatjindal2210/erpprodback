@@ -447,8 +447,9 @@ export function compareLocationBoxSets(expected_boxes, scanned_boxes) {
 }
 
 export function resolveLocationStatusAfterScan(comparison, { forceComplete = false } = {}) {
-  if (comparison.exact) return "completed";
-  if (forceComplete) return "mismatch";
+  if (forceComplete) {
+    return comparison.exact ? "completed" : "mismatch";
+  }
   if (comparison.scanned_count > 0) return "draft";
   return "pending";
 }

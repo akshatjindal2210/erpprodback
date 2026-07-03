@@ -5,8 +5,8 @@ import { normalizeDocDtForDb } from "../utils/packing-entry/packRowParse.js";
 
 function imsFailureMessage(err) {
   const m = err?.cause?.message || err?.message || String(err);
-  if (/ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|fetch failed|aborted/i.test(m)) {
-    return "IMS is unreachable (network). Lists and screens still work; IMS-only fields may be empty.";
+  if (/ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|fetch failed|aborted|socket hang up|ECONNRESET|EPIPE/i.test(m)) {
+    return "IMS ERP server unreachable. Check that the IMS service is running and ERP_IMS_API_URL is correct.";
   }
   return m;
 }

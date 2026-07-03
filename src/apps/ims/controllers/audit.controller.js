@@ -307,7 +307,7 @@ export const submitAuditScan = async (req, res) => {
 
     let message = "Scans saved successfully";
     if (progress?.auto_completed) {
-      message = "All boxes matched — location completed automatically";
+      message = "All boxes matched — location submitted";
     } else if (progress?.location_status === "mismatch") {
       message = "Location saved — boxes missing, admin review required";
     } else if (progress?.location_status === "completed") {

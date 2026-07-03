@@ -517,6 +517,24 @@ function normalizeStickerProductionPayload(p, fallbackDocNo) {
   };
 }
 
+/** True when ERP/packing-list payload differs from a stale ims_dailyprod row (e.g. after cancel stickers). */
+function liveProductionDiffersFromHistory(historyRow, live) {
+  if (!live) return false;
+  if (!historyRow) return true;
+
+  const norm = (v) => (v != null ? String(v).trim() : "");
+  const normQty = (v) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  if (norm(historyRow.itemdcode) !== norm(live.itemdcode)) return true;
+  if (norm(historyRow.item_code) !== norm(live.item_code)) return true;
+  if (normQty(historyRow.total_qty) !== normQty(live.total_qty)) return true;
+  if (norm(historyRow.acc_code) !== norm(live.acc_code)) return true;
+  return false;
+}
+
 /** Client sticker_meta packing fields only — customer is resolved per box at bulk print. */
 function packingLevelStickerHints(sticker_meta = {}) {
   if (!sticker_meta || typeof sticker_meta !== "object") return {};
@@ -868,34 +886,41 @@ export const stickerFetchBox = async (req, res) => {
 
     const liveFromBody = normalizeStickerProductionPayload(production, doc_no);
 
+    // Cleared dailyprod row (e.g. after cancel stickers) — do not treat as valid history.
+    const historyMissingCore =
+      rows?.length > 0 &&
+      rows.every((r) => r.itemdcode == null || String(r.itemdcode).trim() === "");
+    if (historyMissingCore && !liveFromBody) {
+      rows = [];
+    }
+
     const accOverride =
       liveFromBody?.acc_code != null && String(liveFromBody.acc_code).trim() !== ""
         ? String(liveFromBody.acc_code).trim()
         : null;
-    let clientAccDiffersFromHistory = false;
+    let clientLiveDiffersFromHistory = false;
 
-    if (accOverride && rows?.length > 0) {
-      const dpAcc =
-        rows[0]?.acc_code != null && String(rows[0].acc_code).trim() !== ""
-          ? String(rows[0].acc_code).trim()
-          : "";
-      if (dpAcc !== accOverride) {
-        clientAccDiffersFromHistory = true;
+    // No production stickers: prefer live ERP/packing-list over stale ims_dailyprod snapshot.
+    if (liveFromBody && !productionStickersExistEarly) {
+      const historyRow = rows?.[0] ?? null;
+      if (liveProductionDiffersFromHistory(historyRow, liveFromBody)) {
+        clientLiveDiffersFromHistory = true;
         const liveRow = {
           doc_no: String(doc_no).trim(),
-          doc_dt: liveFromBody?.doc_dt ?? rows[0]?.doc_dt ?? null,
-          job_card_no: liveFromBody?.job_card_no ?? rows[0]?.job_card_no ?? null,
-          itemdcode: liveFromBody?.itemdcode ?? rows[0]?.itemdcode ?? null,
-          total_qty: liveFromBody?.total_qty ?? rows[0]?.total_qty ?? "0",
-          acc_code: accOverride,
-          sticker_generated: liveFromBody?.sticker_generated ?? rows[0]?.sticker_generated ?? false,
+          doc_dt: liveFromBody.doc_dt ?? historyRow?.doc_dt ?? null,
+          job_card_no: liveFromBody.job_card_no ?? historyRow?.job_card_no ?? null,
+          itemdcode: liveFromBody.itemdcode ?? historyRow?.itemdcode ?? null,
+          item_code: liveFromBody.item_code ?? historyRow?.item_code ?? null,
+          total_qty: liveFromBody.total_qty ?? historyRow?.total_qty ?? "0",
+          acc_code: accOverride ?? historyRow?.acc_code ?? null,
+          sticker_generated: liveFromBody.sticker_generated ?? historyRow?.sticker_generated ?? false,
           packing_standard_id:
-            liveFromBody?.packing_standard_id ?? rows[0]?.packing_standard_id ?? null,
+            liveFromBody.packing_standard_id ?? historyRow?.packing_standard_id ?? null,
         };
         const liveRows = await getStickerHistoryFromLiveRow(liveRow, category_id);
         if (liveRows?.length) {
           rows = liveRows;
-        } else {
+        } else if (accOverride && historyRow) {
           rows = rows.map((r) => ({ ...r, acc_code: accOverride }));
         }
       }
@@ -951,7 +976,7 @@ export const stickerFetchBox = async (req, res) => {
     let stickerAcc = fallbackAcc;
     if (productionStickersExist) {
       stickerAcc = (await resolveStickerCustomerAccCode(doc_no, fallbackAcc)) ?? fallbackAcc;
-    } else if (clientAccDiffersFromHistory && explicitClientAcc) {
+    } else if (clientLiveDiffersFromHistory && explicitClientAcc) {
       stickerAcc = explicitClientAcc;
     }
     rows = await applyStickerCustCodeNarr(rows, stickerAcc);

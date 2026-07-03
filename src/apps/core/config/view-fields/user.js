@@ -2,6 +2,9 @@ const forPicker = ["id", "name", "username"];
 
 const forModal = [...forPicker, "email", "phone", "type", "status", "usercode", "auth_source", "department_id", "designation_id" ];
 
+/** Task filters / assign dropdowns — need dept, designation, role */
+const forTaskFilter = [...forPicker, "type", "department_id", "designation_id"];
+
 export function resolveUserViewsSelectFields(options = {}) {
   const mod = options.permission_module;
   const act = options.permission_action;
@@ -29,7 +32,7 @@ export function resolveUserViewsSelectFields(options = {}) {
     "recurring_task",
   ]);
   if (taskModules.has(mod) && (act === "view" || act === "add" || act === "edit" || act === "authorize")) {
-    return [...forPicker];
+    return [...forTaskFilter];
   }
 
   return null;

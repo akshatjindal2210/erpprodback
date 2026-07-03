@@ -2,6 +2,7 @@ import dbQuery from "./db.js";
 import { initImsDB } from "../apps/ims/config/initDB.js";
 import { initTaskDB } from "../apps/task/config/initDB.js";
 import { initCoreDB } from "../apps/core/config/initDB.js";
+import { initDashboardDB } from "../apps/dashboard/config/initDB.js";
 
 export const initDB = async () => {
   try {
@@ -11,6 +12,7 @@ export const initDB = async () => {
     await initCoreDB();
     await initImsDB();
     await initTaskDB();
+    await initDashboardDB();
 
     console.log("✅ All Tables Ready");
   } catch (err) {
