@@ -1,5 +1,19 @@
 import PushSubscription from "../models/pushSubscription.model.js";
+import config from "../../../config/config.js";
 import { getVapidPublicKey, getPushDeliveryLogs, isWebPushConfigured, markPushDeliveryRead, markPushDeliveryReceived, sendWebPushToDevice, sendWebPushToUser } from "../services/webPush.service.js";
+
+function parseDeliveryMeta(body = {}) {
+  const client_ip = String(body?.client_ip ?? "").trim() || null;
+  let on_company_network = body?.on_company_network;
+  if (typeof on_company_network === "boolean") {
+    return { client_ip, on_company_network };
+  }
+  const companyIp = String(config.web_push?.company_public_ip || "").trim();
+  if (client_ip && companyIp) {
+    return { client_ip, on_company_network: client_ip === companyIp };
+  }
+  return { client_ip, on_company_network: null };
+}
 
 function parseSubscription(body = {}) {
   const sub = body.subscription ?? body;
@@ -163,7 +177,7 @@ export async function reportPushReceived(req, res) {
       return res.status(400).json({ success: false, message: "tracking_id is required" });
     }
 
-    const row = await markPushDeliveryReceived(tracking_id);
+    const row = await markPushDeliveryReceived(tracking_id, parseDeliveryMeta(req.body));
     if (!row) {
       return res.status(404).json({ success: false, message: "Delivery log not found or already updated" });
     }
@@ -182,7 +196,14 @@ export async function reportPushRead(req, res) {
       return res.status(400).json({ success: false, message: "tracking_id is required" });
     }
 
-    const row = await markPushDeliveryRead(tracking_id);
+    if (req.body?.company_network_verified !== true) {
+      return res.status(403).json({
+        success: false,
+        message: "Read is recorded only when the user opens the app on company network",
+      });
+    }
+
+    const row = await markPushDeliveryRead(tracking_id, parseDeliveryMeta(req.body));
     if (!row) {
       return res.status(404).json({ success: false, message: "Delivery log not found" });
     }

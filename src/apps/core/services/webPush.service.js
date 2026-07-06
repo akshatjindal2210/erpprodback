@@ -38,6 +38,19 @@ function toWebPushSubscription(row) {
   };
 }
 
+const RETRYABLE_HTTP = new Set([408, 429, 500, 502, 503, 504]);
+const RETRYABLE_ERR = /ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang|network|timeout/i;
+
+function isRetryablePushError(err) {
+  const status = err?.statusCode ?? err?.status;
+  if (status && RETRYABLE_HTTP.has(Number(status))) return true;
+  return RETRYABLE_ERR.test(String(err?.message || err?.cause?.message || ""));
+}
+
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function sendToRow(row, notification = {}, meta = {}) {
   const tracking_id = randomUUID();
   const app_type = meta.app_type ?? notification.app_type ?? "task";
@@ -62,67 +75,80 @@ async function sendToRow(row, notification = {}, meta = {}) {
       tracking_id,
       app_type,
       app_label: brand.label,
+      api_base: String(config.web_push?.api_base_url || config.web_push?.delivery_api_bases?.[0] || "").replace(/\/$/, ""),
+      delivery_api_bases: config.web_push?.delivery_api_bases ?? [],
+      company_backend_url: String(config.web_push?.company_backend_url || "").replace(/\/$/, ""),
+      company_public_ip: String(config.web_push?.company_public_ip || "").trim(),
     },
   });
 
-  try {
-    await webpush.sendNotification(toWebPushSubscription(row), payload, {
-      TTL: PUSH_TTL_SECONDS,
-      urgency: "high",
-    });
-    await PushSubscription.touchLastUsed(row.subscription_id);
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) await sleep(1500 * attempt);
 
-    const log = await PushDeliveryLog.create({
-      tracking_id,
-      user_id: row.user_id ?? meta.user_id ?? null,
-      user_name: row.user_name || meta.user_name || null,
-      subscription_id: row.subscription_id,
-      device_id: row.device_id,
-      device_name: row.device_name || null,
-      inbox_id,
-      template_key: meta.template_key ?? null,
-      channel: meta.channel ?? "pwa_push",
-      app_type: meta.app_type ?? "task",
-      title,
-      body,
-      status: "sent",
-      sent_at: new Date(),
-    });
+    try {
+      await webpush.sendNotification(toWebPushSubscription(row), payload, {
+        TTL: PUSH_TTL_SECONDS,
+        urgency: "high",
+      });
+      await PushSubscription.touchLastUsed(row.subscription_id);
 
-    return { ok: true, subscription_id: row.subscription_id, tracking_id, log };
-  } catch (err) {
-    const status = err?.statusCode ?? err?.status;
-    if (status === 404 || status === 410) {
-      await PushSubscription.removeByEndpoint(row.endpoint);
+      const log = await PushDeliveryLog.create({
+        tracking_id,
+        user_id: row.user_id ?? meta.user_id ?? null,
+        user_name: row.user_name || meta.user_name || null,
+        subscription_id: row.subscription_id,
+        device_id: row.device_id,
+        device_name: row.device_name || null,
+        inbox_id,
+        template_key: meta.template_key ?? null,
+        channel: meta.channel ?? "pwa_push",
+        app_type: meta.app_type ?? "task",
+        title,
+        body,
+        status: "sent",
+        sent_at: new Date(),
+      });
+
+      return { ok: true, subscription_id: row.subscription_id, tracking_id, log };
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryablePushError(err) || attempt >= 2) break;
     }
-
-    const log = await PushDeliveryLog.create({
-      tracking_id,
-      user_id: row.user_id ?? meta.user_id ?? null,
-      user_name: row.user_name || meta.user_name || null,
-      subscription_id: row.subscription_id,
-      device_id: row.device_id,
-      device_name: row.device_name || null,
-      inbox_id,
-      template_key: meta.template_key ?? null,
-      channel: meta.channel ?? "pwa_push",
-      app_type: meta.app_type ?? "task",
-      title,
-      body,
-      status: "failed",
-      error_detail: err.message,
-      sent_at: new Date(),
-    });
-
-    return {
-      ok: false,
-      subscription_id: row.subscription_id,
-      tracking_id,
-      error: err.message,
-      status,
-      log,
-    };
   }
+
+  const err = lastErr || new Error("Push delivery failed");
+  const status = err?.statusCode ?? err?.status;
+  if (status === 404 || status === 410) {
+    await PushSubscription.removeByEndpoint(row.endpoint);
+  }
+
+  const log = await PushDeliveryLog.create({
+    tracking_id,
+    user_id: row.user_id ?? meta.user_id ?? null,
+    user_name: row.user_name || meta.user_name || null,
+    subscription_id: row.subscription_id,
+    device_id: row.device_id,
+    device_name: row.device_name || null,
+    inbox_id,
+    template_key: meta.template_key ?? null,
+    channel: meta.channel ?? "pwa_push",
+    app_type: meta.app_type ?? "task",
+    title,
+    body,
+    status: "failed",
+    error_detail: err.message,
+    sent_at: new Date(),
+  });
+
+  return {
+    ok: false,
+    subscription_id: row.subscription_id,
+    tracking_id,
+    error: err.message,
+    status,
+    log,
+  };
 }
 
 export async function sendWebPushToSubscriptions(rows, notification = {}, meta = {}) {
@@ -167,14 +193,14 @@ export async function sendWebPushToDevice(deviceId, notification = {}, meta = {}
   return sendWebPushToSubscriptions(rows, notification, meta);
 }
 
-export async function markPushDeliveryReceived(tracking_id) {
+export async function markPushDeliveryReceived(tracking_id, meta = {}) {
   if (!tracking_id) return null;
-  return PushDeliveryLog.markReceived(String(tracking_id));
+  return PushDeliveryLog.markReceived(String(tracking_id), meta);
 }
 
-export async function markPushDeliveryRead(tracking_id) {
+export async function markPushDeliveryRead(tracking_id, meta = {}) {
   if (!tracking_id) return null;
-  return PushDeliveryLog.markRead(String(tracking_id));
+  return PushDeliveryLog.markRead(String(tracking_id), meta);
 }
 
 export async function markPushDeliveryReadByInbox(inboxId, userId) {

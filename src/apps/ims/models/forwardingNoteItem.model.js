@@ -26,7 +26,7 @@ const JOINS = `
   LEFT JOIN ${M.USERS} u_lock     ON fnm.out_entry_locked_by = u_lock.id
   LEFT JOIN ${M.USERS} u_bill     ON fnm.bill_updated_by = u_bill.id
   LEFT JOIN LATERAL (
-    SELECT oe.out_uid, oe.scan_complete
+    SELECT oe.out_uid, oe.scan_complete, oe.approved, oe.boxes_scanned, oe.boxes_required
     FROM ims_out_entry oe
     WHERE oe.fuid = fnm.fuid AND oe.is_deleted = false
     ORDER BY oe.out_uid DESC
@@ -220,21 +220,27 @@ export const findForwardingNoteItem = async (filters = {}) => {
   return row ?? null;
 };
 
-export const insertForwardingNoteItem = async (data) => {
+export const insertForwardingNoteItem = async (data, { client } = {}) => {
   const fields = [
     "fuid", "item_dcode", "packing_number", "box", "box_qty", 
     "loose_box", "loose_box_qty", "total_qty", "created_by"
   ];
   const values = fields.map(f => data[f] ?? null);
   const placeholders = fields.map((_, idx) => `$${idx + 1}`).join(", ");
+  const run = client?.query
+    ? async (sql, params) => {
+        const result = await client.query(sql, params);
+        return result.rows;
+      }
+    : dbQuery;
 
-  const [row] = await dbQuery(
+  const rows = await run(
     `INSERT INTO ims_forwarding_note_item_wise (${fields.join(", ")})
      VALUES (${placeholders})
      RETURNING *`,
     values
   );
-  return row;
+  return client?.query ? rows[0] : rows[0];
 };
 
 export const updateForwardingNoteItems = async (fields = {}, filters = {}) => {
@@ -265,7 +271,7 @@ export const updateForwardingNoteItems = async (fields = {}, filters = {}) => {
   return row;
 };
 
-export const deleteForwardingNoteItems = async (filters = {}, meta = {}) => {
+export const deleteForwardingNoteItems = async (filters = {}, meta = {}, { client } = {}) => {
   const keys = Object.keys(filters);
   const values = [];
   let i = 1;
@@ -274,13 +280,34 @@ export const deleteForwardingNoteItems = async (filters = {}, meta = {}) => {
   for (const k of keys) {
     if (k !== "id" && k !== "fuid" && !ALLOWED_FILTER_FIELDS.includes(k)) continue;
     values.push(filters[k]);
-    conditions.push(`fi.${k} = $${i++}`);
+    conditions.push(`${k} = $${i++}`);
   }
 
   values.push(meta.deleted_by ?? null);
-  await dbQuery(
-    `UPDATE ims_forwarding_note_item_wise fi SET is_deleted = true, deleted_at = NOW(), deleted_by = $${i}
-     WHERE ${conditions.join(" AND ")}`,
-    values
+  const sql = `UPDATE ims_forwarding_note_item_wise SET is_deleted = true, deleted_at = NOW(), deleted_by = $${i}
+     WHERE ${conditions.join(" AND ")}`;
+
+  if (client?.query) {
+    await client.query(sql, values);
+    return;
+  }
+  await dbQuery(sql, values);
+};
+
+/** Active item rows for one forwarding note — used for reserve validation on approve. */
+export const findActiveForwardingNoteItemsByFuid = async (fuid, { client } = {}) => {
+  const run = client?.query
+    ? async (sql, params) => {
+        const result = await client.query(sql, params);
+        return result.rows;
+      }
+    : dbQuery;
+
+  return run(
+    `SELECT item_dcode, packing_number, box, box_qty, loose_box, loose_box_qty, total_qty
+     FROM ims_forwarding_note_item_wise
+     WHERE fuid = $1 AND is_deleted = false
+     ORDER BY id ASC`,
+    [Number(fuid)]
   );
 };

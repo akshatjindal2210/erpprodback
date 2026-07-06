@@ -100,7 +100,16 @@ export const findOutEntries = async (options = {}) => {
   if (search) {
     const searchTerm = `%${search}%`;
     values.push(searchTerm);
-    conditions.push(`(o.remarks ILIKE $${i} OR u_cr.name ILIKE $${i})`);
+    conditions.push(`(
+      o.remarks ILIKE $${i}
+      OR u_cr.name ILIKE $${i}
+      OR o.out_uid::text ILIKE $${i}
+      OR o.fuid::text ILIKE $${i}
+      OR o.item_codes::text ILIKE $${i}
+      OR o.packing_numbers::text ILIKE $${i}
+      OR o.qtys::text ILIKE $${i}
+      OR o.reason ILIKE $${i}
+    )`);
     i++;
   }
 

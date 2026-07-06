@@ -3,13 +3,13 @@ import { buildForwardingAvailableBoxes, findItemDcodesWithForwardingAvailableSto
 import { buildPackingNumberSet, filterForwardingBoxesByCategoryId, filterErpStockByCategory } from "../utils/forwarding-note/forwardingPackingCategory.js";
 import { enrichRowsWithIMS } from "../utils/erp-api/imsLookup.js";
 import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo } from "../utils/forwarding-note/forwardingNoteList.js";
-import { saveForwardingNoteItems } from "../utils/forwarding-note/forwardingNoteItemsWrite.js";
+import { saveForwardingNoteItems, replaceForwardingNoteItems, validateExistingForwardingNoteItems } from "../utils/forwarding-note/forwardingNoteItemsWrite.js";
 import { buildForwardingLockMessage } from "../utils/forwarding-note/forwardingNoteMessages.js";
 import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
-import { deleteForwardingNoteItems, findForwardingNoteItems } from "../models/forwardingNoteItem.model.js";
+import { findForwardingNoteItems } from "../models/forwardingNoteItem.model.js";
 import { sanitizeSearch, buildForwardingNoteBillDocument } from "../../core/utils/helper.js";
 import { fetchFromIMS } from "../services/ims.service.js";
 import { findCategories } from "../models/category.model.js";
@@ -106,8 +106,9 @@ export const createForwardingNote = async (req, res) => {
       userId: req.user.id,
     });
 
-    // 3. Apply initial approval state when requested
+    // 3. Apply initial approval state when requested (re-validate reserve before locking stock)
     if (normalizedApproved === true) {
+      await validateExistingForwardingNoteItems({ fuid: row.fuid, excludeFuid: row.fuid });
       const approvalFields = {};
       applyApprovalWorkflow({
         req,
@@ -247,17 +248,23 @@ export const updateForwardingNote = async (req, res) => {
     }
     
     applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges });
-    await updateForwardingNotes(fields, { fuid });
+
+    const isNewApproval =
+      normalizedApproved === true &&
+      !(existing.approved === true || existing.approved === "true" || existing.approved === 1);
 
     if (items.length > 0) {
-      await deleteForwardingNoteItems({ fuid }, { deleted_by: req.user.id });
-      await saveForwardingNoteItems({
+      await replaceForwardingNoteItems({
         fuid,
         items,
         userId: req.user.id,
         excludeFuid: fuid,
       });
+    } else if (isNewApproval) {
+      await validateExistingForwardingNoteItems({ fuid, excludeFuid: fuid });
     }
+
+    await updateForwardingNotes(fields, { fuid });
 
     const data = await findForwardingNote({ fuid });
     const enrichedData = await enrichForwardingNoteDetail(data);

@@ -1,6 +1,7 @@
 import { withTransaction } from "../../../config/db.js";
 import { toSafeLimitedSql } from "./sqlGenerator.js";
 import { fetchImsDataRaw } from "../../ims/services/ims.service.js";
+import { buildErpMssqlPayload, resolveErpMssqlSql, logErpMssqlInternalRequest } from "./erpMssqlQuery.js";
 
 const QUERY_TIMEOUT_MS = 8000;
 const DATE_FILTER_KEYS = ["created_at", "createdat", "created_on", "createdon", "date", "doc_dt", "docdt", "approved_at", "updated_at"];
@@ -88,53 +89,35 @@ function applyResultFilters(rows = [], filters = {}) {
   });
 }
 
-async function runErpReadOnlyQuery(rawSql, filters = {}, erpFilter = {}) {
-  const rawValue = String(rawSql || "").trim();
-  if (!rawValue) {
-    throw new Error("requestedData is required for MSSQL source.");
-  }
-  let requestedData = rawValue;
-  let baseFilter = erpFilter && typeof erpFilter === "object" ? erpFilter : {};
-  if (rawValue.startsWith("{") && rawValue.endsWith("}")) {
-    try {
-      const payload = JSON.parse(rawValue);
-      if (payload && typeof payload === "object") {
-        requestedData = String(payload.requestedData || payload.requested_data || "").trim();
-        baseFilter = payload.filter ?? {};
-      }
-    } catch (_error) {
-      throw new Error("Invalid MSSQL payload JSON.");
-    }
-  }
-  if (!requestedData) {
-    throw new Error("requestedData is required in MSSQL payload.");
-  }
-  const mergedFilter =
-    typeof baseFilter === "string"
-      ? applyRuntimeFilters(baseFilter, filters)
-      : {
-          ...(baseFilter && typeof baseFilter === "object" ? baseFilter : {}),
-          fromDate: filters?.fromDate || null,
-          toDate: filters?.toDate || null,
-          userId: filters?.userId || null,
-        };
-  const response = await fetchImsDataRaw(requestedData, mergedFilter);
+async function runErpReadOnlyQuery(rawSql, filters = {}) {
+  const resolvedSql = resolveErpMssqlSql(rawSql, filters);
+  const erpRequest = buildErpMssqlPayload(resolvedSql);
+  // logErpMssqlInternalRequest(erpRequest);
+  const response = await fetchImsDataRaw(erpRequest.requestedData, erpRequest.filter);
   if (!response?.success) {
     throw new Error(response?.message || "ERP data source query failed.");
   }
-  return Array.isArray(response?.records) ? response.records : [];
+  return {
+    rows: Array.isArray(response?.records) ? response.records : [],
+    erpRequest,
+  };
 }
 
 export async function executeReadOnlyWidgetQuery(rawSql, options = {}) {
   const source = String(options?.source || "ims_postgresql").toLowerCase();
   const filters = options?.filters && typeof options.filters === "object" ? options.filters : {};
-  const erpFilter = options?.erpFilter && typeof options.erpFilter === "object" ? options.erpFilter : {};
-  const filteredSql = applyRuntimeFilters(rawSql, filters);
   if (source === "erp_mssql") {
-    const rows = await runErpReadOnlyQuery(filteredSql, filters, erpFilter);
-    return applyResultFilters(rows, filters);
+    const { rows, erpRequest } = await runErpReadOnlyQuery(rawSql, filters);
+    return {
+      rows: applyResultFilters(rows, filters),
+      erpRequest,
+    };
   }
+  const filteredSql = applyRuntimeFilters(rawSql, filters);
   const rows = await runPostgresReadOnlyQuery(filteredSql);
-  return applyResultFilters(rows, filters);
+  return {
+    rows: applyResultFilters(rows, filters),
+    erpRequest: null,
+  };
 }
 

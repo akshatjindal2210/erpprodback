@@ -88,6 +88,22 @@ const config = {
     publicKey: process.env.VAPID_PUBLIC_KEY || "",
     privateKey: process.env.VAPID_PRIVATE_KEY || "",
     subject: process.env.VAPID_SUBJECT || "mailto:sagar@jflindia.com",
+    /** Public API bases for delivery receipts — reachable on mobile data / any network */
+    api_base_url: process.env.PUSH_API_BASE_URL || process.env.PUBLIC_API_BASE_URL || "",
+    delivery_api_bases: [
+      ...new Set(
+        [
+          process.env.PUSH_API_BASE_URL,
+          process.env.PUBLIC_API_BASE_URL,
+          ...(process.env.PUSH_API_BASE_FALLBACKS || "").split(","),
+        ]
+          .map((v) => String(v || "").trim().replace(/\/$/, ""))
+          .filter(Boolean)
+      ),
+    ],
+    /** Internal backend URL for company-network ping when user opens notification */
+    company_backend_url: process.env.COMPANY_BACKEND_URL || "",
+    company_public_ip: process.env.COMPANY_PUBLIC_IP || "",
   },
 };
 

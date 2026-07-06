@@ -56,7 +56,7 @@ export async function updateTemplate(req, res) {
 
 export async function getNotificationLogs(req, res) {
   try {
-    const { page = 1, limit = 20, template_key, channel, status, search, order } = req.query;
+    const { page = 1, limit = 20, template_key, channel, status, search, order } = req.body ?? {};
     const result = await NotificationLog.getAll({ page, limit, template_key, channel, status, search, order });
     res.json({
       success: true,

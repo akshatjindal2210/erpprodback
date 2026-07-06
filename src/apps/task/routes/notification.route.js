@@ -6,10 +6,10 @@ const superAdmin = authorize("super_admin");
 
 router.use(authenticate);
 
-router.get("/channels", superAdmin, getChannels);
-router.get("/templates", superAdmin, getTemplates);
+router.post("/channels", superAdmin, getChannels);
+router.post("/templates", superAdmin, getTemplates);
 router.put("/templates/:key", superAdmin, updateTemplate);
-router.get("/logs", superAdmin, getNotificationLogs);
+router.post("/logs", superAdmin, getNotificationLogs);
 router.post("/send", superAdmin, sendInstantNotification);
 
 export default router;

@@ -1,9 +1,9 @@
 /**
  * Inventory Report SQL — single query.
- * Boxes aggregate + SA/dailyprod meta (DB columns, hash join). Filters on frontend.
+ * Rows grouped by packing + doc date + item + customer (reused packing numbers stay separate).
  */
 
-import { sqlBoxSellable, sqlBoxOnQcHold, sqlBoxInHand, sqlBoxCountedAsOut, sqlDocDtFromDailyprod, sqlDocDtText } from "../box/boxInventorySql.js";
+import { sqlBoxSellable, sqlBoxOnQcHold, sqlBoxInHand, sqlBoxCountedAsOut, sqlDocDtFromDailyprod, sqlDocDtText, sqlBoxCustomerCodeReport } from "../box/boxInventorySql.js";
 
 const PN = (alias) => `NULLIF(TRIM(${alias}.packing_number::text), '')`;
 const TRIM_TXT = (expr) => `NULLIF(TRIM((${expr})::text), '')`;
@@ -17,78 +17,60 @@ const PACKING_AREA = `${SELLABLE} AND b.location_id IS NULL`;
 const SHOW_LOC = `(${IN_STORE}) OR (${QC_HOLD})`;
 const IS_OUT = sqlBoxCountedAsOut("b");
 
-/** One approved SA row per packing (full table scan once). */
-const SA_META_CTE = `
-  sa_meta AS (
-    SELECT DISTINCT ON (packing_number)
-      packing_number,
-      item_dcode,
-      ${TRIM_TXT("item_code")} AS item_code,
-      ${TRIM_TXT("item_desc")} AS item_desc,
-      acc_code,
-      ${TRIM_TXT("acc_name")} AS acc_name,
-      ${sqlDocDtText("sa.doc_dt")} AS doc_dt,
-      ${TRIM_TXT("job_card_no")} AS job_card_no
-    FROM (
-      SELECT
-        ${PN("sa")} AS packing_number,
-        sa.item_dcode,
-        sa.item_code,
-        sa.item_desc,
-        sa.acc_code,
-        sa.acc_name,
-        sa.doc_dt,
-        sa.job_card_no,
-        sa.approved_at
-      FROM ims_stock_adjustment sa
-      WHERE sa.is_deleted = false
-        AND sa.approved = true
-        AND sa.entry_type IN ('add', 'minus')
-        AND ${PN("sa")} IS NOT NULL
-    ) sa
-    ORDER BY packing_number, approved_at DESC NULLS LAST
-  )`;
+/** SA boxes: meta from linked SA only (safe when packing number is reused across years). */
+const BOX_ITEM_DCODE = `COALESCE(
+  CASE WHEN b.sa_id IS NOT NULL THEN sa.item_dcode::text END,
+  dp.item_dcode::text,
+  '—'
+)`;
 
-/** One dailyprod row per doc_no (full table scan once). */
-const DP_META_CTE = `
-  dp_meta AS (
-    SELECT DISTINCT ON (packing_number)
-      packing_number,
-      item_dcode,
-      ${TRIM_TXT("item_code")} AS item_code,
-      ${TRIM_TXT("item_desc")} AS item_desc,
-      acc_code,
-      ${TRIM_TXT("acc_name")} AS acc_name,
-      ${sqlDocDtFromDailyprod("dp")} AS doc_dt,
-      ${TRIM_TXT("job_card_no")} AS job_card_no
-    FROM (
-      SELECT
-        NULLIF(TRIM(dp_inner.doc_no::text), '') AS packing_number,
-        dp_inner.item_dcode,
-        dp_inner.item_code,
-        dp_inner.item_desc,
-        dp_inner.acc_code,
-        dp_inner.acc_name,
-        dp_inner.doc_dt,
-        dp_inner.job_card_no
-      FROM ims_dailyprod dp_inner
-      WHERE NULLIF(TRIM(dp_inner.doc_no::text), '') IS NOT NULL
-    ) dp
-    ORDER BY packing_number, (CASE WHEN dp.doc_dt IS NOT NULL THEN 0 ELSE 1 END), dp.doc_dt ASC NULLS LAST
-  )`;
+const BOX_CUSTOMER_CODE = sqlBoxCustomerCodeReport("b", "sa", "dp");
 
-/** Builds CTEs: sa_meta + dp_meta + grouped + report_rows */
+const BOX_DOC_DT = `COALESCE(
+  CASE WHEN b.sa_id IS NOT NULL THEN ${sqlDocDtText("sa.doc_dt")} END,
+  ${sqlDocDtFromDailyprod("dp")}
+)`;
+
+const BOX_ITEM_CODE = `COALESCE(
+  CASE WHEN b.sa_id IS NOT NULL THEN ${TRIM_TXT("sa.item_code")} END,
+  ${TRIM_TXT("dp.item_code")},
+  ${BOX_ITEM_DCODE}
+)`;
+
+const BOX_ITEM_DESC = `COALESCE(
+  CASE WHEN b.sa_id IS NOT NULL THEN ${TRIM_TXT("sa.item_desc")} END,
+  ${TRIM_TXT("dp.item_desc")},
+  '—'
+)`;
+
+const BOX_CUSTOMER_NAME = `COALESCE(
+  CASE WHEN b.sa_id IS NOT NULL THEN ${TRIM_TXT("sa.acc_name")} END,
+  ${TRIM_TXT("dp.acc_name")},
+  '—'
+)`;
+
+const BOX_JOB_CARD = `COALESCE(
+  CASE WHEN b.sa_id IS NOT NULL THEN ${TRIM_TXT("sa.job_card_no")} END,
+  ${TRIM_TXT("dp.job_card_no")}
+)`;
+
+/** Builds CTEs: grouped (packing + doc_dt + item + customer) + report_rows */
 export function buildInventoryReportSql() {
   const stockHaving = `SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${IN_STORE})) > 0
        OR SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${PACKING_AREA})) > 0
        OR SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${QC_HOLD})) > 0`;
 
   const groupedCte = `
-    ${SA_META_CTE},
-    ${DP_META_CTE},
     grouped AS (
       SELECT
         ${PN("b")} AS packing_number,
+        ${BOX_DOC_DT} AS doc_dt,
+        ${BOX_ITEM_DCODE} AS item_dcode,
+        ${BOX_CUSTOMER_CODE} AS customer_code,
+        MAX(${BOX_ITEM_CODE}) AS item_code,
+        MAX(${BOX_ITEM_DESC}) AS item_desc,
+        MAX(${BOX_CUSTOMER_NAME}) AS customer_name,
+        MAX(${BOX_JOB_CARD}) AS job_card_no,
         SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${SELLABLE}))::bigint AS fg_stock_qty,
         SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${IN_STORE}))::bigint AS in_store_qty,
         SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${PACKING_AREA}))::bigint AS packing_area_qty,
@@ -99,14 +81,28 @@ export function buildInventoryReportSql() {
         STRING_AGG(DISTINCT ${LOC_LABEL}, ', ') FILTER (WHERE (${SHOW_LOC})) AS location_details,
         COALESCE(ARRAY_AGG(DISTINCT b.location_id::text) FILTER (WHERE (${SHOW_LOC})), ARRAY[]::text[]) AS in_store_location_ids
       FROM ims_box_table b
+      LEFT JOIN ims_stock_adjustment sa
+        ON sa.adjustment_id = b.sa_id
+       AND sa.is_deleted = false
+       AND sa.approved = true
+      LEFT JOIN ims_dailyprod dp
+        ON b.sa_id IS NULL
+       AND trim(b.packing_number::text) = trim(dp.doc_no::text)
       LEFT JOIN ims_location_master lm ON lm.location_id = b.location_id
       WHERE b.is_deleted = false AND ${PN("b")} IS NOT NULL
-      GROUP BY ${PN("b")}
+      GROUP BY ${PN("b")}, ${BOX_DOC_DT}, ${BOX_ITEM_DCODE}, ${BOX_CUSTOMER_CODE}
       HAVING ${stockHaving}
     ),
     report_rows AS (
       SELECT
         g.packing_number,
+        g.doc_dt,
+        g.item_dcode,
+        g.item_code,
+        g.item_desc,
+        g.customer_code,
+        g.customer_name,
+        g.job_card_no,
         g.fg_stock_qty,
         g.in_store_qty,
         g.packing_area_qty,
@@ -115,17 +111,8 @@ export function buildInventoryReportSql() {
         g.in_store_boxes,
         g.packing_area_boxes,
         g.location_details,
-        g.in_store_location_ids,
-        COALESCE(sa.item_dcode::text, dp.item_dcode::text, '—') AS item_dcode,
-        COALESCE(sa.item_code, dp.item_code, sa.item_dcode::text, dp.item_dcode::text, '—') AS item_code,
-        COALESCE(sa.item_desc, dp.item_desc, '—') AS item_desc,
-        COALESCE(sa.acc_code::text, dp.acc_code::text, '') AS customer_code,
-        COALESCE(sa.acc_name, dp.acc_name, '—') AS customer_name,
-        COALESCE(sa.doc_dt, dp.doc_dt) AS doc_dt,
-        COALESCE(sa.job_card_no, dp.job_card_no) AS job_card_no
+        g.in_store_location_ids
       FROM grouped g
-      LEFT JOIN sa_meta sa ON sa.packing_number = g.packing_number
-      LEFT JOIN dp_meta dp ON dp.packing_number = g.packing_number
     )`;
 
   return { values: [], groupedCte, groupWhere: "" };
@@ -133,20 +120,20 @@ export function buildInventoryReportSql() {
 
 function pageOrder(sortBy, sortCol, sortDir) {
   if (sortBy === "doc_dt") {
-    return `f.doc_dt ${sortDir} NULLS LAST, NULLIF(regexp_replace(f.packing_number::text, '\\D', '', 'g'), '')::bigint DESC NULLS LAST`;
+    return `f.doc_dt ${sortDir} NULLS LAST, NULLIF(regexp_replace(f.packing_number::text, '\\D', '', 'g'), '')::bigint DESC NULLS LAST, f.item_dcode ASC`;
   }
   if (sortBy === "packing_number") {
-    return `NULLIF(regexp_replace(f.packing_number::text, '\\D', '', 'g'), '')::bigint ${sortDir} NULLS LAST, f.packing_number ${sortDir}`;
+    return `NULLIF(regexp_replace(f.packing_number::text, '\\D', '', 'g'), '')::bigint ${sortDir} NULLS LAST, f.packing_number ${sortDir}, f.doc_dt DESC NULLS LAST, f.item_dcode ASC`;
   }
   const col = sortCol.includes(".") ? sortCol.replace(/^g\./, "f.") : `f.${sortCol}`;
-  return `${col} ${sortDir} NULLS LAST`;
+  return `${col} ${sortDir} NULLS LAST, f.packing_number DESC, f.doc_dt DESC NULLS LAST`;
 }
 
 export function sqlPageSlice({ sortBy, sortCol, sortDir, limitIdx, offsetIdx }) {
   const order = pageOrder(sortBy, sortCol, sortDir);
   return `
     SELECT
-      CONCAT(f.packing_number, ':', f.item_dcode, ':', COALESCE(f.customer_code, '')) AS id,
+      CONCAT(f.packing_number, ':', f.item_dcode, ':', COALESCE(f.customer_code, ''), ':', COALESCE(f.doc_dt, '')) AS id,
       f.packing_number,
       f.item_dcode,
       f.item_code,

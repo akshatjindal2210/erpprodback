@@ -41,7 +41,7 @@ const JOINS = `
   LEFT JOIN ${M.USERS} u_lock ON f.out_entry_locked_by = u_lock.id
   LEFT JOIN ${M.USERS} u_bill ON f.bill_updated_by = u_bill.id
   LEFT JOIN LATERAL (
-    SELECT oe.out_uid, oe.scan_complete
+    SELECT oe.out_uid, oe.scan_complete, oe.approved, oe.boxes_scanned, oe.boxes_required
     FROM ims_out_entry oe
     WHERE oe.fuid = f.fuid AND oe.is_deleted = false
     ORDER BY oe.out_uid DESC
@@ -60,6 +60,9 @@ const DEFAULT_FIELDS = [
   "u_bill.name AS bill_updated_by_name",
   "oe.out_uid AS out_entry_uid",
   "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
+  "COALESCE(oe.approved, false) AS out_entry_approved",
+  "oe.boxes_scanned AS out_entry_boxes_scanned",
+  "oe.boxes_required AS out_entry_boxes_required",
   "(oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete"
 ];
 
@@ -481,7 +484,17 @@ export const findLastForwardingPackingCategory = async (acc_code) => {
   return row?.packing_category_id != null ? Number(row.packing_category_id) : null;
 };
 
-export const findAvailableBoxes = async (item_dcode) => {
+function queryRunner(client) {
+  return client?.query
+    ? async (sql, params) => {
+        const result = await client.query(sql, params);
+        return result.rows;
+      }
+    : dbQuery;
+}
+
+export const findAvailableBoxes = async (item_dcode, { client } = {}) => {
+  const run = queryRunner(client);
   const query = `
     SELECT
       b.box_uid,
@@ -531,7 +544,7 @@ export const findAvailableBoxes = async (item_dcode) => {
     ORDER BY b.created_at ASC
   `;
 
-  return await dbQuery(query, [Number(item_dcode)]);
+  return await run(query, [Number(item_dcode)]);
 };
 
 /** All sellable in-hand boxes (every item) — for forwarding item dropdown catalog. */
@@ -580,13 +593,15 @@ export const findAllSellableForwardingBoxes = async () => {
 };
 
 /** Forwarding reserves for all items (per packing). Excludes `exclude_fuid` when editing. */
-export const findAllForwardedReservesByItemAndPacking = async (exclude_fuid = null) => {
+export const findAllForwardedReservesByItemAndPacking = async (exclude_fuid = null, { approvedOnly = false, client } = {}) => {
   const exclude =
     exclude_fuid != null && exclude_fuid !== "" && Number.isFinite(Number(exclude_fuid))
       ? Number(exclude_fuid)
       : null;
 
-  return dbQuery(
+  const run = queryRunner(client);
+
+  return run(
     `SELECT fi.item_dcode::int AS itemdcode,
             TRIM(fi.packing_number::text) AS packing_number,
             COALESCE(SUM(fi.box_qty), 0)::float AS open_qty,
@@ -597,6 +612,7 @@ export const findAllForwardedReservesByItemAndPacking = async (exclude_fuid = nu
        ON f.fuid = fi.fuid AND f.is_deleted = false
      WHERE fi.is_deleted = false
        AND ($1::bigint IS NULL OR fi.fuid <> $1::bigint)
+       AND ($2::boolean IS FALSE OR COALESCE(f.approved, false) = true)
        AND NOT EXISTS (
          SELECT 1
          FROM ims_out_entry oe
@@ -605,12 +621,12 @@ export const findAllForwardedReservesByItemAndPacking = async (exclude_fuid = nu
            AND COALESCE(oe.scan_complete, false) = true
        )
      GROUP BY fi.item_dcode::int, TRIM(fi.packing_number::text)`,
-    [exclude]
+    [exclude, Boolean(approvedOnly)]
   );
 };
 
 /** Qty already on other forwarding notes for this item (per packing). Excludes `exclude_fuid` when editing. */
-export const findForwardedQtyByItemAndPacking = async (item_dcode, exclude_fuid = null) => {
+export const findForwardedQtyByItemAndPacking = async (item_dcode, exclude_fuid = null, { approvedOnly = false, client } = {}) => {
   const dcode = Number(item_dcode);
   if (!Number.isFinite(dcode)) return {};
 
@@ -619,7 +635,9 @@ export const findForwardedQtyByItemAndPacking = async (item_dcode, exclude_fuid 
       ? Number(exclude_fuid)
       : null;
 
-  const rows = await dbQuery(
+  const run = queryRunner(client);
+
+  const rows = await run(
     `SELECT TRIM(fi.packing_number::text) AS packing_number,
             COALESCE(SUM(fi.box_qty), 0)::float AS open_qty,
             COALESCE(SUM(fi.loose_box_qty), 0)::float AS loose_qty,
@@ -630,6 +648,7 @@ export const findForwardedQtyByItemAndPacking = async (item_dcode, exclude_fuid 
      WHERE fi.is_deleted = false
        AND fi.item_dcode::int = $1::int
        AND ($2::bigint IS NULL OR fi.fuid <> $2::bigint)
+       AND ($3::boolean IS FALSE OR COALESCE(f.approved, false) = true)
        AND NOT EXISTS (
          SELECT 1
          FROM ims_out_entry oe
@@ -638,7 +657,7 @@ export const findForwardedQtyByItemAndPacking = async (item_dcode, exclude_fuid 
            AND COALESCE(oe.scan_complete, false) = true
        )
      GROUP BY TRIM(fi.packing_number::text)`,
-    [dcode, exclude]
+    [dcode, exclude, Boolean(approvedOnly)]
   );
 
   const map = {};

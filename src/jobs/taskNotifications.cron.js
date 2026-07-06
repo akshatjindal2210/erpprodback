@@ -70,7 +70,7 @@ async function runDailyReminders() {
       view: "assigned_to",
     });
     const statVars = buildNotifyVarsFromDashboardStats(stats);
-    if (Number(statVars.total) === 0) {
+    if (Number(statVars.action_required) === 0) {
       skipped += 1;
       return;
     }

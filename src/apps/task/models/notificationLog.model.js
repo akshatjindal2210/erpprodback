@@ -132,6 +132,8 @@ const NotificationLog = {
           TO_CHAR(COALESCE(p.sent_at, p.created_at), 'YYYY-MM-DD HH24:MI:SS') AS sent_at,
           TO_CHAR(p.received_at, 'YYYY-MM-DD HH24:MI:SS') AS received_at,
           TO_CHAR(p.read_at, 'YYYY-MM-DD HH24:MI:SS') AS read_at,
+          p.received_client_ip,
+          p.received_on_company_network,
           NULL::int AS task_id
         FROM ${M.PUSH_DELIVERY_LOG} p
         WHERE 1=1 ${pushWhereSql}
@@ -161,6 +163,8 @@ const NotificationLog = {
           TO_CHAR(l.created_at, 'YYYY-MM-DD HH24:MI:SS') AS sent_at,
           NULL AS received_at,
           NULL AS read_at,
+          NULL AS received_client_ip,
+          NULL AS received_on_company_network,
           l.entity_id AS task_id
         FROM ${M.ACTIVITY_LOGS} l
         LEFT JOIN ${M.USERS} u ON u.id = l.user_id
@@ -174,8 +178,12 @@ const NotificationLog = {
     }
 
     const combinedSql = unionParts.join(" UNION ALL ");
-    const queryParams = [...pushParams, ...actParams, safeLimit, offset];
-    const countParams = [...pushParams, ...actParams];
+    const filterParams = [
+      ...(includePush ? pushParams : []),
+      ...(includeActivity ? actParams : []),
+    ];
+    const queryParams = [...filterParams, safeLimit, offset];
+    const countParams = filterParams;
 
     const items = await dbQuery(
       `WITH combined AS (${combinedSql})
@@ -213,6 +221,13 @@ const NotificationLog = {
         sent_at: row.sent_at,
         received_at: row.received_at,
         read_at: row.read_at,
+        received_client_ip: row.received_client_ip ?? null,
+        received_on_company_network:
+          row.received_on_company_network === true
+            ? true
+            : row.received_on_company_network === false
+              ? false
+              : null,
       })),
       total: countRows[0]?.total ?? 0,
       page: safePage,

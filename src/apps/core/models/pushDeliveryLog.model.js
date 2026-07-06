@@ -21,6 +21,13 @@ function formatRow(row) {
     sent_at: row.sent_at,
     received_at: row.received_at,
     read_at: row.read_at,
+    received_client_ip: row.received_client_ip ?? null,
+    received_on_company_network:
+      row.received_on_company_network === true
+        ? true
+        : row.received_on_company_network === false
+          ? false
+          : null,
     created_at: row.created_at,
   };
 }
@@ -76,35 +83,39 @@ const PushDeliveryLog = {
     return formatRow(rows[0]);
   },
 
-  async markReceived(tracking_id) {
+  async markReceived(tracking_id, { client_ip = null, on_company_network = null } = {}) {
     const rows = await dbQuery(
       `UPDATE ${M.PUSH_DELIVERY_LOG}
        SET status = 'received',
            received_at = COALESCE(received_at, CURRENT_TIMESTAMP),
+           received_client_ip = COALESCE(received_client_ip, ?),
+           received_on_company_network = COALESCE(received_on_company_network, ?),
            updated_at = CURRENT_TIMESTAMP
        WHERE tracking_id = ? AND status IN ('sent', 'received')
-       RETURNING push_log_id, tracking_id, status,
+       RETURNING push_log_id, tracking_id, status, received_client_ip, received_on_company_network,
          TO_CHAR(sent_at, 'YYYY-MM-DD HH24:MI:SS') AS sent_at,
          TO_CHAR(received_at, 'YYYY-MM-DD HH24:MI:SS') AS received_at,
          TO_CHAR(read_at, 'YYYY-MM-DD HH24:MI:SS') AS read_at`,
-      [tracking_id]
+      [client_ip, on_company_network, tracking_id]
     );
     return formatRow(rows[0]);
   },
 
-  async markRead(tracking_id) {
+  async markRead(tracking_id, { client_ip = null, on_company_network = null } = {}) {
     const rows = await dbQuery(
       `UPDATE ${M.PUSH_DELIVERY_LOG}
        SET status = 'read',
            received_at = COALESCE(received_at, CURRENT_TIMESTAMP),
            read_at = COALESCE(read_at, CURRENT_TIMESTAMP),
+           received_client_ip = COALESCE(received_client_ip, ?),
+           received_on_company_network = COALESCE(received_on_company_network, ?),
            updated_at = CURRENT_TIMESTAMP
        WHERE tracking_id = ? AND status IN ('sent', 'received', 'read')
-       RETURNING push_log_id, tracking_id, status,
+       RETURNING push_log_id, tracking_id, status, received_client_ip, received_on_company_network,
          TO_CHAR(sent_at, 'YYYY-MM-DD HH24:MI:SS') AS sent_at,
          TO_CHAR(received_at, 'YYYY-MM-DD HH24:MI:SS') AS received_at,
          TO_CHAR(read_at, 'YYYY-MM-DD HH24:MI:SS') AS read_at`,
-      [tracking_id]
+      [client_ip, on_company_network, tracking_id]
     );
     return formatRow(rows[0]);
   },
@@ -170,6 +181,7 @@ const PushDeliveryLog = {
     const items = await dbQuery(
       `SELECT push_log_id, tracking_id, user_id, user_name, subscription_id, device_id, device_name,
               inbox_id, title, body, status, error_detail,
+              received_client_ip, received_on_company_network,
               TO_CHAR(sent_at, 'YYYY-MM-DD HH24:MI:SS') AS sent_at,
               TO_CHAR(received_at, 'YYYY-MM-DD HH24:MI:SS') AS received_at,
               TO_CHAR(read_at, 'YYYY-MM-DD HH24:MI:SS') AS read_at,

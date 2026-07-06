@@ -100,8 +100,8 @@ export function reduceBoxesByForwardedQty(boxes = [], forwardedByPacking = {}) {
   return enrichForwardingBoxesWithPackingStd(result);
 }
 
-export async function buildForwardingAvailableBoxes(boxes = [], item_dcode, exclude_fuid = null) {
-  const forwarded = await findForwardedQtyByItemAndPacking(item_dcode, exclude_fuid);
+export async function buildForwardingAvailableBoxes(boxes = [], item_dcode, exclude_fuid = null, { approvedOnly = false, client } = {}) {
+  const forwarded = await findForwardedQtyByItemAndPacking(item_dcode, exclude_fuid, { approvedOnly, client });
   return reduceBoxesByForwardedQty(boxes, forwarded);
 }
 
@@ -126,10 +126,10 @@ function buildForwardedMapByItem(rows = []) {
 }
 
 /** Item dcodes with FG stock available for a new forwarding note row (after other-note reserves). */
-export async function findItemDcodesWithForwardingAvailableStock(exclude_fuid = null) {
+export async function findItemDcodesWithForwardingAvailableStock(exclude_fuid = null, { approvedOnly = false } = {}) {
   const [allBoxes, forwardRows] = await Promise.all([
     findAllSellableForwardingBoxes(),
-    findAllForwardedReservesByItemAndPacking(exclude_fuid),
+    findAllForwardedReservesByItemAndPacking(exclude_fuid, { approvedOnly }),
   ]);
 
   const boxesByItem = new Map();

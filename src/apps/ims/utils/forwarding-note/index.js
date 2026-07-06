@@ -2,5 +2,5 @@
 export { buildForwardingAvailableBoxes, sumBoxQty, findItemDcodesWithForwardingAvailableStock } from "./forwardingAvailableStock.js";
 export { applyForwardingOutEntryListFilter } from "./forwardingNoteListFilters.js";
 export { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo } from "./forwardingNoteList.js";
-export { saveForwardingNoteItems } from "./forwardingNoteItemsWrite.js";
+export { saveForwardingNoteItems, replaceForwardingNoteItems, validateExistingForwardingNoteItems } from "./forwardingNoteItemsWrite.js";
 export { buildForwardingLockMessage } from "./forwardingNoteMessages.js";

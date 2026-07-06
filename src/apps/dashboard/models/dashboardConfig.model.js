@@ -39,31 +39,154 @@ export async function getGlobalDashboardConfig(appKey, pageKey, { publishedOnly 
 }
 
 export async function getUserDashboardConfig(appKey, pageKey, userId, { publishedOnly = false } = {}) {
-  const numericUserId = Number(userId);
-  if (!Number.isInteger(numericUserId) || numericUserId <= 0) return null;
-  const rows = await listDashboardConfigs(appKey, pageKey, { includeDraft: !publishedOnly });
-  const matches = rows.filter((row) => {
-    const { meta } = parseDashboardDocument(row?.dashboard_json);
-    if (String(meta?.dashboardKey || "default") === "default") return false;
-    if (String(meta?.scope || "global") !== "users") return false;
-    if (publishedOnly && meta?.published !== true) return false;
-    return normalizeUserIds(meta?.targetUserIds || []).includes(numericUserId);
-  });
-  if (!matches.length) return null;
+  const accessible = await listUserAccessibleDashboards(appKey, pageKey, userId, { publishedOnly });
+  if (!accessible.length) return null;
+  const defaultKey = resolveUserDefaultDashboardKey(accessible, userId);
+  return getDashboardConfigByKey(appKey, pageKey, defaultKey, { publishedOnly });
+}
 
-  // Prefer the most specific assignment (smallest user list), then latest update.
-  matches.sort((rowA, rowB) => {
-    const metaA = parseDashboardDocument(rowA.dashboard_json).meta;
-    const metaB = parseDashboardDocument(rowB.dashboard_json).meta;
-    const sizeA = normalizeUserIds(metaA?.targetUserIds || []).length;
-    const sizeB = normalizeUserIds(metaB?.targetUserIds || []).length;
-    if (sizeA !== sizeB) return sizeA - sizeB;
-    const timeA = new Date(rowA.updated_at || 0).getTime();
-    const timeB = new Date(rowB.updated_at || 0).getTime();
+export async function listAllPublishedDashboards(appKey, pageKey, { publishedOnly = true } = {}) {
+  const rows = await listDashboardConfigs(appKey, pageKey, { includeDraft: !publishedOnly });
+  const dashboards = [];
+
+  for (const row of rows) {
+    const { meta } = parseDashboardDocument(row?.dashboard_json);
+    if (publishedOnly && meta?.published !== true) continue;
+
+    const dashboardKey = String(meta?.dashboardKey || "default").trim().toLowerCase() || "default";
+    dashboards.push({
+      dashboardKey,
+      dashboardName: String(meta?.dashboardName || dashboardKey).trim() || dashboardKey,
+      scope: String(meta?.scope || "global"),
+      targetUserIds: normalizeUserIds(meta?.targetUserIds || []),
+      defaultForUserIds: normalizeUserIds(meta?.defaultForUserIds || []),
+      targetUserCount: normalizeUserIds(meta?.targetUserIds || []).length,
+      updatedAt: row.updated_at || null,
+    });
+  }
+
+  return dashboards.sort((rowA, rowB) => {
+    if (rowA.dashboardKey === "default") return -1;
+    if (rowB.dashboardKey === "default") return 1;
+    const timeA = new Date(rowA.updatedAt || 0).getTime();
+    const timeB = new Date(rowB.updatedAt || 0).getTime();
     return timeB - timeA;
   });
+}
 
-  return matches[0];
+export async function listUserAccessibleDashboards(appKey, pageKey, userId, { publishedOnly = true } = {}) {
+  const numericUserId = Number(userId);
+  if (!Number.isInteger(numericUserId) || numericUserId <= 0) return [];
+  const rows = await listDashboardConfigs(appKey, pageKey, { includeDraft: !publishedOnly });
+  const clones = [];
+  let globalDefault = null;
+
+  for (const row of rows) {
+    const { meta } = parseDashboardDocument(row?.dashboard_json);
+    if (publishedOnly && meta?.published !== true) continue;
+
+    const dashboardKey = String(meta?.dashboardKey || "default");
+    const scope = String(meta?.scope || "global");
+    const targetUserIds = normalizeUserIds(meta?.targetUserIds || []);
+    const defaultForUserIds = normalizeUserIds(meta?.defaultForUserIds || []);
+
+    if (dashboardKey === "default" && scope === "global") {
+      globalDefault = {
+        dashboardKey,
+        dashboardName: String(meta?.dashboardName || "Default").trim() || "Default",
+        scope,
+        targetUserIds: [],
+        defaultForUserIds,
+        targetUserCount: 0,
+        updatedAt: row.updated_at || null,
+      };
+      continue;
+    }
+
+    if (scope === "users" && targetUserIds.includes(numericUserId)) {
+      clones.push({
+        dashboardKey,
+        dashboardName: String(meta?.dashboardName || dashboardKey).trim() || dashboardKey,
+        scope,
+        targetUserIds,
+        defaultForUserIds,
+        targetUserCount: targetUserIds.length,
+        updatedAt: row.updated_at || null,
+      });
+    }
+  }
+
+  // Assigned clone dashboards replace the app global default for that user.
+  if (clones.length) return clones;
+  return globalDefault ? [globalDefault] : [];
+}
+
+export function resolveUserDefaultDashboardKey(accessible = [], userId) {
+  const numericUserId = Number(userId);
+  if (!accessible.length) return "default";
+
+  const markedDefault = accessible.find((item) =>
+    (item.defaultForUserIds || []).includes(numericUserId),
+  );
+  if (markedDefault) return markedDefault.dashboardKey;
+
+  if (accessible.length === 1) return accessible[0].dashboardKey;
+
+  const sorted = [...accessible].sort((rowA, rowB) => {
+    const sizeA = Number(rowA?.targetUserCount) || 0;
+    const sizeB = Number(rowB?.targetUserCount) || 0;
+    if (sizeA !== sizeB) return sizeA - sizeB;
+    const timeA = new Date(rowA.updatedAt || 0).getTime();
+    const timeB = new Date(rowB.updatedAt || 0).getTime();
+    return timeB - timeA;
+  });
+  return sorted[0]?.dashboardKey || accessible[0]?.dashboardKey || "default";
+}
+
+export async function userCanAccessDashboard(appKey, pageKey, userId, dashboardKey, { publishedOnly = true } = {}) {
+  const normalizedKey = String(dashboardKey || "default").trim().toLowerCase() || "default";
+  const accessible = await listUserAccessibleDashboards(appKey, pageKey, userId, { publishedOnly });
+  return accessible.some((item) => item.dashboardKey === normalizedKey);
+}
+
+export async function clearDefaultForUsersFromOtherDashboards(appKey, pageKey, keepDashboardKey, userIds = [], actorId = null) {
+  const normalizedKeepKey = String(keepDashboardKey || "default").trim().toLowerCase() || "default";
+  const normalizedUserIds = normalizeUserIds(userIds);
+  if (!normalizedUserIds.length) return;
+
+  const rows = await listDashboardConfigs(appKey, pageKey, { includeDraft: true });
+  for (const row of rows) {
+    const { doc, meta, widgets } = parseDashboardDocument(row?.dashboard_json);
+    const dashboardKey = String(meta?.dashboardKey || "default");
+    if (dashboardKey === normalizedKeepKey) continue;
+
+    const existingDefaults = normalizeUserIds(meta?.defaultForUserIds || []);
+    const nextDefaults = existingDefaults.filter((id) => !normalizedUserIds.includes(id));
+    if (nextDefaults.length === existingDefaults.length) continue;
+
+    const payload = buildDashboardDocument({
+      appKey: meta.appKey || appKey,
+      pageKey: meta.pageKey || pageKey,
+      dashboardKey,
+      dashboardName: meta.dashboardName || dashboardKey,
+      scope: meta.scope || "global",
+      targetUserIds: meta.targetUserIds || [],
+      defaultForUserIds: nextDefaults,
+      widgets,
+      actorId,
+      isPublished: meta.published !== false,
+      isActive: meta.active !== false,
+      version: doc.version || 1,
+      pageModule: meta.pageModule || null,
+    });
+    await dbQuery(
+      `UPDATE ${DASHBOARD_CONFIG_TABLE}
+          SET dashboard_json = $1,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2`,
+      [payload, row.id],
+    );
+  }
 }
 
 export async function upsertDashboardConfig({
@@ -77,6 +200,7 @@ export async function upsertDashboardConfig({
   actorId = null,
   isPublished = true,
   pageModule = null,
+  defaultForUserIds = undefined,
 }) {
   const normalizedDashboardKey = String(dashboardKey || "default").trim().toLowerCase() || "default";
   const normalizedScope = scope === "users" ? "users" : "global";
@@ -92,6 +216,10 @@ export async function upsertDashboardConfig({
     pageModule !== undefined && pageModule !== null
       ? String(pageModule || "").trim() || null
       : existingMeta?.pageModule || null;
+  const resolvedDefaultForUserIds =
+    defaultForUserIds !== undefined
+      ? normalizeUserIds(defaultForUserIds)
+      : normalizeUserIds(existingMeta?.defaultForUserIds || []);
 
   const payload = buildDashboardDocument({
     appKey,
@@ -100,6 +228,7 @@ export async function upsertDashboardConfig({
     dashboardName: String(dashboardName || normalizedDashboardKey || "Dashboard").trim(),
     scope: normalizedScope,
     targetUserIds: normalizedTargetUsers,
+    defaultForUserIds: resolvedDefaultForUserIds,
     widgets: incoming.widgets,
     actorId,
     isPublished,
@@ -168,6 +297,7 @@ export async function deactivateDashboardByKey(appKey, pageKey, dashboardKey, ac
     dashboardName: meta.dashboardName || dashboardKey,
     scope: meta.scope || "global",
     targetUserIds: meta.targetUserIds || [],
+    defaultForUserIds: meta.defaultForUserIds || [],
     widgets,
     actorId,
     isPublished: meta.published !== false,

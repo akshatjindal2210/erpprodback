@@ -77,9 +77,12 @@ export const CRUD_MODULES = {
       "f.acc_code::text AS acc_name",
       "oe.out_uid AS out_entry_uid",
       "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
+      "COALESCE(oe.approved, false) AS out_entry_approved",
+      "oe.boxes_scanned AS out_entry_boxes_scanned",
+      "oe.boxes_required AS out_entry_boxes_required",
       "(oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete",
     ],
-    filterFields: ["fuid", "acc_code", "po_number", "approved", "out_entry_locked", "out_entry_available", "out_entry_complete", "from_date", "to_date"],
+    filterFields: ["fuid", "acc_code", "po_number", "approved", "out_entry_locked", "out_entry_available", "out_entry_complete", "out_entry_approved", "from_date", "to_date"],
     searchFields: ["f.po_number", "f.transporter_name", "f.vehicle_number", "f.bill_no", "f.acc_code"]
   },
   forwarding_note_item_wise: {
@@ -99,7 +102,7 @@ export const CRUD_MODULES = {
       "u_mcr.name AS created_by_name", "u_mupd.name AS updated_by_name", "u_mdl.name  AS deleted_by_name", "u_map.name  AS approved_by_name",
       "u_bill.name AS bill_updated_by_name",
     ],
-    filterFields: ["id", "fuid", "item_dcode", "approved", "out_entry_locked", "out_entry_complete", "from_date", "to_date"],
+    filterFields: ["id", "fuid", "item_dcode", "approved", "out_entry_locked", "out_entry_complete", "out_entry_approved", "from_date", "to_date"],
     searchFields: ["fi.item_dcode", "fi.qty"]
   },
   out_entry: {

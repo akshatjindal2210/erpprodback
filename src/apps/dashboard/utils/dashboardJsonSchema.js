@@ -7,6 +7,7 @@
  *     appKey, pageKey, dashboardKey, dashboardName,
  *     scope: "global" | "users",
  *     targetUserIds: number[],
+ *     defaultForUserIds: number[],
  *     published: boolean,
  *     active: boolean,
  *     updatedAt, updatedBy
@@ -32,6 +33,57 @@ export function parseDashboardDocument(raw = {}) {
   return { doc, meta, widgets };
 }
 
+function createPersistedWidgetId(seed = Date.now()) {
+  return `w_${seed}_${Math.floor(Math.random() * 100000)}`;
+}
+
+export function remapDashboardWidgetIds(rawWidgets = []) {
+  const widgets = rawWidgets.map((widget, idx) => widgetToStoredJson(widget, idx));
+  const idMap = new Map();
+  let seed = Date.now();
+
+  widgets.forEach((widget) => {
+    const oldId = String(widget.id || "").trim();
+    if (!oldId || oldId.startsWith("tmp_")) {
+      const newId = createPersistedWidgetId(seed++);
+      if (oldId) idMap.set(oldId, newId);
+      widget.id = newId;
+      return;
+    }
+    idMap.set(oldId, oldId);
+  });
+
+  const remapRef = (rawId) => {
+    const key = String(rawId || "").trim();
+    if (!key) return null;
+    return idMap.get(key) || key;
+  };
+
+  const remapLayoutList = (items = []) =>
+    (Array.isArray(items) ? items : [])
+      .map((item) => {
+        const nextId = remapRef(item?.i);
+        if (!nextId) return null;
+        return { ...item, i: String(nextId) };
+      })
+      .filter(Boolean);
+
+  return widgets.map((widget, idx) => {
+    const newId = String(remapRef(widget.id) || widget.id);
+    const sectionId = widget.sectionId ? remapRef(widget.sectionId) : null;
+
+    return {
+      ...widget,
+      id: newId,
+      sectionId,
+      nestedLayout: remapLayoutList(widget.nestedLayout),
+      mobileNestedLayout: remapLayoutList(widget.mobileNestedLayout),
+      layout: sanitizeLayoutCoords({ ...(widget.layout || {}), i: newId }, newId, idx),
+      mobileLayout: sanitizeLayoutCoords({ ...(widget.mobileLayout || {}), i: newId }, newId, idx),
+    };
+  });
+}
+
 export function buildDashboardDocument({
   appKey,
   pageKey,
@@ -39,6 +91,7 @@ export function buildDashboardDocument({
   dashboardName,
   scope = "global",
   targetUserIds = [],
+  defaultForUserIds = [],
   widgets = [],
   actorId = null,
   isPublished = true,
@@ -57,6 +110,7 @@ export function buildDashboardDocument({
       dashboardName,
       scope: normalizedScope,
       targetUserIds: normalizedScope === "users" ? normalizeUserIds(targetUserIds) : [],
+      defaultForUserIds: normalizeUserIds(defaultForUserIds),
       published: Boolean(isPublished),
       active: isActive !== false,
       updatedAt: new Date().toISOString(),
@@ -64,6 +118,18 @@ export function buildDashboardDocument({
     },
     widgets: Array.isArray(widgets) ? widgets : [],
   };
+}
+
+export function resolveContainerPreset(widget = {}, layoutItem = {}) {
+  const preset = String(widget.containerPreset || widget.container_preset || "").trim().toLowerCase();
+  const layoutW = Number(layoutItem?.w ?? widget.layout?.w);
+  if (preset === "half") return "half";
+  if (preset === "full") {
+    if (Number.isFinite(layoutW) && layoutW <= 6) return "half";
+    return "full";
+  }
+  if (Number.isFinite(layoutW) && layoutW <= 6) return "half";
+  return "full";
 }
 
 export function sanitizeLayoutCoords(rawLayout = {}, widgetId = "", idx = 0) {
@@ -83,9 +149,17 @@ export function sanitizeLayoutCoords(rawLayout = {}, widgetId = "", idx = 0) {
   };
 }
 
+export function normalizeDeviceTarget(rawValue = "") {
+  const value = String(rawValue || "").trim().toLowerCase();
+  if (value === "mobile") return "mobile";
+  if (value === "desktop") return "desktop";
+  return "both";
+}
+
 export function widgetToStoredJson(widget = {}, idx = 0) {
   if (widget?.rawType || widget?.dataSource) {
-    const rawType = String(widget.rawType || widget.type || "table").toLowerCase();
+    const rawTypeInput = String(widget.rawType || widget.type || "table").toLowerCase();
+    const rawType = rawTypeInput === "container" ? "container" : rawTypeInput;
     return {
       id: widget.id,
       rawType,
@@ -96,9 +170,25 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       dataSource: String(widget.dataSource || "ims_postgresql").toLowerCase(),
       erpFilter: widget.erpFilter && typeof widget.erpFilter === "object" ? widget.erpFilter : {},
       emptyText: String(widget.emptyText || "Click edit and add query"),
-      sectionId: widget.sectionId || null,
+      sectionId: widget.containerId || widget.sectionId || null,
+      containerPreset: resolveContainerPreset(
+        { containerPreset: widget.containerPreset },
+        widget.layout,
+      ),
+      nestedLayout: Array.isArray(widget.nestedLayout) ? widget.nestedLayout : [],
+      mobileNestedLayout: Array.isArray(widget.mobileNestedLayout) ? widget.mobileNestedLayout : [],
+      mobilePaddingLeft: widget.mobilePaddingLeft ?? 8,
+      mobilePaddingRight: widget.mobilePaddingRight ?? 8,
+      mobilePaddingTop: widget.mobilePaddingTop ?? 8,
+      mobilePaddingBottom: widget.mobilePaddingBottom ?? 8,
       style: widget.style && typeof widget.style === "object" ? widget.style : {},
       layout: sanitizeLayoutCoords(widget.layout, widget.id, idx),
+      mobileLayout: sanitizeLayoutCoords(
+        widget.mobileLayout || widget.mobile_layout || widget.layout,
+        widget.id,
+        idx,
+      ),
+      deviceTarget: normalizeDeviceTarget(widget.deviceTarget || widget.device_target),
       isActive: widget.is_active !== false,
       targetPageKey: String(widget.targetPageKey || widget.target_page_key || "dashboard").trim().toLowerCase() || "dashboard",
       targetPageModule: widget.targetPageModule || widget.target_page_module || null,
@@ -108,7 +198,7 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
   const chartConfig = widget?.chart_config && typeof widget.chart_config === "object" ? widget.chart_config : {};
   const type = String(widget.type || "table").toLowerCase();
   const rawType =
-    type === "count" || type === "sum" ? "kpi" : type === "graph" ? "graph" : type === "heading" ? "heading" : "table";
+    type === "count" || type === "sum" ? "kpi" : type === "graph" ? "graph" : type === "heading" ? "heading" : type === "section" ? "container" : "table";
 
   return {
     id: widget.id,
@@ -121,6 +211,16 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
     erpFilter: chartConfig.erp_filter && typeof chartConfig.erp_filter === "object" ? chartConfig.erp_filter : {},
     emptyText: String(chartConfig.emptyText || "Click edit and add query"),
     sectionId: chartConfig.section_id ?? null,
+      containerPreset: resolveContainerPreset(
+        { containerPreset: chartConfig.container_preset },
+        widget.layout,
+      ),
+    nestedLayout: Array.isArray(chartConfig.nested_layout) ? chartConfig.nested_layout : [],
+    mobileNestedLayout: Array.isArray(chartConfig.mobile_nested_layout) ? chartConfig.mobile_nested_layout : [],
+    mobilePaddingLeft: chartConfig.mobile_padding_left ?? 8,
+    mobilePaddingRight: chartConfig.mobile_padding_right ?? 8,
+    mobilePaddingTop: chartConfig.mobile_padding_top ?? 8,
+    mobilePaddingBottom: chartConfig.mobile_padding_bottom ?? 8,
     style: {
       color: chartConfig.color,
       bg: chartConfig.bg,
@@ -135,6 +235,12 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       kpiLabelFontSize: chartConfig.kpiLabelFontSize,
     },
     layout: sanitizeLayoutCoords(widget.layout, widget.id, idx),
+    mobileLayout: sanitizeLayoutCoords(
+      widget.mobile_layout || widget.mobileLayout || widget.layout,
+      widget.id,
+      idx,
+    ),
+    deviceTarget: normalizeDeviceTarget(widget.device_target || widget.deviceTarget),
     isActive: widget.is_active !== false,
     targetPageKey: String(widget.targetPageKey || widget.target_page_key || "dashboard").trim().toLowerCase() || "dashboard",
     targetPageModule: widget.targetPageModule || widget.target_page_module || null,
@@ -151,13 +257,15 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
         ? "graph"
         : rawType === "heading"
           ? "heading"
-          : rawType === "count" || rawType === "sum" || rawType === "section"
-            ? rawType
-            : "table";
+          : rawType === "container"
+            ? "section"
+            : rawType === "count" || rawType === "sum" || rawType === "section"
+              ? rawType
+              : "table";
 
   return {
     id: stored.id || `cfg_${idx}`,
-    title: stored.title || "Widget",
+    title: stored.title || "",
     description: stored.description || "",
     type,
     query: stored.query || "",
@@ -168,6 +276,13 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       erp_filter: stored.erpFilter || {},
       emptyText: stored.emptyText || "Click edit and add query",
       section_id: stored.sectionId || null,
+      container_preset: stored.containerPreset || "full",
+      nested_layout: Array.isArray(stored.nestedLayout) ? stored.nestedLayout : [],
+      mobile_nested_layout: Array.isArray(stored.mobileNestedLayout) ? stored.mobileNestedLayout : [],
+      mobile_padding_left: stored.mobilePaddingLeft ?? 8,
+      mobile_padding_right: stored.mobilePaddingRight ?? 8,
+      mobile_padding_top: stored.mobilePaddingTop ?? 8,
+      mobile_padding_bottom: stored.mobilePaddingBottom ?? 8,
       bg: stored.style?.bg,
       color: stored.style?.color,
       fontSize: stored.style?.fontSize,
@@ -181,6 +296,8 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       kpiLabelFontSize: stored.style?.kpiLabelFontSize,
     },
     layout: sanitizeLayoutCoords(stored.layout, stored.id || `cfg_${idx}`, idx),
+    mobile_layout: sanitizeLayoutCoords(stored.mobileLayout, stored.id || `cfg_${idx}`, idx),
+    device_target: stored.deviceTarget || "both",
     is_active: stored.isActive !== false,
     is_published: true,
     target_page_key: stored.targetPageKey || "dashboard",

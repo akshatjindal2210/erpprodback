@@ -14,6 +14,16 @@ function erpDocDt(record) {
   return raw != null && String(raw).trim() !== "" ? String(raw).trim() : null;
 }
 
+function erpJobCardNo(record) {
+  const raw =
+    record?.jobcardno ??
+    record?.job_card_no ??
+    record?.Job_Card_No ??
+    record?.["Job Card No"] ??
+    record?.JobCardNo;
+  return raw != null && String(raw).trim() !== "" ? String(raw).trim() : null;
+}
+
 /** Fetch ERP FG stock rows for one item (`requestedData: erpfg`). */
 export async function fetchErpFgStockForItem(itemDcode) {
   const n = Number(itemDcode);
@@ -50,6 +60,7 @@ export async function fetchAllErpFgStock({ refresh = false } = {}) {
 export function summarizeErpFgRecords(records = []) {
   const byPacking = new Map();
   const docDtByPacking = Object.create(null);
+  const jobCardByPacking = Object.create(null);
   let total = 0;
   const rows = Array.isArray(records) ? records : [];
 
@@ -60,6 +71,7 @@ export function summarizeErpFgRecords(records = []) {
     if (pn) {
       byPacking.set(pn, (byPacking.get(pn) || 0) + bal);
       if (!docDtByPacking[pn]) docDtByPacking[pn] = erpDocDt(rec);
+      if (!jobCardByPacking[pn]) jobCardByPacking[pn] = erpJobCardNo(rec);
     }
   }
 
@@ -67,10 +79,12 @@ export function summarizeErpFgRecords(records = []) {
     total,
     byPacking: Object.fromEntries(byPacking),
     docDtByPacking,
+    jobCardByPacking,
     records: rows.map((rec) => ({
       itemdcode: rec?.itemdcode ?? rec?.item_dcode ?? null,
       doc_no: erpDocNo(rec),
       doc_dt: erpDocDt(rec),
+      job_card_no: erpJobCardNo(rec),
       bal_qty: erpBalQty(rec),
     })),
   };

@@ -25,8 +25,11 @@ router.post("/configs/unpublish", superAdminOnly, dashboardController.unpublishD
 router.post("/configs/delete", superAdminOnly, dashboardController.deleteDashboardConfigHandler);
 router.post("/configs/clone-users", superAdminOnly, dashboardController.cloneDashboardToUsersHandler);
 router.post("/configs/list", superAdminOnly, dashboardController.listDashboardConfigsHandler);
+router.post("/configs/rename", superAdminOnly, dashboardController.renameDashboardConfigHandler);
 
 // Dashboard render API (permission-filtered for logged in user)
+router.get("/dashboard/user-dashboards", dashboardController.getUserDashboardsHandler);
+router.post("/dashboard/user-dashboards", dashboardController.getUserDashboardsHandler);
 router.get("/dashboard/status", dashboardController.getDashboardStatusHandler);
 router.post("/dashboard/status", dashboardController.getDashboardStatusHandler);
 router.get("/dashboard/widgets", dashboardController.getDashboardWidgetsHandler);
