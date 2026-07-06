@@ -78,7 +78,8 @@ async function sendToRow(row, notification = {}, meta = {}) {
       api_base: String(config.web_push?.api_base_url || config.web_push?.delivery_api_bases?.[0] || "").replace(/\/$/, ""),
       delivery_api_bases: config.web_push?.delivery_api_bases ?? [],
       company_backend_url: String(config.web_push?.company_backend_url || "").replace(/\/$/, ""),
-      company_public_ip: String(config.web_push?.company_public_ip || "").trim(),
+      internal_frontend_host: String(config.web_push?.internal_frontend_host || "").trim(),
+      external_frontend_host: String(config.web_push?.external_frontend_host || "").trim(),
     },
   });
 

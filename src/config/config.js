@@ -5,6 +5,17 @@ import { APP_VERSION } from "./appVersion.js";
 
 dotenv.config();
 
+function hostFromEnv(value) {
+  const v = String(value || "").trim();
+  if (!v) return "";
+  try {
+    if (v.includes("://")) return new URL(v).hostname;
+  } catch {
+    /* fall through */
+  }
+  return v.replace(/^https?:\/\//i, "").split("/")[0].trim();
+}
+
 const getUploadPath = () => {
   const envPath = process.env.UPLOAD_PATH;
   let finalPath = "uploads";
@@ -101,9 +112,10 @@ const config = {
           .filter(Boolean)
       ),
     ],
-    /** Internal backend URL for company-network ping when user opens notification */
+    /** Internal backend URL for office-network ping when user opens notification */
     company_backend_url: process.env.COMPANY_BACKEND_URL || "",
-    company_public_ip: process.env.COMPANY_PUBLIC_IP || "",
+    internal_frontend_host: hostFromEnv(process.env.INTERNAL_FRONTEND_HOST || process.env.FRONTEND_URL),
+    external_frontend_host: hostFromEnv(process.env.EXTERNAL_FRONTEND_HOST),
   },
 };
 

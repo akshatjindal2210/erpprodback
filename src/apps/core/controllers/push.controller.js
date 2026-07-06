@@ -4,13 +4,14 @@ import { getVapidPublicKey, getPushDeliveryLogs, isWebPushConfigured, markPushDe
 
 function parseDeliveryMeta(body = {}) {
   const client_ip = String(body?.client_ip ?? "").trim() || null;
-  let on_company_network = body?.on_company_network;
-  if (typeof on_company_network === "boolean") {
-    return { client_ip, on_company_network };
+  if (typeof body?.on_company_network === "boolean") {
+    return { client_ip, on_company_network: body.on_company_network };
   }
-  const companyIp = String(config.web_push?.company_public_ip || "").trim();
-  if (client_ip && companyIp) {
-    return { client_ip, on_company_network: client_ip === companyIp };
+  if (body?.on_internal_domain === true) {
+    return { client_ip, on_company_network: true };
+  }
+  if (body?.on_internal_domain === false) {
+    return { client_ip, on_company_network: false };
   }
   return { client_ip, on_company_network: null };
 }
@@ -199,7 +200,7 @@ export async function reportPushRead(req, res) {
     if (req.body?.company_network_verified !== true) {
       return res.status(403).json({
         success: false,
-        message: "Read is recorded only when the user opens the app on company network",
+        message: "Read is recorded only when the user opens the app from an authorized portal domain",
       });
     }
 
