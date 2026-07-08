@@ -3,7 +3,25 @@
  */
 
 import dbQuery from "../../../../config/db.js";
+import { getImsMapsSafe } from "../erp-api/imsLookup.js";
+import { resolvePackingCustomerName } from "../packing-entry/packingEntryCustomers.js";
 import { buildInventoryReportSql, sqlPageSlice } from "./inventoryReportSql.js";
+
+async function enrichInventoryReportCustomerNames(rows = []) {
+  if (!rows?.length) return rows;
+  const { ledgerMap, partyRateMap } = await getImsMapsSafe();
+  return rows.map((row) => {
+    const code = row?.customer_code != null ? String(row.customer_code).trim() : "";
+    if (!code) return row;
+    const resolved = resolvePackingCustomerName(code, {
+      ledgerMap,
+      partyRateMap,
+      itemDcode: row?.item_dcode,
+    });
+    if (!resolved) return row;
+    return { ...row, customer_name: resolved };
+  });
+}
 
 const SORT_COL = {
   packing_number: "packing_number",
@@ -113,8 +131,9 @@ export async function findInventoryReportFiltered(options = {}) {
       params
     );
     const first = rows[0];
+    const pageRows = await enrichInventoryReportCustomerNames(rows.map(stripStatsCols));
     return {
-      data: rows.map(stripStatsCols),
+      data: pageRows,
       total: Number(first?.total_count) || rows.length,
       totals: includeTotals && first
         ? mapTotals({
@@ -131,5 +150,6 @@ export async function findInventoryReportFiltered(options = {}) {
   }
 
   const rows = await dbQuery(`${withFiltered(sql)}, page AS (${pageSql}) SELECT * FROM page`, params);
-  return { data: rows.map(stripStatsCols), totals: null, total: undefined, page: safePage, limit: safeLimit };
+  const pageRows = await enrichInventoryReportCustomerNames(rows.map(stripStatsCols));
+  return { data: pageRows, totals: null, total: undefined, page: safePage, limit: safeLimit };
 }

@@ -111,6 +111,22 @@ function dedupeWidgets(rows = []) {
   return Array.from(byId.values()).sort((a, b) => (Number(a?.id) || 0) - (Number(b?.id) || 0));
 }
 
+function isTopLevelDashboardWidget(widget = {}) {
+  const sectionId = widget?.chart_config?.section_id;
+  return sectionId == null || String(sectionId).trim() === "";
+}
+
+/** Full saved layout slots (incl. permission-hidden widgets) for live gap packing. */
+function buildLayoutBlueprint(widgets = []) {
+  const topLevel = (widgets || []).filter(isTopLevelDashboardWidget);
+  return {
+    desktop: topLevel.map((widget, idx) =>
+      sanitizeLayoutCoords(widget?.layout, widget.id, idx)),
+    mobile: topLevel.map((widget, idx) =>
+      sanitizeLayoutCoords(widget?.mobile_layout || widget?.layout, widget.id, idx)),
+  };
+}
+
 function normalizeDashboardJson(raw = {}) {
   const { doc, widgets } = parseDashboardDocument(raw);
   return { ...doc, widgets };
@@ -815,7 +831,11 @@ export const getDashboardWidgetsHandler = async (req, res) => {
       }
     }
 
-    res.json({ success: true, data: results });
+    res.json({
+      success: true,
+      data: results,
+      layout_blueprint: buildLayoutBlueprint(pageWidgets),
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

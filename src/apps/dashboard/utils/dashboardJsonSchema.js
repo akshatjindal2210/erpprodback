@@ -156,6 +156,22 @@ export function normalizeDeviceTarget(rawValue = "") {
   return "both";
 }
 
+function readWidgetLayoutPixels(widget = {}) {
+  const style = widget.style && typeof widget.style === "object" ? widget.style : {};
+  const widthPx = Number(style.layoutWidthPx ?? widget.layoutWidthPx);
+  const heightPx = Number(style.layoutHeightPx ?? widget.layoutHeightPx);
+  return {
+    widthPx: Number.isFinite(widthPx) && widthPx > 0 ? Math.round(widthPx) : null,
+    heightPx: Number.isFinite(heightPx) && heightPx > 0 ? Math.round(heightPx) : null,
+  };
+}
+
+function hasManualWidgetLayout(widget = {}) {
+  if (widget.layoutLocked === true || widget.layout_locked === true) return true;
+  const { widthPx, heightPx } = readWidgetLayoutPixels(widget);
+  return widthPx != null || heightPx != null;
+}
+
 export function widgetToStoredJson(widget = {}, idx = 0) {
   if (widget?.rawType || widget?.dataSource) {
     const rawTypeInput = String(widget.rawType || widget.type || "table").toLowerCase();
@@ -175,6 +191,7 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
         { containerPreset: widget.containerPreset },
         widget.layout,
       ),
+      layoutLocked: widget.layoutLocked === true || hasManualWidgetLayout(widget),
       nestedLayout: Array.isArray(widget.nestedLayout) ? widget.nestedLayout : [],
       mobileNestedLayout: Array.isArray(widget.mobileNestedLayout) ? widget.mobileNestedLayout : [],
       mobilePaddingLeft: widget.mobilePaddingLeft ?? 8,
@@ -215,6 +232,14 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
         { containerPreset: chartConfig.container_preset },
         widget.layout,
       ),
+    layoutLocked: chartConfig.layout_locked === true
+      || hasManualWidgetLayout({
+        layoutLocked: chartConfig.layout_locked === true,
+        style: {
+          layoutWidthPx: chartConfig.layout_width_px,
+          layoutHeightPx: chartConfig.layout_height_px,
+        },
+      }),
     nestedLayout: Array.isArray(chartConfig.nested_layout) ? chartConfig.nested_layout : [],
     mobileNestedLayout: Array.isArray(chartConfig.mobile_nested_layout) ? chartConfig.mobile_nested_layout : [],
     mobilePaddingLeft: chartConfig.mobile_padding_left ?? 8,
@@ -233,6 +258,12 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       emptyTextPosition: chartConfig.emptyTextPosition,
       kpiLabelPosition: chartConfig.kpiLabelPosition,
       kpiLabelFontSize: chartConfig.kpiLabelFontSize,
+      layoutWidthPx: Number.isFinite(Number(chartConfig.layout_width_px))
+        ? Math.round(Number(chartConfig.layout_width_px))
+        : undefined,
+      layoutHeightPx: Number.isFinite(Number(chartConfig.layout_height_px))
+        ? Math.round(Number(chartConfig.layout_height_px))
+        : undefined,
     },
     layout: sanitizeLayoutCoords(widget.layout, widget.id, idx),
     mobileLayout: sanitizeLayoutCoords(
@@ -277,6 +308,7 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       emptyText: stored.emptyText || "Click edit and add query",
       section_id: stored.sectionId || null,
       container_preset: stored.containerPreset || "full",
+      layout_locked: stored.layoutLocked === true,
       nested_layout: Array.isArray(stored.nestedLayout) ? stored.nestedLayout : [],
       mobile_nested_layout: Array.isArray(stored.mobileNestedLayout) ? stored.mobileNestedLayout : [],
       mobile_padding_left: stored.mobilePaddingLeft ?? 8,
@@ -294,6 +326,12 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       emptyTextPosition: stored.style?.emptyTextPosition,
       kpiLabelPosition: stored.style?.kpiLabelPosition,
       kpiLabelFontSize: stored.style?.kpiLabelFontSize,
+      layout_width_px: Number.isFinite(Number(stored.style?.layoutWidthPx))
+        ? Math.round(Number(stored.style.layoutWidthPx))
+        : undefined,
+      layout_height_px: Number.isFinite(Number(stored.style?.layoutHeightPx))
+        ? Math.round(Number(stored.style.layoutHeightPx))
+        : undefined,
     },
     layout: sanitizeLayoutCoords(stored.layout, stored.id || `cfg_${idx}`, idx),
     mobile_layout: sanitizeLayoutCoords(stored.mobileLayout, stored.id || `cfg_${idx}`, idx),

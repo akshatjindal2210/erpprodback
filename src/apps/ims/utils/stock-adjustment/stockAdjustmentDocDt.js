@@ -1,7 +1,35 @@
 import { updateAdjustmentsTx, findFinancialYearForPacking } from "../../models/stockAdjustment.model.js";
+import { getImsMapsSafe } from "../erp-api/imsLookup.js";
+import { resolvePackingCustomerName } from "../packing-entry/packingEntryCustomers.js";
 import { fetchSaPackingMetaFromIms } from "./stockAdjustmentImsPacking.js";
 import { resolveStockAdjustmentPackingMeta } from "./stockAdjustmentPacking.js";
 import { mergeAdjustmentPackingMeta, packingMetaToSaDbFields } from "./stockAdjustmentPackingSnapshot.js";
+
+function trimOrNull(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  return s === "" || s === "—" ? null : s;
+}
+
+/** Resolve acc_name from ledger/party-rate; fix wrong names copied from packing meta. */
+export async function resolveAdjustmentAccNameFields(adjustment) {
+  const accCode = trimOrNull(adjustment?.acc_code);
+  if (!accCode) return {};
+
+  const { ledgerMap, partyRateMap } = await getImsMapsSafe();
+  const resolved = resolvePackingCustomerName(accCode, {
+    ledgerMap,
+    partyRateMap,
+    itemDcode: adjustment?.item_dcode,
+  });
+  if (!resolved) return {};
+
+  const existingName = trimOrNull(adjustment?.acc_name);
+  if (!existingName || existingName !== resolved) {
+    return { acc_name: resolved };
+  }
+  return {};
+}
 
 const PACKING_ENTRY_TYPES = new Set(["add", "minus"]);
 
@@ -48,6 +76,7 @@ async function resolveAdjustmentPackingMeta(adjustment) {
 export async function persistAdjustmentDocDtTx(client, adjustment) {
   const meta = await resolveAdjustmentPackingMeta(adjustment);
   const fields = packingMetaToSaDbFields(meta, { existing: adjustment });
+  Object.assign(fields, await resolveAdjustmentAccNameFields({ ...adjustment, ...fields }));
   if (!Object.keys(fields).length) return meta;
   await updateAdjustmentsTx(
     client,

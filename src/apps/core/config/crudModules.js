@@ -66,7 +66,7 @@ export const CRUD_MODULES = {
   forwarding_note_master: {
     idField: "fuid",
     listFields: [
-      "f.fuid", "f.acc_code", "f.po_number", "f.remarks", "f.transporter_name", "f.vehicle_number", "f.cartage", "f.total_items", "f.bill_no", "f.timestamp",
+      "f.fuid", "f.acc_code", "f.po_number", "f.schno", "f.remarks", "f.transporter_name", "f.vehicle_number", "f.cartage", "f.total_items", "f.bill_no", "f.timestamp",
       "f.approved", "f.approved_by", "f.approved_at",
       "f.out_entry_locked", "f.out_entry_locked_by", "f.out_entry_locked_at",
       "f.bill_updated_by", "f.bill_updated_at",

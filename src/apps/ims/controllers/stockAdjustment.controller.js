@@ -54,8 +54,10 @@ export const createAdjustment = async (req, res) => {
   try {
     const normalizedApproved = normalizeApprovedInput(req.body.approved);
     const { item_dcode: bodyItemDcode, qty: bodyQty, unit, remarks, entry_type, packing_number: rawPacking, financial_year,
-      per_box_qty, box_count_impact, no_of_boxes, removed_box_uids, acc_code: bodyAccCode,
-      category_id: bodyCategoryId } = req.body;
+      per_box_qty, box_count_impact, no_of_boxes, removed_box_uids, acc_code: bodyAccCode, acc_name: bodyAccName,
+      category_id: bodyCategoryId, all_boxes_loose: bodyAllBoxesLoose, box_breakup: _ignoredBoxBreakup } = req.body;
+
+    const allBoxesLoose = bodyAllBoxesLoose === true || bodyAllBoxesLoose === "true" || bodyAllBoxesLoose === 1;
 
     let item_dcode = bodyItemDcode;
     let acc_code = bodyAccCode;
@@ -179,6 +181,9 @@ export const createAdjustment = async (req, res) => {
     } else if (acc_code !== undefined) {
       data.acc_code = acc_code;
     }
+    if (entry_type === "add" && bodyAccName !== undefined && bodyAccName !== null && String(bodyAccName).trim() !== "") {
+      data.acc_name = String(bodyAccName).trim();
+    }
 
     if (entry_type === "add" || entry_type === "minus") {
       data.entry_type = entry_type;
@@ -203,7 +208,11 @@ export const createAdjustment = async (req, res) => {
           applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false });
           await updateAdjustmentsTx(client, approvalFields, { adjustment_id: adj.adjustment_id });
           const fresh = { ...adj, ...data, ...approvalFields, approved: true };
-          await applyStockAdjustmentOnApproveTx(client, { adjustment: fresh, userId: req.user.id });
+          await applyStockAdjustmentOnApproveTx(client, {
+            adjustment: fresh,
+            userId: req.user.id,
+            allBoxesLoose,
+          });
         }
         return adj;
       });
@@ -294,7 +303,19 @@ export const getAdjustmentById = async (req, res) => {
 
 export const updateAdjustment = async (req, res) => {
   try {
-    const { id: rawId, approved, removed_box_uids, remove_add_box_uids, add_extra_boxes, no_of_boxes, acc_code, ...incoming } = req.body;
+    const {
+      id: rawId,
+      approved,
+      removed_box_uids,
+      remove_add_box_uids,
+      add_extra_boxes,
+      no_of_boxes,
+      acc_code,
+      acc_name,
+      all_boxes_loose,
+      box_breakup: _ignoredBoxBreakup,
+      ...incoming
+    } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
     const id = parsePositiveIntId(rawId);
     if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
@@ -372,9 +393,15 @@ export const updateAdjustment = async (req, res) => {
     if (acc_code !== undefined) {
       fields.acc_code = acc_code;
     }
+    if (acc_name !== undefined && acc_name !== null && String(acc_name).trim() !== "") {
+      fields.acc_name = String(acc_name).trim();
+    }
     const wasApproved = !!existing.approved;
+    const allBoxesLoose =
+      all_boxes_loose === true || all_boxes_loose === "true" || all_boxes_loose === 1;
+
     const hasBusinessChanges =
-      Object.keys(incoming).length > 0 || wantsPackingBoxSync;
+      Object.keys(incoming).length > 0 || wantsPackingBoxSync || all_boxes_loose !== undefined;
 
     /** Approved row + any edit → pending only; Approve must be a separate action. */
     if (wasApproved && hasBusinessChanges) {
@@ -413,7 +440,11 @@ export const updateAdjustment = async (req, res) => {
       );
       const row = freshRows[0] || updated || { ...existing, ...fields };
       if (fields.approved === true && !(wasApproved && hasBusinessChanges)) {
-        await applyStockAdjustmentOnApproveTx(client, { adjustment: row, userId: req.user.id });
+        await applyStockAdjustmentOnApproveTx(client, {
+          adjustment: row,
+          userId: req.user.id,
+          allBoxesLoose,
+        });
       }
     });
 

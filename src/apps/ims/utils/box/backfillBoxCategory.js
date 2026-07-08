@@ -308,13 +308,14 @@ export async function backfillBoxIsLooseFromPackingMode() {
        ORDER BY packing_number, cnt DESC, box_qty DESC
      )
      UPDATE ims_box_table b
-     SET is_loose = (ROUND(b.qty)::int IS DISTINCT FROM ps.std_qty),
+     SET is_loose = true,
          updated_at = NOW()
      FROM packing_std ps
      WHERE b.is_deleted = false
        AND b.packing_number = ps.packing_number
        AND ROUND(b.qty)::int > 0
-       AND COALESCE(b.is_loose, false) IS DISTINCT FROM (ROUND(b.qty)::int IS DISTINCT FROM ps.std_qty)`
+       AND COALESCE(b.is_loose, false) = false
+       AND ROUND(b.qty)::int IS DISTINCT FROM ps.std_qty`
   );
   return { updated: mutationCount(res) };
 }

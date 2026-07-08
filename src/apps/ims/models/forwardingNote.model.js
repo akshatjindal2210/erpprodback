@@ -13,7 +13,7 @@ const ALLOWED_SORT_FIELDS = ["created_at", "approved_at", "updated_at", "po_numb
 
 const ALLOWED_UPDATE_FIELDS = [
   "acc_code", "po_number", "remarks", "transporter_name", "transporter_id",
-  "vehicle_number", "cartage", "total_items", "bill_no", "packing_category_id",
+  "vehicle_number", "cartage", "total_items", "bill_no", "packing_category_id", "schno",
   "bill_updated_by", "bill_updated_at",
   "approved", "approved_by", "approved_at", "updated_by", "updated_at"
 ];
@@ -243,7 +243,7 @@ export const findForwardingNote = async (filters = {}) => {
 };
 
 export const insertForwardingNote = async (data) => {
-  const fields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage", "total_items", "packing_category_id", "bill_no", "approved", "created_by"];
+  const fields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage", "total_items", "packing_category_id", "schno", "bill_no", "approved", "created_by"];
   const hasBill = data.bill_no != null && String(data.bill_no).trim() !== "";
   if (hasBill) {
     fields.push("bill_updated_by", "bill_updated_at");
@@ -508,6 +508,9 @@ export const findAvailableBoxes = async (item_dcode, { client } = {}) => {
       dp.doc_no,
       ${sqlDocDtText("dp.doc_dt")} AS doc_dt,
       dp.job_card_no,
+      dp.qty_per_box,
+      dp.full_boxes_count,
+      dp.loose_box_qty,
       COALESCE(NULLIF(trim(b.override_cust::text), ''), dp.acc_code::text) AS acc_code,
       CASE
         WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL
@@ -562,6 +565,9 @@ export const findAllSellableForwardingBoxes = async () => {
       dp.doc_no,
       ${sqlDocDtText("dp.doc_dt")} AS doc_dt,
       dp.job_card_no,
+      dp.qty_per_box,
+      dp.full_boxes_count,
+      dp.loose_box_qty,
       COALESCE(NULLIF(trim(b.override_cust::text), ''), dp.acc_code::text) AS acc_code,
       CASE
         WHEN b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in' AND sa_adj.item_dcode IS NOT NULL

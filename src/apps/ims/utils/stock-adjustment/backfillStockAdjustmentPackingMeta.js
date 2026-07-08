@@ -15,6 +15,7 @@ import { updateAdjustmentsTx, findFinancialYearForPacking } from "../../models/s
 import { fetchSaPackingMetaFromIms } from "./stockAdjustmentImsPacking.js";
 import { resolveStockAdjustmentPackingMeta } from "./stockAdjustmentPacking.js";
 import { mergeAdjustmentPackingMeta, packingMetaToSaDbFields } from "./stockAdjustmentPackingSnapshot.js";
+import { resolveAdjustmentAccNameFields } from "./stockAdjustmentDocDt.js";
 
 const META_CACHE = new Map();
 const META_CACHE_TTL_MS = 10 * 60_000;
@@ -70,8 +71,9 @@ async function loadRowsNeedingBackfill(limit) {
   );
 }
 
-function buildUpdateFields(row, meta) {
+async function buildUpdateFieldsAsync(row, meta) {
   const fields = packingMetaToSaDbFields(meta, { existing: row });
+  Object.assign(fields, await resolveAdjustmentAccNameFields({ ...row, ...fields }));
   if (!Object.keys(fields).length) return null;
   return { ...fields, updated_at: new Date() };
 }
@@ -112,7 +114,7 @@ export async function backfillStockAdjustmentPackingMetaFromIms({ limit = 500 } 
       continue;
     }
 
-    const fields = buildUpdateFields(row, merged);
+    const fields = await buildUpdateFieldsAsync(row, merged);
     if (!fields) {
       skipped++;
       continue;

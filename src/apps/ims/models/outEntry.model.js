@@ -229,6 +229,10 @@ export const deleteOutEntries = async (filters = {}, meta = {}) => {
   );
 };
 
+const OUT_ENTRY_BOX_DAILYPROD_JOIN = `
+  LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '') = NULLIF(TRIM(dp.doc_no::text), '')
+`;
+
 const OUT_ENTRY_BOX_JSON_AGG = `
   json_agg(
     json_build_object(
@@ -236,6 +240,9 @@ const OUT_ENTRY_BOX_JSON_AGG = `
       'box_no_uid', b.box_no_uid,
       'qty', b.qty,
       'is_loose', b.is_loose,
+      'qty_per_box', dp.qty_per_box,
+      'full_boxes_count', dp.full_boxes_count,
+      'loose_box_qty', dp.loose_box_qty,
       'out_uid', b.out_uid,
       'sa_id', b.sa_id,
       'sa_entry_type', b.sa_entry_type,
@@ -342,6 +349,7 @@ export const findFuidDetailsForOutEntry = async (fuid, forOutUid = null) => {
         coalesce(sum(b.qty), 0)::int AS total_qty,
         ${OUT_ENTRY_BOX_JSON_AGG}
       FROM ims_box_table b
+      ${OUT_ENTRY_BOX_DAILYPROD_JOIN}
       WHERE b.packing_number = $1
         AND b.location_id IS NULL
         AND ${OUT_ENTRY_BOX_AVAILABILITY_SQL}
@@ -359,6 +367,7 @@ export const findFuidDetailsForOutEntry = async (fuid, forOutUid = null) => {
         coalesce(sum(b.qty), 0)::int AS total_qty,
         ${OUT_ENTRY_BOX_JSON_AGG}
       FROM ims_box_table b
+      ${OUT_ENTRY_BOX_DAILYPROD_JOIN}
       INNER JOIN ims_location_master loc ON b.location_id = loc.location_id
       WHERE b.packing_number = $1
         AND ${OUT_ENTRY_BOX_AVAILABILITY_SQL}

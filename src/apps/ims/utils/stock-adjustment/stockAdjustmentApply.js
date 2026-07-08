@@ -1,7 +1,7 @@
 import { findBoxesByUids, insertBulkBoxesTx, markBoxesStockAdjustmentOutTx, clearStockAdjustmentMinusMarksTx, findStockAdjustmentAddBoxesTx, permanentlyDeleteStockAdjustmentAddBoxesTx } from "../../models/box.model.js";
 import { updateAdjustmentsTx } from "../../models/stockAdjustment.model.js";
 import { getBoxNoUidPrefix } from "../../../core/models/appConfig.model.js";
-import { buildStockAdjustmentAddBoxInsertRows, isLooseBoxComparedToStandard, resolveOverrideCustForPacking, resolveStandardQtyPerBoxForPacking } from "./stockAdjustmentPacking.js";
+import { buildStockAdjustmentAddBoxInsertRows, resolveOverrideCustForPacking } from "./stockAdjustmentPacking.js";
 import { persistAdjustmentDocDtTx } from "./stockAdjustmentDocDt.js";
 import { boxBelongsToPackingNumber, isBoxAvailableForMinus } from "../box/boxInventory.js";
 import { resolveAccCodeFromBoxRows } from "../box/boxCustomerOverride.js";
@@ -45,7 +45,7 @@ export async function revertAddAdjustmentBoxesTx(client, { adjustmentId, userId 
 }
 
 /** Apply box changes when adjustment becomes approved (inventory reflects here). */
-export async function applyStockAdjustmentOnApproveTx(client, { adjustment, userId }) {
+export async function applyStockAdjustmentOnApproveTx(client, { adjustment, userId, allBoxesLoose = false }) {
   const adjId = adjustment.adjustment_id;
   const entryType = adjustment.entry_type;
 
@@ -61,12 +61,6 @@ export async function applyStockAdjustmentOnApproveTx(client, { adjustment, user
       throw err;
     }
 
-    const itemDcode = parseInt(String(adjustment.item_dcode), 10);
-    const standardPerBox = await resolveStandardQtyPerBoxForPacking({
-      packingNumber,
-      itemDcode: Number.isFinite(itemDcode) ? itemDcode : null
-    });
-    const isLooseEach = isLooseBoxComparedToStandard(pb, standardPerBox);
     const boxNoUidPrefix = await getBoxNoUidPrefix();
     const override_cust = adjustment.acc_code || (await resolveOverrideCustForPacking(packingNumber, {
       financialYear: adjustment.financial_year,
@@ -76,7 +70,7 @@ export async function applyStockAdjustmentOnApproveTx(client, { adjustment, user
       adjustmentId: adjId,
       totalBoxes: nb,
       perBoxQty: pb,
-      isLoose: isLooseEach,
+      isLoose: !!allBoxesLoose,
       userId,
       boxNoUidPrefix,
       override_cust,

@@ -27,8 +27,15 @@ export function packingMetaToSaDbFields(meta, { existing = null } = {}) {
   const itemDesc = trimOrNull(meta.item_desc ?? meta.itemdesc);
   if (itemDesc && !trimOrNull(existing?.item_desc)) fields.item_desc = itemDesc;
 
+  const existingAcc = trimOrNull(existing?.acc_code);
+  const metaAcc = trimOrNull(meta.acc_code);
   const accName = trimOrNull(meta.acc_name);
-  if (accName && !trimOrNull(existing?.acc_name)) fields.acc_name = accName;
+  // Do not copy packing customer name when adjustment already has a different customer.
+  if (accName && !trimOrNull(existing?.acc_name)) {
+    if (!existingAcc || (metaAcc && existingAcc === metaAcc)) {
+      fields.acc_name = accName;
+    }
+  }
 
   return fields;
 }

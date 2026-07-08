@@ -141,6 +141,7 @@ function planToRow(plan, ims = {}, lastTxn = null) {
     itemdcode: plan.itemdcode ?? ims.itemdcode,
     item_code: plan.item_code ?? ims.item_code,
     itemdesc: plan.itemdesc ?? ims.itemdesc,
+    custitemcode: ims.custitemcode ?? plan.custitemcode ?? null,
     totalqty: plan.totalqty ?? ims.totalqty ?? ims.total_qty,
     Remarks: imsRemarks,
     remarks: imsRemarks,

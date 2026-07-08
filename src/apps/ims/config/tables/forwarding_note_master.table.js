@@ -36,7 +36,10 @@ export async function createForwardingNoteMasterTable() {
   `);
 
   await patchTableSchema(dbQuery, T.FORWARDING_NOTE_MASTER, {
-    columns: [patchCol("packing_category_id", "INTEGER")],
+    columns: [
+      patchCol("packing_category_id", "INTEGER"),
+      patchCol("schno", "VARCHAR(32)"),
+    ],
     columnTypes: [{ name: "bill_no", type: "text" }],
   });
 }

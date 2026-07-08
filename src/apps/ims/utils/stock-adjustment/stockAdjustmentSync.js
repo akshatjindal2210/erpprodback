@@ -23,6 +23,15 @@ export async function syncAdjustmentMetadataOnly(client, { existing, body, userI
   }
 
   if (entryType === "add") {
+    if (body.acc_code !== undefined && body.acc_code !== null && String(body.acc_code).trim() !== "") {
+      fields.acc_code = body.acc_code;
+      touched = true;
+    }
+    if (body.acc_name !== undefined && body.acc_name !== null && String(body.acc_name).trim() !== "") {
+      fields.acc_name = String(body.acc_name).trim();
+      touched = true;
+    }
+
     if (body.category_id !== undefined) {
       const catId = parseInt(String(body.category_id), 10);
       if (Number.isFinite(catId) && catId > 0) {

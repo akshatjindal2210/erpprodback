@@ -28,7 +28,7 @@ router.post("/get-qc-hold-details", authenticate, accessControl("out_entry", "vi
 
 router.post("/linked-boxes", authenticate, accessControl("out_entry", "view"), getOutEntryLinkedBoxesController);
 
-router.post("/lock-fuid", authenticate, accessControl("out_entry", "add"), lockFuidForOutEntry);
+router.post("/lock-fuid", authenticate, accessControl("out_entry", ["add", "edit", "authorize"]), lockFuidForOutEntry);
 
 router.post("/verify-box", authenticate, accessControl("out_entry", "view"), verifyBoxSticker);
 

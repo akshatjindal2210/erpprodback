@@ -108,8 +108,12 @@ export async function executeReadOnlyWidgetQuery(rawSql, options = {}) {
   const filters = options?.filters && typeof options.filters === "object" ? options.filters : {};
   if (source === "erp_mssql") {
     const { rows, erpRequest } = await runErpReadOnlyQuery(rawSql, filters);
+    // ERP SQL is authoritative — only {{fromDate}}/{{toDate}}/{{userId}} in the query are applied
+    // (via resolveErpMssqlSql). Do not post-filter by docdt etc.; builder preview always sends
+    // today's dashboard dates and would hide rows whose docdt is outside that range.
+    // rows: applyResultFilters(rows, filters),
     return {
-      rows: applyResultFilters(rows, filters),
+      rows,
       erpRequest,
     };
   }

@@ -113,8 +113,10 @@ export const findBoxes = async (options = {}) => {
 
   const journeyMode = hasJourneyFilter(filters);
 
-  // Permission-based date restriction (can_view_days) — skipped in journey mode (full history).
-  if (!journeyMode && permission?.can_view_days > 0) {
+  const searchPackingMode = search && /^\d+$/.test(String(search).trim());
+
+  // Permission-based date restriction (can_view_days) — skipped when tracing a packing/journey.
+  if (!journeyMode && !filterByPacking && !filterBySaId && !searchPackingMode && permission?.can_view_days > 0) {
     conditions.push(`b.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
   }
 
@@ -984,9 +986,14 @@ export const findBoxesByNoUids = async (box_no_uids = []) => {
   const uids = [...new Set((box_no_uids || []).map((u) => String(u).trim()).filter(Boolean))];
   if (!uids.length) return [];
   return dbQuery(
-    `SELECT b.*, dp.acc_code AS prod_acc_code, dp.item_dcode AS itemdcode
+    `SELECT b.*,
+            dp.acc_code AS prod_acc_code,
+            dp.item_dcode AS itemdcode,
+            dp.qty_per_box,
+            dp.full_boxes_count,
+            dp.loose_box_qty
      FROM ims_box_table b
-     LEFT JOIN ims_dailyprod dp ON trim(b.packing_number::text) = trim(dp.doc_no::text)
+     LEFT JOIN ims_dailyprod dp ON NULLIF(TRIM(b.packing_number::text), '') = NULLIF(TRIM(dp.doc_no::text), '')
      WHERE b.is_deleted = false AND b.box_no_uid = ANY($1::text[])
      ORDER BY b.box_uid ASC`,
     [uids]
