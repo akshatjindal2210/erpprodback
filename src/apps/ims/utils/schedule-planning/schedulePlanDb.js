@@ -110,7 +110,7 @@ export async function updatePlanStatus({ fin_year_id, schno, itemdcode, is_plann
 
 /**
  * Dispatch-plan helper — no fin_year_id required.
- * Returns plan items whose latest "plan" transaction action_date falls in [fromDate, toDate].
+ * Returns plan/hold items whose latest transaction action_date falls in [fromDate, toDate].
  * Used by the Forwarding Note "Today Dispatch Plan" tab.
  */
 export async function loadDispatchPlanItems(fromDate, toDate, statuses = []) {
@@ -120,7 +120,7 @@ export async function loadDispatchPlanItems(fromDate, toDate, statuses = []) {
        sp.plan_id, sp.fin_year_id, sp.schno, sp.itemdcode, sp.schmonth, sp.schdt::text AS schdt,
        sp.acc_code, sp.acc_name, sp.item_code, sp.itemdesc, sp.totalqty,
       sp.is_planned,
-      COALESCE(lt.action_date, sp.schdt::date)::text AS action_date,
+      lt.action_date::text AS action_date,
       lt.remark AS item_remark
      FROM ${T.SCHEDULE_PLAN} sp
      LEFT JOIN LATERAL (
@@ -129,20 +129,39 @@ export async function loadDispatchPlanItems(fromDate, toDate, statuses = []) {
        WHERE fin_year_id = sp.fin_year_id
          AND schno       = sp.schno
          AND itemdcode   = sp.itemdcode
-         AND LOWER(TRIM(action_type)) IN ('plan', 'hold', 'reject')
+         AND LOWER(TRIM(action_type)) IN ('plan', 'hold')
        ORDER BY created_at DESC, txn_id DESC
        LIMIT 1
      ) lt ON true
       WHERE sp.schmonth = EXTRACT(MONTH FROM $2::date)::int
-      AND (
-        lt.action_date IS NULL
-        OR lt.action_date BETWEEN $1::date AND $2::date
-      )
+      AND lt.action_date BETWEEN $1::date AND $2::date
        AND sp.is_planned = ANY($3::int[])
-     ORDER BY COALESCE(lt.action_date, sp.schdt::date) ASC, sp.schno, sp.item_code`,
+     ORDER BY lt.action_date ASC, sp.schno, sp.item_code`,
     [fromDate, toDate, dispatchStatuses]
   );
   return rows || [];
+}
+
+/** Sum of forwarding-note item qty per schedule + item (partial dispatch tracking). */
+export async function loadScheduleDispatchQtyMap() {
+  const rows = await dbQuery(
+    `SELECT TRIM(f.schno::text) AS schno,
+            fi.item_dcode::int AS itemdcode,
+            COALESCE(SUM(fi.total_qty), 0)::float AS dispatch_qty
+     FROM ${T.FORWARDING_NOTE_MASTER} f
+     INNER JOIN ${T.FORWARDING_NOTE_ITEM_WISE} fi
+       ON fi.fuid = f.fuid AND fi.is_deleted = false
+     WHERE f.is_deleted = false
+       AND f.schno IS NOT NULL
+       AND TRIM(f.schno::text) <> ''
+     GROUP BY TRIM(f.schno::text), fi.item_dcode::int`
+  );
+  const map = new Map();
+  for (const row of rows || []) {
+    const key = planKey(row.schno, row.itemdcode);
+    map.set(key, Number(row.dispatch_qty) || 0);
+  }
+  return map;
 }
 
 export async function deletePlans({ fin_year_id, schno, itemdcode }, client = null) {

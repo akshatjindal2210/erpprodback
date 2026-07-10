@@ -26,7 +26,7 @@ export function isOutEntryNonForwarding(entryType) {
 }
 
 export function isOutEntryAutoAuthorized(entryType) {
-  return isOutEntryNonForwarding(entryType);
+  return isOutEntryPackingArea(entryType) || isOutEntryQcArea(entryType);
 }
 
 export function normalizeOutEntryType(raw) {

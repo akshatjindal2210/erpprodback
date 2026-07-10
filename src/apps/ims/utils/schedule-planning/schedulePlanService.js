@@ -1,7 +1,7 @@
 import dbQuery, { withTransaction } from "../../../../config/db.js";
 import { fetchImsDataRaw } from "../../services/ims.service.js";
 import { buildInventoryReportSql } from "../inventory-report/inventoryReportSql.js";
-import { deletePlans, loadAllPlanMap, loadDispatchPlanItems, loadPlanRow, planKey, upsertPlan, updatePlanStatus } from "./schedulePlanDb.js";
+import { deletePlans, loadAllPlanMap, loadDispatchPlanItems, loadPlanRow, loadScheduleDispatchQtyMap, planKey, upsertPlan, updatePlanStatus } from "./schedulePlanDb.js";
 import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canRejectFrom, isActiveScheduleStatus, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel } from "./schedulePlanStatus.js";
 import { insertScheduleTransaction, loadActionDates, loadActionReasons, loadItemTransactionHistory, loadLastTransactionMap, loadPlanDateHistoryMap, deletePlanTransactions } from "./schedulePlanTransactionDb.js";
 import { buildScheduleComparison, hasScheduleComparisonMismatch } from "./schedulePlanCompare.js";
@@ -320,6 +320,30 @@ async function enrichFgStock(records) {
   }
 }
 
+async function enrichScheduleDispatchBalances(records) {
+  if (!records.length) return records;
+  try {
+    const dispatchMap = await loadScheduleDispatchQtyMap();
+    return records.map((r) => {
+      const scheduleQty = Number(r.totalqty ?? r.total_qty ?? 0);
+      const dispatched = Number(dispatchMap.get(planKey(r.schno, r.itemdcode)) ?? 0);
+      const balanceQty = Math.max(0, scheduleQty - dispatched);
+      return {
+        ...r,
+        schedule_qty: scheduleQty,
+        dispatch_qty: dispatched,
+        balance_qty: balanceQty,
+      };
+    });
+  } catch (err) {
+    console.error("[schedule-planning] dispatch balance failed", err?.message || err);
+    return records.map((r) => {
+      const scheduleQty = Number(r.totalqty ?? r.total_qty ?? 0);
+      return { ...r, schedule_qty: scheduleQty, dispatch_qty: 0, balance_qty: scheduleQty };
+    });
+  }
+}
+
 function currentScheduleMonth() {
   return String(new Date().getMonth() + 1);
 }
@@ -372,7 +396,7 @@ function imsFilterForReport(body, finYearId) {
   return buildImsScheduleFilterSql(body, finYearId);
 }
 
-/** All items for one schedule (any status) — for plan/reject modal. */
+/** Active items for one schedule — for plan modal (excludes complete & reject). */
 async function listScheduleItemsForSchno(fy, schno) {
   const schnoNorm = String(schno ?? "").trim();
   if (!schnoNorm) {
@@ -396,9 +420,14 @@ async function listScheduleItemsForSchno(fy, schno) {
   }
 
   let records = buildFilteredList(imsRows, SCHEDULE_LIST_FILTER.ALL, schnoPlanMap, lastTxnMap);
+  records = records.filter((r) => {
+    const st = Number(r.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);
+    return st !== SCHEDULE_PLAN_STATUS.COMPLETE && st !== SCHEDULE_PLAN_STATUS.REJECT;
+  });
   const planDateHistoryMap = await loadPlanDateHistoryMap(fy.finYearId);
   records = enrichPlanDateHistory(records, planDateHistoryMap);
   records = await enrichFgStock(records);
+  records = await enrichScheduleDispatchBalances(records);
 
   const imsOk = imsResult?.success === true;
   return {
@@ -460,6 +489,7 @@ export async function listSchedulePlanning(body = {}) {
   let records = buildFilteredList(imsResult?.records, filterMode, planMap, lastTxnMap);
   records = enrichPlanDateHistory(records, planDateHistoryMap);
   records = await enrichFgStock(records);
+  records = await enrichScheduleDispatchBalances(records);
 
   const imsOk = imsResult?.success === true;
   const hasRecords = records.length > 0;
@@ -617,10 +647,19 @@ export async function holdSchedulePlan(body = {}, userId = null) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
 
-  const { schno, itemdcode, item_remark } = body || {};
+  const { schno, itemdcode, item_remark, action_date } = body || {};
   if (schno == null || itemdcode == null) {
     return { success: false, status: 400, message: "schno and itemdcode are required." };
   }
+
+  const actionDateNorm = normDate(action_date);
+  if (!actionDateNorm) {
+    return { success: false, status: 400, message: "action_date is required for hold." };
+  }
+
+  const snap = pickSnap(body);
+  const rangeErr = validateScheduleTargetDate(actionDateNorm, body.schmonth ?? snap.schmonth, body.schdt ?? snap.schdt);
+  if (rangeErr) return { success: false, status: 400, message: rangeErr };
 
   const existingRow = await loadPlanRow(fy.finYearId, schno, itemdcode);
   const fromStatus = existingRow?.is_planned != null ? Number(existingRow.is_planned) : SCHEDULE_PLAN_STATUS.PENDING;
@@ -642,7 +681,7 @@ export async function holdSchedulePlan(body = {}, userId = null) {
       await recordTransaction({
         fin_year_id: fy.finYearId, schno, itemdcode, plan_id: localRow.plan_id,
         action_type: SCHEDULE_PLAN_ACTION.HOLD, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.HOLD,
-        action_date: null, action_reason: null, remark: itemRemark,
+        action_date: actionDateNorm, action_reason: null, remark: itemRemark,
         user_id: userId,
       });
     }
@@ -656,7 +695,7 @@ export async function holdSchedulePlan(body = {}, userId = null) {
       await recordTransaction({
         fin_year_id: fy.finYearId, schno, itemdcode, plan_id: localRow.plan_id,
         action_type: SCHEDULE_PLAN_ACTION.HOLD, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.HOLD,
-        action_date: null, action_reason: null, remark: itemRemark,
+        action_date: actionDateNorm, action_reason: null, remark: itemRemark,
         user_id: userId,
       });
     }
@@ -670,7 +709,7 @@ export async function holdSchedulePlan(body = {}, userId = null) {
       await recordTransaction({
         fin_year_id: fy.finYearId, schno, itemdcode, plan_id: localRow.plan_id,
         action_type: SCHEDULE_PLAN_ACTION.HOLD, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.HOLD,
-        action_date: null, action_reason: null, remark: itemRemark,
+        action_date: actionDateNorm, action_reason: null, remark: itemRemark,
         user_id: userId,
       });
     }
@@ -679,7 +718,7 @@ export async function holdSchedulePlan(body = {}, userId = null) {
   if (!localRow) return { success: false, status: 500, message: "Could not hold schedule." };
   const lastTxn = txnSnapshot({
     action_type: SCHEDULE_PLAN_ACTION.HOLD,
-    action_date: null,
+    action_date: actionDateNorm,
     action_reason: null,
     remark: itemRemark,
   });
@@ -916,7 +955,8 @@ export async function listScheduleDispatchPlan(body = {}) {
     }));
 
     const enriched = await enrichFgStock(records);
-    return { success: true, records: enriched };
+    const withBalances = await enrichScheduleDispatchBalances(enriched);
+    return { success: true, records: withBalances };
   } catch (err) {
     console.error("[schedule-planning] dispatch helper error:", err?.message || err);
     return { success: false, records: [], message: "Could not load dispatch plan data." };

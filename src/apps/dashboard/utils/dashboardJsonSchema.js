@@ -172,10 +172,60 @@ function hasManualWidgetLayout(widget = {}) {
   return widthPx != null || heightPx != null;
 }
 
+function readTableWidgetOptions(widget = {}, chartConfig = {}) {
+  const cfg = chartConfig && typeof chartConfig === "object" ? chartConfig : {};
+  return {
+    tableSearchEnabled: widget.tableSearchEnabled === true || cfg.table_search_enabled === true,
+    tableSearchPlaceholder: String(
+      widget.tableSearchPlaceholder ?? cfg.table_search_placeholder ?? "",
+    ).trim(),
+    tableSearchPosition: (widget.tableSearchPosition ?? cfg.table_search_position) === "left" ? "left" : "right",
+    tableColumnSortEnabled: widget.tableColumnSortEnabled === true || cfg.table_column_sort_enabled === true,
+  };
+}
+
+function tableWidgetOptionsToChartConfig(options = {}) {
+  return {
+    table_search_enabled: options.tableSearchEnabled === true,
+    table_search_placeholder: String(options.tableSearchPlaceholder || "").trim(),
+    table_search_position: options.tableSearchPosition === "left" ? "left" : "right",
+    table_column_sort_enabled: options.tableColumnSortEnabled === true,
+  };
+}
+
+function tableStyleToChartConfig(style = {}) {
+  const src = style && typeof style === "object" ? style : {};
+  return {
+    table_header_color: src.tableHeaderColor,
+    table_header_bg: src.tableHeaderBg,
+    table_body_color: src.tableBodyColor,
+    table_body_bg: src.tableBodyBg,
+    table_border_color: src.tableBorderColor,
+    table_header_font_size: src.tableHeaderFontSize,
+    table_body_font_size: src.tableBodyFontSize,
+    table_row_hover_bg: src.tableRowHoverBg,
+  };
+}
+
+function readTableStyleFromChartConfig(chartConfig = {}) {
+  const cfg = chartConfig && typeof chartConfig === "object" ? chartConfig : {};
+  return {
+    tableHeaderColor: cfg.table_header_color ?? cfg.tableHeaderColor,
+    tableHeaderBg: cfg.table_header_bg ?? cfg.tableHeaderBg,
+    tableBodyColor: cfg.table_body_color ?? cfg.tableBodyColor,
+    tableBodyBg: cfg.table_body_bg ?? cfg.tableBodyBg,
+    tableBorderColor: cfg.table_border_color ?? cfg.tableBorderColor,
+    tableHeaderFontSize: cfg.table_header_font_size ?? cfg.tableHeaderFontSize,
+    tableBodyFontSize: cfg.table_body_font_size ?? cfg.tableBodyFontSize,
+    tableRowHoverBg: cfg.table_row_hover_bg ?? cfg.tableRowHoverBg,
+  };
+}
+
 export function widgetToStoredJson(widget = {}, idx = 0) {
   if (widget?.rawType || widget?.dataSource) {
     const rawTypeInput = String(widget.rawType || widget.type || "table").toLowerCase();
     const rawType = rawTypeInput === "container" ? "container" : rawTypeInput;
+    const tableOptions = readTableWidgetOptions(widget);
     return {
       id: widget.id,
       rawType,
@@ -186,6 +236,7 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       dataSource: String(widget.dataSource || "ims_postgresql").toLowerCase(),
       erpFilter: widget.erpFilter && typeof widget.erpFilter === "object" ? widget.erpFilter : {},
       emptyText: String(widget.emptyText || "Click edit and add query"),
+      ...tableOptions,
       sectionId: widget.containerId || widget.sectionId || null,
       containerPreset: resolveContainerPreset(
         { containerPreset: widget.containerPreset },
@@ -216,6 +267,7 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
   const type = String(widget.type || "table").toLowerCase();
   const rawType =
     type === "count" || type === "sum" ? "kpi" : type === "graph" ? "graph" : type === "heading" ? "heading" : type === "section" ? "container" : "table";
+  const tableOptions = readTableWidgetOptions(widget, chartConfig);
 
   return {
     id: widget.id,
@@ -227,6 +279,7 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
     dataSource: String(chartConfig.data_source || "ims_postgresql").toLowerCase(),
     erpFilter: chartConfig.erp_filter && typeof chartConfig.erp_filter === "object" ? chartConfig.erp_filter : {},
     emptyText: String(chartConfig.emptyText || "Click edit and add query"),
+    ...tableOptions,
     sectionId: chartConfig.section_id ?? null,
       containerPreset: resolveContainerPreset(
         { containerPreset: chartConfig.container_preset },
@@ -264,6 +317,7 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       layoutHeightPx: Number.isFinite(Number(chartConfig.layout_height_px))
         ? Math.round(Number(chartConfig.layout_height_px))
         : undefined,
+      ...readTableStyleFromChartConfig(chartConfig),
     },
     layout: sanitizeLayoutCoords(widget.layout, widget.id, idx),
     mobileLayout: sanitizeLayoutCoords(
@@ -293,6 +347,8 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
             : rawType === "count" || rawType === "sum" || rawType === "section"
               ? rawType
               : "table";
+  const tableChartConfig = tableWidgetOptionsToChartConfig(stored);
+  const tableStyleChartConfig = tableStyleToChartConfig(stored.style);
 
   return {
     id: stored.id || `cfg_${idx}`,
@@ -306,6 +362,8 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       data_source: stored.dataSource || "ims_postgresql",
       erp_filter: stored.erpFilter || {},
       emptyText: stored.emptyText || "Click edit and add query",
+      ...tableChartConfig,
+      ...tableStyleChartConfig,
       section_id: stored.sectionId || null,
       container_preset: stored.containerPreset || "full",
       layout_locked: stored.layoutLocked === true,

@@ -4,13 +4,13 @@ import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { getDashboardConfigByKey, listDashboardConfigs, getDashboardWidgetsFromConfig, saveDashboardWidgetsToConfig, upsertDashboardConfig, deactivateDashboardByKey, listUserAccessibleDashboards, listAllPublishedDashboards, resolveUserDefaultDashboardKey, userCanAccessDashboard, clearDefaultForUsersFromOtherDashboards } from "../models/dashboardConfig.model.js";
 import { parseDashboardDocument, remapDashboardWidgetIds, sanitizeLayoutCoords, widgetToRuntimeRow, widgetToStoredJson, normalizeDeviceTarget } from "../utils/dashboardJsonSchema.js";
 import { executeReadOnlyWidgetQuery } from "../utils/queryExecutor.js";
-import { validateErpMssqlWidgetQuery, resolveErpMssqlSqlFromRequest, resolveErpMssqlRuntimeFilters, isErpMssqlDirectRequest, parseErpMssqlDirectRequest } from "../utils/erpMssqlQuery.js";
+import { validateErpMssqlWidgetQuery, resolveErpMssqlSqlFromRequest, resolveErpMssqlRuntimeFilters, isErpMssqlDirectRequest, parseErpMssqlDirectRequest, isExternalMssqlSource, resolveExternalMssqlConfig, validateExternalMssqlWidgetQuery } from "../utils/erpMssqlQuery.js";
 import { validateSelectSql } from "../utils/sqlGenerator.js";
 import { isConfiguredWidgetQuery } from "../utils/widgetQuery.js";
 import { fetchImsDataRaw } from "../../ims/services/ims.service.js";
 
 const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings"]);
-const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql"]);
+const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql"]);
 const ALLOWED_AUDIENCE_SCOPES = new Set(["global", "users"]);
 const APP_TABLE_PREFIX = {
   ims: ["ims_"],
@@ -217,10 +217,15 @@ function normalizeWidgetFilters(rawFilters = {}) {
   const userId = userIdRaw !== undefined && userIdRaw !== null && String(userIdRaw).trim() !== ""
     ? Number(userIdRaw)
     : null;
+  const fyuidRaw = rawFilters?.fyuid ?? rawFilters?.fy_uid ?? rawFilters?.fin_year_id;
+  const fyuid = fyuidRaw !== undefined && fyuidRaw !== null && String(fyuidRaw).trim() !== ""
+    ? Number(fyuidRaw)
+    : null;
   return {
     fromDate,
     toDate,
     userId: Number.isInteger(userId) && userId > 0 ? userId : null,
+    fyuid: Number.isInteger(fyuid) && fyuid > 0 ? fyuid : null,
   };
 }
 
@@ -241,8 +246,9 @@ export const getTables = async (req, res) => {
   try {
     const appKey = normalizeAppKey(req.query?.app || req.body?.app_key || "ims");
     const dbSource = normalizeDbSource(req.query?.db_source || req.body?.db_source || "ims_postgresql");
-    if (dbSource === "erp_mssql") {
-      const imsRes = await fetchImsDataRaw("dashboard_tables");
+    if (isExternalMssqlSource(dbSource)) {
+      const { tablesRequestedData } = resolveExternalMssqlConfig(dbSource);
+      const imsRes = await fetchImsDataRaw(tablesRequestedData);
       const rows = Array.isArray(imsRes?.records) ? imsRes.records : [];
       const values = rows
         .map((row) => String(row?.table_name || row?.name || "").trim())
@@ -300,11 +306,11 @@ function sanitizeWidgetBody(body = {}) {
 
   if (!allowedTypes.has(type)) throw new Error("Invalid widget type.");
   if (requiresQuery && !query) throw new Error("Query is required.");
-  if (requiresQuery && dbSource !== "erp_mssql") {
+  if (requiresQuery && !isExternalMssqlSource(dbSource)) {
     validateSelectSql(query);
   }
-  if (requiresQuery && dbSource === "erp_mssql") {
-    validateErpMssqlWidgetQuery(query);
+  if (requiresQuery && isExternalMssqlSource(dbSource)) {
+    validateExternalMssqlWidgetQuery(query, dbSource);
   }
 
   const autoTitle =
@@ -625,11 +631,11 @@ export const previewWidgetHandler = async (req, res) => {
     const q = req.query || {};
 
     if (isErpMssqlDirectRequest(body, q)) {
-      const { filter, runtimeFilters } = parseErpMssqlDirectRequest(body, q);
+      const { filter, runtimeFilters, requestedData } = parseErpMssqlDirectRequest(body, q);
       const resolvedRuntime = resolveWidgetFiltersForUser(req, runtimeFilters);
-      validateErpMssqlWidgetQuery(filter);
+      validateExternalMssqlWidgetQuery(filter, requestedData);
       const result = await executeReadOnlyWidgetQuery(filter, {
-        source: "erp_mssql",
+        source: requestedData,
         filters: resolvedRuntime,
       });
       return res.json({
@@ -641,13 +647,13 @@ export const previewWidgetHandler = async (req, res) => {
     }
 
     const dbSource = normalizeDbSource(body.db_source || q.db_source || "ims_postgresql");
-    if (dbSource === "erp_mssql") {
+    if (isExternalMssqlSource(dbSource)) {
       const rawSql = resolveErpMssqlSqlFromRequest(body, q);
       const runtimeFilters = resolveWidgetFiltersForUser(
         req,
         resolveErpMssqlRuntimeFilters(body, q),
       );
-      validateErpMssqlWidgetQuery(rawSql);
+      validateExternalMssqlWidgetQuery(rawSql, dbSource);
       const result = await executeReadOnlyWidgetQuery(rawSql, { source: dbSource, filters: runtimeFilters });
       return res.json({
         success: true,

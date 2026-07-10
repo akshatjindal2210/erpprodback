@@ -1,7 +1,7 @@
 import { withTransaction } from "../../../config/db.js";
 import { toSafeLimitedSql } from "./sqlGenerator.js";
 import { fetchImsDataRaw } from "../../ims/services/ims.service.js";
-import { buildErpMssqlPayload, resolveErpMssqlSql, logErpMssqlInternalRequest } from "./erpMssqlQuery.js";
+import { buildExternalMssqlPayload, isExternalMssqlSource, resolveExternalMssqlSql } from "./externalMssqlQuery.js";
 
 const QUERY_TIMEOUT_MS = 8000;
 const DATE_FILTER_KEYS = ["created_at", "createdat", "created_on", "createdon", "date", "doc_dt", "docdt", "approved_at", "updated_at"];
@@ -24,11 +24,16 @@ function applyRuntimeFilters(rawSql, filters = {}) {
     filters?.userId !== undefined && filters?.userId !== null && String(filters.userId).trim() !== ""
       ? Number(filters.userId)
       : null;
+  const fyuid =
+    filters?.fyuid !== undefined && filters?.fyuid !== null && String(filters.fyuid).trim() !== ""
+      ? Number(filters.fyuid)
+      : null;
 
   return String(rawSql || "")
     .replace(/\{\{\s*fromDate\s*\}\}/gi, fromDate ? `'${escapeSqlLiteral(fromDate)}'` : "NULL")
     .replace(/\{\{\s*toDate\s*\}\}/gi, toDate ? `'${escapeSqlLiteral(toDate)}'` : "NULL")
-    .replace(/\{\{\s*userId\s*\}\}/gi, Number.isFinite(userId) ? String(userId) : "NULL");
+    .replace(/\{\{\s*userId\s*\}\}/gi, Number.isFinite(userId) ? String(userId) : "NULL")
+    .replace(/\{\{\s*fyuid\s*\}\}/gi, Number.isFinite(fyuid) ? String(fyuid) : "NULL");
 }
 
 async function runPostgresReadOnlyQuery(rawSql) {
@@ -89,13 +94,12 @@ function applyResultFilters(rows = [], filters = {}) {
   });
 }
 
-async function runErpReadOnlyQuery(rawSql, filters = {}) {
-  const resolvedSql = resolveErpMssqlSql(rawSql, filters);
-  const erpRequest = buildErpMssqlPayload(resolvedSql);
-  // logErpMssqlInternalRequest(erpRequest);
+async function runExternalMssqlReadOnlyQuery(rawSql, filters = {}, source = "erp_mssql") {
+  const resolvedSql = resolveExternalMssqlSql(rawSql, filters);
+  const erpRequest = buildExternalMssqlPayload(resolvedSql, source);
   const response = await fetchImsDataRaw(erpRequest.requestedData, erpRequest.filter);
   if (!response?.success) {
-    throw new Error(response?.message || "ERP data source query failed.");
+    throw new Error(response?.message || "External SQL Server query failed.");
   }
   return {
     rows: Array.isArray(response?.records) ? response.records : [],
@@ -106,9 +110,9 @@ async function runErpReadOnlyQuery(rawSql, filters = {}) {
 export async function executeReadOnlyWidgetQuery(rawSql, options = {}) {
   const source = String(options?.source || "ims_postgresql").toLowerCase();
   const filters = options?.filters && typeof options.filters === "object" ? options.filters : {};
-  if (source === "erp_mssql") {
-    const { rows, erpRequest } = await runErpReadOnlyQuery(rawSql, filters);
-    // ERP SQL is authoritative — only {{fromDate}}/{{toDate}}/{{userId}} in the query are applied
+  if (isExternalMssqlSource(source)) {
+    const { rows, erpRequest } = await runExternalMssqlReadOnlyQuery(rawSql, filters, source);
+    // ERP SQL is authoritative — only {{fromDate}}/{{toDate}}/{{userId}}/{{fyuid}} in the query are applied
     // (via resolveErpMssqlSql). Do not post-filter by docdt etc.; builder preview always sends
     // today's dashboard dates and would hide rows whose docdt is outside that range.
     // rows: applyResultFilters(rows, filters),

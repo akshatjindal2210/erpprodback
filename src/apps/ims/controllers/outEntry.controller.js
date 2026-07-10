@@ -159,6 +159,7 @@ export const createOutEntry = async (req, res) => {
       const storedEntryType = isOutEntryInventoryOut(entry_type)
         ? OUT_ENTRY_TYPE.INVENTORY_OUT
         : OUT_ENTRY_TYPE.PACKING_AREA;
+      const autoApprove = !isOutEntryInventoryOut(entry_type);
 
       const result = await withTransaction(async (client) => {
         const row = await insertOutEntry({
@@ -176,7 +177,7 @@ export const createOutEntry = async (req, res) => {
           out_uid: outUid,
           userId,
           scanned_boxes: scannedList,
-          approved: true,
+          approved: autoApprove,
           entry_type: storedEntryType,
         }, { client });
 
@@ -191,9 +192,9 @@ export const createOutEntry = async (req, res) => {
           scan_complete: summary.scan_complete,
           boxes_required: summary.boxes_required,
           boxes_scanned: summary.boxes_scanned,
-          approved: true,
-          approved_by: userId,
-          approved_at: new Date(),
+          approved: autoApprove,
+          approved_by: autoApprove ? userId : null,
+          approved_at: autoApprove ? new Date() : null,
         };
         await updateOutEntries(patchFields, { out_uid: outUid }, { client });
         return { outUid };
@@ -204,7 +205,7 @@ export const createOutEntry = async (req, res) => {
       return res.status(201).json({
         success: true,
         message: isOutEntryInventoryOut(entry_type)
-          ? "Inventory out completed."
+          ? "Inventory out submitted. Awaiting approval."
           : "Boxes moved to packing area.",
         data,
       });
@@ -300,6 +301,108 @@ export const updateOutEntry = async (req, res) => {
 
     const existing = await findOutEntry({ out_uid });
     if (!existing) return res.status(404).json({ success: false, message: "Not found" });
+
+    if (isOutEntryInventoryOut(existing.entry_type)) {
+      let nextReason = existing.reason;
+      if (reason !== undefined || reason_text !== undefined) {
+        const normalizedReason = normalizeOutEntryReasonInput(reason, reason_text);
+        if (!normalizedReason) {
+          return res.status(400).json({ success: false, message: "Reason is required." });
+        }
+        nextReason = normalizedReason;
+      }
+
+      const hasBusinessChanges =
+        remarks !== undefined ||
+        scanned_boxes !== undefined ||
+        reason !== undefined ||
+        reason_text !== undefined;
+
+      let finalScanned = await scannedListForOut({
+        out_uid,
+        scanned_boxes: scanned_boxes !== undefined ? scanned_boxes : undefined,
+      });
+
+      if (scanned_boxes !== undefined) {
+        if (finalScanned.length > 0) {
+          const scanErr = await validateOutEntryInventoryOutScannedBoxes(finalScanned, out_uid);
+          if (scanErr) return res.status(400).json({ success: false, message: scanErr });
+        }
+      } else {
+        finalScanned = await findScannedBoxUidsForOutEntry(out_uid);
+      }
+
+      if (!finalScanned.length) {
+        return res.status(400).json({ success: false, message: "Scan at least one box." });
+      }
+
+      const summary = await getOutEntryOtherScanSummary({ scanned_boxes: finalScanned });
+
+      if (normalizedApproved === true && !summary.scan_complete) {
+        return res.status(400).json({
+          success: false,
+          message: "Scan all required boxes before approving.",
+        });
+      }
+
+      const willApprove = summary.scan_complete && normalizedApproved === true;
+      const wasApproved = Boolean(existing.approved);
+      const scansChanged = scanned_boxes !== undefined;
+      const approvalChanged = willApprove !== wasApproved;
+
+      const result = await withTransaction(async (client) => {
+        if (scansChanged || approvalChanged) {
+          await syncOutEntryBoxLinks({
+            out_uid,
+            userId,
+            scanned_boxes: finalScanned,
+            approved: willApprove,
+            entry_type: OUT_ENTRY_TYPE.INVENTORY_OUT,
+          }, { client });
+        }
+
+        const listMeta =
+          scansChanged || approvalChanged
+            ? await snapshotMetadataFromBoxUids(finalScanned, { includePackingNumbers: true })
+            : null;
+
+        const fields = {
+          ...(remarks !== undefined && { remarks }),
+          reason: nextReason,
+          ...(listMeta && {
+            packing_numbers: listMeta.packing_numbers,
+            item_codes: listMeta.item_codes,
+            qtys: listMeta.qtys,
+            total_qty: listMeta.total_qty,
+          }),
+          updated_by: userId,
+          updated_at: new Date(),
+          scan_complete: summary.scan_complete,
+          boxes_required: summary.boxes_required,
+          boxes_scanned: summary.boxes_scanned,
+        };
+
+        if (!summary.scan_complete) {
+          fields.approved = false;
+          fields.approved_by = null;
+          fields.approved_at = null;
+        }
+
+        applyApprovalWorkflow({
+          req,
+          fields,
+          incomingApproved: summary.scan_complete ? normalizedApproved : false,
+          hasBusinessChanges,
+        });
+
+        await updateOutEntries(fields, { out_uid }, { client });
+        return { out_uid };
+      });
+
+      const data = await findOutEntry({ out_uid: result.out_uid });
+      await logActivity(req, { action: "update", entity: "out_entry", entity_id: out_uid });
+      return res.json({ success: true, data });
+    }
 
     if (isOutEntryAutoAuthorized(existing.entry_type)) {
       let nextReason = existing.reason;
