@@ -303,13 +303,14 @@ function sanitizeWidgetBody(body = {}) {
   const query = String(body.query || "").trim();
   const dbSource = normalizeDbSource(body?.chart_config?.data_source || "ims_postgresql");
   const requiresQuery = type === "count" || type === "sum" || type === "table" || type === "graph";
+  const isDraft = body.is_published === false;
 
   if (!allowedTypes.has(type)) throw new Error("Invalid widget type.");
-  if (requiresQuery && !query) throw new Error("Query is required.");
-  if (requiresQuery && !isExternalMssqlSource(dbSource)) {
+  if (requiresQuery && !query && !isDraft) throw new Error("Query is required.");
+  if (requiresQuery && query && !isExternalMssqlSource(dbSource)) {
     validateSelectSql(query);
   }
-  if (requiresQuery && isExternalMssqlSource(dbSource)) {
+  if (requiresQuery && query && isExternalMssqlSource(dbSource)) {
     validateExternalMssqlWidgetQuery(query, dbSource);
   }
 
@@ -619,7 +620,20 @@ export const listWidgetsHandler = async (_req, res) => {
     const storagePageKey = "default";
     const dashboardKey = normalizeDashboardKey(_req.body?.dashboard_key || _req.query?.dashboard_key || "default");
     const rows = await getWidgetsForBuilder(appKey, storagePageKey, dashboardKey);
-    res.json({ success: true, data: rows });
+    const configRow = await getDashboardConfigByKey(appKey, storagePageKey, dashboardKey, { publishedOnly: false });
+    const parsed = normalizeDashboardJson(configRow?.dashboard_json || {});
+    res.json({
+      success: true,
+      data: rows,
+      layout_px: Array.isArray(parsed.layout_px) ? parsed.layout_px : [],
+      canvas_width: Number.isFinite(Number(parsed.canvas_width)) && Number(parsed.canvas_width) >= 200
+        ? Math.round(Number(parsed.canvas_width))
+        : null,
+      layout_px_mobile: Array.isArray(parsed.layout_px_mobile) ? parsed.layout_px_mobile : [],
+      canvas_width_mobile: Number.isFinite(Number(parsed.canvas_width_mobile)) && Number(parsed.canvas_width_mobile) >= 200
+        ? Math.round(Number(parsed.canvas_width_mobile))
+        : null,
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -778,8 +792,9 @@ export const getDashboardWidgetsHandler = async (req, res) => {
     const configRow = await resolveRuntimeDashboardConfig(appKey, req.user?.id, requestedDashboardKey, {
       isSuperAdmin,
     });
+    const parsedConfig = configRow ? normalizeDashboardJson(configRow.dashboard_json) : { widgets: [] };
     const allWidgets = configRow
-      ? normalizeDashboardJson(configRow.dashboard_json).widgets.map((widget, idx) => widgetToRuntimeRow(widget, idx))
+      ? parsedConfig.widgets.map((widget, idx) => widgetToRuntimeRow(widget, idx))
       : [];
 
     // Page Access controls which widgets a user sees on the main dashboard (by permission).
@@ -841,6 +856,14 @@ export const getDashboardWidgetsHandler = async (req, res) => {
       success: true,
       data: results,
       layout_blueprint: buildLayoutBlueprint(pageWidgets),
+      layout_px: Array.isArray(parsedConfig.layout_px) ? parsedConfig.layout_px : [],
+      canvas_width: Number.isFinite(Number(parsedConfig.canvas_width)) && Number(parsedConfig.canvas_width) >= 200
+        ? Math.round(Number(parsedConfig.canvas_width))
+        : null,
+      layout_px_mobile: Array.isArray(parsedConfig.layout_px_mobile) ? parsedConfig.layout_px_mobile : [],
+      canvas_width_mobile: Number.isFinite(Number(parsedConfig.canvas_width_mobile)) && Number(parsedConfig.canvas_width_mobile) >= 200
+        ? Math.round(Number(parsedConfig.canvas_width_mobile))
+        : null,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -877,7 +900,10 @@ export const saveDashboardDraftHandler = async (req, res) => {
     });
     await applyDashboardDefaultForUsers(appKey, pageKey, dashboardKey, resolvedDefaultForUserIds, req.user?.id ?? null);
 
-    const normalizedWidgets = remapDashboardWidgetIds(dashboardJson.widgets);
+    const { widgets: normalizedWidgets, layoutPx: normalizedLayoutPx } = remapDashboardWidgetIds(
+      dashboardJson.widgets,
+      dashboardJson.layout_px,
+    );
 
     const row = await upsertDashboardConfig({
       appKey,
@@ -887,7 +913,11 @@ export const saveDashboardDraftHandler = async (req, res) => {
       scope: resolvedScope,
       targetUserIds: resolvedTargetUserIds,
       defaultForUserIds: resolvedDefaultForUserIds,
-      dashboardJson: { ...dashboardJson, widgets: normalizedWidgets },
+      dashboardJson: {
+        ...dashboardJson,
+        widgets: normalizedWidgets,
+        ...(normalizedLayoutPx.length ? { layout_px: normalizedLayoutPx } : {}),
+      },
       actorId: req.user?.id ?? null,
       isPublished: keepPublished,
       pageModule: null,
@@ -925,7 +955,10 @@ export const publishDashboardConfigHandler = async (req, res) => {
       targetUserIds: resolvedTargetUserIds,
     });
     await applyDashboardDefaultForUsers(appKey, pageKey, dashboardKey, resolvedDefaultForUserIds, req.user?.id ?? null);
-    const normalizedWidgets = remapDashboardWidgetIds(dashboardJson.widgets);
+    const { widgets: normalizedWidgets, layoutPx: normalizedLayoutPx } = remapDashboardWidgetIds(
+      dashboardJson.widgets,
+      dashboardJson.layout_px,
+    );
     const row = await upsertDashboardConfig({
       appKey,
       pageKey,
@@ -934,7 +967,11 @@ export const publishDashboardConfigHandler = async (req, res) => {
       scope: resolvedScope,
       targetUserIds: resolvedTargetUserIds,
       defaultForUserIds: resolvedDefaultForUserIds,
-      dashboardJson: { ...dashboardJson, widgets: normalizedWidgets },
+      dashboardJson: {
+        ...dashboardJson,
+        widgets: normalizedWidgets,
+        ...(normalizedLayoutPx.length ? { layout_px: normalizedLayoutPx } : {}),
+      },
       actorId: req.user?.id ?? null,
       isPublished: true,
       pageModule: null,

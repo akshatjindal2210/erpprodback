@@ -1,5 +1,5 @@
-export const applyApprovalWorkflow = ({req, fields, incomingApproved, hasBusinessChanges }) => {
-  const canAuthorize = Boolean(req?.permission?.can_authorize) || req?.user?.type === "super_admin";
+export const applyApprovalWorkflow = ({ req, fields, incomingApproved, hasBusinessChanges, canAuthorize: canAuthorizeOverride }) => {
+  const canAuthorize = canAuthorizeOverride !== undefined ? Boolean(canAuthorizeOverride) : Boolean(req?.permission?.can_authorize) || req?.user?.type === "super_admin";
 
   if (incomingApproved === true) {
     if (!canAuthorize) {

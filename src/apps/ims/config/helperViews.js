@@ -20,6 +20,9 @@ function fieldsForItems(mod, act) {
   if (mod === "forwarding_note_master" && act === VIEW) return [...itemPicker];
   if (mod === "forwarding_note_master" && isForm(act)) return [...itemModal];
 
+  if (mod === "out_entry" && act === VIEW) return [...itemPicker];
+  if (mod === "out_entry" && isForm(act)) return [...itemModal];
+
   if (mod === "location_master" && act === VIEW) return [...itemPicker];
   if (mod === "location_master" && isForm(act)) return [...itemModal];
 

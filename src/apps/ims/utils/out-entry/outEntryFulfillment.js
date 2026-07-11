@@ -4,7 +4,9 @@ import {
   findInHandBoxesByScanCodes,
   findBoxesByScanCodesAny,
   matchBoxRowByScanCode,
+  matchBoxRowByAnyScanCodes,
 } from "../../models/box.model.js";
+import { expandStickerScanLookupCodes } from "../box/stickerScanParse.js";
 import { findFuidDetailsForOutEntry } from "../../models/outEntry.model.js";
 import { isBoxAvailableForOutEntryScan, isBoxInHand, isBoxInStore, isBoxStockAdjustmentOut } from "../box/boxInventory.js";
 import { isForwardingLooseBox } from "../forwarding-note/forwardingAvailableStock.js";
@@ -541,12 +543,17 @@ export async function resolveOutEntryOtherBatchScan({
       ? Number(forOutUid)
       : null;
 
-  const normalizedItems = (items || []).map((item, index) => ({
-    id: item?.id != null ? String(item.id) : String(index),
-    code: item?.code != null ? String(item.code).trim() : "",
-  }));
+  const normalizedItems = (items || []).map((item, index) => {
+    const raw = item?.code != null ? String(item.code).trim() : "";
+    const lookupCodes = expandStickerScanLookupCodes(raw);
+    return {
+      id: item?.id != null ? String(item.id) : String(index),
+      code: raw,
+      lookupCodes,
+    };
+  });
 
-  const codes = normalizedItems.map((item) => item.code).filter(Boolean);
+  const codes = [...new Set(normalizedItems.flatMap((item) => item.lookupCodes).filter(Boolean))];
   const [inHandRows, anyRows] = await Promise.all([
     findInHandBoxesByScanCodes(codes),
     findBoxesByScanCodesAny(codes),
@@ -555,7 +562,7 @@ export async function resolveOutEntryOtherBatchScan({
   const confirmed = new Set((session_scanned || []).map((u) => String(u).trim()).filter(Boolean));
   const results = [];
 
-  for (const { id, code } of normalizedItems) {
+  for (const { id, code, lookupCodes } of normalizedItems) {
     if (!code) {
       results.push({
         id,
@@ -567,8 +574,8 @@ export async function resolveOutEntryOtherBatchScan({
       continue;
     }
 
-    const inHand = matchBoxRowByScanCode(inHandRows, code);
-    const anyRow = matchBoxRowByScanCode(anyRows, code);
+    const inHand = lookupCodes.length ? matchBoxRowByAnyScanCodes(inHandRows, lookupCodes) : null;
+    const anyRow = lookupCodes.length ? matchBoxRowByAnyScanCodes(anyRows, lookupCodes) : null;
     const canonical = inHand?.box_no_uid != null ? String(inHand.box_no_uid).trim() : null;
 
     if (!canonical) {
@@ -649,12 +656,17 @@ export async function resolveOutEntryInventoryOutBatchScan({
       ? Number(forOutUid)
       : null;
 
-  const normalizedItems = (items || []).map((item, index) => ({
-    id: item?.id != null ? String(item.id) : String(index),
-    code: item?.code != null ? String(item.code).trim() : "",
-  }));
+  const normalizedItems = (items || []).map((item, index) => {
+    const raw = item?.code != null ? String(item.code).trim() : "";
+    const lookupCodes = expandStickerScanLookupCodes(raw);
+    return {
+      id: item?.id != null ? String(item.id) : String(index),
+      code: raw,
+      lookupCodes,
+    };
+  });
 
-  const codes = normalizedItems.map((item) => item.code).filter(Boolean);
+  const codes = [...new Set(normalizedItems.flatMap((item) => item.lookupCodes).filter(Boolean))];
   const [inHandRows, anyRows] = await Promise.all([
     findInHandBoxesByScanCodes(codes),
     findBoxesByScanCodesAny(codes),
@@ -663,7 +675,7 @@ export async function resolveOutEntryInventoryOutBatchScan({
   const confirmed = new Set((session_scanned || []).map((u) => String(u).trim()).filter(Boolean));
   const results = [];
 
-  for (const { id, code } of normalizedItems) {
+  for (const { id, code, lookupCodes } of normalizedItems) {
     if (!code) {
       results.push({
         id,
@@ -675,8 +687,8 @@ export async function resolveOutEntryInventoryOutBatchScan({
       continue;
     }
 
-    const inHand = matchBoxRowByScanCode(inHandRows, code);
-    const anyRow = matchBoxRowByScanCode(anyRows, code);
+    const inHand = lookupCodes.length ? matchBoxRowByAnyScanCodes(inHandRows, lookupCodes) : null;
+    const anyRow = lookupCodes.length ? matchBoxRowByAnyScanCodes(anyRows, lookupCodes) : null;
     const canonical = inHand?.box_no_uid != null ? String(inHand.box_no_uid).trim() : null;
 
     if (!canonical) {

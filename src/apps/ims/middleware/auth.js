@@ -25,7 +25,7 @@ export const authenticate = async (req, res, next) => {
     const decoded = jwt.verify(token, config.jwt_secret);
 // console.log("__ auth __",decoded);
     const [user] = await dbQuery(
-      `SELECT id, name, username, email, type, status, auth_source, usercode FROM ${M.USERS} WHERE id = $1`,
+      `SELECT id, name, username, email, type, status, auth_source, usercode, special_permissions FROM ${M.USERS} WHERE id = $1`,
       [decoded.id]
     );
 

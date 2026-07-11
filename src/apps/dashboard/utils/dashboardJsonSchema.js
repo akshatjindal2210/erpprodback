@@ -27,7 +27,15 @@ export function normalizeUserIds(userIds = []) {
 }
 
 export function parseDashboardDocument(raw = {}) {
-  const doc = raw && typeof raw === "object" ? raw : {};
+  let doc = raw;
+  if (typeof raw === "string") {
+    try {
+      doc = JSON.parse(raw);
+    } catch {
+      doc = {};
+    }
+  }
+  doc = doc && typeof doc === "object" ? doc : {};
   const meta = doc.meta && typeof doc.meta === "object" ? doc.meta : {};
   const widgets = Array.isArray(doc.widgets) ? doc.widgets : [];
   return { doc, meta, widgets };
@@ -37,7 +45,7 @@ function createPersistedWidgetId(seed = Date.now()) {
   return `w_${seed}_${Math.floor(Math.random() * 100000)}`;
 }
 
-export function remapDashboardWidgetIds(rawWidgets = []) {
+export function remapDashboardWidgetIds(rawWidgets = [], layoutPx = []) {
   const widgets = rawWidgets.map((widget, idx) => widgetToStoredJson(widget, idx));
   const idMap = new Map();
   let seed = Date.now();
@@ -68,7 +76,7 @@ export function remapDashboardWidgetIds(rawWidgets = []) {
       })
       .filter(Boolean);
 
-  return widgets.map((widget, idx) => {
+  const remappedWidgets = widgets.map((widget, idx) => {
     const newId = String(remapRef(widget.id) || widget.id);
     const sectionId = widget.sectionId ? remapRef(widget.sectionId) : null;
 
@@ -77,11 +85,25 @@ export function remapDashboardWidgetIds(rawWidgets = []) {
       id: newId,
       sectionId,
       nestedLayout: remapLayoutList(widget.nestedLayout),
+      nestedLayoutPx: remapLayoutList(widget.nestedLayoutPx),
       mobileNestedLayout: remapLayoutList(widget.mobileNestedLayout),
       layout: sanitizeLayoutCoords({ ...(widget.layout || {}), i: newId }, newId, idx),
       mobileLayout: sanitizeLayoutCoords({ ...(widget.mobileLayout || {}), i: newId }, newId, idx),
+      style: widget.style?.boxPx
+        ? {
+          ...(widget.style || {}),
+          boxPx: {
+            ...(widget.style.boxPx || {}),
+          },
+        }
+        : (widget.style || {}),
     };
   });
+
+  return {
+    widgets: remappedWidgets,
+    layoutPx: remapLayoutList(layoutPx),
+  };
 }
 
 export function buildDashboardDocument({
@@ -181,6 +203,7 @@ function readTableWidgetOptions(widget = {}, chartConfig = {}) {
     ).trim(),
     tableSearchPosition: (widget.tableSearchPosition ?? cfg.table_search_position) === "left" ? "left" : "right",
     tableColumnSortEnabled: widget.tableColumnSortEnabled === true || cfg.table_column_sort_enabled === true,
+    tableExportEnabled: widget.tableExportEnabled === true || cfg.table_export_enabled === true,
   };
 }
 
@@ -190,6 +213,7 @@ function tableWidgetOptionsToChartConfig(options = {}) {
     table_search_placeholder: String(options.tableSearchPlaceholder || "").trim(),
     table_search_position: options.tableSearchPosition === "left" ? "left" : "right",
     table_column_sort_enabled: options.tableColumnSortEnabled === true,
+    table_export_enabled: options.tableExportEnabled === true,
   };
 }
 
@@ -244,7 +268,9 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       ),
       layoutLocked: widget.layoutLocked === true || hasManualWidgetLayout(widget),
       nestedLayout: Array.isArray(widget.nestedLayout) ? widget.nestedLayout : [],
+      nestedLayoutPx: Array.isArray(widget.nestedLayoutPx) ? widget.nestedLayoutPx : [],
       mobileNestedLayout: Array.isArray(widget.mobileNestedLayout) ? widget.mobileNestedLayout : [],
+      mobileNestedLayoutPx: Array.isArray(widget.mobileNestedLayoutPx) ? widget.mobileNestedLayoutPx : [],
       mobilePaddingLeft: widget.mobilePaddingLeft ?? 8,
       mobilePaddingRight: widget.mobilePaddingRight ?? 8,
       mobilePaddingTop: widget.mobilePaddingTop ?? 8,
@@ -294,6 +320,7 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
         },
       }),
     nestedLayout: Array.isArray(chartConfig.nested_layout) ? chartConfig.nested_layout : [],
+    nestedLayoutPx: Array.isArray(chartConfig.nested_layout_px) ? chartConfig.nested_layout_px : [],
     mobileNestedLayout: Array.isArray(chartConfig.mobile_nested_layout) ? chartConfig.mobile_nested_layout : [],
     mobilePaddingLeft: chartConfig.mobile_padding_left ?? 8,
     mobilePaddingRight: chartConfig.mobile_padding_right ?? 8,
@@ -309,6 +336,7 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       margin: chartConfig.margin,
       contentAlign: chartConfig.contentAlign,
       emptyTextPosition: chartConfig.emptyTextPosition,
+      titlePosition: chartConfig.titlePosition === "bottom" ? "bottom" : "top",
       kpiLabelPosition: chartConfig.kpiLabelPosition,
       kpiLabelFontSize: chartConfig.kpiLabelFontSize,
       layoutWidthPx: Number.isFinite(Number(chartConfig.layout_width_px))
@@ -317,6 +345,14 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       layoutHeightPx: Number.isFinite(Number(chartConfig.layout_height_px))
         ? Math.round(Number(chartConfig.layout_height_px))
         : undefined,
+      boxPx: Number.isFinite(Number(chartConfig.box_width))
+        ? {
+          left: Math.max(0, Math.round(Number(chartConfig.box_left ?? 0))),
+          top: Math.max(0, Math.round(Number(chartConfig.box_top ?? 0))),
+          width: Math.max(40, Math.round(Number(chartConfig.box_width))),
+          height: Math.max(32, Math.round(Number(chartConfig.box_height ?? 64))),
+        }
+        : (chartConfig.boxPx && Number.isFinite(Number(chartConfig.boxPx.width)) ? chartConfig.boxPx : undefined),
       ...readTableStyleFromChartConfig(chartConfig),
     },
     layout: sanitizeLayoutCoords(widget.layout, widget.id, idx),
@@ -368,7 +404,9 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       container_preset: stored.containerPreset || "full",
       layout_locked: stored.layoutLocked === true,
       nested_layout: Array.isArray(stored.nestedLayout) ? stored.nestedLayout : [],
+      nested_layout_px: Array.isArray(stored.nestedLayoutPx) ? stored.nestedLayoutPx : [],
       mobile_nested_layout: Array.isArray(stored.mobileNestedLayout) ? stored.mobileNestedLayout : [],
+      mobile_nested_layout_px: Array.isArray(stored.mobileNestedLayoutPx) ? stored.mobileNestedLayoutPx : [],
       mobile_padding_left: stored.mobilePaddingLeft ?? 8,
       mobile_padding_right: stored.mobilePaddingRight ?? 8,
       mobile_padding_top: stored.mobilePaddingTop ?? 8,
@@ -382,6 +420,7 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       margin: stored.style?.margin,
       contentAlign: stored.style?.contentAlign,
       emptyTextPosition: stored.style?.emptyTextPosition,
+      titlePosition: stored.style?.titlePosition === "bottom" ? "bottom" : "top",
       kpiLabelPosition: stored.style?.kpiLabelPosition,
       kpiLabelFontSize: stored.style?.kpiLabelFontSize,
       layout_width_px: Number.isFinite(Number(stored.style?.layoutWidthPx))
@@ -390,6 +429,11 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       layout_height_px: Number.isFinite(Number(stored.style?.layoutHeightPx))
         ? Math.round(Number(stored.style.layoutHeightPx))
         : undefined,
+      box_left: Number.isFinite(Number(stored.style?.boxPx?.left)) ? Math.round(Number(stored.style.boxPx.left)) : undefined,
+      box_top: Number.isFinite(Number(stored.style?.boxPx?.top)) ? Math.round(Number(stored.style.boxPx.top)) : undefined,
+      box_width: Number.isFinite(Number(stored.style?.boxPx?.width)) ? Math.round(Number(stored.style.boxPx.width)) : undefined,
+      box_height: Number.isFinite(Number(stored.style?.boxPx?.height)) ? Math.round(Number(stored.style.boxPx.height)) : undefined,
+      boxPx: stored.style?.boxPx && typeof stored.style.boxPx === "object" ? stored.style.boxPx : undefined,
     },
     layout: sanitizeLayoutCoords(stored.layout, stored.id || `cfg_${idx}`, idx),
     mobile_layout: sanitizeLayoutCoords(stored.mobileLayout, stored.id || `cfg_${idx}`, idx),

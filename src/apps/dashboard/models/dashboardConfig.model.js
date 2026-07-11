@@ -221,20 +221,54 @@ export async function upsertDashboardConfig({
       ? normalizeUserIds(defaultForUserIds)
       : normalizeUserIds(existingMeta?.defaultForUserIds || []);
 
-  const payload = buildDashboardDocument({
-    appKey,
-    pageKey,
-    dashboardKey: normalizedDashboardKey,
-    dashboardName: String(dashboardName || normalizedDashboardKey || "Dashboard").trim(),
-    scope: normalizedScope,
-    targetUserIds: normalizedTargetUsers,
-    defaultForUserIds: resolvedDefaultForUserIds,
-    widgets: incoming.widgets,
-    actorId,
-    isPublished,
-    version: incoming.doc?.version || 1,
-    pageModule: resolvedPageModule,
-  });
+  const existingDoc = existing ? parseDashboardDocument(existing.dashboard_json).doc : {};
+  const incomingLayoutPx = Array.isArray(incoming.doc?.layout_px) ? incoming.doc.layout_px : [];
+  const existingLayoutPx = Array.isArray(existingDoc?.layout_px) ? existingDoc.layout_px : [];
+  // Prefer incoming layout_px; if omitted (widget-only saves), keep the existing pixel layout.
+  const resolvedLayoutPx = incomingLayoutPx.length ? incomingLayoutPx : existingLayoutPx;
+  const incomingCanvasWidth = Number(incoming.doc?.canvas_width);
+  const existingCanvasWidth = Number(existingDoc?.canvas_width);
+  const resolvedCanvasWidth = Number.isFinite(incomingCanvasWidth) && incomingCanvasWidth >= 200
+    ? Math.round(incomingCanvasWidth)
+    : (Number.isFinite(existingCanvasWidth) && existingCanvasWidth >= 200
+      ? Math.round(existingCanvasWidth)
+      : null);
+
+  const incomingLayoutPxMobile = Array.isArray(incoming.doc?.layout_px_mobile) ? incoming.doc.layout_px_mobile : [];
+  const existingLayoutPxMobile = Array.isArray(existingDoc?.layout_px_mobile) ? existingDoc.layout_px_mobile : [];
+  const resolvedLayoutPxMobile = incomingLayoutPxMobile.length
+    ? incomingLayoutPxMobile
+    : (Object.prototype.hasOwnProperty.call(incoming.doc || {}, "layout_px_mobile")
+      ? incomingLayoutPxMobile
+      : existingLayoutPxMobile);
+  const incomingCanvasWidthMobile = Number(incoming.doc?.canvas_width_mobile);
+  const existingCanvasWidthMobile = Number(existingDoc?.canvas_width_mobile);
+  const resolvedCanvasWidthMobile = Number.isFinite(incomingCanvasWidthMobile) && incomingCanvasWidthMobile >= 200
+    ? Math.round(incomingCanvasWidthMobile)
+    : (Number.isFinite(existingCanvasWidthMobile) && existingCanvasWidthMobile >= 200
+      ? Math.round(existingCanvasWidthMobile)
+      : null);
+
+  const payload = {
+    ...buildDashboardDocument({
+      appKey,
+      pageKey,
+      dashboardKey: normalizedDashboardKey,
+      dashboardName: String(dashboardName || normalizedDashboardKey || "Dashboard").trim(),
+      scope: normalizedScope,
+      targetUserIds: normalizedTargetUsers,
+      defaultForUserIds: resolvedDefaultForUserIds,
+      widgets: incoming.widgets,
+      actorId,
+      isPublished,
+      version: incoming.doc?.version || 1,
+      pageModule: resolvedPageModule,
+    }),
+    ...(resolvedLayoutPx.length ? { layout_px: resolvedLayoutPx } : {}),
+    ...(resolvedCanvasWidth != null ? { canvas_width: resolvedCanvasWidth } : {}),
+    ...(resolvedLayoutPxMobile.length ? { layout_px_mobile: resolvedLayoutPxMobile } : {}),
+    ...(resolvedCanvasWidthMobile != null ? { canvas_width_mobile: resolvedCanvasWidthMobile } : {}),
+  };
 
   if (existing?.id) {
     const updated = await dbQuery(
@@ -273,6 +307,8 @@ export async function saveDashboardWidgetsToConfig({
   actorId = null,
   isPublished = false,
 }) {
+  const existing = await getDashboardConfigByKey(appKey, pageKey, dashboardKey, { publishedOnly: false });
+  const { doc } = parseDashboardDocument(existing?.dashboard_json || {});
   return upsertDashboardConfig({
     appKey,
     pageKey,
@@ -280,7 +316,20 @@ export async function saveDashboardWidgetsToConfig({
     dashboardName,
     scope,
     targetUserIds,
-    dashboardJson: { version: 1, widgets },
+    dashboardJson: {
+      version: doc?.version || 1,
+      widgets,
+      ...(Array.isArray(doc?.layout_px) && doc.layout_px.length ? { layout_px: doc.layout_px } : {}),
+      ...(Number.isFinite(Number(doc?.canvas_width)) && Number(doc.canvas_width) >= 200
+        ? { canvas_width: Math.round(Number(doc.canvas_width)) }
+        : {}),
+      ...(Array.isArray(doc?.layout_px_mobile) && doc.layout_px_mobile.length
+        ? { layout_px_mobile: doc.layout_px_mobile }
+        : {}),
+      ...(Number.isFinite(Number(doc?.canvas_width_mobile)) && Number(doc.canvas_width_mobile) >= 200
+        ? { canvas_width_mobile: Math.round(Number(doc.canvas_width_mobile)) }
+        : {}),
+    },
     actorId,
     isPublished,
   });

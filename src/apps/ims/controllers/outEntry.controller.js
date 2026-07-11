@@ -1,6 +1,6 @@
 import { findOutEntries, findOutEntry, insertOutEntry, updateOutEntries, deleteOutEntries, findFuidDetailsForOutEntry, findOutEntryLinkedBoxes, findQcHoldDetailsForOutEntry, clearOutEntryDraftScans, resetBoxesForOutEntry, findAnyOutEntryByFuid, findDistinctOutEntryReasons } from "../models/outEntry.model.js";
 import { findUser } from "../../core/models/user.model.js";
-import { findForwardingNote, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry } from "../models/forwardingNote.model.js";
+import { findAvailableBoxes, findForwardingNote, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry } from "../models/forwardingNote.model.js";
 import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
@@ -8,10 +8,11 @@ import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { findScannedBoxUidsForOutEntry, getOutEntryScanSummary, getOutEntryOtherScanSummary, getOutEntryQcAreaScanSummary, resolveOutEntryBatchScan, resolveOutEntryOtherBatchScan, resolveOutEntryInventoryOutBatchScan, resolveOutEntryQcAreaBatchScan } from "../utils/out-entry/outEntryFulfillment.js";
 import { enrichOutEntryItems, enrichOutEntryListRows, enrichOutEntryNote, isOutEntryAutoAuthorized, isOutEntryInventoryOut, isOutEntryPackingArea, isOutEntryQcArea, normalizeOutEntryReasonInput, normalizeOutEntryType, OUT_ENTRY_TYPE, scannedListForOut, syncOutEntryBoxLinks, validateOutEntryInventoryOutScannedBoxes, validateOutEntryOtherScannedBoxes, validateOutEntryQcAreaScannedBoxes, validateOutEntryScannedBoxes } from "../utils/out-entry/index.js";
-import { withTransaction } from "../../../config/db.js";
+import dbQuery, { withTransaction } from "../../../config/db.js";
 import { enrichQcHoldListRows } from "../utils/qc-hold-material/qcHoldList.js";
 import { snapshotMetadataFromBoxUids, snapshotOutEntryMetadata } from "../utils/erp-api/entryListMetadata.js";
 import { parsePositiveIntId } from "../../core/utils/parseId.js";
+import { hasInventoryOutApprovePermission, hasInventoryOutPermission } from "../utils/imsSpecialPermissions.js";
 
 const OUT_CFG = getCrudModuleConfig("out_entry");
 
@@ -70,8 +71,7 @@ export const createOutEntry = async (req, res) => {
     // Backend Permission Check for Inventory Out
     if (isOutEntryInventoryOut(entry_type)) {
       const user = await findUser({ id: userId });
-      const isSuperAdmin = user?.type === "super_admin";
-      if (!isSuperAdmin && !user?.special_permissions?.ims?.inventory_out) {
+      if (!hasInventoryOutPermission(user)) {
         return res.status(403).json({ 
           success: false, 
           message: "You do not have permission to perform Inventory Out." 
@@ -302,6 +302,19 @@ export const updateOutEntry = async (req, res) => {
     const existing = await findOutEntry({ out_uid });
     if (!existing) return res.status(404).json({ success: false, message: "Not found" });
 
+    const canModuleUpdate = req.user?.type === "super_admin" || Boolean(req.permission?.can_add || req.permission?.can_edit || req.permission?.can_authorize);
+    if (!canModuleUpdate) {
+      const approveOnly = isOutEntryInventoryOut(existing.entry_type) && normalizedApproved === true;
+      if (!approveOnly || !hasInventoryOutApprovePermission(req.user)) {
+        return res.status(403).json({
+          success: false,
+          message: approveOnly
+            ? "You do not have permission to approve Inventory Out."
+            : "You do not have permission to update this out entry.",
+        });
+      }
+    }
+
     if (isOutEntryInventoryOut(existing.entry_type)) {
       let nextReason = existing.reason;
       if (reason !== undefined || reason_text !== undefined) {
@@ -350,6 +363,25 @@ export const updateOutEntry = async (req, res) => {
       const scansChanged = scanned_boxes !== undefined;
       const approvalChanged = willApprove !== wasApproved;
 
+      if (willApprove && !hasInventoryOutApprovePermission(req.user)) {
+        return res.status(403).json({
+          success: false,
+          message: "You do not have permission to approve Inventory Out.",
+        });
+      }
+
+      if (hasBusinessChanges && !willApprove) {
+        const canEdit =
+          req.user?.type === "super_admin" ||
+          Boolean(req.permission?.can_edit || req.permission?.can_add);
+        if (!canEdit && !hasInventoryOutPermission(req.user)) {
+          return res.status(403).json({
+            success: false,
+            message: "You do not have permission to edit Inventory Out.",
+          });
+        }
+      }
+
       const result = await withTransaction(async (client) => {
         if (scansChanged || approvalChanged) {
           await syncOutEntryBoxLinks({
@@ -393,6 +425,7 @@ export const updateOutEntry = async (req, res) => {
           fields,
           incomingApproved: summary.scan_complete ? normalizedApproved : false,
           hasBusinessChanges,
+          canAuthorize: hasInventoryOutApprovePermission(req.user),
         });
 
         await updateOutEntries(fields, { out_uid }, { client });
@@ -840,6 +873,57 @@ export const getOutEntryLinkedBoxesController = async (req, res) => {
     if (!out_uid) return;
     const boxes = await findOutEntryLinkedBoxes(out_uid);
     res.json({ success: true, data: boxes || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** In-hand store boxes for an item — Inventory Out info panel (not FN-reserved reduced). */
+export const getAvailableBoxesByItemForOutEntry = async (req, res) => {
+  try {
+    const item_dcode = Number(req.body?.item_dcode);
+    if (!Number.isFinite(item_dcode) || item_dcode <= 0) {
+      return res.status(400).json({ success: false, message: "Valid item_dcode is required" });
+    }
+
+    const rows = await findAvailableBoxes(item_dcode);
+    const locIds = [
+      ...new Set(
+        (rows || [])
+          .map((r) => Number(r.location_id))
+          .filter((id) => Number.isFinite(id) && id > 0)
+      ),
+    ];
+
+    const locMap = new Map();
+    if (locIds.length) {
+      const locs = await dbQuery(
+        `SELECT location_id,
+                COALESCE(location_no, CONCAT(rack_no, UPPER(COALESCE(shelf_no, '-')))) AS location_no
+         FROM ims_location_master
+         WHERE location_id = ANY($1::int[])`,
+        [locIds]
+      );
+      for (const loc of locs || []) {
+        locMap.set(Number(loc.location_id), loc.location_no || null);
+      }
+    }
+
+    const data = (rows || []).map((r) => ({
+      box_uid: r.box_uid,
+      box_no_uid: r.box_no_uid,
+      packing_number: r.packing_number,
+      qty: Number(r.qty) || 0,
+      is_loose: r.is_loose === true || r.is_loose === 1 || r.is_loose === "true" || r.is_loose === "1",
+      location_id: r.location_id ?? null,
+      location_no: locMap.get(Number(r.location_id)) || null,
+      itemdcode: r.itemdcode ?? item_dcode,
+      doc_dt: r.doc_dt ?? null,
+      job_card_no: r.job_card_no ?? null,
+      category_id: r.category_id ?? null,
+    }));
+
+    res.json({ success: true, count: data.length, data });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
