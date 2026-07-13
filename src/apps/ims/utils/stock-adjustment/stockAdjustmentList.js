@@ -2,14 +2,13 @@
  * Stock Adjustment — list query + row enrich for API responses.
  *
  * Table: ims_stock_adjustment (s)
- * Joins: users for created / updated / approved names
+ * Audit cols store user name snapshot (not live user id).
  *
  * Filters: adjustment_id, item_dcode, approved, entry_type, packing_number, acc_code, dates
  * Search:  adj id, item, packing, fin year, remarks, customer code, entry type
  */
 
 import dbQuery from "../../../../config/db.js";
-import { MST_TABLES as M } from "../../../../config/dbTables.js";
 import { buildImsDocFilter, findImsPackByDocNo, imsPackRowToProduction } from "../erp-api/imsPackRow.js";
 import { fetchFromIMS, fetchPackRowsForFinancialYearDoc } from "../../services/ims.service.js";
 import { findCustomerHintsForPackings } from "../../models/inventoryReport.model.js";
@@ -40,18 +39,14 @@ const ALLOWED_SORT_FIELDS = [
   "acc_code",
 ];
 
-const USER_JOINS = `
-  LEFT JOIN ${M.USERS} u_cr ON s.created_by = u_cr.id
-  LEFT JOIN ${M.USERS} u_up ON s.updated_by = u_up.id
-  LEFT JOIN ${M.USERS} u_ap ON s.approved_by = u_ap.id
-`;
+const USER_JOINS = ``;
 
 const DEFAULT_SELECT = [
   "s.*",
   "s.item_dcode::text AS item_code",
-  "u_cr.name AS created_by_name",
-  "u_up.name AS updated_by_name",
-  "u_ap.name AS approved_by_name",
+  "s.created_by AS created_by_name",
+  "s.updated_by AS updated_by_name",
+  "s.approved_by AS approved_by_name",
 ];
 
 function assertField(key, whitelist, context = "field") {
@@ -98,8 +93,8 @@ function buildListWhere({ filters = {}, search, permission = {} }) {
       COALESCE(s.financial_year::text, '') ILIKE $${idx} OR
       COALESCE(s.acc_code::text, '') ILIKE $${idx} OR
       COALESCE(s.entry_type::text, '') ILIKE $${idx} OR
-      u_cr.name ILIKE $${idx} OR
-      u_ap.name ILIKE $${idx}
+      COALESCE(s.created_by::text, '') ILIKE $${idx} OR
+      COALESCE(s.approved_by::text, '') ILIKE $${idx}
     )`);
   }
 
@@ -111,9 +106,9 @@ function resolveSelectFields(fields = []) {
   return fields
     .map((f) => {
       if (f === "item_code") return "s.item_dcode::text AS item_code";
-      if (f === "created_by_name") return "u_cr.name AS created_by_name";
-      if (f === "updated_by_name") return "u_up.name AS updated_by_name";
-      if (f === "approved_by_name") return "u_ap.name AS approved_by_name";
+      if (f === "created_by_name") return "s.created_by AS created_by_name";
+      if (f === "updated_by_name") return "s.updated_by AS updated_by_name";
+      if (f === "approved_by_name") return "s.approved_by AS approved_by_name";
       return `s.${f}`;
     })
     .join(", ");

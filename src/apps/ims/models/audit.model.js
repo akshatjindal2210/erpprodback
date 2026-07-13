@@ -4,14 +4,13 @@ import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
 import { sqlBoxInHand } from "../utils/box/boxInventorySql.js";
 import { logBoxTransaction, singlePackingFromRows } from "../utils/box/logBoxTransaction.js";
 import { fetchBoxSnapshotForLocation, fetchBoxDetailsByUids, flattenScansFromLocations, mergeScannedBoxes, removeScannedBox, parseExpectedBoxes, parseScannedBoxes, compareLocationBoxSets, resolveLocationStatusAfterScan, isLocationClosed, isLocationPending, resolveBoxAccName, resolveAuditBoxAccName, pickAuditAccCode, enrichAuditBoxRows, buildAuditEnrichContext } from "../utils/audit/auditBoxSnapshot.js";
-import { findAudits, ASSIGNED_USERS_SUBQUERY, AUDIT_LIST_JOINS, AUDIT_DEFAULT_SELECT_FIELDS, AUDIT_LOCATIONS_JSON } from "../utils/audit/auditList.js";
+import { findAudits, ASSIGNED_USERS_SUBQUERY, AUDIT_DEFAULT_SELECT_FIELDS, AUDIT_LOCATIONS_JSON } from "../utils/audit/auditList.js";
 
 export { findAudits } from "../utils/audit/auditList.js";
 
 const ALLOWED_FILTER_FIELDS = ["audit_id", "status", "approved", "from_date", "to_date"];
 const ALLOWED_UPDATE_FIELDS = ["start_date", "end_date", "remarks", "status", "approved", "approved_by", "approved_at", "updated_by", "updated_at"];
 
-const JOINS = AUDIT_LIST_JOINS;
 const DEFAULT_FIELDS = AUDIT_DEFAULT_SELECT_FIELDS;
 export const findAudit = async (filters = {}) => {
   const keys = Object.keys(filters);
@@ -32,7 +31,6 @@ export const findAudit = async (filters = {}) => {
      ${ASSIGNED_USERS_SUBQUERY} AS assigned_user_names,
      ${AUDIT_LOCATIONS_JSON} AS locations
      FROM ${T.AUDIT_MASTER} am
-     ${JOINS}
      WHERE ${conditions.join(" AND ")}
      LIMIT 1`,
     values
@@ -886,7 +884,7 @@ const inHandSql = sqlBoxInHand("b");
 /** Super-admin: align box_table with audit scans, log transactions, complete locations, verify audit. */
 export const applyAuditComparisonAdjustment = async (
   audit_id,
-  { locationId = null, userId = null, client = null, result_rejected = false } = {}
+  { locationId = null, userId = null, userName = null, client = null, result_rejected = false } = {}
 ) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const audit = await findAudit({ audit_id });
@@ -896,6 +894,7 @@ export const applyAuditComparisonAdjustment = async (
   if (!report?.locations?.length) throw new Error("No locations to adjust");
 
   const { enrichOpts } = await buildAuditEnrichContext();
+  const boxAuditBy = userName != null && String(userName).trim() !== "" ? String(userName).trim() : null;
 
   const summary = {
     missing_boxes: 0,
@@ -929,7 +928,7 @@ export const applyAuditComparisonAdjustment = async (
            AND b.is_deleted = false
            AND ${inHandSql}
          RETURNING b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose, b.location_id`,
-        [locId, missing.map((u) => normalizeBoxUid(u)), userId]
+        [locId, missing.map((u) => normalizeBoxUid(u)), boxAuditBy]
       );
       const removed = client ? removeRes.rows : removeRes;
       if (removed?.length) {
@@ -964,7 +963,7 @@ export const applyAuditComparisonAdjustment = async (
            AND b.is_deleted = false
            AND ${inHandSql}
          RETURNING b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose, b.location_id`,
-        [locId, userId, extraUids]
+        [locId, boxAuditBy, extraUids]
       );
       const extraRows = client ? extraRes.rows : extraRes;
       if (extraRows?.length) {

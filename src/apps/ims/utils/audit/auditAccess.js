@@ -26,6 +26,14 @@ export function canManagementAccessAudit(permission = {}, user = {}) {
   return Boolean(permission.can_authorize || permission.can_edit || permission.can_view);
 }
 
+/** Master `created_by` stores a name snapshot (not user id). */
+export function isAuditCreator(audit, user) {
+  const stored = audit?.created_by != null ? String(audit.created_by).trim() : "";
+  const current = user?.name != null ? String(user.name).trim() : "";
+  if (!stored || !current) return false;
+  return stored === current;
+}
+
 /** Workers with add-only access: assigned + active + within date window. */
 export function canAssignedWorkerAccessAudit(audit, userId, now = new Date()) {
   if (!isUserAssignedOnAudit(audit, userId)) return false;
@@ -36,7 +44,7 @@ export function canAssignedWorkerAccessAudit(audit, userId, now = new Date()) {
 export function canAccessAuditRecord(audit, user, permission = {}) {
   if (!audit) return false;
   if (canManagementAccessAudit(permission, user)) return true;
-  if (Number(audit.created_by) === Number(user?.id)) return true;
+  if (isAuditCreator(audit, user)) return true;
   return canAssignedWorkerAccessAudit(audit, user?.id);
 }
 
@@ -45,7 +53,7 @@ export function canSeeInactiveAuditLocations(audit, user, permission = {}) {
   if (!audit || audit.approved) return true;
   if (user?.type === "super_admin") return true;
   if (permission.can_edit || permission.can_authorize) return true;
-  return Number(audit.created_by) === Number(user?.id);
+  return isAuditCreator(audit, user);
 }
 
 export function filterAuditLocationsForUser(audit, user, permission = {}) {

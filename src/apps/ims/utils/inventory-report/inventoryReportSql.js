@@ -15,6 +15,9 @@ const IN_STORE = `${SELLABLE} AND b.location_id IS NOT NULL`;
 const QC_HOLD = `${sqlBoxOnQcHold("b")} AND ${IN_HAND}`;
 const PACKING_AREA = `${SELLABLE} AND b.location_id IS NULL`;
 const SHOW_LOC = `(${IN_STORE}) OR (${QC_HOLD})`;
+// const STOCK_BOX = `(${IN_STORE}) OR (${PACKING_AREA}) OR (${QC_HOLD})`;          /** Boxes that contribute to report stock zones (in store + packing + QC hold). */
+/** Boxes in Total Stock zones only (in store + packing area) — excludes QC hold. */
+const STOCK_BOX = `(${IN_STORE}) OR (${PACKING_AREA})`;
 const IS_OUT = sqlBoxCountedAsOut("b");
 
 /** SA boxes: meta from linked SA only (safe when packing number is reused across years). */
@@ -78,6 +81,12 @@ export function buildInventoryReportSql() {
         SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${IS_OUT}))::bigint AS out_qty,
         COUNT(*) FILTER (WHERE (${IN_STORE}))::int AS in_store_boxes,
         COUNT(*) FILTER (WHERE (${PACKING_AREA}))::int AS packing_area_boxes,
+        COUNT(*) FILTER (WHERE (${STOCK_BOX}))::int AS stock_box_count,
+        COALESCE(
+          ARRAY_AGG(b.box_no_uid::text ORDER BY b.box_no_uid::text)
+          FILTER (WHERE (${STOCK_BOX}) AND NULLIF(TRIM(b.box_no_uid::text), '') IS NOT NULL),
+          ARRAY[]::text[]
+        ) AS stock_box_nos,
         STRING_AGG(DISTINCT ${LOC_LABEL}, ', ') FILTER (WHERE (${SHOW_LOC})) AS location_details,
         COALESCE(ARRAY_AGG(DISTINCT b.location_id::text) FILTER (WHERE (${SHOW_LOC})), ARRAY[]::text[]) AS in_store_location_ids
       FROM ims_box_table b
@@ -110,6 +119,8 @@ export function buildInventoryReportSql() {
         g.out_qty,
         g.in_store_boxes,
         g.packing_area_boxes,
+        g.stock_box_count,
+        g.stock_box_nos,
         g.location_details,
         g.in_store_location_ids
       FROM grouped g
@@ -148,6 +159,8 @@ export function sqlPageSlice({ sortBy, sortCol, sortDir, limitIdx, offsetIdx }) 
       COALESCE(f.qc_hold_qty, 0)::bigint AS qc_hold_qty,
       COALESCE(f.out_qty, 0)::bigint AS out_qty,
       COALESCE(f.in_store_boxes, 0)::int AS in_store_boxes,
+      COALESCE(f.stock_box_count, 0)::int AS stock_box_count,
+      COALESCE(f.stock_box_nos, ARRAY[]::text[]) AS stock_box_nos,
       f.doc_dt,
       f.job_card_no
     FROM filtered f

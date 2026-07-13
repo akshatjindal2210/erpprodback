@@ -2,7 +2,7 @@
  * Change Override Customer — DB list + row enrich.
  *
  * Table: ims_box_override_request (r)
- * Joins: users for requested_by / approved_by names
+ * Audit cols store user name snapshot (not live user id).
  * Extra:  box_no_uids subquery from ims_box_table via r.box_uids
  *
  * Filters: from_date, to_date, status
@@ -10,21 +10,17 @@
  */
 
 import dbQuery from "../../../../config/db.js";
-import { MST_TABLES as M } from "../../../../config/dbTables.js";
 import { canonicalCode, getImsMapsSafe } from "../erp-api/imsLookup.js";
 
-const USER_JOINS = `
-  LEFT JOIN ${M.USERS} req_user ON req_user.id = r.requested_by
-  LEFT JOIN ${M.USERS} app_user ON app_user.id = r.approved_by
-`;
+const USER_JOINS = ``;
 
 const SORT_COLUMNS = {
   request_id: "r.request_id",
   packing_number: "r.packing_number",
   requested_at: "r.requested_at",
   status: "r.status",
-  requested_by_name: "req_user.name",
-  approved_by_name: "app_user.name",
+  requested_by_name: "r.requested_by",
+  approved_by_name: "r.approved_by",
   from_customer_name: "r.from_customer",
   to_customer_name: "r.to_customer",
   item_name: "r.itemdcode",
@@ -61,8 +57,8 @@ function buildListWhere({ filters = {}, search }) {
       r.to_customer::TEXT ILIKE $${idx} OR
       r.remarks ILIKE $${idx} OR
       r.request_id::TEXT ILIKE $${idx} OR
-      req_user.name ILIKE $${idx} OR
-      app_user.name ILIKE $${idx} OR
+      COALESCE(r.requested_by::text, '') ILIKE $${idx} OR
+      COALESCE(r.approved_by::text, '') ILIKE $${idx} OR
       EXISTS (
         SELECT 1 FROM ims_box_table b
         WHERE b.box_uid::TEXT = ANY(r.box_uids::TEXT[])
@@ -102,8 +98,8 @@ export async function listOverrideRequests(options = {}) {
   const rows = await dbQuery(
     `SELECT
        r.*,
-       req_user.name AS requested_by_name,
-       app_user.name AS approved_by_name,
+       r.requested_by AS requested_by_name,
+       r.approved_by AS approved_by_name,
        r.from_customer AS from_customer_name,
        r.to_customer AS to_customer_name,
        r.itemdcode AS item_name,

@@ -1,11 +1,11 @@
 import dbQuery from "../../../config/db.js";
-import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { sqlBoxSellable, sqlDocDtText } from "../utils/box/boxInventorySql.js";
 import { applyForwardingOutEntryListFilter } from "../utils/forwarding-note/forwardingNoteListFilters.js";
 
 /**
  * Forwarding Note — DB access (ims_forwarding_note_master + items + available boxes).
  * List queries join out_entry lateral for lock/complete status.
+ * Audit cols store user name snapshot (not live user id).
  */
 
 const ALLOWED_FILTER_FIELDS = ["fuid", "acc_code", "po_number", "approved", "out_entry_locked", "out_entry_available", "from_date", "to_date"];
@@ -34,12 +34,6 @@ const queryRows = (result, client) => (client?.query ? result.rows : result);
 const firstQueryRow = (result, client) => queryRows(result, client)?.[0] ?? null;
 
 const JOINS = `
-  LEFT JOIN ${M.USERS} u_cr   ON f.created_by  = u_cr.id
-  LEFT JOIN ${M.USERS} u_upd  ON f.updated_by  = u_upd.id
-  LEFT JOIN ${M.USERS} u_dl   ON f.deleted_by  = u_dl.id
-  LEFT JOIN ${M.USERS} u_ap   ON f.approved_by = u_ap.id
-  LEFT JOIN ${M.USERS} u_lock ON f.out_entry_locked_by = u_lock.id
-  LEFT JOIN ${M.USERS} u_bill ON f.bill_updated_by = u_bill.id
   LEFT JOIN LATERAL (
     SELECT oe.out_uid, oe.scan_complete, oe.approved, oe.boxes_scanned, oe.boxes_required
     FROM ims_out_entry oe
@@ -52,12 +46,12 @@ const JOINS = `
 const DEFAULT_FIELDS = [
   "f.*",
   "f.acc_code::text AS acc_name",
-  "u_cr.name  AS created_by_name",
-  "u_upd.name AS updated_by_name",
-  "u_dl.name  AS deleted_by_name",
-  "u_ap.name  AS approved_by_name",
-  "u_lock.name AS out_entry_locked_by_name",
-  "u_bill.name AS bill_updated_by_name",
+  "f.created_by AS created_by_name",
+  "f.updated_by AS updated_by_name",
+  "f.deleted_by AS deleted_by_name",
+  "f.approved_by AS approved_by_name",
+  "f.out_entry_locked_by AS out_entry_locked_by_name",
+  "f.bill_updated_by AS bill_updated_by_name",
   "oe.out_uid AS out_entry_uid",
   "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
   "COALESCE(oe.approved, false) AS out_entry_approved",
@@ -215,17 +209,19 @@ export const findForwardingNote = async (filters = {}) => {
     [row.fuid]
   );
 
-  // Group items by item_dcode while preserving original insertion order
+  // Group items by item_dcode + schno (item-wise schedule) while preserving insertion order
   const groupedItems = [];
   const itemMap = new Map();
 
   for (const item of items) {
-    const key = item.item_dcode;
+    const itemSchno = item.schno != null && String(item.schno).trim() !== "" ? String(item.schno).trim() : "";
+    const key = `${item.item_dcode}|${itemSchno}`;
     if (!itemMap.has(key)) {
       const newItem = {
         item_dcode: item.item_dcode,
         item_code: item.item_code,
         itemdesc: item.itemdesc,
+        schno: itemSchno || null,
         total_qty: 0,
         breakdowns: []
       };
@@ -313,7 +309,7 @@ export const updateForwardingNotes = async (fields = {}, filters = {}) => {
 };
 
 /** Bill is entered after out entry allowed even when `out_entry_locked` is true. */
-export const updateForwardingNoteBillNo = async ({ fuid, bill_no, userId }) => {
+export const updateForwardingNoteBillNo = async ({ fuid, bill_no, userName }) => {
   const normalized =
     bill_no === null || bill_no === undefined ? null : String(bill_no).trim() || null;
 
@@ -325,7 +321,7 @@ export const updateForwardingNoteBillNo = async ({ fuid, bill_no, userId }) => {
      WHERE fuid = $1
        AND is_deleted = false
      RETURNING *`,
-    [fuid, normalized, userId]
+    [fuid, normalized, userName ?? null]
   );
   return row || null;
 };
@@ -386,7 +382,7 @@ export const deleteForwardingNotes = async (filters = {}, meta = {}) => {
   }
 };
 
-export const lockForwardingNoteForOutEntry = async ({ fuid, userId }, { client = null } = {}) => {
+export const lockForwardingNoteForOutEntry = async ({ fuid, userName }, { client = null } = {}) => {
   const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const row = firstQueryRow(
     await run(
@@ -397,7 +393,7 @@ export const lockForwardingNoteForOutEntry = async ({ fuid, userId }, { client =
        WHERE fuid = $1
          AND is_deleted = false
        RETURNING fuid, out_entry_locked, out_entry_locked_at`,
-      [fuid, userId]
+      [fuid, userName ?? null]
     ),
     client
   );

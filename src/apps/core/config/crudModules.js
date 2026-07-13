@@ -26,12 +26,9 @@ export const CRUD_MODULES = {
     listFields: [
       "lm.location_id", "lm.rack_no", "lm.shelf_no", "COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no", "lm.location_description", "lm.total_capacity",
       "lm.acc_code", "lm.item_dcode", "lm.approved", "lm.approved_by", "lm.approved_at", 
-      "lm.created_at", "lm.updated_at",
+      "lm.created_at", "lm.updated_at", "lm.deleted_at",
       "lm.acc_code::text AS acc_name", "lm.item_dcode::text AS item_code", "NULL::text AS item_desc",
-      "u_cr.name AS created_by_name", 
-      "u_up.name AS updated_by_name", 
-      "u_ap.name AS approved_by_name", 
-      "u_dl.name AS deleted_by_name"
+      "lm.created_by AS created_by_name", "lm.updated_by AS updated_by_name", "lm.deleted_by AS deleted_by_name", "lm.approved_by AS approved_by_name",
     ],
     filterFields: ["location_id", "rack_no", "shelf_no", "location_no", "acc_code", "item_dcode", "approved", "from_date", "to_date"],
     searchFields: ["rack_no", "shelf_no", "location_no", "acc_name", "item_code"]
@@ -44,7 +41,7 @@ export const CRUD_MODULES = {
       "ps.created_by", "ps.created_at",
       "ps.updated_by", "ps.updated_at",
       "ps.deleted_by", "ps.deleted_at",
-      "u_cr.name  AS created_by_name", "u_upd.name AS updated_by_name", "u_dl.name  AS deleted_by_name", "u_ap.name  AS approved_by_name",
+      "ps.created_by AS created_by_name", "ps.updated_by AS updated_by_name", "ps.deleted_by AS deleted_by_name", "ps.approved_by AS approved_by_name",
       "ps.item_dcode::text AS item_code", "NULL::text AS item_desc", "ps.acc_code::text AS acc_name", "cat.name AS category_name", "st.name AS sticker_type_name"
     ],
     filterFields: ["standard_id", "item_dcode", "type", "sticker_type", "acc_code", "approved", "from_date", "to_date"],
@@ -58,10 +55,10 @@ export const CRUD_MODULES = {
       "i.created_by", "i.created_at",
       "i.updated_by", "i.updated_at",
       "i.deleted_by", "i.deleted_at",
-      "u_cr.name  AS created_by_name", "u_upd.name AS updated_by_name", "u_dl.name  AS deleted_by_name", "u_ap.name  AS approved_by_name",
+      "i.created_by AS created_by_name", "i.updated_by AS updated_by_name", "i.deleted_by AS deleted_by_name", "i.approved_by AS approved_by_name",
     ],
     filterFields: ["in_uid", "packing_number", "approved", "from_date", "to_date"],
-    searchFields: ["i.packing_number", "i.remarks"] 
+    searchFields: ["i.packing_number", "i.remarks", "i.created_by"] 
   },
   forwarding_note_master: {
     idField: "fuid",
@@ -73,7 +70,7 @@ export const CRUD_MODULES = {
       "f.created_by", "f.created_at",
       "f.updated_by", "f.updated_at",
       "f.deleted_by", "f.deleted_at",
-      "u_cr.name AS created_by_name", "u_upd.name AS updated_by_name", "u_dl.name  AS deleted_by_name", "u_ap.name  AS approved_by_name", "u_lock.name AS out_entry_locked_by_name", "u_bill.name AS bill_updated_by_name",
+      "f.created_by AS created_by_name", "f.updated_by AS updated_by_name", "f.deleted_by AS deleted_by_name", "f.approved_by AS approved_by_name", "f.out_entry_locked_by AS out_entry_locked_by_name", "f.bill_updated_by AS bill_updated_by_name",
       "f.acc_code::text AS acc_name",
       "oe.out_uid AS out_entry_uid",
       "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
@@ -83,14 +80,14 @@ export const CRUD_MODULES = {
       "(oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete",
     ],
     filterFields: ["fuid", "acc_code", "po_number", "approved", "out_entry_locked", "out_entry_available", "out_entry_complete", "out_entry_approved", "from_date", "to_date"],
-    searchFields: ["f.po_number", "f.transporter_name", "f.vehicle_number", "f.bill_no", "f.acc_code"]
+    searchFields: ["f.po_number", "f.transporter_name", "f.vehicle_number", "f.bill_no", "f.acc_code", "f.created_by"]
   },
   forwarding_note_item_wise: {
     idField: "id",
     listFields: [
       "fi.id", "fi.fuid", "fi.item_dcode", "fi.qty", 
       "fi.item_dcode::text AS item_code", "fi.item_dcode AS itemdcode", "NULL::text AS item_desc",
-      "fnm.out_entry_locked", "fnm.out_entry_locked_by", "fnm.out_entry_locked_at", "u_lock.name AS out_entry_locked_by_name",
+      "fnm.out_entry_locked", "fnm.out_entry_locked_by", "fnm.out_entry_locked_at", "fnm.out_entry_locked_by AS out_entry_locked_by_name",
       "oe.out_uid AS out_entry_uid",
       "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
       "(oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete",
@@ -99,8 +96,8 @@ export const CRUD_MODULES = {
       "fnm.updated_by", "fnm.updated_at",
       "fnm.deleted_by", "fnm.deleted_at",
       "fnm.bill_no", "fnm.bill_updated_by", "fnm.bill_updated_at",
-      "u_mcr.name AS created_by_name", "u_mupd.name AS updated_by_name", "u_mdl.name  AS deleted_by_name", "u_map.name  AS approved_by_name",
-      "u_bill.name AS bill_updated_by_name",
+      "fnm.created_by AS created_by_name", "fnm.updated_by AS updated_by_name", "fnm.deleted_by AS deleted_by_name", "fnm.approved_by AS approved_by_name",
+      "fnm.bill_updated_by AS bill_updated_by_name",
     ],
     filterFields: ["id", "fuid", "item_dcode", "approved", "out_entry_locked", "out_entry_complete", "out_entry_approved", "from_date", "to_date"],
     searchFields: ["fi.item_dcode", "fi.qty"]
@@ -116,12 +113,12 @@ export const CRUD_MODULES = {
       "o.scan_complete", "o.boxes_required", "o.boxes_scanned",
       "o.created_by", "o.created_at",
       "o.updated_by", "o.updated_at",
-      "u_cr.name  AS created_by_name", 
-      "u_upd.name AS updated_by_name", 
-      "u_ap.name  AS approved_by_name"
+      "o.created_by AS created_by_name", 
+      "o.updated_by AS updated_by_name", 
+      "o.approved_by AS approved_by_name"
     ],
     filterFields: ["out_uid", "fuid", "entry_type", "approved", "scan_complete", "from_date", "to_date", "fromDate", "toDate"],
-    searchFields: ["o.remarks", "u_cr.name"]
+    searchFields: ["o.remarks", "o.created_by"]
   },
   stock_adjustment: {
     idField: "adjustment_id",
@@ -132,12 +129,12 @@ export const CRUD_MODULES = {
       "s.approved", "s.approved_by", "s.approved_at",
       "s.created_by", "s.created_at",
       "s.updated_by", "s.updated_at",
-      "u_cr.name AS created_by_name",
-      "u_up.name AS updated_by_name",
-      "u_ap.name AS approved_by_name"
+      "s.created_by AS created_by_name",
+      "s.updated_by AS updated_by_name",
+      "s.approved_by AS approved_by_name"
     ],
     filterFields: ["adjustment_id", "item_dcode", "approved", "is_deleted", "from_date", "to_date", "fromDate", "toDate", "entry_type", "packing_number"],
-    searchFields: ["s.remarks", "s.item_dcode", "s.packing_number", "s.financial_year", "u_cr.name"]
+    searchFields: ["s.remarks", "s.item_dcode", "s.packing_number", "s.financial_year", "s.created_by"]
   },
   box_transaction_logs: {
     idField: "id",
@@ -162,7 +159,7 @@ export const CRUD_MODULES = {
     listFields: [
       "am.audit_id", "am.start_date", "am.end_date", "am.remarks", "am.status",
       "am.approved", "am.approved_by", "am.approved_at", "am.created_by", "am.created_at", "am.updated_by", "am.updated_at",
-      "u_cr.name AS created_by_name", "u_up.name AS updated_by_name", "u_ap.name AS approved_by_name", "u_dl.name AS deleted_by_name"
+      "am.created_by AS created_by_name", "am.updated_by AS updated_by_name", "am.approved_by AS approved_by_name", "am.deleted_by AS deleted_by_name"
     ],
     filterFields: ["audit_id", "status", "approved", "from_date", "to_date"],
     searchFields: ["am.remarks"]
@@ -173,10 +170,10 @@ export const CRUD_MODULES = {
       "q.hold_id", "q.packing_number", "q.item_dcode", "q.item_dcode::text AS item_code",
       "q.hold_data", "q.remarks", "q.reason", "q.status",
       "q.approved", "q.approved_by", "q.approved_at", "q.created_by", "q.created_at", "q.updated_by", "q.updated_at",
-      "u_cr.name AS created_by_name", "u_up.name AS updated_by_name", "u_ap.name AS approved_by_name"
+      "q.created_by AS created_by_name", "q.updated_by AS updated_by_name", "q.approved_by AS approved_by_name"
     ],
     filterFields: ["hold_id", "packing_number", "item_dcode", "status", "approved", "from_date", "to_date", "open_only"],
-    searchFields: ["q.packing_number", "q.remarks", "q.reason", "q.status"]
+    searchFields: ["q.packing_number", "q.remarks", "q.reason", "q.status", "q.created_by"]
   },
 };
 

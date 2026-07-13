@@ -9,7 +9,7 @@ import { getOverrideRequestById, insertOverrideRequest, updateOverrideRequest as
 import { isBoxEligibleForOverrideCustomer, overrideCustomerScanRejectMessage } from "./boxInventory.js";
 import { logOverrideCustomerBatch } from "./logBoxTransaction.js";
 import { logActivity } from "../../../core/utils/logActivity.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../../../core/utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../core/utils/approval.js";
 
 export const OVERRIDE_ACTIVITY_ENTITY = "change_override_customer";
 
@@ -53,10 +53,10 @@ async function validateOverrideBoxes(box_uids) {
   return { boxes };
 }
 
-async function applyOverrideToBoxes({ box_uids, to_customer, userId, request_id, boxes, from_customer, remarks }) {
+async function applyOverrideToBoxes({ box_uids, to_customer, userId, userName = null, request_id, boxes, from_customer, remarks }) {
   await updateBoxesByUids(box_uids, {
     override_cust: to_customer,
-    updated_by: userId,
+    updated_by: userName ?? null,
   });
   logOverrideCustomerBatch({
     request_id,
@@ -89,7 +89,7 @@ export async function createOverrideCustomerRequest(req) {
     from_customer: boxes[0]?.override_cust || boxes[0]?.prod_acc_code || null,
     to_customer,
     remarks,
-    requested_by: req.user.id,
+    requested_by: auditUserName(req),
     approved: normalizedApproved === true,
   });
 
@@ -98,6 +98,7 @@ export async function createOverrideCustomerRequest(req) {
       box_uids,
       to_customer,
       userId: req.user.id,
+      userName: auditUserName(req),
       request_id: requestRow?.request_id,
       boxes,
       from_customer: boxes[0]?.override_cust ?? boxes[0]?.prod_acc_code ?? null,
@@ -156,7 +157,7 @@ export async function updateOverrideCustomerRequest(req) {
     ...(box_uids !== undefined && { box_uids }),
     ...(to_customer !== undefined && { to_customer }),
     ...(remarks !== undefined && { remarks }),
-    updated_by: req.user.id,
+    updated_by: auditUserName(req),
     updated_at: new Date(),
   };
 
@@ -171,7 +172,13 @@ export async function updateOverrideCustomerRequest(req) {
     };
   }
 
-  applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges });
+  applyApprovalWorkflow({
+    req,
+    fields,
+    incomingApproved: normalizedApproved,
+    hasBusinessChanges,
+    auditAsName: true,
+  });
 
   if (normalizedApproved === true) {
     fields.status = "approved";
@@ -201,7 +208,8 @@ export async function updateOverrideCustomerRequest(req) {
     await applyOverrideToBoxes({
       box_uids: applyUids,
       to_customer: fields.to_customer || existingReq.to_customer,
-      userId: fields.updated_by,
+      userId: req.user.id,
+      userName: auditUserName(req),
       request_id,
       boxes: applyBoxes,
       from_customer:
@@ -266,6 +274,7 @@ export async function approveOverrideCustomerRequest(req) {
       box_uids: uids,
       to_customer: requestRow.to_customer,
       userId: req.user.id,
+      userName: auditUserName(req),
       request_id,
       boxes: liveBoxes,
       from_customer:
@@ -279,7 +288,7 @@ export async function approveOverrideCustomerRequest(req) {
   const updatedReq = await updateOverrideRequestRow(request_id, {
     status: approve ? "approved" : "rejected",
     approved: approve,
-    approved_by: req.user.id,
+    approved_by: auditUserName(req),
     approved_at: new Date(),
   });
 

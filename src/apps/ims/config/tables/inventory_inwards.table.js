@@ -1,5 +1,6 @@
 import dbQuery from "../../../../config/db.js";
-import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
+import { IMS_TABLES as T } from "../../../../config/dbTables.js";
+import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createInventoryInwardsTable() {
   await dbQuery(`
@@ -11,15 +12,18 @@ export async function createInventoryInwardsTable() {
       total_qty        INTEGER DEFAULT 0,
       remarks          TEXT,
       approved         BOOLEAN DEFAULT false,
-      approved_by      INTEGER REFERENCES ${C.USERS}(id),
+      approved_by      TEXT,
       approved_at      TIMESTAMP,
       is_deleted       BOOLEAN DEFAULT false,
-      deleted_by       INTEGER REFERENCES ${C.USERS}(id),
+      deleted_by       TEXT,
       deleted_at       TIMESTAMP,
-      created_by       INTEGER REFERENCES ${C.USERS}(id),
+      created_by       TEXT,
       created_at       TIMESTAMP DEFAULT NOW(),
-      updated_by       INTEGER REFERENCES ${C.USERS}(id),
+      updated_by       TEXT,
       updated_at       TIMESTAMP
     );
   `);
+
+  // ONE-TIME: INT id → user name. After prod OK, remove this call.
+  await migrateTableAuditColumnsToUserNames(dbQuery, T.INVENTORY_INWARDS);
 }

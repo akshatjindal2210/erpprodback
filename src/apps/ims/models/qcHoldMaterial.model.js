@@ -1,5 +1,4 @@
 import dbQuery from "../../../config/db.js";
-import { MST_TABLES as M } from "../../../config/dbTables.js";
 
 /** QC Hold Material — DB access for ims_qc_hold_material (list, CRUD, reasons). */
 
@@ -26,13 +25,9 @@ const SORT_EXPR = {
   approved: "q.approved",
 };
 
-const JOINS = `
-  LEFT JOIN ${M.USERS} u_cr ON q.created_by = u_cr.id
-  LEFT JOIN ${M.USERS} u_up ON q.updated_by = u_up.id
-  LEFT JOIN ${M.USERS} u_ap ON q.approved_by = u_ap.id
-  LEFT JOIN ${M.USERS} u_dl ON q.deleted_by = u_dl.id
-`;
+const JOINS = ``;
 
+/** Audit cols store user name snapshot (not live user id). */
 const DEFAULT_FIELDS = [
   "q.hold_id",
   "q.packing_number",
@@ -51,10 +46,10 @@ const DEFAULT_FIELDS = [
   "q.updated_at",
   "q.deleted_by",
   "q.deleted_at",
-  "u_cr.name AS created_by_name",
-  "u_up.name AS updated_by_name",
-  "u_ap.name AS approved_by_name",
-  "u_dl.name AS deleted_by_name",
+  "q.created_by AS created_by_name",
+  "q.updated_by AS updated_by_name",
+  "q.approved_by AS approved_by_name",
+  "q.deleted_by AS deleted_by_name",
 ];
 
 const assertField = (key, whitelist, context = "field") => {
@@ -128,7 +123,9 @@ export const findQcHoldMaterials = async (options = {}) => {
       CAST(q.item_dcode AS TEXT) ILIKE $${i} OR
       COALESCE(q.remarks, '') ILIKE $${i} OR
       COALESCE(q.reason, '') ILIKE $${i} OR
-      COALESCE(q.status, '') ILIKE $${i}
+      COALESCE(q.status, '') ILIKE $${i} OR
+      COALESCE(q.created_by::text, '') ILIKE $${i} OR
+      COALESCE(q.approved_by::text, '') ILIKE $${i}
     )`);
     i++;
   }

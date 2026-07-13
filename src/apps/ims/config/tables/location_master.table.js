@@ -1,5 +1,6 @@
+import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 import dbQuery from "../../../../config/db.js";
-import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
+import { IMS_TABLES as T } from "../../../../config/dbTables.js";
 
 export async function createLocationMasterTable() {
   await dbQuery(`
@@ -13,14 +14,14 @@ export async function createLocationMasterTable() {
       acc_code             INTEGER,
       item_dcode           INTEGER,
       approved             BOOLEAN DEFAULT false,
-      approved_by          INTEGER REFERENCES ${C.USERS}(id),
+      approved_by          TEXT,
       approved_at          TIMESTAMP,
       is_deleted           BOOLEAN DEFAULT false,
-      deleted_by           INTEGER REFERENCES ${C.USERS}(id),
+      deleted_by           TEXT,
       deleted_at           TIMESTAMP,
-      created_by           INTEGER REFERENCES ${C.USERS}(id),
+      created_by           TEXT,
       created_at           TIMESTAMP DEFAULT NOW(),
-      updated_by           INTEGER REFERENCES ${C.USERS}(id),
+      updated_by           TEXT,
       updated_at           TIMESTAMP
     );
 
@@ -32,4 +33,7 @@ export async function createLocationMasterTable() {
       ON ${T.LOCATION_MASTER} (trim(location_no))
       WHERE is_deleted = false AND location_no IS NOT NULL AND trim(location_no) <> '';
   `);
+
+  // ONE-TIME: INT id → user name. After prod OK, remove this call (helpers stay).
+  await migrateTableAuditColumnsToUserNames(dbQuery, T.LOCATION_MASTER);
 }

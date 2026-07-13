@@ -1,5 +1,4 @@
 ﻿import dbQuery from "../../../config/db.js";
-import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
 import { logBoxTransactionSafe, singlePackingFromRows } from "../utils/box/logBoxTransaction.js";
 
@@ -12,13 +11,8 @@ const ALLOWED_UPDATE_FIELDS = [
   "remarks", "approved", "approved_by", "approved_at", "updated_by", "updated_at",
 ];
 
-// Join users for creator/updater/deleter/approver display names
-const JOINS = `
-  LEFT JOIN ${M.USERS} u_cr  ON i.created_by  = u_cr.id
-  LEFT JOIN ${M.USERS} u_upd ON i.updated_by  = u_upd.id
-  LEFT JOIN ${M.USERS} u_dl  ON i.deleted_by  = u_dl.id
-  LEFT JOIN ${M.USERS} u_ap  ON i.approved_by = u_ap.id
-`;
+/** Audit cols store user name snapshot (not live user id). */
+const JOINS = ``;
 
 const DEFAULT_FIELDS = [
   "i.in_uid", "i.packing_number", "i.item_codes", "i.qtys", "i.total_qty", "i.remarks",
@@ -26,10 +20,10 @@ const DEFAULT_FIELDS = [
   "i.created_by", "i.created_at",
   "i.updated_by", "i.updated_at",
   "i.is_deleted", "i.deleted_by", "i.deleted_at",
-  "u_cr.name  AS created_by_name",
-  "u_upd.name AS updated_by_name",
-  "u_dl.name  AS deleted_by_name",
-  "u_ap.name  AS approved_by_name"
+  "i.created_by AS created_by_name",
+  "i.updated_by AS updated_by_name",
+  "i.deleted_by AS deleted_by_name",
+  "i.approved_by AS approved_by_name"
 ];
 
 export const findInventoryInwards = async (options = {}) => {
@@ -77,7 +71,7 @@ export const findInventoryInwards = async (options = {}) => {
     conditions.push(`(
       i.packing_number ILIKE $${i} OR
       i.remarks ILIKE $${i} OR
-      u_cr.name ILIKE $${i}
+      i.created_by ILIKE $${i}
     )`);
     i++;
   }

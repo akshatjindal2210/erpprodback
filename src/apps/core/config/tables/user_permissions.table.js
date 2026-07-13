@@ -1,5 +1,6 @@
 import dbQuery from "../../../../config/db.js";
 import { MST_TABLES as T } from "../../../../config/dbTables.js";
+import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createUserPermissionsTable() {
   await dbQuery(`
@@ -15,16 +16,19 @@ export async function createUserPermissionsTable() {
       can_delete    BOOLEAN DEFAULT false,
       can_authorize BOOLEAN DEFAULT false,
       approved      BOOLEAN DEFAULT false,
-      approved_by   INTEGER REFERENCES ${T.USERS}(id),
+      approved_by   TEXT,
       approved_at   TIMESTAMP,
       is_deleted    BOOLEAN DEFAULT false,
-      deleted_by    INTEGER REFERENCES ${T.USERS}(id),
+      deleted_by    TEXT,
       deleted_at    TIMESTAMP,
-      created_by    INTEGER REFERENCES ${T.USERS}(id),
+      created_by    TEXT,
       created_at    TIMESTAMP DEFAULT NOW(),
-      updated_by    INTEGER REFERENCES ${T.USERS}(id),
+      updated_by    TEXT,
       updated_at    TIMESTAMP,
       UNIQUE(user_id, module_id)
     );
   `);
+
+  // ONE-TIME: INT id → user name. After prod OK, remove this call.
+  await migrateTableAuditColumnsToUserNames(dbQuery, T.USER_PERMISSIONS);
 }

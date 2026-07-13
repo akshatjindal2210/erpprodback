@@ -1,5 +1,4 @@
 import dbQuery from "../../../config/db.js";
-import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { buildJourneyFilter, hasJourneyFilter } from "../utils/logJourneyFilter.js";
 
 const TBL = "ims_box_download_log";
@@ -106,7 +105,7 @@ const LIST_SELECT = `
   l.item_dcode AS itemdcode,
   l.sticker_count AS event_sticker_count,
   l.downloaded_at AS last_downloaded_at,
-  u.name AS last_downloaded_by_name,
+  l.downloaded_by AS last_downloaded_by_name,
   l.download_type AS last_download_type,
   l.sticker_count AS last_bulk_sticker_count,
   l.download_source,
@@ -128,7 +127,7 @@ export async function listStickerDownloadLogs(options = {}) {
   const safeLimit = Math.min(100000, Math.max(1, parseInt(limit, 10) || 10));
   const offset = (safePage - 1) * safeLimit;
 
-  const listFrom = `FROM ${TBL} l LEFT JOIN ${M.USERS} u ON u.id = l.downloaded_by`;
+  const listFrom = `FROM ${TBL} l`;
 
   const listValues = [...values, safeLimit, offset];
   const limitParam = values.length + 1;

@@ -3,6 +3,7 @@ import User from "../models/user.model.js";
 import { findModule } from "../models/module.model.js";
 import { getCrudModuleConfig } from "../config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
+import { auditUserName } from "../utils/approval.js";
 
 const PERM_CFG = getCrudModuleConfig("user_permissions");
 
@@ -76,7 +77,7 @@ export const removePermission = async (req, res) => {
   try {
     const { id, user_id, module_id } = req.body;
     if (id) {
-      const deleted = await deletePermissionById(id, { deleted_by: req.user?.id });
+      const deleted = await deletePermissionById(id, { deleted_by: auditUserName(req) });
       if (!deleted) return res.status(404).json({ success: false, message: "Permission not found" });
       return res.json({ success: true, message: "Permission removed" });
     }
@@ -84,7 +85,7 @@ export const removePermission = async (req, res) => {
     const permission = await findPermission(user_id, module_id);
     if (!permission) return res.status(404).json({ success: false, message: "Permission not found" });
 
-    await deletePermission(user_id, module_id, { deleted_by: req.user?.id });
+    await deletePermission(user_id, module_id, { deleted_by: auditUserName(req) });
     res.json({ success: true, message: "Permission removed" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -99,7 +100,7 @@ export const updatePermission = async (req, res) => {
     const updated = await updatePermissionById(
       id,
       { can_view, can_view_days, can_add, can_edit, can_edit_days, can_delete, can_authorize },
-      { updated_by: req.user?.id }
+      { updated_by: auditUserName(req) }
     );
 
     if (!updated) return res.status(404).json({ success: false, message: "Permission not found" });

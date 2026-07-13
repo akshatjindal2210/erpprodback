@@ -1,11 +1,11 @@
 import dbQuery from "../../../../config/db.js";
-import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
+import { IMS_TABLES as T } from "../../../../config/dbTables.js";
 import { planKey } from "./schedulePlanDb.js";
 
 export async function insertScheduleTransaction(row) {
   const {
     fin_year_id, schno, itemdcode, plan_id, action_type, from_status, to_status,
-    action_date, action_reason, remark, user_id,
+    action_date, action_reason, remark, user_name,
   } = row;
 
   const [out] = await dbQuery(
@@ -20,7 +20,7 @@ export async function insertScheduleTransaction(row) {
       from_status != null ? Number(from_status) : null,
       Number(to_status),
       action_date ?? null, action_reason ?? null, remark ?? null,
-      user_id ?? null,
+      user_name ?? null,
     ]
   );
   return out ?? null;
@@ -32,9 +32,8 @@ export async function loadLastTransactionMap(finYearId) {
        t.txn_id, t.fin_year_id, t.schno, t.itemdcode, t.plan_id, t.action_type,
        t.from_status, t.to_status, t.action_date::text AS action_date, t.action_reason,
        t.remark, t.created_at,
-       u.name AS created_by_name
+       t.created_by AS created_by_name
      FROM ${T.SCHEDULE_PLAN_TRANSACTION} t
-     LEFT JOIN ${C.USERS} u ON u.id = t.created_by
      WHERE t.fin_year_id = $1
      ORDER BY t.fin_year_id, t.schno, t.itemdcode, t.created_at DESC, t.txn_id DESC`,
     [String(finYearId)]
@@ -107,9 +106,8 @@ export async function loadItemTransactionHistory(finYearId, schno, itemdcode) {
     `SELECT
        t.txn_id, t.action_type, t.from_status, t.to_status,
        t.action_date::text AS action_date, t.action_reason, t.remark,
-       t.created_at, u.name AS created_by_name
+       t.created_at, t.created_by AS created_by_name
      FROM ${T.SCHEDULE_PLAN_TRANSACTION} t
-     LEFT JOIN ${C.USERS} u ON u.id = t.created_by
      WHERE t.fin_year_id = $1 AND t.schno = $2 AND t.itemdcode = $3
      ORDER BY t.created_at DESC, t.txn_id DESC`,
     [String(finYearId), String(schno).trim(), Number(itemdcode)]

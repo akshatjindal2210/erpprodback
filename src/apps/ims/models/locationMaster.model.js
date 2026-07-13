@@ -1,5 +1,4 @@
 import dbQuery from "../../../config/db.js";
-import { MST_TABLES as M } from "../../../config/dbTables.js";
 
 const ALLOWED_FILTER_FIELDS = ["location_id", "rack_no", "shelf_no", "location_no", "acc_code", "item_dcode", "approved", "from_date", "to_date"];
 
@@ -11,21 +10,18 @@ const ALLOWED_UPDATE_FIELDS = [
   "updated_by", "updated_at"
 ];
 
-const JOINS = `
-  LEFT JOIN ${M.USERS} u_cr ON lm.created_by = u_cr.id
-  LEFT JOIN ${M.USERS} u_up ON lm.updated_by = u_up.id
-  LEFT JOIN ${M.USERS} u_ap ON lm.approved_by = u_ap.id
-  LEFT JOIN ${M.USERS} u_dl ON lm.deleted_by = u_dl.id
-`;
+const JOINS = "";
 
+/** Audit cols store user name snapshot (not live user id). */
 const DEFAULT_FIELDS = [
   "lm.location_id", "lm.rack_no", "lm.shelf_no", "COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no", "lm.location_description", "lm.total_capacity",
-  "lm.acc_code", "lm.item_dcode", "lm.approved", "lm.created_at", "lm.updated_at",
+  "lm.acc_code", "lm.item_dcode", "lm.approved", "lm.approved_by", "lm.approved_at",
+  "lm.created_by", "lm.created_at", "lm.updated_by", "lm.updated_at", "lm.deleted_by", "lm.deleted_at",
   "lm.acc_code::text AS acc_name", "lm.item_dcode::text AS item_code", "NULL::text AS item_desc",
-  "u_cr.name AS created_by_name",
-  "u_up.name AS updated_by_name",
-  "u_ap.name AS approved_by_name",
-  "u_dl.name AS deleted_by_name"
+  "lm.created_by AS created_by_name",
+  "lm.updated_by AS updated_by_name",
+  "lm.approved_by AS approved_by_name",
+  "lm.deleted_by AS deleted_by_name"
 ];
 
 export { DEFAULT_FIELDS as LOCATION_DEFAULT_FIELDS };

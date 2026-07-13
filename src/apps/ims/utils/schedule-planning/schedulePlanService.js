@@ -1,7 +1,7 @@
 import dbQuery, { withTransaction } from "../../../../config/db.js";
 import { fetchImsDataRaw } from "../../services/ims.service.js";
 import { buildInventoryReportSql } from "../inventory-report/inventoryReportSql.js";
-import { deletePlans, loadAllPlanMap, loadDispatchPlanItems, loadPlanRow, loadScheduleDispatchQtyMap, planKey, upsertPlan, updatePlanStatus } from "./schedulePlanDb.js";
+import { deletePlans, loadAllPlanMap, loadCustomerMonthScheduleItems, loadDispatchPlanItems, loadPlanRow, loadScheduleDispatchQtyMap, planKey, upsertPlan, updatePlanStatus } from "./schedulePlanDb.js";
 import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canRejectFrom, isActiveScheduleStatus, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel } from "./schedulePlanStatus.js";
 import { insertScheduleTransaction, loadActionDates, loadActionReasons, loadItemTransactionHistory, loadLastTransactionMap, loadPlanDateHistoryMap, deletePlanTransactions } from "./schedulePlanTransactionDb.js";
 import { buildScheduleComparison, hasScheduleComparisonMismatch } from "./schedulePlanCompare.js";
@@ -178,12 +178,12 @@ function enrichPlanDateHistory(records, historyMap) {
 
 async function recordTransaction({
   fin_year_id, schno, itemdcode, plan_id, action_type, from_status, to_status,
-  action_date, action_reason, remark, user_id,
+  action_date, action_reason, remark, user_name,
 }) {
   try {
     await insertScheduleTransaction({
       fin_year_id, schno, itemdcode, plan_id, action_type, from_status, to_status,
-      action_date, action_reason, remark, user_id,
+      action_date, action_reason, remark, user_name,
     });
   } catch (err) {
     console.error("[schedule-planning] transaction log failed", err?.message || err);
@@ -320,10 +320,10 @@ async function enrichFgStock(records) {
   }
 }
 
-async function enrichScheduleDispatchBalances(records) {
+async function enrichScheduleDispatchBalances(records, { excludeFuid = null } = {}) {
   if (!records.length) return records;
   try {
-    const dispatchMap = await loadScheduleDispatchQtyMap();
+    const dispatchMap = await loadScheduleDispatchQtyMap({ excludeFuid });
     return records.map((r) => {
       const scheduleQty = Number(r.totalqty ?? r.total_qty ?? 0);
       const dispatched = Number(dispatchMap.get(planKey(r.schno, r.itemdcode)) ?? 0);
@@ -512,7 +512,7 @@ export async function listScheduleActionDates(body = {}) {
   return { success: true, data: { action_dates: dates, reject_reasons: reasons }, reasons };
 }
 
-export async function saveSchedulePlan(body = {}, userId = null) {
+export async function saveSchedulePlan(body = {}, userName = null) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
 
@@ -545,7 +545,7 @@ export async function saveSchedulePlan(body = {}, userId = null) {
 
   const localRow = await upsertPlan({
     fin_year_id: fy.finYearId, schno, itemdcode, snap,
-    user_id: userId,
+    user_name: userName,
     is_planned: toStatus,
   });
 
@@ -555,7 +555,7 @@ export async function saveSchedulePlan(body = {}, userId = null) {
     fin_year_id: fy.finYearId, schno, itemdcode, plan_id: localRow.plan_id,
     action_type: SCHEDULE_PLAN_ACTION.PLAN, from_status: fromStatus, to_status: toStatus,
     action_date: actionDateNorm, action_reason: null, remark: item_remark ?? null,
-    user_id: userId,
+    user_name: userName,
   });
 
   await syncIms(fy.finYearId, body, { actionDate: actionDateNorm, qty: totalQty });
@@ -568,7 +568,7 @@ export async function saveSchedulePlan(body = {}, userId = null) {
   return { success: true, message: "Schedule plan saved.", data: planToRow(localRow, body, lastTxn) };
 }
 
-export async function rejectSchedulePlan(body = {}, userId = null) {
+export async function rejectSchedulePlan(body = {}, userName = null) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
 
@@ -595,13 +595,13 @@ export async function rejectSchedulePlan(body = {}, userId = null) {
         fin_year_id: fy.finYearId, schno, itemdcode, plan_id: existingRow.plan_id,
         action_type: SCHEDULE_PLAN_ACTION.REJECT, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.REJECT,
         action_date: ad, action_reason: reason, remark: item_remark ?? null,
-        user_id: userId,
+        user_name: userName,
       });
     } else {
       const updated = await updatePlanStatus({
         fin_year_id: fy.finYearId, schno, itemdcode,
         is_planned: SCHEDULE_PLAN_STATUS.REJECT,
-        user_id: userId,
+        user_name: userName,
       });
       if (!updated) return { success: false, status: 500, message: "Could not reject schedule." };
       const map = await loadAllPlanMap(fy.finYearId);
@@ -610,13 +610,13 @@ export async function rejectSchedulePlan(body = {}, userId = null) {
         fin_year_id: fy.finYearId, schno, itemdcode, plan_id: updated.plan_id ?? existingRow.plan_id,
         action_type: SCHEDULE_PLAN_ACTION.REJECT, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.REJECT,
         action_date: ad, action_reason: reason, remark: item_remark ?? null,
-        user_id: userId,
+        user_name: userName,
       });
     }
   } else {
     localRow = await upsertPlan({
       fin_year_id: fy.finYearId, schno, itemdcode, snap: pickSnap(body),
-      user_id: userId,
+      user_name: userName,
       is_planned: SCHEDULE_PLAN_STATUS.REJECT,
     });
     if (localRow) {
@@ -624,7 +624,7 @@ export async function rejectSchedulePlan(body = {}, userId = null) {
         fin_year_id: fy.finYearId, schno, itemdcode, plan_id: localRow.plan_id,
         action_type: SCHEDULE_PLAN_ACTION.REJECT, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.REJECT,
         action_date: ad, action_reason: reason, remark: item_remark ?? null,
-        user_id: userId,
+        user_name: userName,
       });
     }
   }
@@ -643,7 +643,7 @@ export async function rejectSchedulePlan(body = {}, userId = null) {
   };
 }
 
-export async function holdSchedulePlan(body = {}, userId = null) {
+export async function holdSchedulePlan(body = {}, userName = null) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
 
@@ -674,7 +674,7 @@ export async function holdSchedulePlan(body = {}, userId = null) {
   if (existingRow && holdUpdate) {
     localRow = await upsertPlan({
       fin_year_id: fy.finYearId, schno, itemdcode, snap: pickSnap(body),
-      user_id: userId,
+      user_name: userName,
       is_planned: SCHEDULE_PLAN_STATUS.HOLD,
     });
     if (localRow) {
@@ -682,13 +682,13 @@ export async function holdSchedulePlan(body = {}, userId = null) {
         fin_year_id: fy.finYearId, schno, itemdcode, plan_id: localRow.plan_id,
         action_type: SCHEDULE_PLAN_ACTION.HOLD, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.HOLD,
         action_date: actionDateNorm, action_reason: null, remark: itemRemark,
-        user_id: userId,
+        user_name: userName,
       });
     }
   } else if (existingRow) {
     localRow = await upsertPlan({
       fin_year_id: fy.finYearId, schno, itemdcode, snap: pickSnap(body),
-      user_id: userId,
+      user_name: userName,
       is_planned: SCHEDULE_PLAN_STATUS.HOLD,
     });
     if (localRow) {
@@ -696,13 +696,13 @@ export async function holdSchedulePlan(body = {}, userId = null) {
         fin_year_id: fy.finYearId, schno, itemdcode, plan_id: localRow.plan_id,
         action_type: SCHEDULE_PLAN_ACTION.HOLD, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.HOLD,
         action_date: actionDateNorm, action_reason: null, remark: itemRemark,
-        user_id: userId,
+        user_name: userName,
       });
     }
   } else {
     localRow = await upsertPlan({
       fin_year_id: fy.finYearId, schno, itemdcode, snap: pickSnap(body),
-      user_id: userId,
+      user_name: userName,
       is_planned: SCHEDULE_PLAN_STATUS.HOLD,
     });
     if (localRow) {
@@ -710,7 +710,7 @@ export async function holdSchedulePlan(body = {}, userId = null) {
         fin_year_id: fy.finYearId, schno, itemdcode, plan_id: localRow.plan_id,
         action_type: SCHEDULE_PLAN_ACTION.HOLD, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.HOLD,
         action_date: actionDateNorm, action_reason: null, remark: itemRemark,
-        user_id: userId,
+        user_name: userName,
       });
     }
   }
@@ -833,7 +833,7 @@ export async function removeSchedulePlan(body = {}) {
   };
 }
 
-export async function completeSchedulePlan(body = {}, userId = null) {
+export async function completeSchedulePlan(body = {}, userName = null) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
 
@@ -855,7 +855,7 @@ export async function completeSchedulePlan(body = {}, userId = null) {
   const updated = await updatePlanStatus({
     fin_year_id: fy.finYearId, schno, itemdcode,
     is_planned: SCHEDULE_PLAN_STATUS.COMPLETE,
-    user_id: userId,
+    user_name: userName,
   });
 
   if (!updated) return { success: false, status: 500, message: "Could not mark as complete." };
@@ -864,7 +864,7 @@ export async function completeSchedulePlan(body = {}, userId = null) {
     fin_year_id: fy.finYearId, schno, itemdcode, plan_id: updated.plan_id ?? existingRow.plan_id,
     action_type: SCHEDULE_PLAN_ACTION.COMPLETE, from_status: fromStatus, to_status: SCHEDULE_PLAN_STATUS.COMPLETE,
     action_date: localTodayYmd(), action_reason: null, remark: item_remark ?? null,
-    user_id: userId,
+    user_name: userName,
   });
 
   const snap = pickSnap(body);
@@ -881,36 +881,182 @@ export async function completeSchedulePlan(body = {}, userId = null) {
   };
 }
 
+/**
+ * Today Dispatch status filters.
+ * - active / default → Pending(Plan) + Hold with remaining balance
+ * - pending / plan → Planned only (balance > 0)
+ * - hold → Hold only (balance > 0)
+ * - complete → marked Complete OR remaining balance 0
+ * - all → Planned + Hold + Complete (every balance)
+ */
 function parseDispatchStatusFilter(rawStatus) {
-  const mode = String(rawStatus ?? "all").trim().toLowerCase();
+  const mode = String(rawStatus ?? "active").trim().toLowerCase();
+  if (mode === "complete" || mode === "completed" || mode === "zero" || mode === "zero_balance") {
+    return {
+      codes: [
+        SCHEDULE_PLAN_STATUS.PLANNED,
+        SCHEDULE_PLAN_STATUS.HOLD,
+        SCHEDULE_PLAN_STATUS.COMPLETE,
+      ],
+      balanceMode: "complete",
+    };
+  }
   if (mode === "plan" || mode === "pending") {
-    return [SCHEDULE_PLAN_STATUS.PLANNED];
+    return { codes: [SCHEDULE_PLAN_STATUS.PLANNED], balanceMode: "positive" };
   }
   if (mode === "hold") {
-    return [SCHEDULE_PLAN_STATUS.HOLD];
+    return { codes: [SCHEDULE_PLAN_STATUS.HOLD], balanceMode: "positive" };
   }
   if (mode === "all") {
-    return [
-      SCHEDULE_PLAN_STATUS.PLANNED,
-      SCHEDULE_PLAN_STATUS.HOLD,
-    ];
+    return {
+      codes: [
+        SCHEDULE_PLAN_STATUS.PLANNED,
+        SCHEDULE_PLAN_STATUS.HOLD,
+        SCHEDULE_PLAN_STATUS.COMPLETE,
+      ],
+      balanceMode: "any",
+    };
   }
-  return [
-    SCHEDULE_PLAN_STATUS.PLANNED,
-    SCHEDULE_PLAN_STATUS.HOLD,
-  ];
+  // active / pending_hold / default
+  return {
+    codes: [SCHEDULE_PLAN_STATUS.PLANNED, SCHEDULE_PLAN_STATUS.HOLD],
+    balanceMode: "positive",
+  };
+}
+
+function mapDispatchPlanRecord(row) {
+  return {
+    plan_id: row.plan_id,
+    fin_year_id: row.fin_year_id,
+    schno: row.schno,
+    itemdcode: row.itemdcode,
+    schmonth: row.schmonth,
+    schdt: row.schdt,
+    acc_code: row.acc_code,
+    acc_name: row.acc_name,
+    item_code: row.item_code,
+    itemdesc: row.itemdesc,
+    totalqty: row.totalqty,
+    is_planned: row.is_planned,
+    action_date: row.action_date ?? null,
+    item_remark: row.item_remark ?? null,
+    in_hand_qty: 0,
+    fg_stock_qty: 0,
+  };
+}
+
+/**
+ * Customer + current-month schedule lines for Forwarding Note item picker.
+ *
+ * Include (union):
+ *  1) Same-month ERP/IMS lines for this customer (Pending + Plan + Hold, etc.)
+ *  2) Same-month Plan/Hold in our DB even if missing from IMS
+ *
+ * Exclude: Complete, Reject.
+ * Schno/item from IMS when present; balance (FN dispatched) + FG from our DB.
+ */
+export async function listCustomerMonthSchedules(body = {}) {
+  const accCode = Number(body?.acc_code);
+  if (!Number.isFinite(accCode) || accCode <= 0) {
+    return { success: false, status: 400, records: [], message: "acc_code is required." };
+  }
+  const fy = requireFinYear(body);
+  if (fy.error) return fy.error;
+
+  const month = Number(currentScheduleMonth());
+  const excludeFuidRaw = Number(body?.exclude_fuid ?? body?.excludeFuid);
+  const excludeFuid =
+    Number.isFinite(excludeFuidRaw) && excludeFuidRaw > 0 ? excludeFuidRaw : null;
+
+  try {
+    const [imsResult, planMap, lastTxnMap] = await Promise.all([
+      fetchImsDataRaw(IMS_SCHEDULE_LIST, {
+        fin_year_id: fy.finYearId,
+        month: currentScheduleMonth(),
+      }),
+      loadAllPlanMap(fy.finYearId),
+      loadLastTransactionMap(fy.finYearId),
+    ]);
+
+    const imsRows = (Array.isArray(imsResult?.records) ? imsResult.records : []).filter(
+      (r) => Number(r.acc_code ?? r.Acc_code ?? r.accCode) === accCode
+    );
+
+    // Customer IMS month rows + DB merge (pending if no plan; plan/hold when we have them).
+    let records = buildFilteredList(imsRows, SCHEDULE_LIST_FILTER.ALL, planMap, lastTxnMap);
+
+    // Same-month Plan/Hold orphans (in our DB, not returned by IMS for this month).
+    const seen = new Set(records.map((r) => planKey(r.schno, r.itemdcode)));
+    for (const plan of planMap.values()) {
+      if (Number(plan.acc_code) !== accCode) continue;
+      if (Number(plan.schmonth) !== month) continue;
+      const st = Number(plan.is_planned);
+      if (st !== SCHEDULE_PLAN_STATUS.PLANNED && st !== SCHEDULE_PLAN_STATUS.HOLD) continue;
+      const k = planKey(plan.schno, plan.itemdcode);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      records.push(planToRow(plan, {}, lastTxnMap.get(k) ?? null));
+    }
+
+    records = records.filter((r) => {
+      if (Number(r.acc_code ?? r.Acc_code ?? 0) !== accCode) return false;
+      const st = Number(r.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);
+      if (st === SCHEDULE_PLAN_STATUS.COMPLETE || st === SCHEDULE_PLAN_STATUS.REJECT) return false;
+      // Drop other-month orphan noise from ALL merge (IMS month fetch is already current month).
+      const rowMonth = Number(r.schmonth);
+      if (Number.isFinite(rowMonth) && rowMonth > 0 && rowMonth !== month) {
+        // Keep pending IMS rows even if schmonth field missing/odd — IMS filter is month-scoped.
+        if (st === SCHEDULE_PLAN_STATUS.PENDING) return true;
+        return false;
+      }
+      return true;
+    });
+
+    records.sort((a, b) => {
+      const sa = String(a.schno ?? "");
+      const sb = String(b.schno ?? "");
+      if (sa !== sb) return sa.localeCompare(sb, undefined, { numeric: true });
+      return String(a.item_code ?? "").localeCompare(String(b.item_code ?? ""), undefined, {
+        sensitivity: "base",
+      });
+    });
+
+    const enriched = await enrichFgStock(records);
+    // Edit/approve: exclude this FN so balance includes qty already on the note.
+    const withBalances = await enrichScheduleDispatchBalances(enriched, { excludeFuid });
+    // Picker: skip fully dispatched / complete lines (Bal 0).
+    const openBalance = withBalances.filter((r) => Number(r.balance_qty ?? 0) > 0);
+    return { success: true, records: openBalance };
+  } catch (err) {
+    console.error("[schedule-planning] customer-month schedules error:", err?.message || err);
+    // Fallback: DB-only same-month Plan/Hold if IMS fails.
+    try {
+      const rows = await loadCustomerMonthScheduleItems(accCode, [
+        SCHEDULE_PLAN_STATUS.PLANNED,
+        SCHEDULE_PLAN_STATUS.HOLD,
+      ]);
+      const records = (rows || []).map(mapDispatchPlanRecord);
+      const enriched = await enrichFgStock(records);
+      const withBalances = await enrichScheduleDispatchBalances(enriched, { excludeFuid });
+      const openBalance = withBalances.filter((r) => Number(r.balance_qty ?? 0) > 0);
+      return { success: true, records: openBalance };
+    } catch (fallbackErr) {
+      console.error("[schedule-planning] customer-month DB fallback error:", fallbackErr?.message || fallbackErr);
+      return { success: false, records: [], message: "Could not load customer schedules." };
+    }
+  }
 }
 
 /**
  * Dispatch-plan helper for Forwarding Note.
- * Returns current month's non-complete planned items (1st of month → today).
+ * Current month action_date window (1st → today), filtered by status (see parseDispatchStatusFilter).
  */
 export async function listScheduleDispatchPlan(body = {}) {
   const now = new Date();
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const day = String(now.getDate()).padStart(2, "0");
-  const statusCodes = parseDispatchStatusFilter(body?.status);
+  const { codes: statusCodes, balanceMode } = parseDispatchStatusFilter(body?.status);
   try {
     const rows = await loadDispatchPlanItems(
       `${year}-${month}-01`,
@@ -918,44 +1064,21 @@ export async function listScheduleDispatchPlan(body = {}) {
       statusCodes
     );
 
-    const records = (rows || []).map((row) => ({
-      // identifiers needed for complete / reschedule actions
-      plan_id:    row.plan_id,
-      fin_year_id: row.fin_year_id,
-      schno:      row.schno,
-      itemdcode:  row.itemdcode,
-      schmonth:   row.schmonth,
-      schdt:      row.schdt,
-      acc_code:   row.acc_code,
-      acc_name:   row.acc_name,
-      item_code:  row.item_code,
-      itemdesc:   row.itemdesc,
-      totalqty:   row.totalqty,
-      is_planned: row.is_planned,
-      // last planned transaction — target date + remark
-      action_date:  row.action_date  ?? null,
-      item_remark:  row.item_remark  ?? null,
-      // fg stock enriched below
-      in_hand_qty:  0,
-      fg_stock_qty: 0,
-      // --- fields available for future use (not sent to client currently) ---
-      // created_at:         row.created_at,
-      // updated_at:         row.updated_at,
-      // created_by_name:    row.created_by_name,
-      // updated_by_name:    row.updated_by_name,
-      // last_action_type:   row.last_action_type,
-      // action_reason:      row.action_reason,
-      // last_action_at:     row.last_action_at,
-      // last_action_by_name: row.last_action_by_name,
-      // status_label:       statusLabel(row.is_planned),
-      // status:             statusLabel(row.is_planned).toLowerCase(),
-      // last_action_label:  actionTypeLabel(row.last_action_type),
-      // plan_date_history:  [],
-      // previous_plan_dates: [],
-    }));
+    const records = (rows || []).map(mapDispatchPlanRecord);
 
     const enriched = await enrichFgStock(records);
-    const withBalances = await enrichScheduleDispatchBalances(enriched);
+    let withBalances = await enrichScheduleDispatchBalances(enriched);
+    if (balanceMode === "positive") {
+      withBalances = withBalances.filter((r) => Number(r.balance_qty ?? 0) > 0);
+    } else if (balanceMode === "zero") {
+      withBalances = withBalances.filter((r) => Number(r.balance_qty ?? 0) === 0);
+    } else if (balanceMode === "complete") {
+      withBalances = withBalances.filter(
+        (r) =>
+          Number(r.is_planned) === SCHEDULE_PLAN_STATUS.COMPLETE ||
+          Number(r.balance_qty ?? 0) === 0
+      );
+    }
     return { success: true, records: withBalances };
   } catch (err) {
     console.error("[schedule-planning] dispatch helper error:", err?.message || err);

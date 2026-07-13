@@ -1,8 +1,8 @@
 import dbQuery from "../../../config/db.js";
-import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { applyForwardingOutEntryListFilter } from "../utils/forwarding-note/forwardingNoteListFilters.js";
 
-/** Forwarding Note item-wise rows — joined to master for list filters. */
+/** Forwarding Note item-wise rows — joined to master for list filters.
+ * Audit cols store user name snapshot (not live user id). */
 
 // Master-level columns available for filters/search
 const ALLOWED_FILTER_FIELDS = ["id", "fuid", "item_dcode", "approved", "out_entry_locked", "from_date", "to_date", "po_number", "acc_code"];
@@ -16,15 +16,6 @@ const ALLOWED_UPDATE_FIELDS = [
 // Items (fi) joined to master (fnm) on fuid
 const JOINS = `
   INNER JOIN ims_forwarding_note_master fnm ON fi.fuid = fnm.fuid
-  LEFT JOIN ${M.USERS} u_cr       ON fi.created_by = u_cr.id
-  LEFT JOIN ${M.USERS} u_upd      ON fi.updated_by = u_upd.id
-  LEFT JOIN ${M.USERS} u_ap       ON fi.approved_by = u_ap.id
-  LEFT JOIN ${M.USERS} u_mcr      ON fnm.created_by = u_mcr.id
-  LEFT JOIN ${M.USERS} u_mupd     ON fnm.updated_by = u_mupd.id
-  LEFT JOIN ${M.USERS} u_mdl      ON fnm.deleted_by = u_mdl.id
-  LEFT JOIN ${M.USERS} u_map      ON fnm.approved_by = u_map.id
-  LEFT JOIN ${M.USERS} u_lock     ON fnm.out_entry_locked_by = u_lock.id
-  LEFT JOIN ${M.USERS} u_bill     ON fnm.bill_updated_by = u_bill.id
   LEFT JOIN LATERAL (
     SELECT oe.out_uid, oe.scan_complete, oe.approved, oe.boxes_scanned, oe.boxes_required
     FROM ims_out_entry oe
@@ -75,12 +66,12 @@ const DEFAULT_FIELDS = [
   "fnm.deleted_by",
   "fnm.deleted_at",
   "fnm.acc_code::text AS acc_name",
-  "u_mcr.name AS created_by_name",
-  "u_mupd.name AS updated_by_name",
-  "u_mdl.name AS deleted_by_name",
-  "u_map.name AS approved_by_name",
-  "u_lock.name AS out_entry_locked_by_name",
-  "u_bill.name AS bill_updated_by_name"
+  "fnm.created_by AS created_by_name",
+  "fnm.updated_by AS updated_by_name",
+  "fnm.deleted_by AS deleted_by_name",
+  "fnm.approved_by AS approved_by_name",
+  "fnm.out_entry_locked_by AS out_entry_locked_by_name",
+  "fnm.bill_updated_by AS bill_updated_by_name"
 ];
 
 export const findForwardingNoteItems = async (options = {}) => {
@@ -223,9 +214,15 @@ export const findForwardingNoteItem = async (filters = {}) => {
 export const insertForwardingNoteItem = async (data, { client } = {}) => {
   const fields = [
     "fuid", "item_dcode", "packing_number", "box", "box_qty", 
-    "loose_box", "loose_box_qty", "total_qty", "created_by"
+    "loose_box", "loose_box_qty", "total_qty", "schno", "created_by"
   ];
-  const values = fields.map(f => data[f] ?? null);
+  const values = fields.map(f => {
+    if (f === "schno") {
+      const raw = data.schno;
+      return raw != null && String(raw).trim() !== "" ? String(raw).trim() : null;
+    }
+    return data[f] ?? null;
+  });
   const placeholders = fields.map((_, idx) => `$${idx + 1}`).join(", ");
   const run = client?.query
     ? async (sql, params) => {

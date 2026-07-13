@@ -2,6 +2,7 @@ import { findModuleSops, findModuleSop, findModuleSopByModulePermission, insertM
 import { findModule } from "../models/module.model.js";
 import User from "../models/user.model.js";
 import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
+import { auditUserName } from "../utils/approval.js";
 
 const SOP_FILTER_FIELDS = ["id", "module_id", "permission_type", "is_required", "from_date", "to_date"];
 
@@ -44,12 +45,12 @@ export const createModuleSop = async (req, res) => {
     if (!allowedPerm.includes(permission_type)) {
       return res.status(400).json({ success: false, message: "Invalid permission_type" });
     }
-    const created_by = req.user.id;
+    const created_by = auditUserName(req);
 
     const module = await findModule({ id: module_id });
     if (!module) return res.status(404).json({ success: false, message: "Module not found" });
 
-    const user = await User.getById(created_by);
+    const user = await User.getById(req.user.id);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
     const dup = await findModuleSopByModulePermission(module_id, permission_type);
@@ -74,7 +75,7 @@ export const createModuleSop = async (req, res) => {
 export const updateModuleSopController = async (req, res) => {
   try {
     const { id, description, is_required } = req.body;
-    const fields = { updated_by: req.user.id, updated_at: new Date() };
+    const fields = { updated_by: auditUserName(req), updated_at: new Date() };
     if (description !== undefined) fields.description = description;
     if (is_required !== undefined) fields.is_required = !!is_required;
 
@@ -90,7 +91,7 @@ export const updateModuleSopController = async (req, res) => {
 export const deleteModuleSopController = async (req, res) => {
   try {
     const { id } = req.body;
-    await deleteModuleSop({ id }, { deleted_by: req.user.id });
+    await deleteModuleSop({ id }, { deleted_by: auditUserName(req) });
     res.json({ success: true, message: "SOP deleted" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

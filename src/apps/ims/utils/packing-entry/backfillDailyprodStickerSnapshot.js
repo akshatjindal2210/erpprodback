@@ -65,7 +65,7 @@ export async function backfillDailyprodStickerColumns() {
          MAX(b.qty) FILTER (WHERE NOT COALESCE(b.is_loose, false)) AS qty_per_box,
          MAX(b.qty) FILTER (WHERE COALESCE(b.is_loose, false)) AS loose_box_qty,
          MIN(b.created_at) AS system_generate_date,
-         (SELECT u.name FROM ${T.BOX_TABLE} b2 LEFT JOIN mst_users u ON u.id = b2.created_by WHERE b2.packing_number = dp.doc_no::text AND b2.is_deleted = false ORDER BY b2.created_at ASC LIMIT 1) AS system_generate_user_name
+         (SELECT b2.created_by FROM ${T.BOX_TABLE} b2 WHERE b2.packing_number = dp.doc_no::text AND b2.is_deleted = false ORDER BY b2.created_at ASC LIMIT 1) AS system_generate_user_name
        FROM ${T.BOX_TABLE} b
        WHERE b.is_deleted = false
          AND trim(b.packing_number::text) = trim(dp.doc_no::text)

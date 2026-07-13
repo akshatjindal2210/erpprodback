@@ -9,9 +9,7 @@ const ALLOWED_UPDATE_FIELDS = ["description", "is_required", "updated_by", "upda
 const ALLOWED_FIND_KEYS = ["id", "module_id"];
 const ALLOWED_DELETE_FILTER_KEYS = ["id"];
 
-const MS_FROM = `FROM ${TABLE} ms
-  LEFT JOIN ${M.USERS} u_cr ON ms.created_by = u_cr.id
-  LEFT JOIN ${M.USERS} u_up ON ms.updated_by = u_up.id`;
+const MS_FROM = `FROM ${TABLE} ms`;
 
 const assertField = (key, list, ctx = "field") => {
   if (!list.includes(key)) throw new Error(`Invalid ${ctx}: "${key}"`);
@@ -64,7 +62,9 @@ export const findModuleSops = async ({
   const limPh = `$${i++}`;
   const offPh = `$${i++}`;
   const dataQuery = `
-    SELECT ms.*, u_cr.name AS created_by_name, u_up.name AS updated_by_name
+    SELECT ms.*,
+           ms.created_by AS created_by_name,
+           ms.updated_by AS updated_by_name
     ${MS_FROM}
     ${whereSql}
     ORDER BY ms.${safeSortBy} ${safeOrder}
@@ -88,7 +88,9 @@ export const findModuleSop = async (filters = {}) => {
 
   const conditions = keys.map((key, idx) => `ms.${key} = $${idx + 1}`).join(" AND ");
   const [row] = await dbQuery(
-    `SELECT ms.*, u_cr.name AS created_by_name, u_up.name AS updated_by_name
+    `SELECT ms.*,
+            ms.created_by AS created_by_name,
+            ms.updated_by AS updated_by_name
      ${MS_FROM}
      WHERE ms.is_deleted = false AND ${conditions}
      LIMIT 1`,
@@ -100,7 +102,9 @@ export const findModuleSop = async (filters = {}) => {
 /** One live SOP per module + permission_type */
 export const findModuleSopByModulePermission = async (module_id, permission_type) => {
   const [row] = await dbQuery(
-    `SELECT ms.*, u_cr.name AS created_by_name, u_up.name AS updated_by_name
+    `SELECT ms.*,
+            ms.created_by AS created_by_name,
+            ms.updated_by AS updated_by_name
      ${MS_FROM}
      WHERE ms.is_deleted = false AND ms.module_id = $1 AND ms.permission_type = $2
      LIMIT 1`,

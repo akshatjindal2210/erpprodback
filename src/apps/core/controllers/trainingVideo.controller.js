@@ -4,6 +4,7 @@ import User from "../models/user.model.js";
 import { getCrudModuleConfig } from "../config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
 import { sanitizeSearch } from "../utils/helper.js";
+import { auditUserName } from "../utils/approval.js";
 
 const TRAINING_CFG = getCrudModuleConfig("training_videos");
 
@@ -57,12 +58,12 @@ export const getTrainingVideoById = async (req, res) => {
 export const createTrainingVideo = async (req, res) => {
   try {
     const { module_id, title, description, video_url, permission_type } = req.body;
-    const created_by = req.user.id;
+    const created_by = auditUserName(req);
 
     const module = await findModule({ id: module_id });
     if (!module) return res.status(404).json({ success: false, message: "Module not found" });
 
-    const user = await User.getById(created_by);
+    const user = await User.getById(req.user.id);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
     const autoApprove = req.user?.type === "super_admin" || req.permission?.can_authorize === true;
@@ -89,7 +90,7 @@ export const updateTrainingVideoController = async (req, res) => {
   try {
     const { id, ...fields } = req.body;
     const video = await updateTrainingVideo(
-      { ...fields, updated_by: req.user.id, updated_at: new Date() },
+      { ...fields, updated_by: auditUserName(req), updated_at: new Date() },
       { id }
     );
     if (!video) return res.status(404).json({ success: false, message: "Video not found" });
@@ -105,7 +106,7 @@ export const approveTrainingVideoController = async (req, res) => {
     const { id } = req.body;
     if (!id) return res.status(400).json({ success: false, message: "ID required" });
 
-    const updated = await approveTrainingVideoById(id, req.user.id);
+    const updated = await approveTrainingVideoById(id, auditUserName(req));
     if (!updated) {
       const existing = await findTrainingVideo({ id });
       if (!existing) return res.status(404).json({ success: false, message: "Video not found" });
@@ -122,7 +123,7 @@ export const approveTrainingVideoController = async (req, res) => {
 export const deleteTrainingVideoController = async (req, res) => {
   try {
     const { id } = req.body;
-    await deleteTrainingVideo({ id }, { deleted_by: req.user.id });
+    await deleteTrainingVideo({ id }, { deleted_by: auditUserName(req) });
     
     res.json({ success: true, message: "Video deleted" });
   } catch (err) {

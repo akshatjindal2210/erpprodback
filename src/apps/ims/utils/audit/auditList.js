@@ -27,12 +27,7 @@ export const ASSIGNED_USERS_SUBQUERY = `
    LEFT JOIN ${M.USERS} u_al ON al_names.assigned_user_id = u_al.id
    WHERE al_names.audit_id = am.audit_id)`;
 
-export const AUDIT_LIST_JOINS = `
-  LEFT JOIN ${M.USERS} u_cr ON am.created_by = u_cr.id
-  LEFT JOIN ${M.USERS} u_up ON am.updated_by = u_up.id
-  LEFT JOIN ${M.USERS} u_ap ON am.approved_by = u_ap.id
-  LEFT JOIN ${M.USERS} u_dl ON am.deleted_by = u_dl.id
-`;
+/** Master audit cols store name snapshots — no users JOIN for created/updated/approved/deleted. */
 
 const AUDIT_MASTER_COLUMNS = `
   am.audit_id, am.start_date, am.end_date, am.remarks, am.status,
@@ -44,10 +39,10 @@ const AUDIT_MASTER_COLUMNS = `
 /** Detail / findAudit — full row + deleted metadata */
 export const AUDIT_DEFAULT_SELECT_FIELDS = [
   AUDIT_MASTER_COLUMNS,
-  "u_cr.name AS created_by_name",
-  "u_up.name AS updated_by_name",
-  "u_ap.name AS approved_by_name",
-  "u_dl.name AS deleted_by_name",
+  "am.created_by AS created_by_name",
+  "am.updated_by AS updated_by_name",
+  "am.approved_by AS approved_by_name",
+  "am.deleted_by AS deleted_by_name",
 ];
 
 /** List page — lighter select (no delete columns) */
@@ -64,9 +59,9 @@ const AUDIT_LIST_SELECT = [
   "am.created_at",
   "am.updated_by",
   "am.updated_at",
-  "u_cr.name AS created_by_name",
-  "u_up.name AS updated_by_name",
-  "u_ap.name AS approved_by_name",
+  "am.created_by AS created_by_name",
+  "am.updated_by AS updated_by_name",
+  "am.approved_by AS approved_by_name",
 ].join(", ");
 
 export const AUDIT_LOCATIONS_JSON = `
@@ -109,7 +104,8 @@ function applyVisibility(user, permission, conditions, values) {
   const isManager = Boolean(permission?.can_authorize || permission?.can_edit || permission?.can_view);
   if (isManager) return;
 
-  const creatorIdx = nextParam(values, user.id);
+  const creatorName = user?.name != null ? String(user.name).trim() : "";
+  const creatorIdx = nextParam(values, creatorName || null);
   const assigneeIdx = nextParam(values, user.id);
   conditions.push(`(
     am.created_by = $${creatorIdx}
@@ -161,8 +157,8 @@ function applySearch(search, conditions, values) {
     am.audit_id::text ILIKE $${idx}
     OR am.remarks ILIKE $${idx}
     OR am.status ILIKE $${idx}
-    OR u_cr.name ILIKE $${idx}
-    OR u_ap.name ILIKE $${idx}
+    OR COALESCE(am.created_by::text, '') ILIKE $${idx}
+    OR COALESCE(am.approved_by::text, '') ILIKE $${idx}
     OR EXISTS (
       SELECT 1
       FROM ${T.AUDIT_LOCATIONS} al_s
@@ -186,15 +182,14 @@ function buildListWhere({ filters = {}, search, permission = {}, user = {} }) {
 
   applyVisibility(user, permission, conditions, values);
   applyFilters(filters, conditions, values);
-  const needsUserJoins = applySearch(search, conditions, values);
+  applySearch(search, conditions, values);
 
-  return { whereClause: `WHERE ${conditions.join(" AND ")}`, values, needsUserJoins };
+  return { whereClause: `WHERE ${conditions.join(" AND ")}`, values };
 }
 
-async function countAudits(whereClause, values, needsUserJoins) {
-  const joins = needsUserJoins ? AUDIT_LIST_JOINS : "";
+async function countAudits(whereClause, values) {
   const [{ count }] = await dbQuery(
-    `SELECT COUNT(*)::int AS count FROM ${T.AUDIT_MASTER} am ${joins} ${whereClause}`,
+    `SELECT COUNT(*)::int AS count FROM ${T.AUDIT_MASTER} am ${whereClause}`,
     values
   );
   return Number(count) || 0;
@@ -212,7 +207,7 @@ export async function findAudits(options = {}) {
     user = {},
   } = options;
 
-  const { whereClause, values, needsUserJoins } = buildListWhere({
+  const { whereClause, values } = buildListWhere({
     filters,
     search,
     permission,
@@ -234,7 +229,6 @@ export async function findAudits(options = {}) {
     `SELECT ${selectCore},
        ${AUDIT_LOCATIONS_JSON} AS locations
      FROM ${T.AUDIT_MASTER} am
-     ${AUDIT_LIST_JOINS}
      ${whereClause}
      ORDER BY am.${sortBy} ${sortOrder}
      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
@@ -243,7 +237,7 @@ export async function findAudits(options = {}) {
 
   let total = rows.length;
   if (rows.length >= safeLimit || safePage > 1) {
-    total = await countAudits(whereClause, values, needsUserJoins);
+    total = await countAudits(whereClause, values);
   }
 
   return {

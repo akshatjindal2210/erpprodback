@@ -1,5 +1,5 @@
 import express from "express";
-import { getSchedulePlanning, getScheduleActionDates, saveSchedulePlanning, rejectSchedulePlanning, holdSchedulePlanning, getScheduleItemTransactions, submitScheduleShortagePlanning, deleteSchedulePlanning, getScheduleDispatchPlan, completeSchedulePlanning } from "../controllers/schedulePlanning.controller.js";
+import { getSchedulePlanning, getScheduleActionDates, saveSchedulePlanning, rejectSchedulePlanning, holdSchedulePlanning, getScheduleItemTransactions, submitScheduleShortagePlanning, deleteSchedulePlanning, getScheduleDispatchPlan, getCustomerMonthSchedules, completeSchedulePlanning } from "../controllers/schedulePlanning.controller.js";
 import { authenticate } from "../middleware/auth.js";
 import { accessControl } from "../../core/middleware/accessControl.js";
 import { helperAccess } from "../config/helperViews.js";
@@ -18,5 +18,7 @@ router.post("/delete", authenticate, accessControl("schedule_planning", "delete"
 
 // Dispatch-plan helper (Forwarding Note "Today Dispatch Plan" tab) — no fin_year_id required
 router.post("/dispatch-helper", authenticate, helperAccess("schedulePlanning"), getScheduleDispatchPlan);
+// Customer + current-month schedules for FN create/edit item picker
+router.post("/customer-month-schedules", authenticate, accessControl("forwarding_note_master", "view"), getCustomerMonthSchedules);
 
 export default router;

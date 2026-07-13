@@ -9,10 +9,7 @@ const ALLOWED_UPDATE_FIELDS = ["module_id", "title", "description", "video_url",
 const ALLOWED_FIND_KEYS = ["id", "module_id"];
 const ALLOWED_DELETE_FILTER_KEYS = ["id"];
 
-const TV_FROM = `FROM ${TABLE} tv
-  LEFT JOIN ${M.USERS} u_cr ON tv.created_by = u_cr.id
-  LEFT JOIN ${M.USERS} u_ap ON tv.approved_by = u_ap.id
-  LEFT JOIN ${M.USERS} u_up ON tv.updated_by = u_up.id`;
+const TV_FROM = `FROM ${TABLE} tv`;
 
 const assertField = (key, list, ctx = "field") => {
   if (!list.includes(key)) throw new Error(`Invalid ${ctx}: "${key}"`);
@@ -118,7 +115,10 @@ export const findTrainingVideos = async ({
   const limPh = `$${i++}`;
   const offPh = `$${i++}`;
   const dataQuery = `
-    SELECT tv.*, u_cr.name AS created_by_name, u_ap.name AS approved_by_name, u_up.name AS updated_by_name
+    SELECT tv.*,
+           tv.created_by AS created_by_name,
+           tv.approved_by AS approved_by_name,
+           tv.updated_by AS updated_by_name
     ${TV_FROM}
     ${whereSql}
     ORDER BY tv.${safeSortBy} ${safeOrder}
@@ -142,7 +142,10 @@ export const findTrainingVideo = async (filters = {}) => {
 
   const conditions = keys.map((key, idx) => `tv.${key} = $${idx + 1}`).join(" AND ");
   const [video] = await dbQuery(
-    `SELECT tv.*, u_cr.name AS created_by_name, u_ap.name AS approved_by_name, u_up.name AS updated_by_name
+    `SELECT tv.*,
+            tv.created_by AS created_by_name,
+            tv.approved_by AS approved_by_name,
+            tv.updated_by AS updated_by_name
      ${TV_FROM}
      WHERE tv.is_deleted = false AND ${conditions}
      LIMIT 1`,
@@ -172,7 +175,7 @@ export const insertTrainingVideo = async ({
   return video;
 };
 
-export const approveTrainingVideoById = async (id, approverUserId) => {
+export const approveTrainingVideoById = async (id, approvedByName) => {
   const [row] = await dbQuery(
     `UPDATE ${TABLE}
      SET approved = true,
@@ -180,7 +183,7 @@ export const approveTrainingVideoById = async (id, approverUserId) => {
          approved_at = NOW()
      WHERE id = $1 AND is_deleted = false AND approved = false
      RETURNING *`,
-    [id, approverUserId]
+    [id, approvedByName]
   );
   return row ?? null;
 };

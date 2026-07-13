@@ -1,6 +1,7 @@
 import dbQuery from "../../../../config/db.js";
 import { patchTableSchema, patchCol, dropColumnIfExists } from "../../../../config/ensureDbColumns.js";
-import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
+import { IMS_TABLES as T } from "../../../../config/dbTables.js";
+import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createStockAdjustmentTable() {
   await dbQuery(`
@@ -11,14 +12,14 @@ export async function createStockAdjustmentTable() {
       unit              VARCHAR(50),
       remarks           TEXT,
       approved          BOOLEAN DEFAULT false,
-      approved_by       INTEGER REFERENCES ${C.USERS}(id),
+      approved_by       TEXT,
       approved_at       TIMESTAMP,
       is_deleted        BOOLEAN DEFAULT false,
-      deleted_by        INTEGER REFERENCES ${C.USERS}(id),
+      deleted_by        TEXT,
       deleted_at        TIMESTAMP,
-      created_by        INTEGER REFERENCES ${C.USERS}(id),
+      created_by        TEXT,
       created_at        TIMESTAMP DEFAULT NOW(),
-      updated_by        INTEGER REFERENCES ${C.USERS}(id),
+      updated_by        TEXT,
       updated_at        TIMESTAMP,
       entry_type        VARCHAR(16),
       packing_number    VARCHAR(128),
@@ -52,4 +53,7 @@ export async function createStockAdjustmentTable() {
   });
 
   await dropColumnIfExists(dbQuery, T.STOCK_ADJUSTMENT, "category_name");
+
+  // ONE-TIME: INT id → user name. After prod OK, remove this call.
+  await migrateTableAuditColumnsToUserNames(dbQuery, T.STOCK_ADJUSTMENT);
 }

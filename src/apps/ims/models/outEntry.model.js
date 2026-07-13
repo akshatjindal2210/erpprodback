@@ -1,9 +1,9 @@
 import dbQuery from "../../../config/db.js";
-import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
 import { logBoxTransactionSafe, singlePackingFromRows } from "../utils/box/logBoxTransaction.js";
 
-/** Store Out — DB access for ims_out_entry (list, CRUD, box links, FUID details). */
+/** Store Out — DB access for ims_out_entry (list, CRUD, box links, FUID details).
+ * Audit cols store user name snapshot (not live user id). */
 
 const ALLOWED_FILTER_FIELDS = ["out_uid", "fuid", "qc_hold_id", "reason", "entry_type", "approved", "scan_complete", "from_date", "to_date"];
 
@@ -29,12 +29,7 @@ const ALLOWED_UPDATE_FIELDS = [
   "boxes_scanned",
 ];
 
-const JOINS = `
-  LEFT JOIN ${M.USERS} u_cr  ON o.created_by  = u_cr.id
-  LEFT JOIN ${M.USERS} u_upd ON o.updated_by  = u_upd.id
-  LEFT JOIN ${M.USERS} u_dl  ON o.deleted_by  = u_dl.id
-  LEFT JOIN ${M.USERS} u_ap  ON o.approved_by = u_ap.id
-`;
+const JOINS = ``;
 
 const DEFAULT_FIELDS = [
   "o.out_uid", "o.fuid", "o.qc_hold_id", "o.reason",
@@ -46,10 +41,10 @@ const DEFAULT_FIELDS = [
   "o.created_by", "o.created_at",
   "o.updated_by", "o.updated_at",
   "o.is_deleted", "o.deleted_by", "o.deleted_at",
-  "u_cr.name  AS created_by_name",
-  "u_upd.name AS updated_by_name",
-  "u_dl.name  AS deleted_by_name",
-  "u_ap.name  AS approved_by_name"
+  "o.created_by AS created_by_name",
+  "o.updated_by AS updated_by_name",
+  "o.deleted_by AS deleted_by_name",
+  "o.approved_by AS approved_by_name"
 ];
 
 export const findOutEntries = async (options = {}) => {
@@ -60,10 +55,10 @@ export const findOutEntries = async (options = {}) => {
 
   const safeFields = fields.length > 0 
     ? fields.map(f => {
-        if (f === "created_by_name") return "u_cr.name AS created_by_name";
-        if (f === "updated_by_name") return "u_upd.name AS updated_by_name";
-        if (f === "approved_by_name") return "u_ap.name AS approved_by_name";
-        if (f === "deleted_by_name") return "u_dl.name AS deleted_by_name";
+        if (f === "created_by_name") return "o.created_by AS created_by_name";
+        if (f === "updated_by_name") return "o.updated_by AS updated_by_name";
+        if (f === "approved_by_name") return "o.approved_by AS approved_by_name";
+        if (f === "deleted_by_name") return "o.deleted_by AS deleted_by_name";
         if (f.includes('.')) return f;
         return `o.${f}`;
       }).join(", ")
@@ -102,7 +97,7 @@ export const findOutEntries = async (options = {}) => {
     values.push(searchTerm);
     conditions.push(`(
       o.remarks ILIKE $${i}
-      OR u_cr.name ILIKE $${i}
+      OR o.created_by ILIKE $${i}
       OR o.out_uid::text ILIKE $${i}
       OR o.fuid::text ILIKE $${i}
       OR o.item_codes::text ILIKE $${i}
@@ -483,7 +478,7 @@ export const findOutEntryLinkedBoxes = async (out_uid) => {
 };
 
 /** Other out entry: remove store location and return boxes to packing area. */
-export const applyOutEntryOtherReturn = async ({ out_uid, userId, scanned_boxes = [] }, { client = null } = {}) => {
+export const applyOutEntryOtherReturn = async ({ out_uid, userId, userName = null, scanned_boxes = [] }, { client = null } = {}) => {
   const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const uids = [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
   if (!out_uid || !uids.length) return [];
@@ -501,7 +496,7 @@ export const applyOutEntryOtherReturn = async ({ out_uid, userId, scanned_boxes 
        AND out_uid IS NULL
        AND sa_entry_type IS DISTINCT FROM 'stock_out'
      RETURNING box_uid, box_no_uid, packing_number, qty, is_loose, location_id`,
-    [userId, uids]
+    [userName ?? null, uids]
   );
 
   const resultRows = client?.query ? rows.rows : rows;
@@ -514,6 +509,7 @@ export const applyOutEntryOtherReturn = async ({ out_uid, userId, scanned_boxes 
       source_id: String(out_uid),
       packing_number: singlePackingFromRows(resultRows),
       user_id: userId,
+      user_name: userName ?? null,
       rows: resultRows,
       details: {
         out_uid,
@@ -528,7 +524,7 @@ export const applyOutEntryOtherReturn = async ({ out_uid, userId, scanned_boxes 
 
 /** QC Area out entry: move in-store held boxes to QC area (clear location, keep qc_hold_id). */
 export const applyOutEntryQcAreaRelease = async (
-  { out_uid, userId, scanned_boxes = [], qc_hold_id = null },
+  { out_uid, userId, userName = null, scanned_boxes = [], qc_hold_id = null },
   { client = null } = {}
 ) => {
   const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
@@ -552,7 +548,7 @@ export const applyOutEntryQcAreaRelease = async (
        AND qc_hold_id = $3::integer
        AND (location_id IS NOT NULL OR in_uid IS NOT NULL)
      RETURNING box_uid, box_no_uid, packing_number, qty, is_loose, location_id, qc_hold_id`,
-    [userId, uids, holdId]
+    [userName ?? null, uids, holdId]
   );
 
   const resultRows = client?.query ? rows.rows : rows;
@@ -565,6 +561,7 @@ export const applyOutEntryQcAreaRelease = async (
       source_id: String(out_uid),
       packing_number: singlePackingFromRows(resultRows),
       user_id: userId,
+      user_name: userName ?? null,
       rows: resultRows,
       details: {
         out_uid,
@@ -580,21 +577,21 @@ export const applyOutEntryQcAreaRelease = async (
 };
 
 /** Apply stock: link boxes on ims_box_table. Call only when out entry is approved. */
-export const applyOutEntryApprovedStock = async ({ out_uid, userId, scanned_boxes = [] }, { client = null } = {}) => {
+export const applyOutEntryApprovedStock = async ({ out_uid, userId, userName = null, scanned_boxes = [] }, { client = null } = {}) => {
   await clearOutEntryDraftScans(out_uid, { client });
-  await resetBoxesForOutEntry(out_uid, userId, { client });
+  await resetBoxesForOutEntry(out_uid, userId, { client, userName });
   if (scanned_boxes?.length) {
-    await linkBoxesToOutEntry({ out_uid, userId, scanned_boxes }, { client });
+    await linkBoxesToOutEntry({ out_uid, userId, userName, scanned_boxes }, { client });
   }
 };
 
 /** Draft save: scans stored without out_uid on boxes (stock unchanged). */
-export const saveOutEntryDraftScans = async ({ out_uid, userId, scanned_boxes = [] }, { client = null } = {}) => {
-  await resetBoxesForOutEntry(out_uid, userId, { client });
+export const saveOutEntryDraftScans = async ({ out_uid, userId, userName = null, scanned_boxes = [] }, { client = null } = {}) => {
+  await resetBoxesForOutEntry(out_uid, userId, { client, userName });
   return replaceOutEntryDraftScans({ out_uid, scanned_boxes }, { client });
 };
 
-export const linkBoxesToOutEntry = async ({ out_uid, userId, scanned_boxes = [] }, { client = null } = {}) => {
+export const linkBoxesToOutEntry = async ({ out_uid, userId, userName = null, scanned_boxes = [] }, { client = null } = {}) => {
   if (!out_uid || !Array.isArray(scanned_boxes) || scanned_boxes.length === 0) return [];
   const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const rows = await run(
@@ -607,7 +604,7 @@ export const linkBoxesToOutEntry = async ({ out_uid, userId, scanned_boxes = [] 
        AND out_uid IS NULL
        AND sa_entry_type IS DISTINCT FROM 'stock_out'
      RETURNING box_uid, box_no_uid, packing_number, qty, is_loose`,
-    [out_uid, userId, scanned_boxes]
+    [out_uid, userName ?? null, scanned_boxes]
   );
   const resultRows = client?.query ? rows.rows : rows;
   if (resultRows?.length) {
@@ -618,6 +615,7 @@ export const linkBoxesToOutEntry = async ({ out_uid, userId, scanned_boxes = [] 
       source_id: String(out_uid),
       packing_number: singlePackingFromRows(resultRows),
       user_id: userId,
+      user_name: userName ?? null,
       rows: resultRows,
       details: {
         out_uid,
@@ -628,7 +626,7 @@ export const linkBoxesToOutEntry = async ({ out_uid, userId, scanned_boxes = [] 
   return resultRows;
 };
 
-export const resetBoxesForOutEntry = async (out_uid, userId = null, { client = null } = {}) => {
+export const resetBoxesForOutEntry = async (out_uid, userId = null, { client = null, userName = null } = {}) => {
   if (!out_uid) return [];
   const run = client?.query ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const rows = await run(
@@ -651,6 +649,7 @@ export const resetBoxesForOutEntry = async (out_uid, userId = null, { client = n
       source_id: String(out_uid),
       packing_number: singlePackingFromRows(resultRows),
       user_id: userId,
+      user_name: userName ?? null,
       rows: resultRows,
       details: {
         out_uid,

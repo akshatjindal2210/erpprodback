@@ -4,7 +4,7 @@ import { logActivity } from "../../core/utils/logActivity.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { resolveViewsFields } from "../config/helperViews.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../core/utils/approval.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../utils/erp-api/imsLookup.js";
 
@@ -112,7 +112,7 @@ export const createPackingStandard = async (req, res) => {
       type,
       sticker_type,
       acc_code: acc_code ?? null,
-      created_by: req.user.id
+      created_by: auditUserName(req)
     });
 
     if (normalizedApproved === true) {
@@ -121,7 +121,8 @@ export const createPackingStandard = async (req, res) => {
         req,
         fields: approvalFields,
         incomingApproved: true,
-        hasBusinessChanges: false
+        hasBusinessChanges: false,
+        auditAsName: true,
       });
       await updatePackingStandards(approvalFields, { standard_id: row.standard_id });
     }
@@ -203,11 +204,11 @@ export const updatePackingStandard = async (req, res) => {
       ...(type !== undefined && { type }),
       ...(sticker_type !== undefined && { sticker_type }),
       ...(acc_code !== undefined && { acc_code }),
-      updated_by: req.user.id,
+      updated_by: auditUserName(req),
       updated_at: new Date()
     };
 
-    applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges: hasChanges });
+    applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges: hasChanges, auditAsName: true });
 
     await updatePackingStandards(fields, { standard_id });
 
@@ -239,7 +240,7 @@ export const deletePackingStandard = async (req, res) => {
 
     await deletePackingStandards(
       { standard_id },
-      { deleted_by: req.user.id }
+      { deleted_by: auditUserName(req) }
     );
 
     await logActivity(req, { action: "delete", entity: "packing_standard", entity_id: standard_id, record: existing });

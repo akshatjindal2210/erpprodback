@@ -132,33 +132,33 @@ export async function validateOutEntryScannedBoxes(scanned_boxes, forOutUid = nu
 
 /** Draft = scan list only; approved = stock outward on ims_box_table (or packing area / QC release). */
 export async function syncOutEntryBoxLinks(
-  { out_uid, userId, scanned_boxes, approved, entry_type = "forwarding_note", qc_hold_id = null },
+  { out_uid, userId, userName = null, scanned_boxes, approved, entry_type = "forwarding_note", qc_hold_id = null },
   { client = null } = {}
 ) {
   const list = [...new Set((scanned_boxes || []).map((u) => String(u).trim()).filter(Boolean))];
   if (isOutEntryQcArea(entry_type)) {
     if (approved && list.length) {
       await applyOutEntryQcAreaRelease(
-        { out_uid, userId, scanned_boxes: list, qc_hold_id },
+        { out_uid, userId, userName, scanned_boxes: list, qc_hold_id },
         { client }
       );
     } else {
-      await saveOutEntryDraftScans({ out_uid, userId, scanned_boxes: list }, { client });
+      await saveOutEntryDraftScans({ out_uid, userId, userName, scanned_boxes: list }, { client });
     }
     return list;
   }
   if (isOutEntryPackingArea(entry_type)) {
     if (approved && list.length) {
-      await applyOutEntryOtherReturn({ out_uid, userId, scanned_boxes: list }, { client });
+      await applyOutEntryOtherReturn({ out_uid, userId, userName, scanned_boxes: list }, { client });
     } else {
-      await saveOutEntryDraftScans({ out_uid, userId, scanned_boxes: list }, { client });
+      await saveOutEntryDraftScans({ out_uid, userId, userName, scanned_boxes: list }, { client });
     }
     return list;
   }
   if (approved) {
-    await applyOutEntryApprovedStock({ out_uid, userId, scanned_boxes: list }, { client });
+    await applyOutEntryApprovedStock({ out_uid, userId, userName, scanned_boxes: list }, { client });
   } else {
-    await saveOutEntryDraftScans({ out_uid, userId, scanned_boxes: list }, { client });
+    await saveOutEntryDraftScans({ out_uid, userId, userName, scanned_boxes: list }, { client });
   }
   return list;
 }

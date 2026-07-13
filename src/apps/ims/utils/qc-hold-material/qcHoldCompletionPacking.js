@@ -31,6 +31,7 @@ export function buildQcHoldCompletionBoxRows({
   holdId,
   packingConfig,
   userId,
+  userName = null,
   boxNoUidPrefix = "",
   override_cust = null,
 }) {
@@ -55,7 +56,7 @@ export function buildQcHoldCompletionBoxRows({
       qty: Number(isLoose ? cfg.loose_box_qty : cfg.qty_per_box),
       is_loose: isLoose,
       override_cust: cust,
-      created_by: userId,
+      created_by: userName ?? null,
     });
   }
   return rows;
@@ -65,6 +66,7 @@ export async function createQcHoldCompletionBoxesTx(client, {
   hold,
   completedQty,
   userId,
+  userName = null,
   pendingUntilApproval = false,
 }) {
   const qty = Math.max(0, parseInt(String(completedQty), 10) || 0);
@@ -103,6 +105,7 @@ export async function createQcHoldCompletionBoxesTx(client, {
     holdId,
     packingConfig,
     userId,
+    userName,
     boxNoUidPrefix,
     override_cust,
   });
@@ -196,11 +199,12 @@ export async function activateQcHoldCompletionBoxesTx(client, { holdId, boxUids 
 }
 
 /** Soft-delete all completion stickers for a hold (revert cleanup or delete hold). */
-export async function softDeleteQcHoldCompletionBoxesByHoldTx(client, { holdId, userId, requireOnHold = false } = {}) {
+export async function softDeleteQcHoldCompletionBoxesByHoldTx(client, { holdId, userId, userName = null, requireOnHold = false } = {}) {
   const pk = Number(holdId);
   if (!Number.isFinite(pk) || pk < 1) return { deleted: 0 };
 
   const tag = qcHoldCompletionBoxTag(pk);
+  const auditBy = userName ?? null;
   const sql = requireOnHold
     ? `UPDATE ims_box_table b
        SET is_deleted = true,
@@ -221,7 +225,7 @@ export async function softDeleteQcHoldCompletionBoxesByHoldTx(client, { holdId, 
        WHERE b.is_deleted = false
          AND position($2::text IN b.box_no_uid::text) > 0
        RETURNING b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose`;
-  const params = requireOnHold ? [pk, userId ?? null, tag] : [userId ?? null, tag];
+  const params = requireOnHold ? [pk, auditBy, tag] : [auditBy, tag];
   const { rows } = await client.query(sql, params);
 
   if (rows?.length) {
@@ -244,8 +248,8 @@ export async function softDeleteQcHoldCompletionBoxesByHoldTx(client, { holdId, 
 }
 
 /** Remove unapproved completion stickers when the hold is deleted. */
-export async function softDeletePendingQcHoldCompletionBoxesTx(client, { holdId, userId }) {
-  return softDeleteQcHoldCompletionBoxesByHoldTx(client, { holdId, userId, requireOnHold: true });
+export async function softDeletePendingQcHoldCompletionBoxesTx(client, { holdId, userId, userName = null }) {
+  return softDeleteQcHoldCompletionBoxesByHoldTx(client, { holdId, userId, userName, requireOnHold: true });
 }
 
 function submissionBoxUids(submission) {
@@ -255,7 +259,7 @@ function submissionBoxUids(submission) {
 }
 
 /** Create completion stickers on first print — pending until submission is approved. */
-export async function ensureQcHoldSubmissionCompletionBoxesTx(client, { hold, submission, userId }) {
+export async function ensureQcHoldSubmissionCompletionBoxesTx(client, { hold, submission, userId, userName = null }) {
   if (String(submission?.submission_type ?? "").trim().toLowerCase() === "revert") {
     return { boxes: [], holdData: null, packing_config: null, created: false };
   }
@@ -278,6 +282,7 @@ export async function ensureQcHoldSubmissionCompletionBoxesTx(client, { hold, su
     hold,
     completedQty,
     userId,
+    userName,
     pendingUntilApproval: !submission.approved,
   });
 
@@ -302,7 +307,7 @@ export async function ensureQcHoldSubmissionCompletionBoxesTx(client, { hold, su
   };
 }
 
-export async function consumeQcHoldSourceQtyTx(client, { holdId, sourceBoxUids = [], completedQty, userId }) {
+export async function consumeQcHoldSourceQtyTx(client, { holdId, sourceBoxUids = [], completedQty, userId, userName = null }) {
   const pk = Number(holdId);
   const targetQty = Math.max(0, parseInt(String(completedQty), 10) || 0);
   const uids = [...new Set((sourceBoxUids || []).map((v) => String(v).trim()).filter(Boolean))];
@@ -351,7 +356,7 @@ export async function consumeQcHoldSourceQtyTx(client, { holdId, sourceBoxUids =
          OR (cardinality($3::text[]) > 0 AND b.box_uid::text = ANY($3::text[]))
        )
      RETURNING b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose`,
-    [pk, consumeUids, consumeNumeric, userId ?? null]
+    [pk, consumeUids, consumeNumeric, userName ?? null]
   );
 
   if (rows?.length) {
@@ -362,6 +367,7 @@ export async function consumeQcHoldSourceQtyTx(client, { holdId, sourceBoxUids =
       source_id: String(pk),
       packing_number: rows[0]?.packing_number,
       user_id: userId,
+      user_name: userName ?? null,
       rows,
       details: { source_box_uids: consumeUids, completed_qty: targetQty, partial: true },
     });
@@ -375,7 +381,7 @@ export async function consumeQcHoldSourceQtyTx(client, { holdId, sourceBoxUids =
   };
 }
 
-export async function consumeQcHoldSourceBoxesTx(client, { holdId, sourceBoxUids = [], userId }) {
+export async function consumeQcHoldSourceBoxesTx(client, { holdId, sourceBoxUids = [], userId, userName = null }) {
   const pk = Number(holdId);
   const uids = [...new Set((sourceBoxUids || []).map((v) => String(v).trim()).filter(Boolean))];
   if (!Number.isFinite(pk) || pk < 1) return { deleted: 0 };
@@ -397,7 +403,7 @@ export async function consumeQcHoldSourceBoxesTx(client, { holdId, sourceBoxUids
          OR (cardinality($4::text[]) > 0 AND b.box_uid::text = ANY($4::text[]))
        )
      RETURNING b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose`,
-    [pk, uids, userId ?? null, numericOnly]
+    [pk, uids, userName ?? null, numericOnly]
   );
 
   if (rows?.length) {
@@ -408,6 +414,7 @@ export async function consumeQcHoldSourceBoxesTx(client, { holdId, sourceBoxUids
       source_id: String(pk),
       packing_number: rows[0]?.packing_number,
       user_id: userId,
+      user_name: userName ?? null,
       rows,
       details: { source_box_uids: uids },
     });

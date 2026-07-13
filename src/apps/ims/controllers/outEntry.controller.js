@@ -4,7 +4,7 @@ import { findAvailableBoxes, findForwardingNote, lockForwardingNoteForOutEntry, 
 import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../core/utils/approval.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { findScannedBoxUidsForOutEntry, getOutEntryScanSummary, getOutEntryOtherScanSummary, getOutEntryQcAreaScanSummary, resolveOutEntryBatchScan, resolveOutEntryOtherBatchScan, resolveOutEntryInventoryOutBatchScan, resolveOutEntryQcAreaBatchScan } from "../utils/out-entry/outEntryFulfillment.js";
 import { enrichOutEntryItems, enrichOutEntryListRows, enrichOutEntryNote, isOutEntryAutoAuthorized, isOutEntryInventoryOut, isOutEntryPackingArea, isOutEntryQcArea, normalizeOutEntryReasonInput, normalizeOutEntryType, OUT_ENTRY_TYPE, scannedListForOut, syncOutEntryBoxLinks, validateOutEntryInventoryOutScannedBoxes, validateOutEntryOtherScannedBoxes, validateOutEntryQcAreaScannedBoxes, validateOutEntryScannedBoxes } from "../utils/out-entry/index.js";
@@ -65,6 +65,7 @@ export const createOutEntry = async (req, res) => {
   try {
     const { fuid, entry_type: rawEntryType, remarks, scanned_boxes, approved, reason, reason_text } = req.body;
     const userId = req.user.id;
+    const userName = auditUserName(req);
     const entry_type = normalizeOutEntryType(rawEntryType);
     const normalizedApproved = normalizeApprovedInput(approved);
 
@@ -106,7 +107,7 @@ export const createOutEntry = async (req, res) => {
             qc_hold_id,
             reason: normalizedReason,
             remarks,
-            created_by: userId,
+            created_by: userName,
             scan_complete: summary.scan_complete,
             boxes_required: summary.boxes_required,
             boxes_scanned: summary.boxes_scanned,
@@ -116,6 +117,7 @@ export const createOutEntry = async (req, res) => {
           await syncOutEntryBoxLinks({
             out_uid: outUid,
             userId,
+            userName,
             scanned_boxes: scannedList,
             approved: true,
             entry_type: OUT_ENTRY_TYPE.QC_AREA,
@@ -128,13 +130,13 @@ export const createOutEntry = async (req, res) => {
             item_codes: listMeta.item_codes,
             qtys: listMeta.qtys,
             total_qty: listMeta.total_qty,
-            updated_by: userId,
+            updated_by: userName,
             updated_at: new Date(),
             scan_complete: summary.scan_complete,
             boxes_required: summary.boxes_required,
             boxes_scanned: summary.boxes_scanned,
             approved: true,
-            approved_by: userId,
+            approved_by: userName,
             approved_at: new Date(),
           };
           await updateOutEntries(patchFields, { out_uid: outUid }, { client });
@@ -166,7 +168,7 @@ export const createOutEntry = async (req, res) => {
           entry_type: storedEntryType,
           reason: normalizedReason,
           remarks,
-          created_by: userId,
+          created_by: userName,
           scan_complete: summary.scan_complete,
           boxes_required: summary.boxes_required,
           boxes_scanned: summary.boxes_scanned,
@@ -176,6 +178,7 @@ export const createOutEntry = async (req, res) => {
         await syncOutEntryBoxLinks({
           out_uid: outUid,
           userId,
+          userName,
           scanned_boxes: scannedList,
           approved: autoApprove,
           entry_type: storedEntryType,
@@ -187,13 +190,13 @@ export const createOutEntry = async (req, res) => {
           item_codes: listMeta.item_codes,
           qtys: listMeta.qtys,
           total_qty: listMeta.total_qty,
-          updated_by: userId,
+          updated_by: userName,
           updated_at: new Date(),
           scan_complete: summary.scan_complete,
           boxes_required: summary.boxes_required,
           boxes_scanned: summary.boxes_scanned,
           approved: autoApprove,
-          approved_by: autoApprove ? userId : null,
+          approved_by: autoApprove ? userName : null,
           approved_at: autoApprove ? new Date() : null,
         };
         await updateOutEntries(patchFields, { out_uid: outUid }, { client });
@@ -240,7 +243,7 @@ export const createOutEntry = async (req, res) => {
         fuid,
         entry_type: "forwarding_note",
         remarks,
-        created_by: userId,
+        created_by: userName,
         scan_complete: summary.scan_complete,
         boxes_required: summary.boxes_required,
         boxes_scanned: summary.boxes_scanned,
@@ -251,6 +254,7 @@ export const createOutEntry = async (req, res) => {
       await syncOutEntryBoxLinks({
         out_uid: outUid,
         userId,
+        userName,
         scanned_boxes: scannedList,
         approved: willApprove,
       }, { client });
@@ -261,7 +265,7 @@ export const createOutEntry = async (req, res) => {
         item_codes: listMeta.item_codes,
         qtys: listMeta.qtys,
         total_qty: listMeta.total_qty,
-        updated_by: userId,
+        updated_by: userName,
         updated_at: new Date(),
         scan_complete: summary.scan_complete,
         boxes_required: summary.boxes_required,
@@ -271,7 +275,7 @@ export const createOutEntry = async (req, res) => {
 
       if (willApprove) {
         patchFields.approved = true;
-        applyApprovalWorkflow({ req, fields: patchFields, incomingApproved: true, hasBusinessChanges: false });
+        applyApprovalWorkflow({ req, fields: patchFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true });
       }
 
       await updateOutEntries(patchFields, { out_uid: outUid }, { client });
@@ -280,7 +284,7 @@ export const createOutEntry = async (req, res) => {
 
     const data = await findOutEntry({ out_uid: result.outUid });
     if (data?.fuid) {
-      await lockForwardingNoteForOutEntry({ fuid: data.fuid, userId });
+      await lockForwardingNoteForOutEntry({ fuid: data.fuid, userName });
     }
 
     await logActivity(req, { action: "create", entity: "out_entry", entity_id: result.outUid });
@@ -294,6 +298,7 @@ export const updateOutEntry = async (req, res) => {
   try {
     const { out_uid: rawOutUid, fuid, remarks, approved, scanned_boxes, reason, reason_text } = req.body;
     const userId = req.user.id;
+    const userName = auditUserName(req);
     const normalizedApproved = normalizeApprovedInput(approved);
 
     const out_uid = requireOutUid(res, rawOutUid);
@@ -387,6 +392,7 @@ export const updateOutEntry = async (req, res) => {
           await syncOutEntryBoxLinks({
             out_uid,
             userId,
+            userName,
             scanned_boxes: finalScanned,
             approved: willApprove,
             entry_type: OUT_ENTRY_TYPE.INVENTORY_OUT,
@@ -407,7 +413,7 @@ export const updateOutEntry = async (req, res) => {
             qtys: listMeta.qtys,
             total_qty: listMeta.total_qty,
           }),
-          updated_by: userId,
+          updated_by: userName,
           updated_at: new Date(),
           scan_complete: summary.scan_complete,
           boxes_required: summary.boxes_required,
@@ -426,6 +432,7 @@ export const updateOutEntry = async (req, res) => {
           incomingApproved: summary.scan_complete ? normalizedApproved : false,
           hasBusinessChanges,
           canAuthorize: hasInventoryOutApprovePermission(req.user),
+          auditAsName: true,
         });
 
         await updateOutEntries(fields, { out_uid }, { client });
@@ -450,7 +457,7 @@ export const updateOutEntry = async (req, res) => {
       const fields = {
         remarks: remarks !== undefined ? remarks : existing.remarks,
         reason: nextReason,
-        updated_by: userId,
+        updated_by: userName,
         updated_at: new Date(),
       };
       await updateOutEntries(fields, { out_uid }, { client: null });
@@ -520,6 +527,7 @@ export const updateOutEntry = async (req, res) => {
         await syncOutEntryBoxLinks({
           out_uid,
           userId,
+          userName,
           scanned_boxes: finalScanned,
           approved: willApprove,
         }, { client });
@@ -538,7 +546,7 @@ export const updateOutEntry = async (req, res) => {
           qtys: listMeta.qtys,
           total_qty: listMeta.total_qty,
         }),
-        updated_by: userId,
+        updated_by: userName,
         updated_at: new Date(),
         scan_complete: summary.scan_complete,
         boxes_required: summary.boxes_required,
@@ -556,6 +564,7 @@ export const updateOutEntry = async (req, res) => {
         fields,
         incomingApproved: summary.scan_complete ? normalizedApproved : false,
         hasBusinessChanges,
+        auditAsName: true,
       });
 
       await updateOutEntries(fields, { out_uid }, { client });
@@ -564,7 +573,7 @@ export const updateOutEntry = async (req, res) => {
 
     const data = await findOutEntry({ out_uid: result.out_uid });
     if (data?.approved) {
-      await lockForwardingNoteForOutEntry({ fuid: data.fuid, userId });
+      await lockForwardingNoteForOutEntry({ fuid: data.fuid, userName });
     }
     await logActivity(req, { action: "update", entity: "out_entry", entity_id: out_uid });
 
@@ -577,7 +586,7 @@ export const updateOutEntry = async (req, res) => {
 export const lockFuidForOutEntry = async (req, res) => {
   try {
     const { fuid } = req.body;
-    const userId = req.user.id;
+    const userName = auditUserName(req);
     if (!fuid) return res.status(400).json({ success: false, message: "fuid required" });
 
     const note = await findForwardingNote({ fuid });
@@ -597,7 +606,7 @@ export const lockFuidForOutEntry = async (req, res) => {
     }
 
     if (alreadyLinked && !isLocked) {
-      const lockResult = await lockForwardingNoteForOutEntry({ fuid, userId });
+      const lockResult = await lockForwardingNoteForOutEntry({ fuid, userName });
       if (!lockResult) return res.status(404).json({ success: false, message: "Forwarding Note not found" });
       return res.json({
         success: true,
@@ -606,7 +615,7 @@ export const lockFuidForOutEntry = async (req, res) => {
       });
     }
 
-    const lockResult = await lockForwardingNoteForOutEntry({ fuid, userId });
+    const lockResult = await lockForwardingNoteForOutEntry({ fuid, userName });
     if (!lockResult) return res.status(404).json({ success: false, message: "Forwarding Note not found" });
 
     return res.json({
@@ -629,9 +638,9 @@ export const deleteOutEntry = async (req, res) => {
 
     await withTransaction(async (client) => {
       // Release linked boxes first so they don't remain stuck as out.
-      await resetBoxesForOutEntry(out_uid, req.user.id, { client });
+      await resetBoxesForOutEntry(out_uid, req.user.id, { client, userName: auditUserName(req) });
       await clearOutEntryDraftScans(out_uid, { client });
-      await deleteOutEntries({ out_uid }, { client, deleted_by: req.user.id });
+      await deleteOutEntries({ out_uid }, { client, deleted_by: auditUserName(req) });
       if (existing.fuid) {
         await unlockForwardingNoteForOutEntry({ fuid: existing.fuid }, { client });
       }

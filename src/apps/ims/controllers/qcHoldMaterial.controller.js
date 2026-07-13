@@ -3,7 +3,7 @@ import { withTransaction } from "../../../config/db.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../core/utils/approval.js";
 import { logActivity } from "../../core/utils/logActivity.js";
 import { resolveQcHoldPackingMeta } from "../utils/qc-hold-material/qcHoldPackingMeta.js";
 import { enrichHoldScannedBoxes, enrichQcHoldListRows } from "../utils/qc-hold-material/qcHoldList.js";
@@ -232,6 +232,7 @@ export const createQcHoldMaterial = async (req, res) => {
     }
 
     const userId = req.user?.id ?? null;
+    const userName = auditUserName(req);
     const payload = {
       packing_number: resolvedPacking || resolvedPackingForExpand || null,
       item_dcode: resolvedItem,
@@ -240,9 +241,9 @@ export const createQcHoldMaterial = async (req, res) => {
       status: "pending",
       hold_data: buildPendingHoldData({ boxes: boxUids, qty: qtyNum, hold_scan_mode: scanMode }),
       approved: true,
-      approved_by: userId,
+      approved_by: userName,
       approved_at: new Date(),
-      created_by: userId,
+      created_by: userName,
     };
 
     const created = await insertQcHoldMaterial(payload);
@@ -339,12 +340,12 @@ export const submitQcHoldMaterial = async (req, res) => {
         remarks: remarks != null ? String(remarks).trim() : null,
         reason: String(reason).trim(),
       },
-      req.user?.id ?? null
+      auditUserName(req)
     );
 
     await updateQcHoldMaterial(pk, {
       hold_data: nextHoldData,
-      updated_by: req.user?.id ?? null,
+      updated_by: auditUserName(req),
       updated_at: new Date(),
     });
 
@@ -455,7 +456,7 @@ export const approveQcHoldSubmissionController = async (req, res) => {
     const approvedResult = approveSubmissionInData(
       hold.hold_data,
       submission.submission_id,
-      req.user?.id ?? null,
+      auditUserName(req),
       patch
     );
     if (!approvedResult) {
@@ -463,6 +464,7 @@ export const approveQcHoldSubmissionController = async (req, res) => {
     }
 
     const userId = req.user?.id ?? null;
+    const userName = auditUserName(req);
     const sourceBoxUids = parseHoldData(hold.hold_data).boxes;
 
     let updatedHold;
@@ -476,6 +478,7 @@ export const approveQcHoldSubmissionController = async (req, res) => {
           await softDeleteQcHoldCompletionBoxesByHoldTx(client, {
             holdId: hold.hold_id,
             userId,
+            userName,
           });
 
           const released = await releaseQcHoldRevertTx(client, {
@@ -516,7 +519,7 @@ export const approveQcHoldSubmissionController = async (req, res) => {
           const row = await updateQcHoldMaterial(hold.hold_id, {
             hold_data: nextHoldData,
             status: "complete",
-            updated_by: userId,
+            updated_by: userName,
             updated_at: new Date(),
           });
 
@@ -557,6 +560,7 @@ export const approveQcHoldSubmissionController = async (req, res) => {
               hold,
               completedQty: finalCompletedQty,
               userId,
+              userName,
               pendingUntilApproval: false,
             });
           }
@@ -585,6 +589,7 @@ export const approveQcHoldSubmissionController = async (req, res) => {
             sourceBoxUids,
             completedQty: finalCompletedQty,
             userId,
+            userName,
           });
           if (!consumeResult.consumedUids?.length) {
             const err = new Error(
@@ -603,6 +608,7 @@ export const approveQcHoldSubmissionController = async (req, res) => {
               holdId: hold.hold_id,
               sourceBoxUids: remainingUids,
               userId,
+              userName,
             });
             nextHoldData = removeBoxesFromHoldData(nextHoldData, remainingUids);
           }
@@ -611,7 +617,7 @@ export const approveQcHoldSubmissionController = async (req, res) => {
         const row = await updateQcHoldMaterial(hold.hold_id, {
           hold_data: nextHoldData,
           status,
-          updated_by: userId,
+          updated_by: userName,
           updated_at: new Date(),
         });
 
@@ -679,6 +685,7 @@ export const getQcHoldCompletionBoxes = async (req, res) => {
     }
 
     const userId = req.user?.id ?? null;
+    const userName = auditUserName(req);
     let packingConfig = null;
 
     if (submission && (Number(submission.completed_qty) || 0) > 0) {
@@ -686,13 +693,13 @@ export const getQcHoldCompletionBoxes = async (req, res) => {
       if (submissionType !== "revert") {
         try {
           const ensured = await withTransaction(async (client) =>
-            ensureQcHoldSubmissionCompletionBoxesTx(client, { hold, submission, userId })
+            ensureQcHoldSubmissionCompletionBoxesTx(client, { hold, submission, userId, userName })
           );
           packingConfig = ensured.packing_config;
           if (ensured.holdData) {
             hold = await updateQcHoldMaterial(pk, {
               hold_data: ensured.holdData,
-              updated_by: userId,
+              updated_by: userName,
               updated_at: new Date(),
             });
             submission = findSubmissionById(hold.hold_data, submission.submission_id);
@@ -735,7 +742,7 @@ export const updateQcHoldMaterialController = async (req, res) => {
     if (!existing) return res.status(404).json({ success: false, message: QC_HOLD_MSG.NOT_FOUND });
 
     const payload = {
-      updated_by: req.user?.id ?? null,
+      updated_by: auditUserName(req),
       updated_at: new Date(),
     };
 
@@ -808,6 +815,7 @@ export const updateQcHoldMaterialController = async (req, res) => {
         fields: payload,
         incomingApproved: normalizedApproved,
         hasBusinessChanges: true,
+        auditAsName: true,
       });
     }
 
@@ -840,13 +848,14 @@ export const deleteQcHoldMaterialController = async (req, res) => {
     const pk = hold_id ?? id;
     if (!pk) return res.status(400).json({ success: false, message: QC_HOLD_MSG.HOLD_ID_REQUIRED });
 
-    const deleted = await softDeleteQcHoldMaterial(pk, req.user?.id ?? null);
+    const deleted = await softDeleteQcHoldMaterial(pk, auditUserName(req));
     if (!deleted) return res.status(404).json({ success: false, message: QC_HOLD_MSG.NOT_FOUND });
 
     await withTransaction(async (client) => {
       await softDeletePendingQcHoldCompletionBoxesTx(client, {
         holdId: pk,
         userId: req.user?.id ?? null,
+        userName: auditUserName(req),
       });
     });
     await releaseQcHoldFromBoxes(pk);

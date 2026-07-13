@@ -3,9 +3,9 @@ import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../core/utils/approval.js";
 import { withTransaction } from "../../../config/db.js";
-import { canAccessAuditRecord, filterAuditLocationsForUser, isWithinAuditDateRange } from "../utils/audit/auditAccess.js";
+import { canAccessAuditRecord, filterAuditLocationsForUser, isWithinAuditDateRange, isAuditCreator } from "../utils/audit/auditAccess.js";
 import { isLocationClosed } from "../utils/audit/auditBoxSnapshot.js";
 import { parsePositiveIntId } from "../../core/utils/parseId.js";
 
@@ -131,6 +131,7 @@ export const createAudit = async (req, res) => {
       fields: approvalFields,
       incomingApproved: normalizedApproved,
       hasBusinessChanges: false,
+      auditAsName: true,
     });
 
     const row = await withTransaction(async (client) => {
@@ -139,7 +140,7 @@ export const createAudit = async (req, res) => {
         end_date,
         remarks,
         assignments,
-        created_by: req.user.id,
+        created_by: auditUserName(req),
         approved: approvalFields.approved ?? false,
         approved_by: approvalFields.approved_by ?? null,
         approved_at: approvalFields.approved_at ?? null,
@@ -180,7 +181,7 @@ export const updateAuditController = async (req, res) => {
       ...(end_date !== undefined && { end_date }),
       ...(remarks !== undefined && { remarks }),
       ...(hasAssignments && { assignments }),
-      updated_by: req.user.id,
+      updated_by: auditUserName(req),
       updated_at: new Date(),
     };
 
@@ -201,6 +202,7 @@ export const updateAuditController = async (req, res) => {
         fields,
         incomingApproved: normalizedApproved,
         hasBusinessChanges: false,
+        auditAsName: true,
       });
     }
 
@@ -232,7 +234,7 @@ export const deleteAuditController = async (req, res) => {
       return res.status(403).json({ success: false, message: "Verified audits cannot be deleted" });
     }
 
-    await deleteAudit({ audit_id: id }, { deleted_by: req.user.id });
+    await deleteAudit({ audit_id: id }, { deleted_by: auditUserName(req) });
     await log(req, "delete", id, { remarks: existing.remarks, status: existing.status }, existing);
 
     return res.json({ success: true, message: "Audit deleted successfully" });
@@ -387,7 +389,7 @@ function assertCanManageAudit(req, audit) {
     req.user.type === "super_admin" ||
     req.permission?.can_edit ||
     req.permission?.can_authorize ||
-    Number(audit.created_by) === Number(req.user.id);
+    isAuditCreator(audit, req.user);
   if (!canManage) {
     return { ok: false, status: 403, message: "Access denied" };
   }
@@ -498,6 +500,7 @@ export const applyAuditComparisonAdjustmentController = async (req, res) => {
       applyAuditComparisonAdjustment(audit_id, {
         locationId: location_id,
         userId: req.user.id,
+        userName: auditUserName(req),
         client,
         result_rejected: Boolean(req.body?.result_rejected ?? req.body?.rejected),
       })
@@ -617,7 +620,6 @@ export const getAuditComparisonReportController = async (req, res) => {
 export const verifyAudit = async (req, res) => {
   try {
     const { id } = req.body;
-    const userId = req.user.id;
 
     if (req.user.type !== 'super_admin') {
       return res.status(403).json({ success: false, message: "Only super admin can verify audits" });
@@ -634,7 +636,7 @@ export const verifyAudit = async (req, res) => {
 
     await updateAudit({
       status: 'verified',
-      updated_by: userId,
+      updated_by: auditUserName(req),
       updated_at: new Date()
     }, { audit_id: id });
 

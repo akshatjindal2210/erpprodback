@@ -22,6 +22,7 @@ import { buildPrintDocument, buildStickerPreviewDocument, buildStickerCardHtml, 
 import { resolveViewsFields } from "../config/helperViews.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { fillMissingBoxItemFields } from "../utils/box/boxListItemMeta.js";
+import { auditUserName } from "../../core/utils/approval.js";
 
 const BOX_STORE_FILTER_FIELDS = [ "box_uid", "box_no_uid", "packing_number", "sa_id", "location_id", "in_uid", "out_uid", "from_date", "to_date", "journey" ];
 
@@ -299,7 +300,7 @@ export const createBox = async (req, res) => {
       return res.status(400).json({ success: false, message: "qty must be a valid number" });
     }
 
-    const data = await insertBox({ box_no_uid, packing_number, qty, override_cust: override_cust || null, location_id, in_uid, out_uid, created_by: req.user.id });
+    const data = await insertBox({ box_no_uid, packing_number, qty, override_cust: override_cust || null, location_id, in_uid, out_uid, created_by: auditUserName(req) });
 
     const saved = await findBox({ box_uid: data.box_uid });
     await logActivity(req, { action: "create", entity: BOX_ACTIVITY_ENTITY, entity_id: data.box_uid, record: saved || data });
@@ -356,7 +357,7 @@ export const updateBox = async (req, res) => {
       ...(location_id !== undefined && { location_id: location_id === "" ? null : location_id }),
       ...(in_uid !== undefined && { in_uid: in_uid === "" ? null : in_uid }),
       ...(out_uid !== undefined && { out_uid: out_uid === "" ? null : out_uid }),
-      updated_by: req.user.id,
+      updated_by: auditUserName(req),
       updated_at: new Date()
     };
 
@@ -386,7 +387,7 @@ export const deleteBox = async (req, res) => {
 
     await deleteBoxes(
       { box_uid }, 
-      { deleted_by: req.user.id }
+      { deleted_by: auditUserName(req), user_id: req.user.id }
     );
 
     await logActivity(req, { action: "delete", entity: BOX_ACTIVITY_ENTITY, entity_id: box_uid, record: existing });
@@ -1106,7 +1107,7 @@ export const generateStickers = async (req, res) => {
         qty            : Number(isLoose ? loose_box_qty : qty_per_box),
         is_loose       : isLoose,
         override_cust  : null,
-        created_by     : req.user.id,
+        created_by     : auditUserName(req),
         ...(boxCategoryId != null ? { category_id: boxCategoryId } : {}),
       });
     }
@@ -1322,13 +1323,13 @@ export const trackStickerDownload = async (req, res) => {
     const log = await insertDownloadLog({
       box_uid,
       ...pickStickerLogFields(enrichedBox, box),
-      downloaded_by: req.user.id,
+      downloaded_by: auditUserName(req),
       download_type: "single",
       download_source,
     });
 
     // Count increment
-    const updated = await incrementDownloadCount(box_uid, req.user.id);
+    const updated = await incrementDownloadCount(box_uid, auditUserName(req));
 
     res.json({
       success        : true,
@@ -1364,13 +1365,13 @@ export const trackBulkDownload = async (req, res) => {
       return res.status(400).json({ success: false, message: "No valid box_uid" });
     const custRow = enrichedBoxes[0];
 
-    const updatedRows = await incrementDownloadCountBulk(uids, req.user.id);
+    const updatedRows = await incrementDownloadCountBulk(uids, auditUserName(req));
 
     await insertDownloadLog({
       ...pickStickerLogFields(custRow),
       packing_number: packingNo,
       box_uid: null,
-      downloaded_by: req.user.id,
+      downloaded_by: auditUserName(req),
       download_type: "bulk_pack",
       sticker_count: uids.length,
       download_source,
@@ -1440,12 +1441,12 @@ export const renderSingleSticker = async (req, res) => {
     await insertDownloadLog({
       box_uid,
       ...pickStickerLogFields(enrichedBox, box),
-      downloaded_by: req.user.id,
+      downloaded_by: auditUserName(req),
       download_type: "single",
       download_source,
     });
 
-    await incrementDownloadCount(box_uid, req.user.id);
+    await incrementDownloadCount(box_uid, auditUserName(req));
 
     const print_title = buildStickerPrintDocumentTitle(printPackingNo);
     res.json({
@@ -1557,13 +1558,13 @@ export const renderBulkStickers = async (req, res) => {
       })
     );
 
-    await incrementDownloadCountBulk(uids, req.user.id);
+    await incrementDownloadCountBulk(uids, auditUserName(req));
 
     await insertDownloadLog({
       ...pickStickerLogFields(custRow),
       packing_number: packingNo,
       box_uid: null,
-      downloaded_by: req.user.id,
+      downloaded_by: auditUserName(req),
       download_type: "bulk_pack",
       sticker_count: totalBoxes,
       download_source,
@@ -1601,7 +1602,7 @@ export const overrideCustomer = async (req, res) => {
     }
 
     const [updated] = await updateBoxes(
-      { override_cust: new_cust, updated_by: req.user.id, updated_at: new Date() },
+      { override_cust: new_cust, updated_by: auditUserName(req), updated_at: new Date() },
       { box_uid }
     );
 

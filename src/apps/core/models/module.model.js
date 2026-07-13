@@ -13,15 +13,15 @@ const assertField = (key, whitelist, context = "field") => {
   if (!whitelist.includes(key)) throw new Error(`Invalid ${context}: "${key}"`);
 };
 
-const MODULE_LIST_JOIN = `FROM ${M.MODULES} m LEFT JOIN ${M.USERS} u_up ON m.updated_by = u_up.id`;
+const MODULE_LIST_JOIN = `FROM ${M.MODULES} m`;
 
 const mapModuleSelectField = (f) => {
-  if (f === "updated_by_name") return "u_up.name AS updated_by_name";
+  if (f === "updated_by_name") return "m.updated_by AS updated_by_name";
   return `m.${f}`;
 };
 
 const DEFAULT_MODULE_LIST_SELECT =
-  "m.id, m.name, m.label, m.app_type, m.sort_order, m.is_active, m.created_at, m.updated_at, m.updated_by, u_up.name AS updated_by_name";
+  "m.id, m.name, m.label, m.app_type, m.sort_order, m.is_active, m.created_at, m.updated_at, m.updated_by, m.updated_by AS updated_by_name";
 
 export const findModules = async (options = {}) => {
   const {
@@ -145,9 +145,8 @@ export const findModule = async (filters = {}) => {
   const values = Object.values(filters);
 
   const [module] = await dbQuery(
-    `SELECT m.id, m.name, m.label, m.app_type, m.sort_order, m.is_active, m.created_at, m.updated_at, m.updated_by, u_up.name AS updated_by_name
+    `SELECT m.id, m.name, m.label, m.app_type, m.sort_order, m.is_active, m.created_at, m.updated_at, m.updated_by, m.updated_by AS updated_by_name
      FROM ${M.MODULES} m
-     LEFT JOIN ${M.USERS} u_up ON m.updated_by = u_up.id
      WHERE ${conditions}
      LIMIT 1`,
     values

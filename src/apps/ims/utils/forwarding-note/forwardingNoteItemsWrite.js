@@ -175,7 +175,10 @@ async function enrichItems(items = []) {
   return out;
 }
 
-async function insertOneItemRow(fuid, item, userId, client) {
+async function insertOneItemRow(fuid, item, userName, client) {
+  const itemSchno =
+    item.schno != null && String(item.schno).trim() !== "" ? String(item.schno).trim() : null;
+
   if (item.is_pre_calculated) {
     await insertForwardingNoteItem(
       {
@@ -187,7 +190,8 @@ async function insertOneItemRow(fuid, item, userId, client) {
         loose_box: item.loose_box,
         loose_box_qty: item.loose_box_qty,
         total_qty: item.total_qty,
-        created_by: userId,
+        schno: itemSchno,
+        created_by: userName,
       },
       { client }
     );
@@ -206,7 +210,8 @@ async function insertOneItemRow(fuid, item, userId, client) {
         loose_box: stats.loose_boxes,
         loose_box_qty: stats.loose_qty,
         total_qty: stats.open_qty + stats.loose_qty,
-        created_by: userId,
+        schno: itemSchno,
+        created_by: userName,
       },
       { client }
     );
@@ -237,7 +242,7 @@ export async function validateExistingForwardingNoteItems({ fuid, excludeFuid = 
   await assertForwardingItemsWithinRemaining(items, excludeFuid ?? fuid, { client, approvedOnly: false });
 }
 
-async function persistForwardingNoteItems({ fuid, items, userId, excludeFuid, replaceExisting, client }) {
+async function persistForwardingNoteItems({ fuid, items, userName, excludeFuid, replaceExisting, client }) {
   const enrichedItems = await enrichItems(items);
   const itemDcodes = enrichedItems.map((i) => i.item_dcode);
 
@@ -245,23 +250,23 @@ async function persistForwardingNoteItems({ fuid, items, userId, excludeFuid, re
   await assertForwardingItemsWithinRemaining(enrichedItems, excludeFuid, { client, approvedOnly: false });
 
   if (replaceExisting) {
-    await deleteForwardingNoteItems({ fuid }, { deleted_by: userId }, { client });
+    await deleteForwardingNoteItems({ fuid }, { deleted_by: userName }, { client });
   }
 
   for (const item of enrichedItems) {
-    await insertOneItemRow(fuid, item, userId, client);
+    await insertOneItemRow(fuid, item, userName, client);
   }
 }
 
 /** Insert all items for create (after master insert). */
-export async function saveForwardingNoteItems({ fuid, items = [], userId, excludeFuid = null }) {
+export async function saveForwardingNoteItems({ fuid, items = [], userName, excludeFuid = null }) {
   if (!items.length) return;
 
   await withTransaction(async (client) => {
     await persistForwardingNoteItems({
       fuid,
       items,
-      userId,
+      userName,
       excludeFuid,
       replaceExisting: false,
       client,
@@ -270,14 +275,14 @@ export async function saveForwardingNoteItems({ fuid, items = [], userId, exclud
 }
 
 /** Replace all items on update — delete + insert in one transaction. */
-export async function replaceForwardingNoteItems({ fuid, items = [], userId, excludeFuid = null }) {
+export async function replaceForwardingNoteItems({ fuid, items = [], userName, excludeFuid = null }) {
   if (!items.length) return;
 
   await withTransaction(async (client) => {
     await persistForwardingNoteItems({
       fuid,
       items,
-      userId,
+      userName,
       excludeFuid,
       replaceExisting: true,
       client,

@@ -13,6 +13,7 @@ import { resolvePackingCustomerName } from "../utils/packing-entry/packingEntryC
 import { withTransaction } from "../../../config/db.js";
 import { snapshotMetadataFromBoxUids, snapshotInwardMetadata } from "../utils/erp-api/entryListMetadata.js";
 import { parsePositiveIntId } from "../../core/utils/parseId.js";
+import { auditUserName } from "../../core/utils/approval.js";
 
 const INWARD_CFG = getCrudModuleConfig("inventory_inwards");
 
@@ -227,6 +228,7 @@ export const createInventoryInward = async (req, res) => {
   try {
     const { remarks, locations } = req.body;
     const userId = req.user.id;
+    const userName = auditUserName(req);
 
     if (!locations || locations.length === 0) {
       return res.status(400).json({ success: false, message: "Locations and boxes are required" });
@@ -255,15 +257,15 @@ export const createInventoryInward = async (req, res) => {
       total_qty: listMeta.total_qty,
       remarks, 
       approved: true,
-      approved_by: userId,
+      approved_by: userName,
       approved_at: new Date(),
-      created_by: userId 
+      created_by: userName 
     });
 
     // 3. Child Records Update (Box Table)
     const linkResults = await Promise.all(
       locations.map((loc) =>
-        updateBoxesAfterInward(row.in_uid, loc.location_id, inwardBoxNoUids(loc.boxes), userId, { logEvent: false })
+        updateBoxesAfterInward(row.in_uid, loc.location_id, inwardBoxNoUids(loc.boxes), userId, { logEvent: false, userName })
       )
     );
     logInwardLinkBatch({ in_uid: row.in_uid, userId, rowGroups: linkResults });
@@ -283,6 +285,7 @@ export const updateInventoryInward = async (req, res) => {
   try {
     const { in_uid, remarks, locations } = req.body;
     const userId = req.user.id;
+    const userName = auditUserName(req);
 
     if (!in_uid) {
       return res.status(400).json({ success: false, message: "in_uid required" });
@@ -316,7 +319,7 @@ export const updateInventoryInward = async (req, res) => {
       await resetBoxesForInward(in_uid, userId);
       const linkResults = await Promise.all(
         locations.map((loc) =>
-          updateBoxesAfterInward(in_uid, loc.location_id, inwardBoxNoUids(loc.boxes), userId, { logEvent: false })
+          updateBoxesAfterInward(in_uid, loc.location_id, inwardBoxNoUids(loc.boxes), userId, { logEvent: false, userName })
         )
       );
       logInwardLinkBatch({ in_uid, userId, rowGroups: linkResults });
@@ -325,9 +328,9 @@ export const updateInventoryInward = async (req, res) => {
     const fields = {
       ...(remarks !== undefined && { remarks }),
       approved: true,
-      approved_by: userId,
+      approved_by: userName,
       approved_at: existing.approved_at || new Date(),
-      updated_by: userId,
+      updated_by: userName,
       updated_at: new Date(),
     };
 
@@ -511,7 +514,7 @@ export const deleteInventoryInward = async (req, res) => {
       // 2. Soft-delete the inward record
       await deleteInventoryInwards(
         { in_uid },
-        { client, deleted_by: req.user.id }
+        { client, deleted_by: auditUserName(req) }
       );
     });
 

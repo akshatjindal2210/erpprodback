@@ -1,5 +1,4 @@
 import dbQuery from "../../../config/db.js";
-import { MST_TABLES as M } from "../../../config/dbTables.js";
 
 const ALLOWED_FILTER_FIELDS = ["standard_id", "item_dcode", "type", "sticker_type", "acc_code", "approved", "from_date", "to_date"];
 
@@ -10,13 +9,9 @@ const ALLOWED_UPDATE_FIELDS = ["item_dcode", "qty", "unit", "type", "sticker_typ
 const JOINS = `
   LEFT JOIN ims_category cat  ON ps.type       = cat.id
   LEFT JOIN ims_sticker_type st ON ps.sticker_type = st.id
-
-  LEFT JOIN ${M.USERS} u_cr    ON ps.created_by  = u_cr.id
-  LEFT JOIN ${M.USERS} u_upd   ON ps.updated_by  = u_upd.id
-  LEFT JOIN ${M.USERS} u_dl    ON ps.deleted_by  = u_dl.id
-  LEFT JOIN ${M.USERS} u_ap    ON ps.approved_by = u_ap.id
 `;
 
+/** Audit cols store user name snapshot (not live user id). */
 const DEFAULT_FIELDS = [
   "ps.standard_id", "ps.item_dcode", "ps.qty", "ps.unit", "ps.type", "ps.sticker_type", "ps.acc_code",
   "ps.approved", "ps.approved_by", "ps.approved_at",
@@ -24,10 +19,10 @@ const DEFAULT_FIELDS = [
   "ps.updated_by", "ps.updated_at",
   "ps.deleted_by", "ps.deleted_at",
   "ps.item_dcode::text AS item_code", "ps.acc_code::text AS acc_name", "cat.name AS category_name", "st.name AS sticker_type_name",
-  "u_cr.name  AS created_by_name",
-  "u_upd.name AS updated_by_name",
-  "u_dl.name  AS deleted_by_name",
-  "u_ap.name  AS approved_by_name"
+  "ps.created_by AS created_by_name",
+  "ps.updated_by AS updated_by_name",
+  "ps.deleted_by AS deleted_by_name",
+  "ps.approved_by AS approved_by_name",
 ];
 
 export const findPackingStandards = async (options = {}) => {
@@ -73,7 +68,7 @@ export const findPackingStandards = async (options = {}) => {
       ps.unit ILIKE $${searchIndex} OR
       ps.item_dcode::text ILIKE $${searchIndex} OR
       cat.name ILIKE $${searchIndex} OR
-      u_cr.name ILIKE $${searchIndex} OR
+      ps.created_by ILIKE $${searchIndex} OR
       ps.acc_code::text ILIKE $${searchIndex}
       OR st.name ILIKE $${searchIndex}
     )`);
@@ -323,9 +318,8 @@ export const findDeletedStandard = async (standard_id) => {
     `SELECT
         ps.standard_id,
         ps.deleted_at,
-        u.name AS deleted_by_name
+        ps.deleted_by AS deleted_by_name
      FROM ims_packing_standard ps
-     LEFT JOIN ${M.USERS} u ON ps.deleted_by = u.id
      WHERE ps.standard_id = $1`,
     [standard_id]
   );

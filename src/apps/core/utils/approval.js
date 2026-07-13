@@ -1,4 +1,20 @@
-export const applyApprovalWorkflow = ({ req, fields, incomingApproved, hasBusinessChanges, canAuthorize: canAuthorizeOverride }) => {
+/**
+ * Approval helpers.
+ * auditAsName: store approver display name (snapshot) instead of user id.
+ */
+
+/** Current user display name for audit write (snapshot). */
+export function auditUserName(req) {
+  const name = req?.user?.name;
+  if (name == null) return null;
+  const trimmed = String(name).trim();
+  return trimmed || null;
+}
+
+/**
+ * @param {boolean} [auditAsName] — true = store approver name snapshot (not user id)
+ */
+export const applyApprovalWorkflow = ({ req, fields, incomingApproved, hasBusinessChanges, canAuthorize: canAuthorizeOverride, auditAsName = false }) => {
   const canAuthorize = canAuthorizeOverride !== undefined ? Boolean(canAuthorizeOverride) : Boolean(req?.permission?.can_authorize) || req?.user?.type === "super_admin";
 
   if (incomingApproved === true) {
@@ -9,7 +25,7 @@ export const applyApprovalWorkflow = ({ req, fields, incomingApproved, hasBusine
     }
 
     fields.approved = true;
-    fields.approved_by = req.user.id;
+    fields.approved_by = auditAsName ? auditUserName(req) : req.user.id;
     fields.approved_at = new Date();
     return;
   }

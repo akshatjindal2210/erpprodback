@@ -6,7 +6,6 @@
  */
 
 import dbQuery from "../../../../config/db.js";
-import { MST_TABLES as M } from "../../../../config/dbTables.js";
 import { sqlBoxSellable, sqlBoxPackingNumber, sqlDailyprodDocNoMatch, sqlDailyprodMatchOrder, sqlDocDtFromDailyprod, sqlDocDtText } from "../box/boxInventorySql.js";
 
 const TRIM = (expr) => `NULLIF(TRIM((${expr})::text), '')`;
@@ -189,21 +188,10 @@ export async function attachPackingDisplayMeta(rows = []) {
 /** Resolve creator display names for packing-area summary rows. */
 async function attachPackingCreatedByMeta(rows = []) {
   if (!rows?.length) return rows;
-
-  const ids = [...new Set(rows.map((row) => row?.created_by).filter((id) => id != null))];
-  if (!ids.length) {
-    return rows.map((row) => ({ ...row, created_by_name: null }));
-  }
-
-  const users = await dbQuery(
-    `SELECT id, name FROM ${M.USERS} WHERE id = ANY($1::int[])`,
-    [ids]
-  );
-  const nameMap = new Map((users || []).map((u) => [Number(u.id), u.name]));
-
+  // ims_box_table.created_by stores name snapshot (not user id).
   return rows.map((row) => ({
     ...row,
-    created_by_name: row?.created_by != null ? nameMap.get(Number(row.created_by)) ?? null : null,
+    created_by_name: row?.created_by != null ? String(row.created_by) : null,
   }));
 }
 

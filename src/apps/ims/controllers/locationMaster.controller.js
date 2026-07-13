@@ -4,7 +4,7 @@ import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { resolveViewsFields } from "../config/helperViews.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
+import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../core/utils/approval.js";
 import { parsePositiveIntId } from "../../core/utils/parseId.js";
 import { enrichRowsWithIMS } from "../utils/erp-api/imsLookup.js";
 
@@ -156,17 +156,12 @@ export const createLocation = async (req, res) => {
       total_capacity,
       acc_code,
       item_dcode,
-      created_by: req.user.id,
+      created_by: auditUserName(req),
     });
 
     if (normalizedApproved === true) {
       const approvalFields = {};
-      applyApprovalWorkflow({
-        req,
-        fields: approvalFields,
-        incomingApproved: true,
-        hasBusinessChanges: false
-      });
+      applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true, });
       await updateLocations(approvalFields, { location_id: row.location_id });
     }
 
@@ -241,7 +236,7 @@ export const updateLocation = async (req, res) => {
       ...(total_capacity !== undefined && { total_capacity }),
       ...(acc_code !== undefined && { acc_code }),
       ...(item_dcode !== undefined && { item_dcode }),
-      updated_by: req.user.id,
+      updated_by: auditUserName(req),
       updated_at: new Date(),
     };
     const nextRackNo = fields.rack_no ?? existing.rack_no;
@@ -263,7 +258,13 @@ export const updateLocation = async (req, res) => {
       }
     }
 
-    applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges });
+    applyApprovalWorkflow({
+      req,
+      fields,
+      incomingApproved: normalizedApproved,
+      hasBusinessChanges,
+      auditAsName: true,
+    });
 
     const updated = await updateLocations(fields, { location_id: id });
 
@@ -298,7 +299,7 @@ export const deleteLocation = async (req, res) => {
 
     await deleteLocations(
       { location_id: id },
-      { deleted_by: req.user.id }
+      { deleted_by: auditUserName(req)}
     );
     
     await log(req, "delete", id, { rack_no: existing.rack_no, shelf_no: existing.shelf_no }, existing);

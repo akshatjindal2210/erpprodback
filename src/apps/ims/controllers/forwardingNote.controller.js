@@ -8,12 +8,13 @@ import { buildForwardingLockMessage } from "../utils/forwarding-note/forwardingN
 import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../core/utils/approval.js";
 import { findForwardingNoteItems } from "../models/forwardingNoteItem.model.js";
 import { sanitizeSearch, buildForwardingNoteBillDocument } from "../../core/utils/helper.js";
 import { fetchFromIMS } from "../services/ims.service.js";
 import { findCategories } from "../models/category.model.js";
 import { fetchErpFgStockForItem, summarizeErpFgRecords } from "../utils/erp-api/erpFgStock.js";
+import { hasDirectForwardingNotePermission } from "../utils/imsSpecialPermissions.js";
 
 const FORWARDING_CFG = getCrudModuleConfig("forwarding_note_master");
 const FORWARDING_ITEM_CFG = getCrudModuleConfig("forwarding_note_item_wise");
@@ -96,14 +97,39 @@ export const createForwardingNote = async (req, res) => {
   try {
     const { items = [], approved, ...rest } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
+    let schno = rest.schno != null && String(rest.schno).trim() !== "" ? String(rest.schno).trim() : null;
+
+    // Multi-schedule FN: derive header schno from item-wise schedules when header empty.
+    if (!schno) {
+      const fromItems = [
+        ...new Set(
+          (items || [])
+            .map((i) => (i?.schno != null ? String(i.schno).trim() : ""))
+            .filter(Boolean)
+        ),
+      ];
+      if (fromItems.length) schno = fromItems[0];
+    }
+
+    const itemHasSchno = (items || []).some(
+      (i) => i?.schno != null && String(i.schno).trim() !== ""
+    );
+
+    // Direct create (no schedule) requires special permission; schedule-based create needs module add only.
+    if (!schno && !itemHasSchno && !hasDirectForwardingNotePermission(req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: "Direct Forwarding Note permission required to create without a schedule. Create from Today's Dispatch Plan instead.",
+      });
+    }
 
     // 1. Insert Master
-    const row = await insertForwardingNote({ ...rest, created_by: req.user.id });
+    const row = await insertForwardingNote({ ...rest, schno, created_by: auditUserName(req) });
 
     await saveForwardingNoteItems({
       fuid: row.fuid,
       items,
-      userId: req.user.id,
+      userName: auditUserName(req),
     });
 
     // 3. Apply initial approval state when requested (re-validate reserve before locking stock)
@@ -114,7 +140,8 @@ export const createForwardingNote = async (req, res) => {
         req,
         fields: approvalFields,
         incomingApproved: true,
-        hasBusinessChanges: false
+        hasBusinessChanges: false,
+        auditAsName: true,
       });
       await updateForwardingNotes(approvalFields, { fuid: row.fuid });
     }
@@ -160,7 +187,7 @@ export const updateForwardingNoteBill = async (req, res) => {
     const row = await updateForwardingNoteBillNo({
       fuid,
       bill_no: normalized,
-      userId: req.user.id,
+      userName: auditUserName(req),
     });
     if (!row) return res.status(404).json({ success: false, message: "Not found" });
 
@@ -228,7 +255,7 @@ export const updateForwardingNote = async (req, res) => {
 
     const fields = {
       ...updateData,
-      updated_by: req.user.id,
+      updated_by: auditUserName(req),
       updated_at: new Date()
     };
 
@@ -242,12 +269,12 @@ export const updateForwardingNote = async (req, res) => {
           ? null
           : String(existing.bill_no).trim() || null;
       if (normalizedBill !== previousBill) {
-        fields.bill_updated_by = req.user.id;
+        fields.bill_updated_by = auditUserName(req);
         fields.bill_updated_at = new Date();
       }
     }
     
-    applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges });
+    applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges, auditAsName: true });
 
     const isNewApproval =
       normalizedApproved === true &&
@@ -257,7 +284,7 @@ export const updateForwardingNote = async (req, res) => {
       await replaceForwardingNoteItems({
         fuid,
         items,
-        userId: req.user.id,
+        userName: auditUserName(req),
         excludeFuid: fuid,
       });
     } else if (isNewApproval) {
@@ -289,7 +316,7 @@ export const deleteForwardingNote = async (req, res) => {
       });
     }
 
-    await deleteForwardingNotes({ fuid }, { deleted_by: req.user.id });
+    await deleteForwardingNotes({ fuid }, { deleted_by: auditUserName(req) });
     await logActivity(req, { action: "delete", entity: "forwarding_note_master", entity_id: fuid, record: existing });
 
     res.json({ success: true, message: "Deleted successfully" });
@@ -309,7 +336,7 @@ export const lockForwardingNoteLock = async (req, res) => {
       return res.status(409).json({ success: false, message: "This forwarding note is already locked." });
     }
 
-    const locked = await lockForwardingNoteForOutEntry({ fuid, userId: req.user.id });
+    const locked = await lockForwardingNoteForOutEntry({ fuid, userName: auditUserName(req) });
     if (!locked) return res.status(404).json({ success: false, message: "Not found" });
 
     await logActivity(req, {

@@ -8,7 +8,7 @@ import { getImsMapsSafe } from "../erp-api/imsLookup.js";
 /**
  * Pending edit: update adjustment row only — ims_box_table changes on approve.
  */
-export async function syncAdjustmentMetadataOnly(client, { existing, body, userId }) {
+export async function syncAdjustmentMetadataOnly(client, { existing, body, userId, userName = null }) {
   if (!existing) return false;
   const entryType = existing.entry_type;
   const fields = {};
@@ -107,7 +107,7 @@ export async function syncAdjustmentMetadataOnly(client, { existing, body, userI
 
   if (!touched) return false;
 
-  fields.updated_by = userId;
+  fields.updated_by = userName != null && String(userName).trim() !== "" ? String(userName).trim() : userId;
   fields.updated_at = new Date();
   await updateAdjustmentsTx(client, fields, { adjustment_id: existing.adjustment_id });
   return true;

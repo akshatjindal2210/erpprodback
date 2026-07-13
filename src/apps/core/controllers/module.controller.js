@@ -4,6 +4,7 @@ import { getCrudModuleConfig } from "../config/crudModules.js";
 import { clearAllCachedPermissions } from "../../../config/permissionCache.js";
 import { sanitizeSearch } from "../utils/helper.js";
 import { emitToAll } from "../utils/socket.js";
+import { auditUserName } from "../utils/approval.js";
 
 const MODULE_CFG = getCrudModuleConfig("modules");
 
@@ -59,7 +60,7 @@ export const updateModuleData = async (req, res) => { // Route calls updateModul
     const { id, ...updateFields } = req.body;
     if (!id) return res.status(400).json({ success: false, message: "ID required" });
 
-    const fields = { ...updateFields, updated_by: req.user.id, updated_at: new Date() };
+    const fields = { ...updateFields, updated_by: auditUserName(req), updated_at: new Date() };
     const rows = await updateModules(fields, { id });
 
     if (!rows.length) return res.status(404).json({ success: false, message: "Module not found" });
@@ -88,7 +89,7 @@ export const toggleModuleStatus = async (req, res) => {
     const rows = await updateModules(
       {
         is_active: !module.is_active,
-        updated_by: req.user.id,
+        updated_by: auditUserName(req),
         updated_at: new Date(),
       },
       { id }

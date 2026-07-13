@@ -1,5 +1,6 @@
 import { getAllAppConfig, setAppConfigValue, getAppConfigValue, APP_CONFIG_KEYS } from "../../core/models/appConfig.model.js";
 import { normalizeBoxNoUidPrefix } from "../utils/box/boxUid.js";
+import { auditUserName } from "../../core/utils/approval.js";
 
 const LIST_VIEW_SPAN_MIN = 1;
 const LIST_VIEW_SPAN_MAX = 3650;
@@ -247,7 +248,7 @@ export const updateAppConfig = async (req, res) => {
       return res.status(400).json({ success: false, message: normalized.message });
     }
 
-    await setAppConfigValue(config_key, normalized.value, { updated_by: req.user?.id ?? null });
+    await setAppConfigValue(config_key, normalized.value, { updated_by: auditUserName(req) });
 
     const fresh = await getAppConfigValue(config_key);
     res.json({

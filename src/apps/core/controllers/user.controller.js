@@ -15,6 +15,7 @@ import { extractListParams, sanitizeFilters } from "../utils/queryHelper.js";
 import { cleanPermissionMap, formatPermissions, sanitizeSearch } from "../utils/helper.js";
 import { getDefaultListViewSpanDays, getBoxNoUidPrefix } from "../models/appConfig.model.js";
 import { isInwardLocationValidationEnabled } from "../../core/models/appConfig.model.js";
+import { auditUserName } from "../utils/approval.js";
 
 /** DB `CHECK (auth_source IN ('local','erp'))` — keep in sync with frontend `AUTH_SOURCES`. */
 const ALLOWED_AUTH_SOURCES = Object.freeze(["local", "erp"]);
@@ -311,7 +312,7 @@ export const createUser = async (req, res) => {
       password: finalPassword,
       type: normalizedType,
       status,
-      created_by: req.user.id,
+      created_by: auditUserName(req),
       usercode: numericUsercode,
       auth_source: src,
       department_id: deptId,
@@ -321,12 +322,12 @@ export const createUser = async (req, res) => {
 
     if (permissions && typeof permissions === "object" && !Array.isArray(permissions)) {
       const permRows = await normalizePermissionsForSave(permissions);
-      const meta = { created_by: req.user.id, updated_by: req.user.id };
+      const meta = { created_by: auditUserName(req), updated_by: auditUserName(req) };
       await upsertBulkPermissions(user.id, permRows, meta);
     }
 
     if (app_access && typeof app_access === "object") {
-      const meta = { created_by: req.user.id, updated_by: req.user.id };
+      const meta = { created_by: auditUserName(req), updated_by: auditUserName(req) };
       await upsertBulkAppAccess(user.id, app_access, meta);
       await syncAppGateChildPermissions(user.id, app_access, meta);
     }
@@ -441,7 +442,7 @@ export const updateUser = async (req, res) => {
       fields.password = await bcrypt.hash(String(password).trim().toLowerCase(), 10);
     }
 
-    fields.updated_by = req.user.id;
+    fields.updated_by = auditUserName(req);
     fields.updated_at = new Date();
 
     const [updated] = await updateUsers(fields, { id });
@@ -451,13 +452,13 @@ export const updateUser = async (req, res) => {
 
     if (permissions && typeof permissions === "object" && !Array.isArray(permissions)) {
       const permRows = await normalizePermissionsForSave(permissions);
-      const meta = { created_by: req.user.id, updated_by: req.user.id };
+      const meta = { created_by: auditUserName(req), updated_by: auditUserName(req) };
       await upsertBulkPermissions(id, permRows, meta);
       permissionsChanged = true;
     }
 
     if (app_access && typeof app_access === "object") {
-      const meta = { created_by: req.user.id, updated_by: req.user.id };
+      const meta = { created_by: auditUserName(req), updated_by: auditUserName(req) };
       await upsertBulkAppAccess(id, app_access, meta);
       await syncAppGateChildPermissions(id, app_access, meta);
       permissionsChanged = true;
@@ -503,7 +504,7 @@ export const deleteUser = async (req, res) => {
     const existing = await findUser({ id });
     if (!existing) return res.status(404).json({ success: false, message: "User not found" });
 
-    await deleteUsers({ id }, { deleted_by: req.user.id });
+    await deleteUsers({ id }, { deleted_by: auditUserName(req) });
     await logActivity(req, {
       action: "delete",
       entity: "users",

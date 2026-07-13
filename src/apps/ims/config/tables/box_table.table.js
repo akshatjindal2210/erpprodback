@@ -1,6 +1,7 @@
 import dbQuery from "../../../../config/db.js";
 import { patchTableSchema, patchCol, runIfColumnExists, dropColumnIfExists } from "../../../../config/ensureDbColumns.js";
-import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
+import { IMS_TABLES as T } from "../../../../config/dbTables.js";
+import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createBoxTable() {
   await dbQuery(`
@@ -20,11 +21,11 @@ export async function createBoxTable() {
       qc_hold_id      INTEGER REFERENCES ${T.QC_HOLD_MATERIAL}(hold_id) ON DELETE SET NULL,
       download_count  INTEGER DEFAULT 0,
       is_deleted      BOOLEAN DEFAULT false,
-      deleted_by      INTEGER REFERENCES ${C.USERS}(id),
+      deleted_by      TEXT,
       deleted_at      TIMESTAMP,
-      created_by      INTEGER REFERENCES ${C.USERS}(id),
+      created_by      TEXT,
       created_at      TIMESTAMP DEFAULT NOW(),
-      updated_by      INTEGER REFERENCES ${C.USERS}(id),
+      updated_by      TEXT,
       updated_at      TIMESTAMP
     );
 
@@ -70,6 +71,9 @@ export async function createBoxTable() {
       WHERE sa_id IS NOT NULL AND sa_entry_type IS NULL
     `);
   });
+
+  // ONE-TIME: INT id → user name. After prod OK, remove this call.
+  await migrateTableAuditColumnsToUserNames(dbQuery, T.BOX_TABLE);
 }
 
 export async function createBoxDownloadLogTable() {
@@ -80,7 +84,7 @@ export async function createBoxDownloadLogTable() {
       packing_number   VARCHAR(50),
       item_dcode       VARCHAR(100),
       acc_name         VARCHAR(255),
-      downloaded_by    INTEGER NOT NULL REFERENCES ${C.USERS}(id),
+      downloaded_by    TEXT NOT NULL,
       downloaded_at    TIMESTAMP NOT NULL DEFAULT NOW(),
       download_type    VARCHAR(20) NOT NULL DEFAULT 'single',
       sticker_count    INTEGER NOT NULL DEFAULT 1,
@@ -106,6 +110,10 @@ export async function createBoxDownloadLogTable() {
   });
 
   await migrateBoxDownloadLogData();
+  // ONE-TIME: INT id → user name. After prod OK, remove this call.
+  await migrateTableAuditColumnsToUserNames(dbQuery, T.BOX_DOWNLOAD_LOG, {
+    columns: ["downloaded_by"],
+  });
 }
 
 async function migrateBoxDownloadLogData() {
@@ -189,11 +197,11 @@ export async function createBoxOverrideRequestTable() {
       approved         BOOLEAN DEFAULT false,
       status           VARCHAR(20) DEFAULT 'pending',
       remarks          TEXT,
-      requested_by     INTEGER NOT NULL REFERENCES ${C.USERS}(id),
+      requested_by     TEXT NOT NULL,
       requested_at     TIMESTAMP DEFAULT NOW(),
-      approved_by      INTEGER REFERENCES ${C.USERS}(id),
+      approved_by      TEXT,
       approved_at      TIMESTAMP,
-      updated_by       INTEGER REFERENCES ${C.USERS}(id),
+      updated_by       TEXT,
       updated_at       TIMESTAMP
     );
 
@@ -212,5 +220,10 @@ export async function createBoxOverrideRequestTable() {
     indexes: [
       `CREATE INDEX IF NOT EXISTS idx_box_override_packing ON ${T.BOX_OVERRIDE_REQUEST}(packing_number)`,
     ],
+  });
+
+  // ONE-TIME: INT id → user name. After prod OK, remove this call.
+  await migrateTableAuditColumnsToUserNames(dbQuery, T.BOX_OVERRIDE_REQUEST, {
+    columns: ["requested_by", "approved_by", "updated_by"],
   });
 }

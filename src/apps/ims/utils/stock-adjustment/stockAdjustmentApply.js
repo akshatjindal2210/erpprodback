@@ -11,7 +11,7 @@ import { getImsMapsSafe } from "../erp-api/imsLookup.js";
 export { parseMinusRemovedBoxPayload, parseRemovedBoxIdsJson } from "./minusRemovedBoxPayload.js";
 
 /** Undo minus marks when un-approving or before re-apply. */
-export async function revertMinusAdjustmentBoxesTx(client, { adjustment, userId }) {
+export async function revertMinusAdjustmentBoxesTx(client, { adjustment, userId, userName = null }) {
   const adjId = adjustment.adjustment_id;
   const uids = parseRemovedBoxIdsJson(adjustment.removed_box_ids);
   const existing = await findBoxesBySaMinus(client, adjId);
@@ -25,7 +25,8 @@ export async function revertMinusAdjustmentBoxesTx(client, { adjustment, userId 
     return await clearStockAdjustmentMinusMarksTx(client, {
       adjustmentId: adjId,
       boxUids: allUids,
-      userId
+      userId,
+      userName,
     });
   }
   return [];
@@ -45,7 +46,7 @@ export async function revertAddAdjustmentBoxesTx(client, { adjustmentId, userId 
 }
 
 /** Apply box changes when adjustment becomes approved (inventory reflects here). */
-export async function applyStockAdjustmentOnApproveTx(client, { adjustment, userId, allBoxesLoose = false }) {
+export async function applyStockAdjustmentOnApproveTx(client, { adjustment, userId, userName = null, allBoxesLoose = false }) {
   const adjId = adjustment.adjustment_id;
   const entryType = adjustment.entry_type;
 
@@ -72,6 +73,7 @@ export async function applyStockAdjustmentOnApproveTx(client, { adjustment, user
       perBoxQty: pb,
       isLoose: !!allBoxesLoose,
       userId,
+      userName,
       boxNoUidPrefix,
       override_cust,
       category_id: adjustment.category_id ?? null,
@@ -124,6 +126,7 @@ export async function applyStockAdjustmentOnApproveTx(client, { adjustment, user
       adjustmentId: adjId,
       boxUids: uids,
       userId,
+      userName,
       packing_number: pn,
     });
 
@@ -144,12 +147,12 @@ export async function applyStockAdjustmentOnApproveTx(client, { adjustment, user
 }
 
 /** Undo box changes from an approved (or partially applied) adjustment — used on unapprove and delete. */
-export async function revertStockAdjustmentOnUnapproveTx(client, { adjustment, userId }) {
+export async function revertStockAdjustmentOnUnapproveTx(client, { adjustment, userId, userName = null }) {
   if (!adjustment) return [];
   if (adjustment.entry_type === "add") {
     return await revertAddAdjustmentBoxesTx(client, { adjustmentId: adjustment.adjustment_id, userId });
   } else if (adjustment.entry_type === "minus") {
-    return await revertMinusAdjustmentBoxesTx(client, { adjustment, userId });
+    return await revertMinusAdjustmentBoxesTx(client, { adjustment, userId, userName });
   }
   return [];
 }

@@ -25,3 +25,10 @@ export function hasInventoryOutApprovePermission(user) {
   const perms = parseSpecialPermissions(user?.special_permissions);
   return Boolean(perms?.ims?.inventory_approve);
 }
+
+/** Direct FN create without schedule (schno). Schedule-based create does not need this. */
+export function hasDirectForwardingNotePermission(user) {
+  if (isSuperAdminUser(user)) return true;
+  const perms = parseSpecialPermissions(user?.special_permissions);
+  return Boolean(perms?.ims?.direct_forwarding_note);
+}

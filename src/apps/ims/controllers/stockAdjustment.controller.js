@@ -7,7 +7,7 @@ import { fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../s
 import { logActivity } from "../../core/utils/logActivity.js";
 import { getCrudModuleConfig } from "../../core/config/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../core/utils/queryHelper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput } from "../../core/utils/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../core/utils/approval.js";
 import { sanitizeSearch } from "../../core/utils/helper.js";
 import { getImsMapsSafe } from "../utils/erp-api/imsLookup.js";
 import { syncAdjustmentMetadataOnly } from "../utils/stock-adjustment/stockAdjustmentSync.js";
@@ -174,7 +174,7 @@ export const createAdjustment = async (req, res) => {
       qty, 
       unit: unit ?? "PCS", 
       remarks, 
-      created_by: req.user.id 
+      created_by: auditUserName(req) 
     };
     if (entry_type === "minus") {
       data.acc_code = acc_code ?? null;
@@ -205,12 +205,13 @@ export const createAdjustment = async (req, res) => {
         await persistAdjustmentDocDtTx(client, { ...adj, ...data });
         if (normalizedApproved === true) {
           const approvalFields = {};
-          applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false });
+          applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true });
           await updateAdjustmentsTx(client, approvalFields, { adjustment_id: adj.adjustment_id });
           const fresh = { ...adj, ...data, ...approvalFields, approved: true };
           await applyStockAdjustmentOnApproveTx(client, {
             adjustment: fresh,
             userId: req.user.id,
+            userName: auditUserName(req),
             allBoxesLoose,
           });
         }
@@ -220,7 +221,7 @@ export const createAdjustment = async (req, res) => {
       adjustment = await insertAdjustment(data);
       if (normalizedApproved === true) {
         const approvalFields = {};
-        applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false });
+        applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true });
         await updateAdjustments(approvalFields, { adjustment_id: adjustment.adjustment_id });
       }
     }
@@ -387,7 +388,7 @@ export const updateAdjustment = async (req, res) => {
 
     const fields = { 
       ...incoming, 
-      updated_by: req.user.id, 
+      updated_by: auditUserName(req), 
       updated_at: new Date() 
     };
     if (acc_code !== undefined) {
@@ -420,17 +421,27 @@ export const updateAdjustment = async (req, res) => {
         req,
         fields,
         incomingApproved: normalizedApproved,
-        hasBusinessChanges
+        hasBusinessChanges,
+        auditAsName: true,
       });
     }
 
     let updated;
     await withTransaction(async (client) => {
       if (wasApproved) {
-        await revertStockAdjustmentOnUnapproveTx(client, { adjustment: existing, userId: req.user.id });
+        await revertStockAdjustmentOnUnapproveTx(client, {
+          adjustment: existing,
+          userId: req.user.id,
+          userName: auditUserName(req),
+        });
       }
       if (wantsPackingBoxSync) {
-        await syncAdjustmentMetadataOnly(client, { existing, body: syncBody, userId: req.user.id });
+        await syncAdjustmentMetadataOnly(client, {
+          existing,
+          body: syncBody,
+          userId: req.user.id,
+          userName: auditUserName(req),
+        });
       }
       [updated] = await updateAdjustmentsTx(client, fields, { adjustment_id: id });
 
@@ -443,6 +454,7 @@ export const updateAdjustment = async (req, res) => {
         await applyStockAdjustmentOnApproveTx(client, {
           adjustment: row,
           userId: req.user.id,
+          userName: auditUserName(req),
           allBoxesLoose,
         });
       }
@@ -482,11 +494,12 @@ export const deleteAdjustment = async (req, res) => {
       // Undo inventory impact: add → hard-delete SA boxes; minus → restore boxes to in-hand.
       affectedBoxes = await revertStockAdjustmentOnUnapproveTx(client, {
         adjustment: existing,
-        userId: req.user.id
+        userId: req.user.id,
+        userName: auditUserName(req),
       });
       await updateAdjustmentsTx(
         client,
-        { is_deleted: true, deleted_by: req.user.id, deleted_at: new Date() },
+        { is_deleted: true, deleted_by: auditUserName(req), deleted_at: new Date() },
         { adjustment_id: id }
       );
       const pn = String(existing.packing_number ?? "").trim();

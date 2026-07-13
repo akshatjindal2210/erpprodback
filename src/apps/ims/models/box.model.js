@@ -1,5 +1,4 @@
 import dbQuery from "../../../config/db.js";
-import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { BOX_TX_TYPES } from "../constants/boxTransactionTypes.js";
 import { logBoxTransaction, logBoxTransactionSafe, singlePackingFromRows } from "../utils/box/logBoxTransaction.js";
 import { sqlBoxInHand, sqlBoxOutUidEmpty, sqlBoxCustomerCode, sqlDailyprodLateralForBox, sqlBoxSellable, sqlBoxNotOnQcHold, sqlBoxOutwardDispatchAny, sqlBoxPackingNumberMatch, sqlDocDtText, sqlDocDtFromDailyprod, sqlOutEntryCustomerDispatch } from "../utils/box/boxInventorySql.js";
@@ -44,9 +43,6 @@ const JOINS_SIMPLE = `
   LEFT JOIN ims_forwarding_note_master fnm ON fnm.fuid = io.fuid AND fnm.is_deleted = false
   LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
   LEFT JOIN ims_dailyprod dp ON trim(b.packing_number::text) = trim(dp.doc_no::text)
-  LEFT JOIN ${M.USERS} u_cr    ON b.created_by  = u_cr.id
-  LEFT JOIN ${M.USERS} u_upd   ON b.updated_by  = u_upd.id
-  LEFT JOIN ${M.USERS} u_dl    ON b.deleted_by  = u_dl.id
 `;
 
 const JOINS_WITHOUT_LATERAL = `
@@ -55,9 +51,6 @@ const JOINS_WITHOUT_LATERAL = `
   LEFT JOIN ims_out_entry io        ON b.out_uid             = io.out_uid AND io.is_deleted = false
   LEFT JOIN ims_forwarding_note_master fnm ON fnm.fuid = io.fuid AND fnm.is_deleted = false
   LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
-  LEFT JOIN ${M.USERS} u_cr    ON b.created_by  = u_cr.id
-  LEFT JOIN ${M.USERS} u_upd   ON b.updated_by  = u_upd.id
-  LEFT JOIN ${M.USERS} u_dl    ON b.deleted_by  = u_dl.id
 `;
 
 /** Expensive lateral join for specific logic (SA/QC). */
@@ -72,6 +65,7 @@ const FIND_BOXES_JOINED_SELECT = {
   rack_no: "lm.rack_no"
 };
 
+/** Audit cols store user name snapshot (not live user id). */
 const DEFAULT_FIELDS_BOX = [
   "b.*",
   "lm.*",
@@ -79,8 +73,9 @@ const DEFAULT_FIELDS_BOX = [
   "ii.in_uid AS inward_ref",
   "io.out_uid AS outward_ref",
   "dp.doc_no AS prod_doc_no",
-  "u_cr.name AS created_by_name",
-  "u_upd.name AS updated_by_name"
+  "b.created_by AS created_by_name",
+  "b.updated_by AS updated_by_name",
+  "b.deleted_by AS deleted_by_name"
 ];
 
 function isExactBoxScanLookup(filters = {}, limit = 10) {
@@ -1128,7 +1123,8 @@ export const deleteBoxes = async (filters = {}, meta = {}) => {
       source_module: meta.source_module || "boxes",
       source_id: meta.source_id != null ? String(meta.source_id) : null,
       packing_number: rows[0]?.packing_number,
-      user_id: meta.deleted_by,
+      user_id: meta.user_id ?? null,
+      user_name: meta.deleted_by ?? null,
       rows,
       details: { filters },
     });
@@ -1572,9 +1568,8 @@ export async function getProductionStickerPanelMetaByPackingNumbers(packingNumbe
        MAX(dailyprod_doc_dt) AS dailyprod_doc_dt,
        MAX(sa_financial_year)::text AS sa_financial_year,
        (
-         SELECT u.name
+         SELECT bm.created_by
          FROM box_with_meta bm
-         INNER JOIN ${M.USERS} u ON u.id = bm.created_by
          WHERE bm.packing_number = b.packing_number
            AND bm.item_dcode = b.item_dcode
            AND bm.acc_code = b.acc_code
@@ -1582,9 +1577,8 @@ export async function getProductionStickerPanelMetaByPackingNumbers(packingNumbe
          LIMIT 1
        ) AS sticker_created_by_name,
        (
-         SELECT u.name
+         SELECT bm.updated_by
          FROM box_with_meta bm
-         INNER JOIN ${M.USERS} u ON u.id = bm.updated_by
          WHERE bm.packing_number = b.packing_number
            AND bm.item_dcode = b.item_dcode
            AND bm.acc_code = b.acc_code
@@ -1700,7 +1694,7 @@ const BULK_INSERT_SQL = `
     $3::int[],
     $4::boolean[],
     $5::text[],
-    $6::int[],
+    $6::text[],
     $7::int[],
     $8::text[],
     $9::int[]
@@ -1729,7 +1723,7 @@ export const insertBulkBoxes = async (rows) => {
       source_module: isSa ? "stock_adjustment" : "packing_entry",
       source_id: isSa ? String(rows[0]?.sa_id ?? "") : String(packing ?? ""),
       packing_number: packing,
-      user_id: rows[0]?.created_by,
+      user_name: rows[0]?.created_by,
       rows: inserted,
       details: { entry_type: isSa ? "add" : undefined },
     });
@@ -1763,7 +1757,7 @@ export const insertBulkBoxesTx = async (client, rows) => {
     source_module: isSa ? "stock_adjustment" : "packing_entry",
     source_id: isSa ? String(rows[0]?.sa_id ?? "") : String(packing ?? ""),
     packing_number: packing,
-    user_id: rows[0]?.created_by,
+    user_name: rows[0]?.created_by,
     rows: inserted,
     details: { entry_type: isSa ? "add" : undefined },
   });
@@ -1788,24 +1782,25 @@ export const findStockAdjustmentAddBoxesTx = async (client, adjustmentId) => {
 };
 
 /** Soft-delete selected stock-in boxes for this add adjustment. */
-export const softDeleteStockAdjustmentAddBoxesByUidsTx = async (client, { adjustmentId, boxUids, userId }) => {
+export const softDeleteStockAdjustmentAddBoxesByUidsTx = async (client, { adjustmentId, boxUids, userId, userName = null }) => {
   const ids = (Array.isArray(boxUids) ? boxUids : [])
     .map((u) => Number(u))
     .filter((n) => Number.isFinite(n) && n > 0);
   if (!ids.length) return [];
+  const auditBy = userName ?? null;
   const { rows } = await client.query(
     `UPDATE ims_box_table
      SET is_deleted = true,
-         deleted_by = $3::integer,
+         deleted_by = $3,
          deleted_at = NOW(),
-         updated_by = $3::integer,
+         updated_by = $3,
          updated_at = NOW()
      WHERE sa_id = $1::integer
        AND sa_entry_type = 'stock_in'
        AND is_deleted = false
        AND box_uid = ANY($2::int[])
      RETURNING box_uid, box_no_uid, packing_number, qty, is_loose`,
-    [adjustmentId, ids, userId]
+    [adjustmentId, ids, auditBy]
   );
   if (rows.length !== ids.length) {
     const err = new Error("Some boxes could not be removed they may not belong to this adjustment.");
@@ -1819,6 +1814,7 @@ export const softDeleteStockAdjustmentAddBoxesByUidsTx = async (client, { adjust
     source_id: String(adjustmentId),
     packing_number: singlePackingFromRows(rows),
     user_id: userId,
+    user_name: auditBy,
     rows,
     details: { entry_type: "add", adjustment_id: adjustmentId },
   });
@@ -1826,16 +1822,17 @@ export const softDeleteStockAdjustmentAddBoxesByUidsTx = async (client, { adjust
 };
 
 /** Update per-box qty on all stock-in boxes for an add adjustment. */
-export const updateStockAdjustmentAddBoxesQtyTx = async (client, { adjustmentId, qty, userId }) => {
+export const updateStockAdjustmentAddBoxesQtyTx = async (client, { adjustmentId, qty, userId, userName = null }) => {
+  const auditBy = userName ?? null;
   await client.query(
     `UPDATE ims_box_table
      SET qty = $2::integer,
-         updated_by = $3::integer,
+         updated_by = $3,
          updated_at = NOW()
      WHERE sa_id = $1::integer
        AND sa_entry_type = 'stock_in'
        AND is_deleted = false`,
-    [adjustmentId, qty, userId]
+    [adjustmentId, qty, auditBy]
   );
   await logBoxTransaction({
     client,
@@ -1843,6 +1840,7 @@ export const updateStockAdjustmentAddBoxesQtyTx = async (client, { adjustmentId,
     source_module: "stock_adjustment",
     source_id: String(adjustmentId),
     user_id: userId,
+    user_name: auditBy,
     details: { entry_type: "add", adjustment_id: adjustmentId, per_box_qty: qty },
   });
 };
@@ -1886,24 +1884,25 @@ export const permanentlyDeleteStockAdjustmentAddBoxesTx = async (
 };
 
 /** Undo minus marks for this adjustment only (pending edit). */
-export const clearStockAdjustmentMinusMarksTx = async (client, { adjustmentId, boxUids, userId }) => {
+export const clearStockAdjustmentMinusMarksTx = async (client, { adjustmentId, boxUids, userId, userName = null }) => {
   const ids = (Array.isArray(boxUids) ? boxUids : [])
     .map((u) => Number(u))
     .filter((n) => Number.isFinite(n) && n > 0);
   if (!ids.length) return [];
+  const auditBy = userName ?? null;
   const { rows } = await client.query(
     `UPDATE ims_box_table
      SET sa_id = NULL,
          sa_entry_type = NULL,
          out_uid = NULL,
-         updated_by = $2::integer,
+         updated_by = $2,
          updated_at = NOW()
      WHERE sa_id = $1::integer
        AND sa_entry_type = 'stock_out'
        AND box_uid = ANY($3::int[])
        AND is_deleted = false
      RETURNING box_uid, box_no_uid, packing_number, qty, is_loose`,
-    [adjustmentId, userId, ids]
+    [adjustmentId, auditBy, ids]
   );
   if (rows.length) {
     await logBoxTransaction({
@@ -1912,6 +1911,7 @@ export const clearStockAdjustmentMinusMarksTx = async (client, { adjustmentId, b
       source_module: "stock_adjustment",
       source_id: String(adjustmentId),
       user_id: userId,
+      user_name: auditBy,
       rows,
       details: { entry_type: "minus", adjustment_id: adjustmentId },
     });
@@ -1919,24 +1919,25 @@ export const clearStockAdjustmentMinusMarksTx = async (client, { adjustmentId, b
   return rows;
 };
 
-export const markBoxesStockAdjustmentOutTx = async (client, { adjustmentId, boxUids, userId, packing_number = null }) => {
+export const markBoxesStockAdjustmentOutTx = async (client, { adjustmentId, boxUids, userId, userName = null, packing_number = null }) => {
   const ids = (Array.isArray(boxUids) ? boxUids : [])
     .map((u) => Number(u))
     .filter((n) => Number.isFinite(n) && n > 0);
   if (!ids.length) return [];
+  const auditBy = userName ?? null;
   const { rows } = await client.query(
     `UPDATE ims_box_table
      SET sa_id = $1::integer,
          sa_entry_type = 'stock_out',
          out_uid = $1::integer,
-         updated_by = $2::integer,
+         updated_by = $2,
          updated_at = NOW()
      WHERE box_uid = ANY($3::int[])
        AND is_deleted = false
        AND (out_uid IS NULL OR out_uid::text = $1::text)
        AND (sa_entry_type IS DISTINCT FROM 'stock_out' OR sa_id = $1::integer)
      RETURNING box_uid, box_no_uid, packing_number, qty, is_loose`,
-    [adjustmentId, userId, ids]
+    [adjustmentId, auditBy, ids]
   );
   if (rows.length !== ids.length) {
     const err = new Error(
@@ -1952,6 +1953,7 @@ export const markBoxesStockAdjustmentOutTx = async (client, { adjustmentId, boxU
     source_id: String(adjustmentId),
     packing_number: packing_number || singlePackingFromRows(rows),
     user_id: userId,
+    user_name: auditBy,
     rows,
     details: { entry_type: "minus", adjustment_id: adjustmentId },
   });
@@ -2457,16 +2459,14 @@ async function getStickerBoxManagementList(options = {}) {
   /** Packing-wide `bulk_pack` rows use `packing_number` with `box_uid` NULL. */
   const lastLogLateral = `
     LEFT JOIN LATERAL (
-      SELECT dl.downloaded_at, u.name AS downloaded_by_name, dl.download_type, dl.sticker_count
+      SELECT dl.downloaded_at, dl.downloaded_by AS downloaded_by_name, dl.download_type, dl.sticker_count
       FROM ims_box_download_log dl
-      LEFT JOIN ${M.USERS} u ON u.id = dl.downloaded_by
       WHERE dl.box_uid = b.box_uid
       ORDER BY dl.downloaded_at DESC LIMIT 1
     ) last_single ON true
     LEFT JOIN LATERAL (
-      SELECT dl.downloaded_at, u.name AS downloaded_by_name, dl.download_type, dl.sticker_count
+      SELECT dl.downloaded_at, dl.downloaded_by AS downloaded_by_name, dl.download_type, dl.sticker_count
       FROM ims_box_download_log dl
-      LEFT JOIN ${M.USERS} u ON u.id = dl.downloaded_by
       WHERE dl.download_type = 'bulk_pack' AND dl.packing_number = b.packing_number::text
       ORDER BY dl.downloaded_at DESC LIMIT 1
     ) last_bulk ON true
@@ -2582,7 +2582,8 @@ export { enrichOverrideCustomerListRows, getOverrideRequestById, insertOverrideR
 // Inward Entry Controllers
 // After inward: set box location and in_uid
 export const updateBoxesAfterInward = async (in_uid, location_id, boxes, userId, options = {}) => {
-  const { logEvent = true } = options;
+  const { logEvent = true, userName = null } = options;
+  const auditBy = userName ?? null;
   const query = `
     UPDATE ims_box_table 
     SET location_id = $1, 
@@ -2595,7 +2596,7 @@ export const updateBoxesAfterInward = async (in_uid, location_id, boxes, userId,
       AND (sa_entry_type IS DISTINCT FROM 'stock_out')
     RETURNING *`;
 
-  const rows = await dbQuery(query, [location_id, in_uid, userId, boxes]);
+  const rows = await dbQuery(query, [location_id, in_uid, auditBy, boxes]);
   if (logEvent && rows?.length) {
     logBoxTransactionSafe({
       transaction_type: BOX_TX_TYPES.INWARD_LINK,
@@ -2603,6 +2604,7 @@ export const updateBoxesAfterInward = async (in_uid, location_id, boxes, userId,
       source_id: String(in_uid),
       packing_number: singlePackingFromRows(rows),
       user_id: userId,
+      user_name: auditBy,
       rows,
       details: {
         in_uid,
