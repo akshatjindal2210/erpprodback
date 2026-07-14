@@ -286,6 +286,14 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       isActive: widget.is_active !== false,
       targetPageKey: String(widget.targetPageKey || widget.target_page_key || "dashboard").trim().toLowerCase() || "dashboard",
       targetPageModule: widget.targetPageModule || widget.target_page_module || null,
+      linkType: String(widget.linkType || widget.link_type || "NONE").toUpperCase() === "APP"
+        ? "APP"
+        : String(widget.linkType || widget.link_type || "NONE").toUpperCase() === "URL"
+          ? "URL"
+          : "NONE",
+      linkUrl: String(widget.linkUrl || widget.link_url || "").trim(),
+      linkAppId: String(widget.linkAppId || widget.link_app_id || "").trim(),
+      linkPageId: String(widget.linkPageId || widget.link_page_id || "").trim(),
     };
   }
 
@@ -365,6 +373,14 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
     isActive: widget.is_active !== false,
     targetPageKey: String(widget.targetPageKey || widget.target_page_key || "dashboard").trim().toLowerCase() || "dashboard",
     targetPageModule: widget.targetPageModule || widget.target_page_module || null,
+    linkType: String(chartConfig.link_type || widget.linkType || widget.link_type || "NONE").toUpperCase() === "APP"
+      ? "APP"
+      : String(chartConfig.link_type || widget.linkType || widget.link_type || "NONE").toUpperCase() === "URL"
+        ? "URL"
+        : "NONE",
+    linkUrl: String(chartConfig.link_url || widget.linkUrl || widget.link_url || "").trim(),
+    linkAppId: String(chartConfig.link_app_id || widget.linkAppId || widget.link_app_id || "").trim(),
+    linkPageId: String(chartConfig.link_page_id || widget.linkPageId || widget.link_page_id || "").trim(),
   };
 }
 
@@ -434,6 +450,10 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       box_width: Number.isFinite(Number(stored.style?.boxPx?.width)) ? Math.round(Number(stored.style.boxPx.width)) : undefined,
       box_height: Number.isFinite(Number(stored.style?.boxPx?.height)) ? Math.round(Number(stored.style.boxPx.height)) : undefined,
       boxPx: stored.style?.boxPx && typeof stored.style.boxPx === "object" ? stored.style.boxPx : undefined,
+      link_type: stored.linkType || "NONE",
+      link_url: stored.linkUrl || "",
+      link_app_id: stored.linkAppId || "",
+      link_page_id: stored.linkPageId || "",
     },
     layout: sanitizeLayoutCoords(stored.layout, stored.id || `cfg_${idx}`, idx),
     mobile_layout: sanitizeLayoutCoords(stored.mobileLayout, stored.id || `cfg_${idx}`, idx),
