@@ -3,7 +3,7 @@ import dbQuery from "../shared/db.js";
 const Category = {
   tableName: "task_categories",
 
-  async getAll({ search, page, limit, sortBy, order, dateFrom, dateTo }) {
+  async getAll({ search, page, limit, sortBy, order, dateFrom, dateTo, viewDays }) {
     const offset      = (Number(page) - 1) * Number(limit);
     const validColumns = ["id", "name", "created_at"];
     const finalSort   = validColumns.includes(sortBy) ? sortBy : "id";
@@ -11,6 +11,11 @@ const Category = {
 
     let query       = `SELECT * FROM ${this.tableName} WHERE name LIKE ?`;
     let queryParams = [`%${search}%`];
+
+    if (Number(viewDays) > 0) {
+      query += ` AND DATE(created_at) >= CURRENT_DATE - (?::int - 1)`;
+      queryParams.push(Number(viewDays));
+    }
 
     if (dateFrom && dateTo) {
       query += ` AND DATE(created_at) BETWEEN ? AND ?`;
@@ -23,9 +28,14 @@ const Category = {
     return await dbQuery(query, queryParams);
   },
 
-  async count({ search, dateFrom, dateTo }) {
+  async count({ search, dateFrom, dateTo, viewDays }) {
     let query       = `SELECT COUNT(*) as total FROM ${this.tableName} WHERE name LIKE ?`;
     let queryParams = [`%${search}%`];
+
+    if (Number(viewDays) > 0) {
+      query += ` AND DATE(created_at) >= CURRENT_DATE - (?::int - 1)`;
+      queryParams.push(Number(viewDays));
+    }
 
     if (dateFrom && dateTo) {
       query += ` AND DATE(created_at) BETWEEN ? AND ?`;

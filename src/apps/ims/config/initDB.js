@@ -1,8 +1,7 @@
-import dbQuery from "../../../config/db.js";
 import { createLocationMasterTable } from "./tables/location_master.table.js";
 import { createPackingStandardTable } from "./tables/packing_standard.table.js";
 import { createBoxDownloadLogTable, createBoxOverrideRequestTable, createBoxTable } from "./tables/box_table.table.js";
-import { createDailyProdTable, backfillDailyProdStickerColumnsOnStartup } from "./tables/dailyprod.table.js";
+import { createDailyProdTable } from "./tables/dailyprod.table.js";
 import { createSchedulePlanTable } from "./tables/schedule_plan.table.js";
 import { createSchedulePlanTransactionTable } from "./tables/schedule_plan_transaction.table.js";
 import { createInventoryInwardsTable } from "./tables/inventory_inwards.table.js";
@@ -19,6 +18,7 @@ import { createAuditTables } from "./tables/audit.table.js";
 import { createQcHoldMaterialTable } from "./tables/qc_hold_material.table.js";
 import { syncImsSequences } from "./syncSequences.js";
 
+/** Schema only — data backfills live in src/backfills/ */
 export async function initImsDB() {
   await createCategoryTable();
   await createStickerTypeTable();
@@ -41,37 +41,5 @@ export async function initImsDB() {
   await createTransactionBoxTable();
   await createAuditTables();
 
-  await backfillDailyProdStickerColumnsOnStartup();
-
   await syncImsSequences();
-
-  if (process.env.BACKFILL_BOX_CATEGORY !== "0") {
-    try {
-      const { runBoxCategoryBackfillOnStartup } = await import("../utils/box/backfillBoxCategory.js");
-      await runBoxCategoryBackfillOnStartup();
-    } catch (err) {
-      console.warn("Box category backfill skipped:", err.message);
-    }
-  }
-
-  if (process.env.BACKFILL_BOX_IS_LOOSE !== "0") {
-    try {
-      const { runBoxIsLooseBackfillOnStartup } = await import("../utils/box/backfillBoxCategory.js");
-      await runBoxIsLooseBackfillOnStartup();
-    } catch (err) {
-      console.warn("Box is_loose backfill skipped:", err.message);
-    }
-  }
-
-  // Legacy SA rows — after all schema patches.
-  if (process.env.BACKFILL_SA_PACKING_META !== "0") {
-    setImmediate(() => {
-      import("../utils/stock-adjustment/backfillStockAdjustmentPackingMeta.js")
-        .then(({ runStockAdjustmentPackingMetaBackfillOnStartup }) =>
-          runStockAdjustmentPackingMetaBackfillOnStartup()
-        )
-        .catch((err) => console.warn("SA packing meta backfill skipped:", err.message));
-    });
-  }
-
 }

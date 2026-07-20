@@ -467,6 +467,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
 
     itemSr += 1;
     const hpCode = escapeHtml(grp.item_code || breakdowns[0]?.item_code || "—");
+    const schNo = escapeHtml(grp.schno || breakdowns[0]?.schno || "—");
     const itemTotal = Math.round(
       Number(grp.total_qty) ||
         breakdowns.reduce((sum, line) => sum + Math.round(Number(line.total_qty || 0)), 0)
@@ -485,6 +486,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
       const isLast = idx === lastIdx;
       const snCell = isFirst ? String(itemSr) : "&#160;";
       const codeCell = isFirst ? hpCode : "&#160;";
+      const schNoCell = isFirst ? schNo : "&#160;";
       let totalQtyCell;
       if (!multiPacking) {
         totalQtyCell = `<td class="fn-td fn-r fn-bold">${qtyCell}</td>`;
@@ -498,6 +500,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
         <tr${rowClass}>
           <td class="fn-td fn-c">${snCell}</td>
           <td class="fn-td fn-l">${codeCell}</td>
+          <td class="fn-td fn-c">${schNoCell}</td>
           <td class="fn-td fn-c">${pkgNo}</td>
           <td class="fn-td fn-c">${escapeHtml(pkgDate)}</td>
           <td class="fn-td fn-r">${qtyCell}</td>
@@ -509,12 +512,12 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
   grandTotal = Math.round(grandTotal);
   if (!rowChunks.length) {
     rowChunks.push(`
-      <tr><td colspan="6" class="fn-td fn-c" style="padding:10px;font-style:italic;">No line items on this document.</td></tr>`);
+      <tr><td colspan="7" class="fn-td fn-c" style="padding:10px;font-style:italic;">No line items on this document.</td></tr>`);
   } else {
     const gt = fmtQtyPlain(grandTotal);
     rowChunks.push(`
       <tr class="fn-tr-total">
-        <td colspan="4" class="fn-td fn-total-lbl">Total</td>
+        <td colspan="5" class="fn-td fn-total-lbl">Total</td>
         <td class="fn-td fn-r fn-bold fn-total-num">${gt}</td>
         <td class="fn-td fn-r fn-bold fn-total-num">${gt}</td>
       </tr>`);
@@ -549,7 +552,16 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
   <meta charset="utf-8" />
   <title>Forwarding Note ${escapeHtml(challanNo)}</title>
   <style>
-    @page { size: A4 portrait; margin: 8mm 10mm 10mm 10mm; }
+    @page {
+      size: A4 portrait;
+      margin: 8mm 10mm 14mm 10mm;
+      @bottom-right {
+        content: "Page " counter(page) " of " counter(pages);
+        font-family: "Times New Roman", Times, Georgia, serif;
+        font-size: 9pt;
+        color: #000;
+      }
+    }
     * { box-sizing: border-box; }
     body {
       margin: 0;
@@ -654,6 +666,14 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
     .fn-cust-name { font-weight: 600; }
     .fn-tbl-wrap { margin-top: 0; flex: 1; }
     .fn-tbl { width: 100%; border-collapse: collapse; font-size: 10pt; table-layout: fixed; }
+    .fn-tbl thead { display: table-header-group; }
+    .fn-page-head td {
+      border: none;
+      padding: 0 0 2mm;
+      vertical-align: top;
+      background: #fff;
+    }
+    .fn-page-head .fn-border { border: none; padding: 0; }
     .fn-tbl thead th {
       border: 1px solid #000;
       padding: 5px 4px;
@@ -674,11 +694,12 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
     .fn-r { text-align: right; font-variant-numeric: tabular-nums; }
     .fn-bold { font-weight: 700; }
     .fn-tr-pack .fn-td { border-top: 1px dotted #bbb; }
-    .fn-col-sn { width: 8%; }
-    .fn-col-code { width: 24%; }
-    .fn-col-pkg { width: 16%; }
-    .fn-col-dt { width: 16%; }
-    .fn-col-qty { width: 18%; }
+    .fn-col-sn { width: 7%; }
+    .fn-col-code { width: 20%; }
+    .fn-col-sch { width: 11%; }
+    .fn-col-pkg { width: 14%; }
+    .fn-col-dt { width: 14%; }
+    .fn-col-qty { width: 17%; }
     .fn-tr-total td { border-top: 2px solid #000; }
     .fn-total-lbl {
       text-align: right;
@@ -730,32 +751,37 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
 <body>
   <div class="fn-sheet">
     <div class="fn-border">
-      <div class="fn-head-row">
-        <div class="fn-logo-cell">${logoBlock}</div>
-        <div class="fn-head-main">
-          <div class="fn-co-name">${escapeHtml(companyName)}</div>
-          <div class="fn-fn-title">Forwarding Note</div>
-          <div class="fn-co-sub">${escapeHtml(companyAddr)}</div>
-          ${gstLine}
-          <div class="fn-co-sub">${escapeHtml(phone)}</div>
-        </div>
-      </div>
-
-      <div class="fn-meta-bar">
-        <div class="fn-meta-row">
-          <div><span class="k">S. No.</span> ${escapeHtml(challanNo)}</div>
-          <div class="fn-meta-date"><span class="k">Date</span> ${escapeHtml(docDateShort)}</div>
-        </div>
-        <div class="fn-meta-cust"><span class="k">Customer</span> <span class="fn-cust-name">${partyName}</span></div>
-      </div>
-
       <div class="fn-body-stack">
         <div class="fn-tbl-wrap">
           <table class="fn-tbl" cellspacing="0">
             <thead>
+              <tr class="fn-page-head">
+                <td colspan="7">
+                  <div class="fn-border">
+                    <div class="fn-head-row">
+                      <div class="fn-logo-cell">${logoBlock}</div>
+                      <div class="fn-head-main">
+                        <div class="fn-co-name">${escapeHtml(companyName)}</div>
+                        <div class="fn-fn-title">Forwarding Note</div>
+                        <div class="fn-co-sub">${escapeHtml(companyAddr)}</div>
+                        ${gstLine}
+                        <div class="fn-co-sub">${escapeHtml(phone)}</div>
+                      </div>
+                    </div>
+                    <div class="fn-meta-bar">
+                      <div class="fn-meta-row">
+                        <div><span class="k">S. No.</span> ${escapeHtml(challanNo)}</div>
+                        <div class="fn-meta-date"><span class="k">Date</span> ${escapeHtml(docDateShort)}</div>
+                      </div>
+                      <div class="fn-meta-cust"><span class="k">Customer</span> <span class="fn-cust-name">${partyName}</span></div>
+                    </div>
+                  </div>
+                </td>
+              </tr>
               <tr>
                 <th class="fn-col-sn">S. No.</th>
                 <th class="fn-col-code">H. P. Code</th>
+                <th class="fn-col-sch">Schedule No.</th>
                 <th class="fn-col-pkg">Packing No.</th>
                 <th class="fn-col-dt">Packing Date</th>
                 <th class="fn-col-qty">Qty.</th>
@@ -807,6 +833,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
       </div>
     </div>
   </div>
+  <div class="fn-page-count" aria-hidden="true"></div>
 </body>
 </html>`;
 };

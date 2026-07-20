@@ -1,7 +1,6 @@
 import dbQuery from "../../../../config/db.js";
 import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
 import { IMS_TABLES as T } from "../../../../config/dbTables.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createForwardingNoteMasterTable() {
   await dbQuery(`
@@ -42,17 +41,5 @@ export async function createForwardingNoteMasterTable() {
       patchCol("schno", "VARCHAR(32)"),
     ],
     columnTypes: [{ name: "bill_no", type: "text" }],
-  });
-
-  // ONE-TIME: INT id → user name. After prod OK, remove this call.
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.FORWARDING_NOTE_MASTER, {
-    columns: [
-      "created_by",
-      "updated_by",
-      "approved_by",
-      "deleted_by",
-      "bill_updated_by",
-      "out_entry_locked_by",
-    ],
   });
 }

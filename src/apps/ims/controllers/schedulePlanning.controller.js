@@ -1,6 +1,11 @@
-import { listSchedulePlanning, listScheduleActionDates, saveSchedulePlan, rejectSchedulePlan, holdSchedulePlan, listScheduleItemTransactions, removeSchedulePlan, submitScheduleShortage, listScheduleDispatchPlan, listCustomerMonthSchedules, completeSchedulePlan } from "../utils/schedule-planning/schedulePlanService.js";
+import { listSchedulePlanning, listScheduleActionDates, saveSchedulePlan, rejectSchedulePlan, holdSchedulePlan, readyToDispatchSchedulePlan, listScheduleItemTransactions, removeSchedulePlan, submitScheduleShortage, listScheduleDispatchPlan, listCustomerMonthSchedules, completeSchedulePlan } from "../utils/schedule-planning/schedulePlanService.js";
 import { clearImsMetaForResponse, toPublicImsMessage } from "../utils/erp-api/imsMeta.js";
 import { auditUserName } from "../../core/utils/approval.js";
+
+function scheduleActionOpts(req) {
+  const type = String(req.user?.type || req.user?.role || "").toLowerCase().trim();
+  return { isSuperAdmin: type === "super_admin" };
+}
 
 // Sends a simple JSON response
 function sendSimple(res, { success, message, data, status = 200, extra = {} }) {
@@ -65,7 +70,7 @@ export const getScheduleActionDates = async (req, res) => {
 
 export const saveSchedulePlanning = async (req, res) => {
   try {
-    const out = await saveSchedulePlan(req.body || {}, auditUserName(req));
+    const out = await saveSchedulePlan(req.body || {}, auditUserName(req), scheduleActionOpts(req));
     if (out?.success === false) {
       return sendSimple(res, {
         success: false,
@@ -86,7 +91,7 @@ export const saveSchedulePlanning = async (req, res) => {
 
 export const rejectSchedulePlanning = async (req, res) => {
   try {
-    const out = await rejectSchedulePlan(req.body || {}, auditUserName(req));
+    const out = await rejectSchedulePlan(req.body || {}, auditUserName(req), scheduleActionOpts(req));
     if (out?.success === false) {
       return sendSimple(res, {
         success: false,
@@ -107,7 +112,7 @@ export const rejectSchedulePlanning = async (req, res) => {
 
 export const holdSchedulePlanning = async (req, res) => {
   try {
-    const out = await holdSchedulePlan(req.body || {}, auditUserName(req));
+    const out = await holdSchedulePlan(req.body || {}, auditUserName(req), scheduleActionOpts(req));
     if (out?.success === false) {
       return sendSimple(res, {
         success: false,
@@ -123,6 +128,27 @@ export const holdSchedulePlanning = async (req, res) => {
     });
   } catch {
     return sendSimple(res, { success: false, message: "Could not hold schedule.", data: null, status: 500 });
+  }
+};
+
+export const readyToDispatchSchedulePlanning = async (req, res) => {
+  try {
+    const out = await readyToDispatchSchedulePlan(req.body || {}, auditUserName(req), scheduleActionOpts(req));
+    if (out?.success === false) {
+      return sendSimple(res, {
+        success: false,
+        message: out.message || "Could not mark Ready to Dispatch.",
+        data: null,
+        status: out.status || 400,
+      });
+    }
+    return sendSimple(res, {
+      success: true,
+      message: out.message || "Marked Ready to Dispatch.",
+      data: out.data ?? null,
+    });
+  } catch {
+    return sendSimple(res, { success: false, message: "Could not mark Ready to Dispatch.", data: null, status: 500 });
   }
 };
 
@@ -199,7 +225,7 @@ export const getCustomerMonthSchedules = async (req, res) => {
 
 export const completeSchedulePlanning = async (req, res) => {
   try {
-    const out = await completeSchedulePlan(req.body || {}, auditUserName(req));
+    const out = await completeSchedulePlan(req.body || {}, auditUserName(req), scheduleActionOpts(req));
     if (out?.success === false) {
       return sendSimple(res, {
         success: false,

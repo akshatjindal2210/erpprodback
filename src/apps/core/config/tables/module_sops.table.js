@@ -1,6 +1,5 @@
 import dbQuery from "../../../../config/db.js";
 import { MST_TABLES as T } from "../../../../config/dbTables.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createModuleSopsTable() {
   await dbQuery(`
@@ -23,9 +22,4 @@ export async function createModuleSopsTable() {
       ON ${T.MODULE_SOPS} (module_id, permission_type)
       WHERE is_deleted = false;
   `);
-
-  // ONE-TIME: INT id → user name. After prod OK, remove this call.
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.MODULE_SOPS, {
-    columns: ["created_by", "updated_by", "deleted_by"],
-  });
 }

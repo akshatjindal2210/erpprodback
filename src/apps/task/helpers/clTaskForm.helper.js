@@ -27,10 +27,16 @@ export function validateFormResponses(schema, responses) {
   for (const field of schema) {
     if (field.type === "section") continue;
     const val = responses[field.id];
+    const attachmentEmpty = field.type === "attachment" && (
+      Array.isArray(val)
+        ? !val.some((v) => v?.file_path || v?.file_name)
+        : !(val && (val.file_path || val.file_name))
+    );
     const empty = val === undefined || val === null || val === "" ||
       (field.type === "multiselect" && (!Array.isArray(val) || val.length === 0)) ||
       (field.type === "checkbox" && val !== true && val !== false) ||
-      (typeof val === "object" && !Array.isArray(val) && !val.file_path && !val.file_name);
+      attachmentEmpty ||
+      (field.type !== "attachment" && typeof val === "object" && !Array.isArray(val) && !val.file_path && !val.file_name);
 
     if (field.required && empty) {
       errors.push(`${field.label || field.id} is required`);
@@ -71,7 +77,153 @@ export function normalizeToEntries(raw) {
   if (Array.isArray(parsed.entries)) return parsed.entries;
   const keys = Object.keys(parsed);
   if (keys.length === 0) return [];
-  return [{ id: "legacy", filled_at: null, responses: parsed }];
+  // Ignore meta keys used by open-task fill history
+  if (keys.every((k) => k === "fills" || k === "entries")) return [];
+  const { fills, entries, ...rest } = parsed;
+  if (Object.keys(rest).length === 0) return [];
+  return [{ id: "legacy", filled_at: null, responses: rest }];
+}
+
+/** Archived completed fills for open tasks (same instance, many fills). */
+export function getOpenFills(raw) {
+  const parsed = parseFormResponses(raw);
+  return Array.isArray(parsed.fills) ? parsed.fills : [];
+}
+
+export function buildOpenFormResponses({ entries = [], fills = [] } = {}) {
+  return {
+    entries: Array.isArray(entries) ? entries : [],
+    fills: Array.isArray(fills) ? fills : [],
+  };
+}
+
+/**
+ * Archive the current open-task cycle into fills[], then clear current entries
+ * so the same instance can be filled again (no new DB row).
+ *
+ * @param {string} [opts.status] completed | awaiting_verification | rejected
+ */
+export function archiveOpenFill(raw, {
+  score = null,
+  rejectCount = 0,
+  personRemark = null,
+  verifierRemark = null,
+  submittedAt = null,
+  completedAt = null,
+  status = "completed",
+} = {}) {
+  const parsed = parseFormResponses(raw);
+  const currentEntries = normalizeToEntries(parsed);
+  const fills = getOpenFills(parsed);
+  const nowIso = new Date().toISOString();
+  const fillStatus = status || "completed";
+  const archived = {
+    id: `fill_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    status: fillStatus,
+    filled_at: currentEntries[0]?.filled_at || nowIso,
+    submitted_at: submittedAt || nowIso,
+    completed_at: fillStatus === "completed" ? (completedAt || nowIso) : null,
+    score: score != null ? Number(score) : null,
+    reject_count: Math.max(0, Number(rejectCount) || 0),
+    person_remark: personRemark || null,
+    verifier_remark: verifierRemark || null,
+    entries: currentEntries,
+  };
+  return {
+    formResponses: buildOpenFormResponses({
+      entries: [],
+      fills: [...fills, archived],
+    }),
+    archivedFill: archived,
+  };
+}
+
+/** Fills waiting for verifier on an open instance. */
+export function getAwaitingOpenFills(raw) {
+  return getOpenFills(raw).filter((f) => {
+    if (f.status === "awaiting_verification") return true;
+    if (f.status === "completed" || f.status === "rejected") return false;
+    // Legacy fills without status: treat as awaiting if not scored/completed
+    return f.score == null && !f.completed_at;
+  });
+}
+
+/** Approve one open fill in-place (instance stays pending for more fills). */
+export function approveOpenFillInResponses(raw, fillId, { score = null, verifierRemark = null } = {}) {
+  const parsed = parseFormResponses(raw);
+  const fills = getOpenFills(parsed);
+  const idx = fills.findIndex((f) => String(f.id) === String(fillId));
+  if (idx < 0) return { error: "Fill not found" };
+  const nowIso = new Date().toISOString();
+  const next = fills.map((f, i) =>
+    i === idx
+      ? {
+          ...f,
+          status: "completed",
+          score: score != null ? Number(score) : f.score,
+          verifier_remark: verifierRemark || f.verifier_remark || null,
+          completed_at: nowIso,
+        }
+      : f,
+  );
+  return {
+    formResponses: buildOpenFormResponses({
+      entries: normalizeToEntries(parsed),
+      fills: next,
+    }),
+  };
+}
+
+/**
+ * Reject one open fill: pull back into current entries when empty,
+ * else mark fill as rejected so Due/history can still show rework.
+ */
+export function rejectOpenFillInResponses(raw, fillId, verifierRemark) {
+  const parsed = parseFormResponses(raw);
+  const fills = getOpenFills(parsed);
+  const idx = fills.findIndex((f) => String(f.id) === String(fillId));
+  if (idx < 0) return { error: "Fill not found" };
+  const fill = fills[idx];
+  const currentEntries = normalizeToEntries(parsed);
+  const currentBusy = currentEntries.some(
+    (e) => e?.responses && Object.keys(e.responses).length > 0,
+  );
+  const nextReject = Math.max(0, Number(fill.reject_count) || 0) + 1;
+
+  if (!currentBusy) {
+    const nextFills = fills.filter((_, i) => i !== idx);
+    return {
+      formResponses: buildOpenFormResponses({
+        entries: fill.entries || [],
+        fills: nextFills,
+      }),
+      personRemark: fill.person_remark || null,
+      verifierRemark: verifierRemark || null,
+      rejectCount: nextReject,
+      pulledBack: true,
+    };
+  }
+
+  const next = fills.map((f, i) =>
+    i === idx
+      ? {
+          ...f,
+          status: "rejected",
+          reject_count: nextReject,
+          verifier_remark: verifierRemark || null,
+        }
+      : f,
+  );
+  return {
+    formResponses: buildOpenFormResponses({
+      entries: currentEntries,
+      fills: next,
+    }),
+    personRemark: null,
+    verifierRemark: verifierRemark || null,
+    rejectCount: nextReject,
+    pulledBack: false,
+  };
 }
 
 export function validateFormEntries(schema, entries) {
@@ -92,19 +244,58 @@ export function mergeEntryUploadedFiles(entries, files = []) {
   }));
 
   for (const file of files) {
-    const match = file.fieldname.match(/^e(\d+)__(.+)$/);
+    const match = String(file.fieldname || "").match(/^e(\d+)__(.+)$/);
     if (!match) continue;
     const idx = Number(match[1]);
     const fieldId = match[2];
     if (!result[idx]) continue;
     const relativePath = path.relative(path.resolve(config.uploadPath), file.path);
-    result[idx].responses[fieldId] = {
+    const meta = {
       file_name: file.originalname,
       file_path: path.join(config.uploadPublicPath, relativePath).replace(/\\/g, "/"),
       mime_type: file.mimetype,
       size: file.size,
     };
+    const current = result[idx].responses[fieldId];
+    if (Array.isArray(current)) {
+      result[idx].responses[fieldId] = [...current, meta];
+    } else if (current?.file_path) {
+      result[idx].responses[fieldId] = [current, meta];
+    } else {
+      result[idx].responses[fieldId] = [meta];
+    }
   }
 
   return result;
+}
+
+/** Build public attachment meta from a multer file for CL master/instance. */
+export function buildClAttachmentMeta(file) {
+  if (!file) return null;
+  const relativePath = path.relative(path.resolve(config.uploadPath), file.path);
+  return {
+    file_name: file.originalname,
+    file_path: path.join(config.uploadPublicPath, relativePath).replace(/\\/g, "/"),
+    mime_type: file.mimetype,
+    size: file.size,
+  };
+}
+
+/** Always return attachment list. Legacy single object → [object]. */
+export function parseClAttachments(raw) {
+  const parsed = parseJsonField(raw, null);
+  if (!parsed) return [];
+  if (Array.isArray(parsed)) return parsed.filter((a) => a?.file_path);
+  if (parsed?.file_path) return [parsed];
+  return [];
+}
+
+export function parseJsonField(raw, fallback = null) {
+  if (raw == null || raw === "") return fallback;
+  if (typeof raw === "object") return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
 }

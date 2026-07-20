@@ -7,6 +7,7 @@ const allRoles = authorize("super_admin", "admin", "user", "executive_assistant"
 
 router.use(authenticate);
 
+router.post("/list", allRoles, getRecurringTasks);
 router.get("/", allRoles, getRecurringTasks);
 router.get("/stats", allRoles, getRecurringTaskStats);
 router.get("/:id", allRoles, getRecurringTaskById);

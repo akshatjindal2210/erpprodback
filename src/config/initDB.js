@@ -3,6 +3,7 @@ import { initImsDB } from "../apps/ims/config/initDB.js";
 import { initTaskDB } from "../apps/task/config/initDB.js";
 import { initCoreDB } from "../apps/core/config/initDB.js";
 import { initDashboardDB } from "../apps/dashboard/config/initDB.js";
+import { runStartupBackfills } from "../backfills/index.js";
 
 export const initDB = async () => {
   try {
@@ -15,6 +16,9 @@ export const initDB = async () => {
     await initDashboardDB();
 
     console.log("✅ All Tables Ready");
+
+    await runStartupBackfills();
+    console.log("✅ Startup backfills finished");
   } catch (err) {
     console.error("❌ initDB Failed:", err.message);
     throw err;

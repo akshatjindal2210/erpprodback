@@ -1,6 +1,6 @@
 import dbQuery from "../../../../config/db.js";
 import { IMS_TABLES as T } from "../../../../config/dbTables.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
+import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
 
 export async function createSchedulePlanTable() {
   await dbQuery(`
@@ -17,6 +17,7 @@ export async function createSchedulePlanTable() {
       itemdesc        TEXT,
       totalqty        NUMERIC(18,3),
       is_planned      SMALLINT NOT NULL DEFAULT 0,
+      shortage_no     VARCHAR(64),
       created_by      TEXT,
       created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_by      TEXT,
@@ -30,8 +31,9 @@ export async function createSchedulePlanTable() {
     CREATE INDEX IF NOT EXISTS idx_schedule_plan_status ON ${T.SCHEDULE_PLAN} (fin_year_id, is_planned);
   `);
 
-  // ONE-TIME: INT id → user name. After prod OK, remove this call.
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.SCHEDULE_PLAN, {
-    columns: ["created_by", "updated_by"],
+  await patchTableSchema(dbQuery, T.SCHEDULE_PLAN, {
+    columns: [
+      patchCol("shortage_no", "VARCHAR(64)"),
+    ],
   });
 }

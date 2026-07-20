@@ -1,6 +1,5 @@
 import dbQuery from "../../../../config/db.js";
 import { MST_TABLES as T } from "../../../../config/dbTables.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createTrainingVideosTable() {
   await dbQuery(`
@@ -24,7 +23,4 @@ export async function createTrainingVideosTable() {
       updated_at       TIMESTAMP
     );
   `);
-
-  // ONE-TIME: INT id → user name. After prod OK, remove this call.
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.TRAINING_VIDEOS);
 }

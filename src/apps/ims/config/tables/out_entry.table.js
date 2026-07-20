@@ -1,7 +1,6 @@
 import dbQuery from "../../../../config/db.js";
 import { IMS_TABLES as T } from "../../../../config/dbTables.js";
 import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createOutEntryTable() {
   await dbQuery(`
@@ -37,7 +36,4 @@ export async function createOutEntryTable() {
       patchCol("qc_hold_id", `INTEGER REFERENCES ${T.QC_HOLD_MATERIAL}(hold_id) ON DELETE SET NULL`),
     ],
   });
-
-  // ONE-TIME: INT id → user name. After prod OK, remove this call.
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.OUT_ENTRY);
 }

@@ -3,6 +3,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import path from "path";
 import config from "./config/config.js";
+import { corsOptions } from "./config/cors.js";
 
 import { morganMiddleware, requestLogger } from "./apps/core/utils/logger.js";
 import logger from "./apps/core/utils/logger.js";
@@ -24,12 +25,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(morganMiddleware);
 app.use(requestLogger);
 
-app.use(
-  cors({
-    origin: [...config.frontend_url],
-    credentials: true,
-  }),
-);
+app.use(cors(corsOptions));
 
 app.use(cookieParser());
 app.use(imsMetaMiddleware);

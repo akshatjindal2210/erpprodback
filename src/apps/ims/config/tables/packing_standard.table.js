@@ -1,6 +1,5 @@
 import dbQuery from "../../../../config/db.js";
 import { IMS_TABLES as T } from "../../../../config/dbTables.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createPackingStandardTable() {
   await dbQuery(`
@@ -24,7 +23,4 @@ export async function createPackingStandardTable() {
       updated_at   TIMESTAMP
     );
   `);
-
-  // ONE-TIME: INT id → user name. After prod OK, remove this call (helpers stay).
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.PACKING_STANDARD);
 }

@@ -32,6 +32,26 @@ const MisScore = {
     return Number(rows[0]?.total) || 0;
   },
 
+  /** Per-user MIS sum (red tickets etc.) for date range. Returns Map<userId, total>. */
+  async getCompiledByUser(userIds, dateFrom, dateTo) {
+    const map = new Map();
+    if (!userIds?.length) return map;
+    const placeholders = userIds.map(() => "?").join(",");
+    const rows = await dbQuery(
+      `SELECT user_id, COALESCE(SUM(score_delta), 0)::int AS total
+       FROM ${T.MIS_SCORE_LEDGER}
+       WHERE user_id IN (${placeholders})
+         AND ledger_date >= ?
+         AND ledger_date <= ?
+       GROUP BY user_id`,
+      [...userIds, dateFrom, dateTo]
+    );
+    for (const row of rows || []) {
+      map.set(Number(row.user_id), Number(row.total) || 0);
+    }
+    return map;
+  },
+
   async getBySource(source_type, source_id) {
     const rows = await dbQuery(
       `SELECT * FROM ${T.MIS_SCORE_LEDGER} WHERE source_type = ? AND source_id = ? LIMIT 1`,

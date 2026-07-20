@@ -4,12 +4,12 @@ import jwt from "jsonwebtoken";
 
 import app from "./src/index.js";
 import config from "./src/config/config.js";
+import { corsOptions } from "./src/config/cors.js";
 import { initDB } from "./src/config/initDB.js";
 import { seedCoreRootUser } from "./src/apps/core/config/seed.js";
 import { seedImsData } from "./src/apps/ims/config/seed.js";
 import logger from "./src/apps/core/utils/logger.js";
-import { initRecurringTasksCron, /* initClTasksCron, */ initTaskNotificationsCron, startDbBackupCron } from "./src/jobs/index.js";
-import { startLogCleanupCron } from "./src/logging/index.js";
+import { initRecurringTasksCron, initClTasksCron, initTaskNotificationsCron, startDbBackupCron, startLogCleanupCron } from "./src/jobs/index.js";
 import { initSocket } from "./src/apps/core/utils/socket.js";
 import { deliverUnreadInboxToSocket } from "./src/apps/task/services/taskPwaPush.service.js";
 import { getImsMapsSafe } from "./src/apps/ims/utils/erp-api/imsLookup.js";
@@ -17,12 +17,7 @@ import { getImsMapsSafe } from "./src/apps/ims/utils/erp-api/imsLookup.js";
 const server = http.createServer(app);
 
 export const io = new Server(server, {
-  cors: {
-    origin: [
-      ...config.frontend_url,
-    ],
-    credentials: true,
-  },
+  cors: corsOptions,
 });
 
 initSocket(io);
@@ -65,7 +60,7 @@ async function startServer() {
     await seedImsData();
     void getImsMapsSafe().catch(() => {});    // Fetch IMS maps in background (no await, no throw)
     initRecurringTasksCron();
-    // initClTasksCron();
+    initClTasksCron();
     initTaskNotificationsCron();
 
     server.listen(config.port, () => {

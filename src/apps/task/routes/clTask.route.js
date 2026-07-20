@@ -1,5 +1,5 @@
 import express from "express";
-import { getClTasks, getMyClTasks, getVerificationClTasks, getClTaskById, createClTask, submitClTask, verifyClTask, deleteClTask } from "../controllers/clTask.controller.js";
+import { getClTasks, getMyClTasks, getVerificationClTasks, getClTaskInstanceDetail, createClTask, updateClTask, submitClTask, updateClTaskSubmission, verifyClTask, updateVerificationReview, deleteClTaskInstance, setClTaskActive, deleteClTask } from "../controllers/clTask.controller.js";
 import { authenticate, authorize, activityLogger } from "../shared/index.js";
 import { clTaskUpload } from "../shared/middleware/clTaskUpload.js";
 import { accessControl } from "../../core/middleware/accessControl.js";
@@ -8,13 +8,22 @@ const router = express.Router();
 const allRoles = authorize("super_admin", "admin", "user", "executive_assistant");
 
 router.use(authenticate);
-router.get("/my", allRoles, getMyClTasks);
-router.get("/verification", allRoles, accessControl("cl_task_verification", "view"), getVerificationClTasks);
-router.get("/", allRoles, accessControl("cl_task", "view"), getClTasks);
-router.get("/:id", allRoles, getClTaskById);
-router.post("/", allRoles, accessControl("cl_task", "add"), activityLogger, createClTask);
-router.post("/:id/submit", allRoles, activityLogger, clTaskUpload.any(), submitClTask);
-router.post("/:id/verify", allRoles, accessControl("cl_task_verification", ["edit", "authorize"]), activityLogger, verifyClTask);
-router.delete("/:id", allRoles, accessControl("cl_task", "delete"), activityLogger, deleteClTask);
+
+router.post("/list",                allRoles, accessControl("cl_task_master", "view"), getClTasks);
+router.post("/create",              allRoles, accessControl("cl_task_master", "add"), activityLogger, clTaskUpload.array("attachments", 10), createClTask);
+router.post("/update",              allRoles, accessControl("cl_task_master", "edit"), activityLogger, clTaskUpload.array("attachments", 10), updateClTask);
+router.post("/delete",              allRoles, accessControl("cl_task_master", "delete"), activityLogger, deleteClTask);
+router.post("/approve",             allRoles, accessControl("cl_task_master", "authorize"), activityLogger, setClTaskActive);
+
+router.post("/verification",        allRoles, accessControl("cl_task_verification", "view"), getVerificationClTasks);
+router.post("/verify",              allRoles, accessControl("cl_task_verification", "add"), activityLogger, verifyClTask);
+router.post("/verification-update", allRoles, accessControl("cl_task_verification", ["add", "authorize"]), activityLogger, updateVerificationReview);
+router.post("/instance-delete",     allRoles, accessControl("cl_task_verification", "delete"), activityLogger, deleteClTaskInstance);
+
+router.post("/my",                  allRoles, accessControl("cl_task", "view"), getMyClTasks);
+/** Assignee / verifier / creator — auth checked inside handler. */
+router.post("/instance",            allRoles, getClTaskInstanceDetail);
+router.post("/submit",              allRoles, activityLogger, clTaskUpload.any(), submitClTask);
+router.post("/submission-update",   allRoles, activityLogger, clTaskUpload.any(), updateClTaskSubmission);
 
 export default router;

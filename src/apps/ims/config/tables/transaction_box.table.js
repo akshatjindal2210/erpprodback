@@ -32,12 +32,4 @@ export async function createTransactionBoxTable() {
       `CREATE INDEX IF NOT EXISTS idx_tx_box_search_trgm ON ${T.TRANSACTION_BOX} USING gin (transaction_type gin_trgm_ops, source_module gin_trgm_ops, packing_number gin_trgm_ops, user_name gin_trgm_ops)`,
     ],
   });
-
-  // Backfill user_name
-  await dbQuery(`
-    UPDATE ${T.TRANSACTION_BOX} tb
-    SET user_name = u.name
-    FROM ${C.USERS} u
-    WHERE tb.user_id = u.id AND tb.user_name IS NULL
-  `);
 }

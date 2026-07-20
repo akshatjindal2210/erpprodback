@@ -4,20 +4,18 @@ import NotificationTemplate from "../apps/task/models/notificationTemplate.model
 import Task from "../apps/task/models/task.model.js";
 import { sendTaskNotification } from "../apps/task/services/notification.service.js";
 import { buildNotifyVarsFromDashboardStats } from "../apps/task/config/dashboardStatKeys.js";
-import { scheduleDeferred } from "./cronUtil.js";
+import { getISTTimeHM } from "../apps/task/helpers/clTaskTime.helper.js";
+import { scheduleDeferred, getCronDateString } from "./cronUtil.js";
 
 const BATCH = 8;
 const DAILY_GRACE_MINUTES = 10;
 let lastDailyRunDate = "";
 
-function getIstNow() {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-}
-
 function isWithinDailyWindow(triggerTime) {
-  const [hh, mm] = triggerTime.split(":").map(Number);
-  const ist = getIstNow();
-  const nowMins = ist.getHours() * 60 + ist.getMinutes();
+  const [hh, mm] = String(triggerTime || "").split(":").map(Number);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return false;
+  const [nowH, nowM] = getISTTimeHM().split(":").map(Number);
+  const nowMins = nowH * 60 + nowM;
   const triggerMins = hh * 60 + mm;
   return nowMins >= triggerMins && nowMins < triggerMins + DAILY_GRACE_MINUTES;
 }
@@ -44,7 +42,9 @@ async function getUsersForDailyReminder() {
          WHERE ta.task_id = t.task_id AND ta.assigned_to = u.id AND ta.is_active = TRUE
        )
      )
-     WHERE u.is_deleted = false AND u.status = 'active' AND t.status != 'closed'`
+     WHERE u.is_deleted = false
+       AND u.status = 'active'
+       AND t.status NOT IN ('completed', 'closed')`
   );
 }
 
@@ -52,9 +52,8 @@ async function runDailyReminders() {
   const tpl = await NotificationTemplate.getByKey("daily_reminder");
   if (!tpl?.is_enabled || !tpl.trigger_time) return;
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getCronDateString(); // IST YYYY-MM-DD
   if (lastDailyRunDate === today) return;
-
   if (!isWithinDailyWindow(tpl.trigger_time)) return;
 
   lastDailyRunDate = today;
@@ -74,8 +73,9 @@ async function runDailyReminders() {
       skipped += 1;
       return;
     }
-    await sendTaskNotification("daily_reminder", row.id, statVars, null, { tpl });
-    sent += 1;
+    const result = await sendTaskNotification("daily_reminder", row.id, statVars, null, { tpl });
+    if (result?.ok) sent += 1;
+    else skipped += 1;
   });
 
   if (sent || failed) {
@@ -87,23 +87,25 @@ async function runPersonalReminders() {
   const tpl = await NotificationTemplate.getByKey("personal_reminder");
   if (!tpl?.is_enabled) return;
 
+  // reminder_at stored as IST wall-clock (naive). Compare against IST now, not DB UTC NOW().
   const rows = await dbQuery(
     `SELECT tsn.task_id, tsn.user_id, tsn.reminder_at, t.title, t.status
      FROM ${T.SELF_NOTES} tsn
      JOIN ${T.TASKS} t ON t.task_id = tsn.task_id
      WHERE tsn.reminder_at IS NOT NULL
-       AND tsn.reminder_at <= NOW()
-       AND tsn.reminder_at >= NOW() - INTERVAL '15 minutes'
+       AND tsn.reminder_at <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+       AND tsn.reminder_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '15 minutes'
        AND t.status != 'completed'`
   );
   if (!rows.length) return;
 
   let sent = 0;
+  let skipped = 0;
   const failed = await inBatches(rows, async (row) => {
     const reminderAt = row.reminder_at instanceof Date
       ? row.reminder_at.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
       : String(row.reminder_at);
-    await sendTaskNotification(
+    const result = await sendTaskNotification(
       "personal_reminder",
       row.user_id,
       {
@@ -115,15 +117,20 @@ async function runPersonalReminders() {
       row.task_id,
       { tpl }
     );
-    await dbQuery(
-      `UPDATE ${T.SELF_NOTES} SET reminder_at = NULL WHERE task_id = ? AND user_id = ?`,
-      [row.task_id, row.user_id]
-    );
-    sent += 1;
+    // Clear only after a real delivery — keep for retry if send no-oped / failed.
+    if (result?.ok) {
+      await dbQuery(
+        `UPDATE ${T.SELF_NOTES} SET reminder_at = NULL WHERE task_id = ? AND user_id = ?`,
+        [row.task_id, row.user_id]
+      );
+      sent += 1;
+    } else {
+      skipped += 1;
+    }
   });
 
-  if (sent || failed) {
-    console.log(`[Task notify] personal: ${sent} sent, ${failed} failed`);
+  if (sent || failed || skipped) {
+    console.log(`[Task notify] personal: ${sent} sent, ${skipped} skipped, ${failed} failed`);
   }
 }
 
@@ -137,8 +144,8 @@ async function runTaskNotifications() {
 }
 
 export function initTaskNotificationsCron() {
-  scheduleDeferred("* * * * *", runTaskNotifications, {
+  scheduleDeferred("*/2 * * * *", runTaskNotifications, {
     name: "task-notifications",
-    onMissed: runDailyReminders,
+    onMissed: runTaskNotifications,
   });
 }

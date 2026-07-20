@@ -1,7 +1,6 @@
 import dbQuery from "../../../../config/db.js";
 import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
 import { IMS_TABLES as T } from "../../../../config/dbTables.js";
-import { backfillDailyprodStickerColumns } from "../../utils/packing-entry/backfillDailyprodStickerSnapshot.js";
 
 export async function createDailyProdTable() {
   await dbQuery(`
@@ -49,17 +48,4 @@ export async function createDailyProdTable() {
       `CREATE INDEX IF NOT EXISTS idx_dailyprod_acc_name ON ${T.DAILYPROD} (acc_name)`,
     ],
   });
-}
-
-/** Run after ims_box_table schema is ready (uses box.packing_number). */
-export async function backfillDailyProdStickerColumnsOnStartup() {
-  const { columnExists } = await import("../../../../config/ensureDbColumns.js");
-  if (!(await columnExists(dbQuery, T.BOX_TABLE, "packing_number"))) {
-    return { updated: 0 };
-  }
-  const { updated } = await backfillDailyprodStickerColumns();
-  if (updated > 0) {
-    console.log(`✅ Backfilled ${updated} ims_dailyprod sticker column row(s)`);
-  }
-  return { updated };
 }

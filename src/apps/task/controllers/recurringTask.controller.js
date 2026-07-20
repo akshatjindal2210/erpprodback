@@ -9,10 +9,18 @@ const parseNumber = (value) => {
   return isNaN(n) ? undefined : n;
 };
 
-// GET /recurring-task_tasks
+const parseIsActive = (value) => {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (value === true || value === 1 || value === "1" || value === "true") return true;
+  if (value === false || value === 0 || value === "0" || value === "false") return false;
+  return undefined;
+};
+
+// POST /recurring-tasks/list  (also GET / for backward compat)
 export async function getRecurringTasks(req, res) {
   try {
-    const { search = "", page = 1, limit = 10, sortBy = "recurring_id", order = "ASC", dateFrom, dateTo, department_id, user_id, } = req.query;
+    const src = { ...(req.query || {}), ...(req.body || {}) };
+    const { search = "", page = 1, limit = 10, sortBy = "recurring_id", order = "ASC", dateFrom, dateTo, department_id, user_id, is_active } = src;
 
     const requestingUser = req.user;
 
@@ -24,19 +32,19 @@ export async function getRecurringTasks(req, res) {
     if (role === "super_admin" || role === "admin") {
       filterDepartmentId = parseNumber(department_id);
       filterUserId = parseNumber(user_id);
-      
     } else {
       filterUserId = requestingUser.id;
     }
 
     const filterParams = {
-      search,
+      search: String(search || "").trim(),
       page: parseNumber(page) || 1,
       limit: parseNumber(limit) || 10,
       sortBy,
-      order: order.toUpperCase() === "DESC" ? "DESC" : "ASC",
+      order: String(order || "ASC").toUpperCase() === "DESC" ? "DESC" : "ASC",
       dateFrom,
       dateTo,
+      is_active: parseIsActive(is_active),
       department_id: filterDepartmentId,
       user_id: filterUserId,
     };
@@ -44,7 +52,10 @@ export async function getRecurringTasks(req, res) {
     const [items, total, stats] = await Promise.all([
       RecurringTask.getAll(filterParams),
       RecurringTask.count(filterParams),
-      RecurringTask.getStats(filterParams),
+      RecurringTask.getStats({
+        search: filterParams.search,
+        user_id: filterParams.user_id,
+      }),
     ]);
 
     res.json({

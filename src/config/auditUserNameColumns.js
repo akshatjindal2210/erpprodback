@@ -1,12 +1,7 @@
 /**
  * ONE-TIME migrate only: audit INT user-id cols → TEXT name snapshot.
  *
- * Usage (in that table's createXTable, once):
- *   await migrateTableAuditColumnsToUserNames(dbQuery, T.SOME_TABLE);
- *
- * After prod verified:
- *   1. Remove the migrate call from that *.table.js
- *   2. When no table calls this anymore — delete this whole file
+ * Migrations are orchestrated from src/backfills/auditUserNames.js — not from *.table.js.
  *
  * Permanent pieces live elsewhere (do NOT import this for reads/writes):
  *   - auditUserName / applyApprovalWorkflow({ auditAsName: true }) → core/utils/approval.js

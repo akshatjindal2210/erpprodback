@@ -56,6 +56,7 @@ export function getChannelStatus() {
   };
 }
 
+/** @returns {{ ok: boolean }} ok=true when at least one channel delivered. */
 export async function sendTaskNotification(
   template_key,
   userId,
@@ -64,13 +65,13 @@ export async function sendTaskNotification(
   { tpl: tplOverride = null } = {}
 ) {
   const uid = toUserId(userId);
-  if (!uid) return;
+  if (!uid) return { ok: false };
 
   const tpl = tplOverride ?? (await NotificationTemplate.getByKey(template_key));
-  if (!tpl?.is_enabled || (!tpl.pwa_enabled && !tpl.api_enabled)) return;
+  if (!tpl?.is_enabled || (!tpl.pwa_enabled && !tpl.api_enabled)) return { ok: false };
 
   const user = await User.getById(uid);
-  if (!user) return;
+  if (!user) return { ok: false };
 
   let taskVars = { ...vars };
   if (task_id) {
@@ -90,29 +91,33 @@ export async function sendTaskNotification(
   const message = subject ? `${subject}\n\n${body}` : body;
   const gatewayTpl = { ...tpl, template_key, send_via: tpl.send_via ?? "none" };
 
+  let delivered = false;
+
   if (tpl.pwa_enabled) {
-    sendTaskPwaPush({ userId: uid, subject, body, message, task_id, template_key })
-      .then((pwa) => {
-        if (!pwa.ok && !pwa.skipped) {
-          writeLog({
-            task_id: task_id ?? null,
-            user_id: uid,
-            template_key,
-            channel: "pwa_push",
-            recipient: `user:${uid}`,
-            message,
-            status: "failed",
-            error_detail: pwa.error ?? "PWA notify failed",
-          });
-        }
-      })
-      .catch((err) => console.error(`[Task notify] PWA ${template_key}:`, err.message));
+    try {
+      const pwa = await sendTaskPwaPush({ userId: uid, subject, body, message, task_id, template_key });
+      if (pwa?.ok) delivered = true;
+      else if (!pwa?.skipped) {
+        writeLog({
+          task_id: task_id ?? null,
+          user_id: uid,
+          template_key,
+          channel: "pwa_push",
+          recipient: `user:${uid}`,
+          message,
+          status: "failed",
+          error_detail: pwa?.error ?? "PWA notify failed",
+        });
+      }
+    } catch (err) {
+      console.error(`[Task notify] PWA ${template_key}:`, err.message);
+    }
   }
 
-  if (!tpl.api_enabled) return;
+  if (!tpl.api_enabled) return { ok: delivered };
 
   const sendVia = SEND_VIA.includes(tpl.send_via) ? tpl.send_via : "none";
-  if (sendVia === "none") return;
+  if (sendVia === "none") return { ok: delivered };
 
   const recipient = user.phone;
   if (!recipient) {
@@ -126,7 +131,7 @@ export async function sendTaskNotification(
       status: "skipped",
       error_detail: "User has no phone",
     });
-    return;
+    return { ok: delivered };
   }
 
   try {
@@ -148,6 +153,7 @@ export async function sendTaskNotification(
       message,
       gateway,
     });
+    if (gateway?.ok) delivered = true;
   } catch (err) {
     console.error(`[Task notify] ERP ${template_key}:`, err.message);
     writeLog({
@@ -161,6 +167,8 @@ export async function sendTaskNotification(
       error_detail: err.message,
     });
   }
+
+  return { ok: delivered };
 }
 
 /** Admin instant send — ignores template is_enabled; uses chosen channels per request. */

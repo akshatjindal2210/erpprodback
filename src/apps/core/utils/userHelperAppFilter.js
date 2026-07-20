@@ -3,6 +3,7 @@ import { SETTINGS_MODULES } from "../../../config/portalModules.js";
 /** Task pages — no DB module row; access is role + app toggle (same as task routes). */
 export const TASK_VIRTUAL_MODULES = new Set([
   "tasks",
+  "cl_task_master",
   "cl_task",
   "cl_task_verification",
   "task_report",

@@ -1,6 +1,5 @@
 import dbQuery from "../../../../config/db.js";
 import { IMS_TABLES as T } from "../../../../config/dbTables.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createSchedulePlanTransactionTable() {
   await dbQuery(`
@@ -25,9 +24,4 @@ export async function createSchedulePlanTransactionTable() {
     CREATE INDEX IF NOT EXISTS idx_sch_plan_txn_created
       ON ${T.SCHEDULE_PLAN_TRANSACTION} (fin_year_id, schno, itemdcode, created_at DESC);
   `);
-
-  // ONE-TIME: INT id → user name. After prod OK, remove this call.
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.SCHEDULE_PLAN_TRANSACTION, {
-    columns: ["created_by"],
-  });
 }

@@ -281,11 +281,18 @@ export async function createTask(req, res) {
     if (!assigned_to)
       return res.status(400).json({ success: false, message: "assigned_to is required" });
 
+    const actual_assigned_by = assigned_by ?? created_by;
+    if (Number(actual_assigned_by) === Number(assigned_to)) {
+      return res.status(400).json({
+        success: false,
+        message: "Assign To cannot be the same as Assign By",
+      });
+    }
+
     const assignee = await Task.getUserById(assigned_to);
     if (!assignee)
       return res.status(400).json({ success: false, message: "Assigned user not found or inactive" });
 
-    const actual_assigned_by = assigned_by ?? created_by;
     const recurringFlag      = [true, 1, "true", "1"].includes(is_recurring);
     const createTodayFlag    = [true, 1, "true", "1"].includes(create_today);
 
@@ -536,6 +543,22 @@ export async function updateTask(req, res) {
     });
 
     if (canEditAssignment && currentTask.task_type !== "self") {
+
+      const nextAssignedBy = assigned_by != null && assigned_by !== ""
+        ? Number(assigned_by)
+        : Number(currentTask.assigned_by_id);
+      const activeL1BeforeCheck = await Task.getActiveL1(id);
+      const currentL1AssigneeCheck =
+        activeL1BeforeCheck?.assigned_to ?? currentTask.first_assigned_to_id;
+      const nextAssignedTo = assigned_to != null && assigned_to !== ""
+        ? Number(assigned_to)
+        : Number(currentL1AssigneeCheck);
+      if (nextAssignedBy && nextAssignedTo && nextAssignedBy === nextAssignedTo) {
+        return res.status(400).json({
+          success: false,
+          message: "Assign To cannot be the same as Assign By",
+        });
+      }
 
       if (assigned_by && Number(assigned_by) !== Number(currentTask.assigned_by_id)) {
         // Only assigner can change assigned_by
@@ -917,6 +940,7 @@ export async function requestCompletion(req, res) {
     const user_id   = req.user.id;
     const user_name = req.user.name ?? "Someone";
     const { completion_note } = req.body;
+    const isSuperAdmin = req.user.type === "super_admin";
 
     const task = await Task.getById(id);
     if (!task)
@@ -925,31 +949,57 @@ export async function requestCompletion(req, res) {
     if (task.status === "completed")
       return res.status(400).json({ success: false, message: "Task already completed" });
 
-    // ── CASE 1: Self task
+    // ── CASE 1: Self task (owner or Super Admin)
     if (task.task_type === "self") {
+      if (!isSuperAdmin && Number(task.created_by_id ?? task.created_by) !== Number(user_id)) {
+        return res.status(403).json({ success: false, message: "Only the owner or Super Admin can complete this self task" });
+      }
       await Task.markCompleted(id);
       await Task.updateStatus(id, "completed");
       if (completion_note?.trim())
         await Task.addChatMessage(id, user_id, `[Completed] ${completion_note.trim()}`);
-      await log(id, user_id, user_name, "task_completed", "Self task marked as completed");
+      await log(id, user_id, user_name, "task_completed",
+        isSuperAdmin ? "Self task completed by Super Admin" : "Self task marked as completed");
       return res.json({ success: true, message: "Self task completed!" });
     }
 
-    // ── CASE 2: Sub-user requesting completion
-    const mySubAssignment = await Task.getActiveSubUserAssignment(id, user_id);
-    if (mySubAssignment) {
-      await Task.requestAssignmentCompletion(mySubAssignment.assignment_id);
-      await Task.updateStatus(id, "pending_approval");
-      if (completion_note?.trim())
-        await Task.addChatMessage(id, user_id, `[Completion Request] ${completion_note.trim()}`);
-      await log(id, user_id, user_name, "completion_requested",
-        `Sub-user requested completion`, mySubAssignment.assignment_id);
-      return res.json({ success: true, message: "Completion requested — waiting for L1 approval" });
+    // ── CASE 2: Sub-user requesting completion (not Super Admin force-complete)
+    if (!isSuperAdmin) {
+      const mySubAssignment = await Task.getActiveSubUserAssignment(id, user_id);
+      if (mySubAssignment) {
+        await Task.requestAssignmentCompletion(mySubAssignment.assignment_id);
+        await Task.updateStatus(id, "pending_approval");
+        if (completion_note?.trim())
+          await Task.addChatMessage(id, user_id, `[Completion Request] ${completion_note.trim()}`);
+        await log(id, user_id, user_name, "completion_requested",
+          `Sub-user requested completion`, mySubAssignment.assignment_id);
+        return res.json({ success: true, message: "Completion requested — waiting for L1 approval" });
+      }
     }
 
-    // ── CASE 3: L1 requesting completion (no sub-users OR all sub-users done)
     const l1Assignment = await Task.getActiveL1ByUser(id, user_id);
-    if (req.user.type !== "super_admin" && !l1Assignment)
+
+    // ── CASE 3a: Super Admin force-complete only when they are NOT the active L1
+    // (If SA is L1, use normal L1 → creator_pending flow below.)
+    if (isSuperAdmin && !l1Assignment) {
+      const activeL1 = await Task.getActiveL1(id);
+      if (activeL1) {
+        try {
+          await Task.approveAssignmentCompletion(activeL1.assignment_id, user_id);
+        } catch {
+          /* already approved / no request — still allow status complete */
+        }
+      }
+      await Task.markCompleted(id);
+      await Task.updateStatus(id, "completed");
+      if (completion_note?.trim())
+        await Task.addChatMessage(id, user_id, `[Admin Completed] ${completion_note.trim()}`);
+      await log(id, user_id, user_name, "task_completed", "Task completed by Super Admin");
+      return res.json({ success: true, message: "Task completed by Super Admin" });
+    }
+
+    // ── CASE 3b: L1 requesting completion (includes Super Admin when they are L1)
+    if (!l1Assignment)
       return res.status(403).json({ success: false, message: "You are not authorized to complete this task" });
 
     // Check pending sub-users

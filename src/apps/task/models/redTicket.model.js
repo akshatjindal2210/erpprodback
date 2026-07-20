@@ -11,6 +11,7 @@ const RedTicket = {
     person_id,
     date_from,
     date_to,
+    viewDays,
   } = {}) {
     const offset = (page - 1) * limit;
     const params = [];
@@ -19,6 +20,10 @@ const RedTicket = {
     if (search?.trim()) {
       params.push(`%${search.trim()}%`, `%${search.trim()}%`);
       where += " AND (rt.title ILIKE ? OR rt.description ILIKE ?)";
+    }
+    if (Number(viewDays) > 0) {
+      params.push(Number(viewDays));
+      where += " AND COALESCE(rt.created_at, rt.ticket_date::timestamp)::date >= CURRENT_DATE - (?::int - 1)";
     }
     if (department_id) { params.push(Number(department_id)); where += " AND rt.department_id = ?"; }
     if (designation_id) { params.push(Number(designation_id)); where += " AND rt.designation_id = ?"; }

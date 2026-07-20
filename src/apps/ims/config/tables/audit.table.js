@@ -1,7 +1,6 @@
 import dbQuery from "../../../../config/db.js";
 import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
 import { MST_TABLES as C, IMS_TABLES as T } from "../../../../config/dbTables.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createAuditTables() {
   await dbQuery(`
@@ -51,8 +50,4 @@ export async function createAuditTables() {
       patchCol("result_rejected", "BOOLEAN NOT NULL DEFAULT false"),
     ],
   });
-
-  // ONE-TIME: INT id → user name on audit master only.
-  // assigned_user_id / plan_assigned_user_id stay INTEGER (live assignment FKs).
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.AUDIT_MASTER);
 }

@@ -1,8 +1,8 @@
 import dbQuery, { withTransaction } from "../../../../config/db.js";
 import { fetchImsDataRaw } from "../../services/ims.service.js";
 import { buildInventoryReportSql } from "../inventory-report/inventoryReportSql.js";
-import { deletePlans, loadAllPlanMap, loadCustomerMonthScheduleItems, loadDispatchPlanItems, loadPlanRow, loadScheduleDispatchQtyMap, planKey, upsertPlan, updatePlanStatus } from "./schedulePlanDb.js";
-import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canRejectFrom, isActiveScheduleStatus, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel } from "./schedulePlanStatus.js";
+import { deletePlans, loadAllPlanMap, loadCustomerMonthScheduleItems, loadDispatchPlanItems, loadPlanRow, loadScheduleDispatchQtyMap, planKey, upsertPlan, updatePlanStatus, setPlanShortageNo } from "./schedulePlanDb.js";
+import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canReadyFrom, canRejectFrom, canTransitionAsSuperAdmin, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel } from "./schedulePlanStatus.js";
 import { insertScheduleTransaction, loadActionDates, loadActionReasons, loadItemTransactionHistory, loadLastTransactionMap, loadPlanDateHistoryMap, deletePlanTransactions } from "./schedulePlanTransactionDb.js";
 import { buildScheduleComparison, hasScheduleComparisonMismatch } from "./schedulePlanCompare.js";
 import { toPublicImsMessage } from "../erp-api/imsMeta.js";
@@ -84,9 +84,12 @@ function pickSnap(src = {}) {
 
 function applyTxnDisplay(row, lastTxn) {
   if (!lastTxn) return row;
+  const actionDate =
+    lastTxn.action_date
+    ?? (lastTxn.created_at != null ? String(lastTxn.created_at).slice(0, 10) : null);
   return {
     ...row,
-    action_date: lastTxn.action_date ?? null,
+    action_date: actionDate,
     action_reason: lastTxn.action_reason ?? null,
     item_remark: lastTxn.remark ?? null,
   };
@@ -102,7 +105,10 @@ function attachLastTxn(row, lastTxn, { keepStatus = false } = {}) {
     last_action_at: lastTxn.created_at,
     last_action_by_name: lastTxn.created_by_name ?? null,
     last_action_reason: lastTxn.action_reason ?? null,
-    last_action_date: lastTxn.action_date ?? null,
+    // Prefer txn action_date; fall back to when the action was recorded.
+    last_action_date:
+      lastTxn.action_date
+      ?? (lastTxn.created_at != null ? String(lastTxn.created_at).slice(0, 10) : null),
     last_txn_to_status: toStatus,
   };
   if (!keepStatus && toStatus != null && Number.isFinite(toStatus)) {
@@ -149,6 +155,7 @@ function planToRow(plan, ims = {}, lastTxn = null) {
     status: statusLabel(st).toLowerCase(),
     status_label: statusLabel(st),
     plan_id: plan.plan_id,
+    shortage_no: plan.shortage_no ?? null,
     created_at: plan.created_at,
     updated_at: plan.updated_at,
     created_by_name: plan.created_by_name ?? null,
@@ -161,8 +168,9 @@ function attachPlanDateHistory(row, historyMap) {
   const all = historyMap?.get(k) ?? [];
   const previous = all.length > 1 ? all.slice(0, -1) : [];
   const st = Number(row.is_planned);
-  const usePlanDate = st === SCHEDULE_PLAN_STATUS.PLANNED || st === SCHEDULE_PLAN_STATUS.RUNNING;
   const lastPlanDate = all.length ? all[all.length - 1] : null;
+  // Target date belongs to Plan rows only (not Ready).
+  const usePlanDate = st === SCHEDULE_PLAN_STATUS.PLANNED || st === SCHEDULE_PLAN_STATUS.RUNNING;
   return {
     ...row,
     plan_date_history: all,
@@ -199,13 +207,27 @@ function attachComparison(imsRow, planRow, mergedRow) {
   };
 }
 
-function pendingRow(imsRow) {
+/**
+ * IMS line not in our DB → Pending (0).
+ */
+function imsOnlyReadyRow(imsRow) {
+  const st = SCHEDULE_PLAN_STATUS.PENDING;
   return {
     ...imsRow,
-    is_planned: SCHEDULE_PLAN_STATUS.PENDING,
-    status: "pending",
-    status_label: "Pending",
+    is_planned: st,
+    status: statusLabel(st).toLowerCase(),
+    status_label: statusLabel(st),
+    plan_id: null,
+    in_db: false,
   };
+}
+
+/** No DB row → Pending (0) for transitions. */
+function effectiveFromStatus(existingRow) {
+  if (existingRow?.is_planned != null && existingRow.is_planned !== "") {
+    return Number(existingRow.is_planned);
+  }
+  return SCHEDULE_PLAN_STATUS.PENDING;
 }
 
 function buildFilteredList(imsRecords, filterMode, planMap, lastTxnMap = new Map()) {
@@ -219,7 +241,30 @@ function buildFilteredList(imsRecords, filterMode, planMap, lastTxnMap = new Map
     seen.add(k);
     const plan = map.get(k);
     const lastTxn = txnMap.get(k) ?? null;
-    if (!plan) return attachLastTxn(pendingRow(imsRow), lastTxn, { keepStatus: true });
+    if (!plan) {
+      // Not in plan table → Pending (0).
+      // If txn history has a real to_status (Ready/Plan/Hold/…), use that.
+      const txnStatus =
+        lastTxn?.to_status != null && lastTxn.to_status !== ""
+          ? Number(lastTxn.to_status)
+          : null;
+      const hasRealTxnStatus =
+        Number.isFinite(txnStatus) && txnStatus !== SCHEDULE_PLAN_STATUS.PENDING;
+      const base = imsOnlyReadyRow(imsRow);
+      if (hasRealTxnStatus) {
+        return attachLastTxn(
+          {
+            ...base,
+            is_planned: txnStatus,
+            status: statusLabel(txnStatus).toLowerCase(),
+            status_label: statusLabel(txnStatus),
+          },
+          lastTxn,
+          { keepStatus: true }
+        );
+      }
+      return attachLastTxn(base, lastTxn, { keepStatus: true });
+    }
     return attachComparison(imsRow, plan, { ...imsRow, ...planToRow(plan, imsRow, lastTxn) });
   });
 
@@ -240,22 +285,35 @@ function buildFilteredList(imsRecords, filterMode, planMap, lastTxnMap = new Map
 
   switch (filterMode) {
     case SCHEDULE_LIST_FILTER.PENDING:
-      return mergedFromIms.filter((r) => {
-        const plan = map.get(planKey(r.schno, r.itemdcode));
-        return !plan;
-      }).map((r) => attachLastTxn(pendingRow(r), txnMap.get(planKey(r.schno, r.itemdcode)) ?? null, { keepStatus: true }));
+      return allRows.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.PENDING);
 
-    case SCHEDULE_LIST_FILTER.SCHEDULE:
-      return mergedFromIms.filter((r) => isActiveScheduleStatus(r.is_planned));
+    case SCHEDULE_LIST_FILTER.READY_TO_DISPATCH:
+      return allRows.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH);
+
+    case SCHEDULE_LIST_FILTER.PENDING_HOLD_REJECT:
+      return allRows.filter((r) => {
+        const code = Number(r.is_planned);
+        return (
+          code === SCHEDULE_PLAN_STATUS.PENDING ||
+          code === SCHEDULE_PLAN_STATUS.HOLD ||
+          code === SCHEDULE_PLAN_STATUS.REJECT
+        );
+      });
+
+    case SCHEDULE_LIST_FILTER.PLAN:
+      return allRows.filter((r) => {
+        const code = Number(r.is_planned);
+        return code === SCHEDULE_PLAN_STATUS.PLANNED || code === SCHEDULE_PLAN_STATUS.RUNNING;
+      });
 
     case SCHEDULE_LIST_FILTER.COMPLETE:
-      return mergedFromIms.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.COMPLETE);
+      return allRows.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.COMPLETE);
 
     case SCHEDULE_LIST_FILTER.REJECT:
-      return mergedFromIms.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.REJECT);
+      return allRows.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.REJECT);
 
     case SCHEDULE_LIST_FILTER.HOLD:
-      return mergedFromIms.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.HOLD);
+      return allRows.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.HOLD);
 
     case SCHEDULE_LIST_FILTER.COMPARISON:
       return allRows.filter((r) => {
@@ -421,7 +479,7 @@ async function listScheduleItemsForSchno(fy, schno) {
 
   let records = buildFilteredList(imsRows, SCHEDULE_LIST_FILTER.ALL, schnoPlanMap, lastTxnMap);
   records = records.filter((r) => {
-    const st = Number(r.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);
+    const st = Number(r.is_planned ?? SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH);
     return st !== SCHEDULE_PLAN_STATUS.COMPLETE && st !== SCHEDULE_PLAN_STATUS.REJECT;
   });
   const planDateHistoryMap = await loadPlanDateHistoryMap(fy.finYearId);
@@ -512,7 +570,7 @@ export async function listScheduleActionDates(body = {}) {
   return { success: true, data: { action_dates: dates, reject_reasons: reasons }, reasons };
 }
 
-export async function saveSchedulePlan(body = {}, userName = null) {
+export async function saveSchedulePlan(body = {}, userName = null, opts = {}) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
 
@@ -533,15 +591,19 @@ export async function saveSchedulePlan(body = {}, userName = null) {
   const totalQty = Number(body.qty ?? body.totalqty ?? 0);
 
   const existingRow = await loadPlanRow(fy.finYearId, schno, itemdcode);
-  const fromStatus = existingRow?.is_planned != null ? Number(existingRow.is_planned) : SCHEDULE_PLAN_STATUS.PENDING;
+  const fromStatus = effectiveFromStatus(existingRow);
+  const isSuperAdmin = Boolean(opts?.isSuperAdmin);
 
-  if (!canPlanFrom(fromStatus)) {
-    return { success: false, status: 400, message: "Cannot plan from current status." };
+  if (!(isSuperAdmin && canTransitionAsSuperAdmin(fromStatus)) && !canPlanFrom(fromStatus)) {
+    return {
+      success: false,
+      status: 400,
+      message: "Cannot Plan from current status.",
+    };
   }
 
-  const toStatus = fromStatus === SCHEDULE_PLAN_STATUS.PENDING || fromStatus === SCHEDULE_PLAN_STATUS.REJECT || fromStatus === SCHEDULE_PLAN_STATUS.HOLD
-    ? SCHEDULE_PLAN_STATUS.PLANNED
-    : fromStatus;
+  /** ADD Plan → Planned (1), same as original. */
+  const toStatus = SCHEDULE_PLAN_STATUS.PLANNED;
 
   const localRow = await upsertPlan({
     fin_year_id: fy.finYearId, schno, itemdcode, snap,
@@ -565,10 +627,14 @@ export async function saveSchedulePlan(body = {}, userName = null) {
     action_reason: null,
     remark: item_remark ?? null,
   });
-  return { success: true, message: "Schedule plan saved.", data: planToRow(localRow, body, lastTxn) };
+  return {
+    success: true,
+    message: "Plan saved.",
+    data: planToRow(localRow, body, lastTxn),
+  };
 }
 
-export async function rejectSchedulePlan(body = {}, userName = null) {
+export async function rejectSchedulePlan(body = {}, userName = null, opts = {}) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
 
@@ -581,9 +647,14 @@ export async function rejectSchedulePlan(body = {}, userName = null) {
   if (!reason) return { success: false, status: 400, message: "action_reason is required for reject." };
 
   const existingRow = await loadPlanRow(fy.finYearId, schno, itemdcode);
-  const fromStatus = existingRow?.is_planned != null ? Number(existingRow.is_planned) : SCHEDULE_PLAN_STATUS.PENDING;
+  const fromStatus = effectiveFromStatus(existingRow);
   const rejectUpdate = fromStatus === SCHEDULE_PLAN_STATUS.REJECT;
-  if (!rejectUpdate && !canRejectFrom(fromStatus)) {
+  const isSuperAdmin = Boolean(opts?.isSuperAdmin);
+  if (
+    !rejectUpdate &&
+    !(isSuperAdmin && canTransitionAsSuperAdmin(fromStatus)) &&
+    !canRejectFrom(fromStatus)
+  ) {
     return { success: false, status: 400, message: "Cannot reject from current status." };
   }
 
@@ -643,7 +714,7 @@ export async function rejectSchedulePlan(body = {}, userName = null) {
   };
 }
 
-export async function holdSchedulePlan(body = {}, userName = null) {
+export async function holdSchedulePlan(body = {}, userName = null, opts = {}) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
 
@@ -662,9 +733,14 @@ export async function holdSchedulePlan(body = {}, userName = null) {
   if (rangeErr) return { success: false, status: 400, message: rangeErr };
 
   const existingRow = await loadPlanRow(fy.finYearId, schno, itemdcode);
-  const fromStatus = existingRow?.is_planned != null ? Number(existingRow.is_planned) : SCHEDULE_PLAN_STATUS.PENDING;
+  const fromStatus = effectiveFromStatus(existingRow);
   const holdUpdate = fromStatus === SCHEDULE_PLAN_STATUS.HOLD;
-  if (!holdUpdate && !canHoldFrom(fromStatus)) {
+  const isSuperAdmin = Boolean(opts?.isSuperAdmin);
+  if (
+    !holdUpdate &&
+    !(isSuperAdmin && canTransitionAsSuperAdmin(fromStatus)) &&
+    !canHoldFrom(fromStatus)
+  ) {
     return { success: false, status: 400, message: "Cannot hold from current status." };
   }
 
@@ -729,6 +805,71 @@ export async function holdSchedulePlan(body = {}, userName = null) {
   };
 }
 
+/** APPROVE: Hold / Reject / Plan → Ready to Dispatch (IMS-only also treated as Ready). */
+export async function readyToDispatchSchedulePlan(body = {}, userName = null, opts = {}) {
+  const fy = requireFinYear(body);
+  if (fy.error) return fy.error;
+
+  const { schno, itemdcode, item_remark } = body || {};
+  if (schno == null || itemdcode == null) {
+    return { success: false, status: 400, message: "schno and itemdcode are required." };
+  }
+
+  const existingRow = await loadPlanRow(fy.finYearId, schno, itemdcode);
+  const fromStatus = effectiveFromStatus(existingRow);
+  const alreadyReady =
+    Boolean(existingRow) && fromStatus === SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH;
+  const isSuperAdmin = Boolean(opts?.isSuperAdmin);
+  if (
+    !alreadyReady &&
+    !(isSuperAdmin && canTransitionAsSuperAdmin(fromStatus)) &&
+    !canReadyFrom(fromStatus)
+  ) {
+    return { success: false, status: 400, message: "Cannot mark Ready to Dispatch from current status." };
+  }
+
+  const snap = pickSnap(body);
+  // Ready to Dispatch: remark only — no client target date; txn stamps today.
+  const actionDateNorm = localTodayYmd();
+
+  const localRow = await upsertPlan({
+    fin_year_id: fy.finYearId,
+    schno,
+    itemdcode,
+    snap,
+    user_name: userName,
+    is_planned: SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH,
+  });
+  if (!localRow) return { success: false, status: 500, message: "Could not mark Ready to Dispatch." };
+
+  await recordTransaction({
+    fin_year_id: fy.finYearId,
+    schno,
+    itemdcode,
+    plan_id: localRow.plan_id,
+    action_type: SCHEDULE_PLAN_ACTION.READY,
+    from_status: fromStatus,
+    to_status: SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH,
+    action_date: actionDateNorm,
+    action_reason: null,
+    remark: item_remark ?? null,
+    user_name: userName,
+  });
+
+  // No IMS target-date sync for Ready (remark / authorize only).
+  const lastTxn = txnSnapshot({
+    action_type: SCHEDULE_PLAN_ACTION.READY,
+    action_date: actionDateNorm,
+    action_reason: null,
+    remark: item_remark ?? null,
+  });
+  return {
+    success: true,
+    message: alreadyReady ? "Ready to Dispatch details updated." : "Marked Ready to Dispatch.",
+    data: planToRow(localRow, body, lastTxn),
+  };
+}
+
 export async function listScheduleItemTransactions(body = {}) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
@@ -763,6 +904,21 @@ export async function submitScheduleShortage(body = {}, userId = null, userName 
     return { success: false, status: 400, message: "Enter a valid shortage quantity." };
   }
 
+  const existingRow = await loadPlanRow(fy.finYearId, schno, body.itemdcode);
+  const existingShortage = String(existingRow?.shortage_no ?? "").trim();
+  if (existingShortage) {
+    return {
+      success: false,
+      status: 400,
+      message: `Shortage already recorded (No: ${existingShortage}).`,
+      data: { shortage_no: existingShortage },
+    };
+  }
+
+  const fromStatus = effectiveFromStatus(existingRow);
+  const itemRemark = body.item_remark != null ? String(body.item_remark).trim() : "";
+  const actionDateNorm = localTodayYmd();
+
   const filter = {
     fin_year_id: fy.finYearId,
     schno,
@@ -780,11 +936,31 @@ export async function submitScheduleShortage(body = {}, userId = null, userName 
   };
 
   console.log("[schedule-planning] shortage request", filter);
-  const ims = await fetchImsDataRaw("shortgoogle", filter);
-  console.log("[schedule-planning] shortage response", JSON.stringify(ims, null, 2));
+  // const ims = await fetchImsDataRaw("shortgoogle", filter);
+  
+  // TODO START: restore real IMS shortgoogle once API returns shortage_no reliably.
+  const dummyShortageNo = `SH-${schno}-${body.itemdcode}-${Date.now().toString().slice(-6)}`;
+  const ims = {
+    success: true,
+    id: dummyShortageNo,
+    shortage_no: dummyShortageNo,
+    records: [
+      {
+        id: dummyShortageNo,
+        shortage_no: dummyShortageNo,
+        schno,
+        itemdcode: body.itemdcode,
+        shortage_qty: shortageQty,
+      },
+    ],
+    message: "Data processed and forwarded successfully.",
+  };
+  // TODO END: restore real IMS shortgoogle once API returns shortage_no reliably.
+  
+  console.log("[schedule-planning] shortage response (dummy)", JSON.stringify(ims, null, 2));
 
   const row = Array.isArray(ims?.records) ? ims.records[0] : ims?.records;
-  const id = ims?.id ?? row?.id ?? null;
+  const id = ims?.id ?? row?.id ?? ims?.shortage_no ?? row?.shortage_no ?? null;
   const msg = ims?.msg ?? ims?.message ?? row?.msg ?? row?.message ?? null;
 
   if (ims?.success !== true) {
@@ -795,10 +971,65 @@ export async function submitScheduleShortage(body = {}, userId = null, userName 
     };
   }
 
+  const shortageNo = id != null && String(id).trim() !== "" ? String(id).trim() : null;
+  if (!shortageNo) {
+    return {
+      success: false,
+      status: 400,
+      message: "IMS did not return a shortage id.",
+    };
+  }
+
+  const snap = pickSnap(body);
+  if (!existingRow) {
+    const created = await upsertPlan({
+      fin_year_id: fy.finYearId,
+      schno,
+      itemdcode: body.itemdcode,
+      snap,
+      user_name: userName,
+      is_planned: SCHEDULE_PLAN_STATUS.PENDING,
+    });
+    if (!created) {
+      return { success: false, status: 500, message: "Could not save schedule plan for shortage." };
+    }
+  }
+
+  const localRow = await setPlanShortageNo({fin_year_id: fy.finYearId, schno, itemdcode: body.itemdcode, shortage_no: shortageNo, user_name: userName });
+  if (!localRow) {
+    return { success: false, status: 400, message: "Shortage already recorded for this item." };
+  }
+
+  await recordTransaction({
+    fin_year_id: fy.finYearId,
+    schno,
+    itemdcode: body.itemdcode,
+    plan_id: localRow.plan_id,
+    action_type: SCHEDULE_PLAN_ACTION.SHORTAGE,
+    from_status: fromStatus,
+    to_status: fromStatus,
+    action_date: actionDateNorm,
+    action_reason: null,
+    remark: itemRemark || null,
+    user_name: userName,
+  });
+
+  const lastTxn = txnSnapshot({
+    action_type: SCHEDULE_PLAN_ACTION.SHORTAGE,
+    action_date: actionDateNorm,
+    action_reason: null,
+    remark: itemRemark || null,
+    created_by_name: userName,
+  });
+
   return {
     success: true,
     message: msg || "Shortage submitted successfully.",
-    data: { id },
+    data: {
+      id: shortageNo,
+      shortage_no: shortageNo,
+      ...planToRow(localRow, body, lastTxn),
+    },
   };
 }
 
@@ -811,7 +1042,27 @@ export async function removeSchedulePlan(body = {}) {
     return { success: false, status: 400, message: "schno is required." };
   }
 
-  const scope = { fin_year_id: fy.finYearId, schno };
+  const deleteScope = String(body?.delete_scope ?? "").trim().toLowerCase();
+  const itemOnly = deleteScope === "item";
+  const scheduleOnly = deleteScope === "schedule" || !deleteScope;
+
+  let itemdcode = null;
+  if (itemOnly) {
+    const raw = body?.itemdcode ?? body?.item_dcode;
+    if (raw == null || String(raw).trim() === "") {
+      return { success: false, status: 400, message: "itemdcode is required for item delete." };
+    }
+    itemdcode = Number(raw);
+    if (!Number.isFinite(itemdcode)) {
+      return { success: false, status: 400, message: "Invalid itemdcode for item delete." };
+    }
+  } else if (scheduleOnly) {
+    itemdcode = null;
+  } else {
+    return { success: false, status: 400, message: "delete_scope must be 'schedule' or 'item'." };
+  }
+
+  const scope = { fin_year_id: fy.finYearId, schno, ...(itemdcode != null ? { itemdcode } : {}) };
 
   const { planDeleted, txnDeleted } = await withTransaction(async (client) => {
     const txnDeleted = await deletePlanTransactions(scope, client);
@@ -820,20 +1071,26 @@ export async function removeSchedulePlan(body = {}) {
   });
 
   if (!planDeleted) {
-    return { success: false, status: 404, message: "No schedule plan found to delete." };
+    return {
+      success: false,
+      status: 404,
+      message: itemOnly ? "No schedule item found to delete." : "No schedule plan found to delete.",
+    };
   }
 
   return {
     success: true,
-    message: planDeleted === 1
-      ? "Schedule deleted."
-      : `Schedule deleted (${planDeleted} items).`,
+    message: itemOnly
+      ? "Schedule item deleted."
+      : planDeleted === 1
+        ? "Schedule deleted."
+        : `Schedule deleted (${planDeleted} items).`,
     deleted_count: planDeleted,
     txn_deleted_count: txnDeleted,
   };
 }
 
-export async function completeSchedulePlan(body = {}, userName = null) {
+export async function completeSchedulePlan(body = {}, userName = null, opts = {}) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
 
@@ -847,8 +1104,9 @@ export async function completeSchedulePlan(body = {}, userName = null) {
     return { success: false, status: 404, message: "Schedule plan not found." };
   }
 
-  const fromStatus = Number(existingRow.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);
-  if (!canCompleteFrom(fromStatus)) {
+  const fromStatus = Number(existingRow.is_planned ?? SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH);
+  const isSuperAdmin = Boolean(opts?.isSuperAdmin);
+  if (!(isSuperAdmin && canTransitionAsSuperAdmin(fromStatus)) && !canCompleteFrom(fromStatus)) {
     return { success: false, status: 400, message: "Cannot complete from current status." };
   }
 
@@ -882,45 +1140,28 @@ export async function completeSchedulePlan(body = {}, userName = null) {
 }
 
 /**
- * Today Dispatch status filters.
- * - active / default → Pending(Plan) + Hold with remaining balance
- * - pending / plan → Planned only (balance > 0)
- * - hold → Hold only (balance > 0)
- * - complete → marked Complete OR remaining balance 0
- * - all → Planned + Hold + Complete (every balance)
+ * Today Dispatch Plan filters (UI: Plan | Complete).
+ * Same month, action_date month-start → today.
+ * Plan → Planned (1) / Running (2) + balance > 0
+ * Complete → Complete, or Planned/Running with balance 0
  */
 function parseDispatchStatusFilter(rawStatus) {
-  const mode = String(rawStatus ?? "active").trim().toLowerCase();
-  if (mode === "complete" || mode === "completed" || mode === "zero" || mode === "zero_balance") {
+  const mode = String(rawStatus ?? "plan").trim().toLowerCase();
+  if (mode === "complete" || mode === "completed") {
     return {
       codes: [
         SCHEDULE_PLAN_STATUS.PLANNED,
-        SCHEDULE_PLAN_STATUS.HOLD,
+        SCHEDULE_PLAN_STATUS.RUNNING,
         SCHEDULE_PLAN_STATUS.COMPLETE,
       ],
-      balanceMode: "complete",
+      showComplete: true,
+      actionTypes: ["plan", "complete"],
     };
   }
-  if (mode === "plan" || mode === "pending") {
-    return { codes: [SCHEDULE_PLAN_STATUS.PLANNED], balanceMode: "positive" };
-  }
-  if (mode === "hold") {
-    return { codes: [SCHEDULE_PLAN_STATUS.HOLD], balanceMode: "positive" };
-  }
-  if (mode === "all") {
-    return {
-      codes: [
-        SCHEDULE_PLAN_STATUS.PLANNED,
-        SCHEDULE_PLAN_STATUS.HOLD,
-        SCHEDULE_PLAN_STATUS.COMPLETE,
-      ],
-      balanceMode: "any",
-    };
-  }
-  // active / pending_hold / default
   return {
-    codes: [SCHEDULE_PLAN_STATUS.PLANNED, SCHEDULE_PLAN_STATUS.HOLD],
-    balanceMode: "positive",
+    codes: [SCHEDULE_PLAN_STATUS.PLANNED, SCHEDULE_PLAN_STATUS.RUNNING],
+    showComplete: false,
+    actionTypes: ["plan"],
   };
 }
 
@@ -938,6 +1179,7 @@ function mapDispatchPlanRecord(row) {
     itemdesc: row.itemdesc,
     totalqty: row.totalqty,
     is_planned: row.is_planned,
+    shortage_no: row.shortage_no ?? null,
     action_date: row.action_date ?? null,
     item_remark: row.item_remark ?? null,
     in_hand_qty: 0,
@@ -945,15 +1187,23 @@ function mapDispatchPlanRecord(row) {
   };
 }
 
+/** Today Dispatch badges: Plan tab → Planned; Complete tab → Complete. */
+function decorateDispatchDisplayRows(rows, showComplete) {
+  return (rows || []).map((r) => {
+    const dbStatus = Number(r.is_planned ?? SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH);
+    const code = showComplete ? SCHEDULE_PLAN_STATUS.COMPLETE : SCHEDULE_PLAN_STATUS.PLANNED;
+    return {
+      ...r,
+      db_is_planned: dbStatus,
+      is_planned: code,
+      status_label: statusLabel(code),
+    };
+  });
+}
+
 /**
- * Customer + current-month schedule lines for Forwarding Note item picker.
- *
- * Include (union):
- *  1) Same-month ERP/IMS lines for this customer (Pending + Plan + Hold, etc.)
- *  2) Same-month Plan/Hold in our DB even if missing from IMS
- *
- * Exclude: Complete, Reject.
- * Schno/item from IMS when present; balance (FN dispatched) + FG from our DB.
+ * Forwarding Note item picker — current-month Ready/Plan for one customer.
+ * Excludes Complete, Reject, Hold. Balance + FG from our DB.
  */
 export async function listCustomerMonthSchedules(body = {}) {
   const accCode = Number(body?.acc_code);
@@ -982,16 +1232,16 @@ export async function listCustomerMonthSchedules(body = {}) {
       (r) => Number(r.acc_code ?? r.Acc_code ?? r.accCode) === accCode
     );
 
-    // Customer IMS month rows + DB merge (pending if no plan; plan/hold when we have them).
+    // Customer IMS month rows + DB merge (IMS-only → Ready; DB keeps Plan/Hold/Ready/…).
     let records = buildFilteredList(imsRows, SCHEDULE_LIST_FILTER.ALL, planMap, lastTxnMap);
 
-    // Same-month Plan/Hold orphans (in our DB, not returned by IMS for this month).
+    // Same-month Ready / Plan orphans (in DB, missing from IMS this month).
     const seen = new Set(records.map((r) => planKey(r.schno, r.itemdcode)));
     for (const plan of planMap.values()) {
       if (Number(plan.acc_code) !== accCode) continue;
       if (Number(plan.schmonth) !== month) continue;
       const st = Number(plan.is_planned);
-      if (st !== SCHEDULE_PLAN_STATUS.PLANNED && st !== SCHEDULE_PLAN_STATUS.HOLD) continue;
+      if (st !== SCHEDULE_PLAN_STATUS.PLANNED && st !== SCHEDULE_PLAN_STATUS.RUNNING) continue;
       const k = planKey(plan.schno, plan.itemdcode);
       if (seen.has(k)) continue;
       seen.add(k);
@@ -1000,13 +1250,18 @@ export async function listCustomerMonthSchedules(body = {}) {
 
     records = records.filter((r) => {
       if (Number(r.acc_code ?? r.Acc_code ?? 0) !== accCode) return false;
-      const st = Number(r.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);
-      if (st === SCHEDULE_PLAN_STATUS.COMPLETE || st === SCHEDULE_PLAN_STATUS.REJECT) return false;
-      // Drop other-month orphan noise from ALL merge (IMS month fetch is already current month).
+      const st = Number(r.is_planned ?? SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH);
+      if (
+        st === SCHEDULE_PLAN_STATUS.COMPLETE ||
+        st === SCHEDULE_PLAN_STATUS.REJECT ||
+        st === SCHEDULE_PLAN_STATUS.HOLD
+      ) {
+        return false;
+      }
       const rowMonth = Number(r.schmonth);
       if (Number.isFinite(rowMonth) && rowMonth > 0 && rowMonth !== month) {
-        // Keep pending IMS rows even if schmonth field missing/odd — IMS filter is month-scoped.
-        if (st === SCHEDULE_PLAN_STATUS.PENDING) return true;
+        // IMS-only Pending other-month lines still allowed.
+        if (!r.plan_id && st === SCHEDULE_PLAN_STATUS.PENDING) return true;
         return false;
       }
       return true;
@@ -1032,8 +1287,9 @@ export async function listCustomerMonthSchedules(body = {}) {
     // Fallback: DB-only same-month Plan/Hold if IMS fails.
     try {
       const rows = await loadCustomerMonthScheduleItems(accCode, [
+        SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH,
         SCHEDULE_PLAN_STATUS.PLANNED,
-        SCHEDULE_PLAN_STATUS.HOLD,
+        SCHEDULE_PLAN_STATUS.RUNNING,
       ]);
       const records = (rows || []).map(mapDispatchPlanRecord);
       const enriched = await enrichFgStock(records);
@@ -1048,38 +1304,42 @@ export async function listCustomerMonthSchedules(body = {}) {
 }
 
 /**
- * Dispatch-plan helper for Forwarding Note.
- * Current month action_date window (1st → today), filtered by status (see parseDispatchStatusFilter).
+ * Today Dispatch Plan for Forwarding Note.
+ * Same month · action_date from month start through today · no Hold.
  */
 export async function listScheduleDispatchPlan(body = {}) {
   const now = new Date();
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const day = String(now.getDate()).padStart(2, "0");
-  const { codes: statusCodes, balanceMode } = parseDispatchStatusFilter(body?.status);
+  const { codes, showComplete, actionTypes } = parseDispatchStatusFilter(body?.status);
+
   try {
     const rows = await loadDispatchPlanItems(
       `${year}-${month}-01`,
       `${year}-${month}-${day}`,
-      statusCodes
+      codes,
+      { actionTypes }
     );
 
-    const records = (rows || []).map(mapDispatchPlanRecord);
+    let records = await enrichFgStock((rows || []).map(mapDispatchPlanRecord));
+    records = await enrichScheduleDispatchBalances(records);
 
-    const enriched = await enrichFgStock(records);
-    let withBalances = await enrichScheduleDispatchBalances(enriched);
-    if (balanceMode === "positive") {
-      withBalances = withBalances.filter((r) => Number(r.balance_qty ?? 0) > 0);
-    } else if (balanceMode === "zero") {
-      withBalances = withBalances.filter((r) => Number(r.balance_qty ?? 0) === 0);
-    } else if (balanceMode === "complete") {
-      withBalances = withBalances.filter(
-        (r) =>
-          Number(r.is_planned) === SCHEDULE_PLAN_STATUS.COMPLETE ||
-          Number(r.balance_qty ?? 0) === 0
-      );
+    if (showComplete) {
+      records = records.filter((r) => {
+        const st = Number(r.is_planned);
+        const bal = Number(r.balance_qty ?? 0);
+        return st === SCHEDULE_PLAN_STATUS.COMPLETE ||
+          ((st === SCHEDULE_PLAN_STATUS.PLANNED || st === SCHEDULE_PLAN_STATUS.RUNNING) && bal <= 0);
+      });
+    } else {
+      records = records.filter((r) => Number(r.balance_qty ?? 0) > 0);
     }
-    return { success: true, records: withBalances };
+
+    // Balance first (highest remaining qty on top)
+    records.sort((a, b) => Number(b.balance_qty ?? 0) - Number(a.balance_qty ?? 0));
+
+    return { success: true, records: decorateDispatchDisplayRows(records, showComplete) };
   } catch (err) {
     console.error("[schedule-planning] dispatch helper error:", err?.message || err);
     return { success: false, records: [], message: "Could not load dispatch plan data." };

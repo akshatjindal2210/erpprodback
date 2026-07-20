@@ -1,6 +1,6 @@
 import { sanitizeSearch } from "../../core/utils/helper.js";
 
-/** True when list should ignore date range and load full DB match for packing / box sticker. */
+/** True when list should ignore date range and load full DB match for packing / box sticker / item code. */
 export function hasJourneyFilter(filters = {}) {
   const j = sanitizeSearch(filters.journey);
   return Boolean(j);
@@ -89,7 +89,9 @@ export function appendJourneySql(opts) {
 }
 
 /**
- * Box list journey — match packing no / box sticker no across full DB (no date window).
+ * Box list journey — match packing no / box sticker no / item code across full DB (no date window).
+ * Packing/box use prefix; item_code is exact only (so HN006 does not match HN006TW / HN006Y).
+ * Item code is resolved via joined dailyprod / stock_adjustment (same joins as findBoxes).
  * @returns next param index after pushing journey bind values
  */
 export function appendBoxJourneyCondition(conditions, values, journey, startIndex) {
@@ -104,6 +106,8 @@ export function appendBoxJourneyCondition(conditions, values, journey, startInde
     OR b.box_uid::text = $${exactIdx}
     OR TRIM(b.packing_number::text) = $${exactIdx}
     OR b.packing_number ILIKE $${prefixIdx}
+    OR TRIM(dp.item_code::text) ILIKE $${exactIdx}
+    OR TRIM(sa.item_code::text) ILIKE $${exactIdx}
   )`);
   return startIndex + 2;
 }

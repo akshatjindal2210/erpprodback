@@ -1,8 +1,6 @@
 import dbQuery from "../../../../config/db.js";
 import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
 import { IMS_TABLES as T } from "../../../../config/dbTables.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
-
 export async function createQcHoldMaterialTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.QC_HOLD_MATERIAL} (
@@ -41,7 +39,4 @@ export async function createQcHoldMaterialTable() {
       `CREATE INDEX IF NOT EXISTS idx_qc_hold_material_hold_data ON ${T.QC_HOLD_MATERIAL} USING gin (hold_data)`,
     ],
   });
-
-  // ONE-TIME: INT id → user name. After prod OK, remove this call.
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.QC_HOLD_MATERIAL);
 }

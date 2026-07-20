@@ -70,7 +70,7 @@ const config = {
   jwt_secret: process.env.JWT_SECRET,
   node_env: process.env.NODE_ENV || "development",
   domain: process.env.DOMAIN || "localhost",
-  frontend_url: process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",") : ["http://localhost:3000"],
+  frontend_url: process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",").map((u) => u.trim()).filter(Boolean) : ["http://localhost:3000"],
   uploadPath: getUploadPath(),
   uploadPublicPath: "uploads",
   cookie_name: "auth_token",
@@ -94,6 +94,20 @@ const config = {
     url: process.env.WA_API_URL || "http://192.168.1.100:3200/send/wa",
     timeoutMs: 15000,
   },
+  /**
+   * CL Task — when frequent masters spawn daily instances (IST hour 0–23).
+   * Set CL_CLONE_ALLOWED_HOUR=13 → cron at 13:00 IST (+ catch-up).
+   * Blank / omit → midnight IST (0:00).
+   */
+  clTask: {
+    cloneAllowedHour: (() => {
+      const raw = process.env.CL_CLONE_ALLOWED_HOUR;
+      if (raw == null || String(raw).trim() === "") return null;
+      const n = parseInt(raw, 10);
+      return Number.isFinite(n) ? Math.min(23, Math.max(0, n)) : null;
+    })(),
+  },
+
   /** Web Push (VAPID) — background notifications when app/tab is closed */
   web_push: {
     publicKey: process.env.VAPID_PUBLIC_KEY || "",

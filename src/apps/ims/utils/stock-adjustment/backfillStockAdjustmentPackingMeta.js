@@ -1,13 +1,7 @@
 /**
- * TEMPORARY — legacy ims_stock_adjustment rows (add + minus).
- * Fills doc_dt + job_card_no from IMS packing on server start when rows are missing.
- *
- * Runs automatically on startup if pending rows exist (fast COUNT skip when done).
- * Disable: BACKFILL_SA_PACKING_META=0
- * Tune: BACKFILL_SA_PACKING_META_LIMIT, BACKFILL_SA_PACKING_META_ROUNDS
- *
- * Remove this file + hook in stock_adjustment.table.js when no legacy gaps remain.
- * New rows: stockAdjustmentDocDt.js on approve.
+ * ONE-SHOT helper — legacy ims_stock_adjustment packing meta.
+ * Not called on server start (already done). New SA rows fill on approve.
+ * Call runStockAdjustmentPackingMetaBackfillOnStartup() manually only if needed.
  */
 
 import dbQuery, { withTransaction } from "../../../../config/db.js";
@@ -148,10 +142,8 @@ async function countRowsNeedingBackfill() {
   return Number(row?.c) || 0;
 }
 
-/** Auto on server start — only when legacy rows still missing doc_dt / job_card_no. */
+/** Manual / rare re-run only — not wired into startup. */
 export async function runStockAdjustmentPackingMetaBackfillOnStartup() {
-  if (process.env.BACKFILL_SA_PACKING_META === "0") return;
-
   const pending = await countRowsNeedingBackfill();
   if (pending === 0) return;
 

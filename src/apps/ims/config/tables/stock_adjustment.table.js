@@ -1,7 +1,6 @@
 import dbQuery from "../../../../config/db.js";
 import { patchTableSchema, patchCol, dropColumnIfExists } from "../../../../config/ensureDbColumns.js";
 import { IMS_TABLES as T } from "../../../../config/dbTables.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createStockAdjustmentTable() {
   await dbQuery(`
@@ -53,7 +52,4 @@ export async function createStockAdjustmentTable() {
   });
 
   await dropColumnIfExists(dbQuery, T.STOCK_ADJUSTMENT, "category_name");
-
-  // ONE-TIME: INT id → user name. After prod OK, remove this call.
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.STOCK_ADJUSTMENT);
 }

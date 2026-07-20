@@ -47,7 +47,7 @@ export async function ensureColumnType(query, tableName, columnName, targetType)
   if (!tableName || !columnName || !target) return;
 
   const rows = await query(
-    `SELECT data_type, udt_name
+    `SELECT data_type, udt_name, character_maximum_length
      FROM information_schema.columns
      WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
      LIMIT 1`,
@@ -57,10 +57,22 @@ export async function ensureColumnType(query, tableName, columnName, targetType)
   if (!Array.isArray(rows) || rows.length === 0) return;
 
   const current = String(rows[0].udt_name || rows[0].data_type || "").toLowerCase();
+  const currentLen = Number(rows[0].character_maximum_length) || 0;
+
   if (target === "text" && current === "text") return;
 
   if (target === "text") {
     await query(`ALTER TABLE ${tableName} ALTER COLUMN ${columnName} TYPE TEXT`);
+    return;
+  }
+
+  const varcharMatch = target.match(/^varchar\((\d+)\)$/);
+  if (varcharMatch) {
+    const wantLen = Number(varcharMatch[1]);
+    if (current === "varchar" && currentLen >= wantLen) return;
+    await query(
+      `ALTER TABLE ${tableName} ALTER COLUMN ${columnName} TYPE VARCHAR(${wantLen})`,
+    );
   }
 }
 
@@ -109,3 +121,30 @@ export async function dropColumnIfExists(query, tableName, columnName) {
   if (!(await columnExists(query, tableName, columnName))) return;
   await query(`ALTER TABLE ${tableName} DROP COLUMN ${columnName}`);
 }
+
+/** Rename column if old exists and new does not (safe for prod restarts). */
+export async function renameColumnIfExists(query, tableName, fromName, toName) {
+  if (!tableName || !fromName || !toName || fromName === toName) return;
+  if (!(await columnExists(query, tableName, fromName))) return;
+  if (await columnExists(query, tableName, toName)) return;
+  await query(`ALTER TABLE ${tableName} RENAME COLUMN ${fromName} TO ${toName}`);
+}
+
+/** Rename table if old exists and new does not (safe for prod restarts). */
+export async function renameTableIfExists(query, fromName, toName) {
+  if (!fromName || !toName || fromName === toName) return;
+  const fromRows = await query(
+    `SELECT 1 FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = $1 LIMIT 1`,
+    [fromName],
+  );
+  if (!Array.isArray(fromRows) || fromRows.length === 0) return;
+  const toRows = await query(
+    `SELECT 1 FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = $1 LIMIT 1`,
+    [toName],
+  );
+  if (Array.isArray(toRows) && toRows.length > 0) return;
+  await query(`ALTER TABLE ${fromName} RENAME TO ${toName}`);
+}
+

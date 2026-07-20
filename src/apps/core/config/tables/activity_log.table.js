@@ -38,12 +38,4 @@ export const createActivityLogsTable = async () => {
       `CREATE INDEX IF NOT EXISTS idx_activity_logs_search_trgm ON ${T.ACTIVITY_LOGS} USING gin (description gin_trgm_ops, module gin_trgm_ops, user_name gin_trgm_ops)`,
     ],
   });
-
-  // Backfill user_name
-  await dbQuery(`
-    UPDATE ${T.ACTIVITY_LOGS} l
-    SET user_name = u.name
-    FROM ${T.USERS} u
-    WHERE l.user_id = u.id AND l.user_name IS NULL
-  `);
 };

@@ -1,16 +1,22 @@
 import express from "express";
-import { getCategories, getCategoryById, createCategory, updateCategory, deleteCategory } from "../controllers/category.controller.js";
+import { getCategories, getCategoriesViews, getCategoryById, createCategory, updateCategory, deleteCategory } from "../controllers/category.controller.js";
 import { authenticate, authorize, activityLogger } from "../shared/index.js";
+import { accessControl } from "../../core/middleware/accessControl.js";
+import { categoryHelperAccess } from "../config/helperViews.js";
 
 const router = express.Router();
 const allRoles = authorize("super_admin", "admin", "user", "executive_assistant");
-const staffOnly = authorize("super_admin", "admin");
 
 router.use(authenticate);
-router.get("/", allRoles, getCategories);
-router.get("/:id", allRoles, getCategoryById);
-router.post("/", staffOnly, activityLogger, createCategory);
-router.put("/:id", staffOnly, activityLogger, updateCategory);
-router.delete("/:id", staffOnly, activityLogger, deleteCategory);
+
+/** POST-only (CL Task style) */
+router.post("/list", allRoles, accessControl("category", "view"), getCategories);
+router.post("/get", allRoles, accessControl("category", "view"), getCategoryById);
+router.post("/create", allRoles, accessControl("category", "add"), activityLogger, createCategory);
+router.post("/update", allRoles, accessControl("category", "edit"), activityLogger, updateCategory);
+router.post("/delete", allRoles, accessControl("category", "delete"), activityLogger, deleteCategory);
+
+/** IMS-style helper for filters/forms — access via calling page module. */
+router.post("/helper", categoryHelperAccess(), getCategoriesViews);
 
 export default router;

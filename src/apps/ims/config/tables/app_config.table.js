@@ -1,6 +1,5 @@
 import dbQuery from "../../../../config/db.js";
 import { IMS_TABLES as T } from "../../../../config/dbTables.js";
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 
 export async function createAppConfigTable() {
   await dbQuery(`
@@ -11,9 +10,4 @@ export async function createAppConfigTable() {
       updated_by   TEXT
     );
   `);
-
-  // ONE-TIME: INT id → user name. After prod OK, remove this call.
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.APP_CONFIG, {
-    columns: ["updated_by"],
-  });
 }

@@ -90,6 +90,47 @@ function reserveValidationError(message, statusCode = 400) {
 }
 
 /**
+ * One item_dcode per Forwarding Note *modal row* (selected_boxes payloads).
+ * Packing breakdown rows (is_pre_calculated) may repeat the same item_dcode — that is OK.
+ * Blocks API bypass of the UI unique-item rule (same item from two schedules).
+ */
+export function assertUniqueForwardingItemDcodes(items = []) {
+  const seen = new Set();
+  for (const item of items || []) {
+    // Saved packing splits of one item — not duplicate schedule lines.
+    if (item?.is_pre_calculated) continue;
+    const raw = item?.item_dcode;
+    if (raw == null || String(raw).trim() === "") continue;
+    const key = String(raw).trim();
+    if (seen.has(key)) {
+      throw reserveValidationError(
+        "Same item cannot appear twice on one Forwarding Note. Use a separate note for another schedule of this item."
+      );
+    }
+    seen.add(key);
+  }
+}
+
+/**
+ * Same physical box must not be claimed by two payload item rows (FIFO integrity).
+ */
+export function assertNoDuplicateSelectedBoxes(items = []) {
+  const seen = new Set();
+  for (const item of items || []) {
+    for (const box of item?.selected_boxes || []) {
+      const key = String(box?.box_no_uid ?? box?.box_uid ?? "").trim();
+      if (!key) continue;
+      if (seen.has(key)) {
+        throw reserveValidationError(
+          `Box ${key} is selected on more than one item. FIFO selection cannot overlap.`
+        );
+      }
+      seen.add(key);
+    }
+  }
+}
+
+/**
  * Validate dispatch qty against physical stock minus all saved FN rows (pending + approved).
  * UI availability and save both use the same reserve scope — qty reserved as soon as the note is saved.
  */
@@ -243,6 +284,9 @@ export async function validateExistingForwardingNoteItems({ fuid, excludeFuid = 
 }
 
 async function persistForwardingNoteItems({ fuid, items, userName, excludeFuid, replaceExisting, client }) {
+  assertUniqueForwardingItemDcodes(items);
+  assertNoDuplicateSelectedBoxes(items);
+
   const enrichedItems = await enrichItems(items);
   const itemDcodes = enrichedItems.map((i) => i.item_dcode);
 

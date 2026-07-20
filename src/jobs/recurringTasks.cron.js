@@ -3,7 +3,8 @@ import path from "path";
 import dbQuery from "../config/db.js";
 import config from "../config/config.js";
 import { addTaskActivityLog } from "../apps/task/services/taskActivityLog.service.js";
-import { scheduleDeferred } from "./cronUtil.js";
+import { scheduleDeferred, getCronDateString, addCalendarDaysYmd, addCalendarMonthsYmd, addCalendarYearsYmd } from "./cronUtil.js";
+import { toYmd } from "../apps/task/helpers/clTaskTime.helper.js";
 
 async function copyRecurringChatAttachments(files) {
   const newDir = path.join(config.uploadPath, "task_tasks", "chat");
@@ -34,7 +35,8 @@ async function copyRecurringChatAttachments(files) {
 }
 
 async function processRecurringTasks() {
-      const today = new Date().toISOString().split("T")[0];
+      // Cron runs in Asia/Kolkata — use IST calendar day (not UTC).
+      const today = getCronDateString();
 
       const recurringTasks = await dbQuery(
         `SELECT * FROM task_recurring_tasks WHERE DATE(next_occurrence) <= ? AND is_active = TRUE`,
@@ -42,7 +44,14 @@ async function processRecurringTasks() {
       );
 
       for (const rt of recurringTasks) {
-        if (rt.end_date && today > rt.end_date) continue;
+        const endYmd = toYmd(rt.end_date);
+        if (endYmd && today > endYmd) {
+          await dbQuery(
+            `UPDATE task_recurring_tasks SET is_active = FALSE WHERE recurring_id = ?`,
+            [rt.recurring_id]
+          );
+          continue;
+        }
 
         const assignments = await dbQuery(
           `SELECT * FROM task_recurring_task_assignments WHERE recurring_id = ?`,
@@ -142,25 +151,26 @@ async function processRecurringTasks() {
           null
         );
 
-        const nextDate = new Date(rt.next_occurrence);
+        const baseYmd = toYmd(rt.next_occurrence) || today;
+        let nextYmd = baseYmd;
         switch (rt.recurrence_type) {
           case "daily":
-            nextDate.setDate(nextDate.getDate() + 1);
+            nextYmd = addCalendarDaysYmd(baseYmd, 1);
             break;
           case "weekly":
-            nextDate.setDate(nextDate.getDate() + 7);
+            nextYmd = addCalendarDaysYmd(baseYmd, 7);
             break;
           case "monthly":
-            nextDate.setMonth(nextDate.getMonth() + 1);
+            nextYmd = addCalendarMonthsYmd(baseYmd, 1);
             break;
           case "yearly":
-            nextDate.setFullYear(nextDate.getFullYear() + 1);
+            nextYmd = addCalendarYearsYmd(baseYmd, 1);
             break;
         }
 
         await dbQuery(
           `UPDATE task_recurring_tasks SET next_occurrence = ? WHERE recurring_id = ?`,
-          [nextDate.toISOString().split("T")[0], rt.recurring_id]
+          [nextYmd, rt.recurring_id]
         );
       }
 

@@ -1,4 +1,3 @@
-import { migrateTableAuditColumnsToUserNames } from "../../../../config/auditUserNameColumns.js";
 import dbQuery from "../../../../config/db.js";
 import { IMS_TABLES as T } from "../../../../config/dbTables.js";
 
@@ -33,7 +32,4 @@ export async function createLocationMasterTable() {
       ON ${T.LOCATION_MASTER} (trim(location_no))
       WHERE is_deleted = false AND location_no IS NOT NULL AND trim(location_no) <> '';
   `);
-
-  // ONE-TIME: INT id → user name. After prod OK, remove this call (helpers stay).
-  await migrateTableAuditColumnsToUserNames(dbQuery, T.LOCATION_MASTER);
 }

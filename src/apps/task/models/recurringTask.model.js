@@ -5,20 +5,25 @@ import { asArray } from "../shared/utils/helper.js";
 const RecurringTask = {
   tableName: "task_recurring_tasks",
 
-  async getAll({ search, page = 1, limit = 10, sortBy, order, dateFrom, dateTo, user_id, requestingUser } = {}) {
+  async getAll({ search, page = 1, limit = 10, sortBy, order, dateFrom, dateTo, is_active, user_id, requestingUser } = {}) {
     const offset = (Number(page) - 1) * Number(limit);
-    const finalLimit = Math.min(Number(limit) || 10, 100);
+    const finalLimit = Math.min(Number(limit) || 10, 1000);
 
-    const validColumns = ["recurring_id", "recurrence_type", "next_occurrence", "created_at"];
+    const validColumns = ["recurring_id", "title", "recurrence_type", "next_occurrence", "end_date", "is_active", "created_at"];
     const finalSort  = validColumns.includes(sortBy) ? sortBy : "recurring_id";
     const finalOrder = order?.toUpperCase() === "DESC" ? "DESC" : "ASC";
 
     let query = `SELECT * FROM ${this.tableName} WHERE 1=1`;
     const queryParams = [];
 
+    if (typeof is_active === "boolean") {
+      query += ` AND is_active = ?`;
+      queryParams.push(is_active);
+    }
+
     if (search) {
-      query += ` AND title LIKE ?`;
-      queryParams.push(`%${search}%`);
+      query += ` AND (title LIKE ? OR recurrence_type LIKE ?)`;
+      queryParams.push(`%${search}%`, `%${search}%`);
     }
 
     if (dateFrom && dateTo) {
@@ -50,8 +55,8 @@ const RecurringTask = {
     }
 
     if (search) {
-      query += ` AND title LIKE ?`;
-      queryParams.push(`%${search}%`);
+      query += ` AND (title LIKE ? OR recurrence_type LIKE ?)`;
+      queryParams.push(`%${search}%`, `%${search}%`);
     }
 
     if (dateFrom && dateTo) {
@@ -71,13 +76,15 @@ const RecurringTask = {
     return rows[0]?.total ?? 0;
   },
 
-  async getStats({ search, dateFrom, dateTo, user_id, requestingUser } = {}) {
+  async getStats({ search, user_id, requestingUser } = {}) {
+    // Overview cards must ignore list is_active / date filters
     const today = new Date().toISOString().slice(0, 10);
+    const base = { search, user_id, requestingUser };
     return {
-      total:    await this.count({ search, dateFrom, dateTo, user_id, requestingUser }),
-      active:   await this.count({ search, dateFrom, dateTo, is_active: true,  user_id, requestingUser }),
-      inactive: await this.count({ search, dateFrom, dateTo, is_active: false, user_id, requestingUser }),
-      today:    await this.count({ search, dateFrom: today, dateTo: today, user_id, requestingUser }),
+      total:    await this.count(base),
+      active:   await this.count({ ...base, is_active: true }),
+      inactive: await this.count({ ...base, is_active: false }),
+      today:    await this.count({ ...base, dateFrom: today, dateTo: today }),
     };
   },
 

@@ -45,10 +45,13 @@ export const MODULES = {
     { name: "schedule_planning", label: "Schedule Planning" },
   ],
   task: [
-    // { name: "cl_task", label: "CL Task" },
-    // { name: "cl_task_verification", label: "CL Task Verification" },
-    // { name: "task_report", label: "CL Task Report" },
-    // { name: "red_ticket", label: "Red Ticket" },
+    { name: "cl_task_master", label: "CL Task Master" },
+    { name: "cl_task", label: "CL Task" },
+    { name: "cl_task_verification", label: "CL Task Verification" },
+    { name: "task_report", label: "CL Task Report" },
+    { name: "red_ticket", label: "Red Ticket" },
+    { name: "category", label: "Category" },
+    { name: "holiday", label: "Holiday" },
   ],
 };
 
@@ -78,9 +81,12 @@ export const SEED_MODULES = [
   { name: "audit",                        label: "Inventory Audit",                 sort_order: 23,       app_type: "ims" },
   { name: "qc_hold_material",             label: "QC Hold Material",                sort_order: 24,       app_type: "ims" },
   { name: "schedule_planning",            label: "Schedule Planning",               sort_order: 25,       app_type: "ims" },
-  // { name: "cl_task",                      label: "CL Task",                         sort_order: 25,       app_type: "task" },
-  // { name: "cl_task_verification",         label: "CL Task Verification",            sort_order: 24,       app_type: "task" },
-  // { name: "task_report",                  label: "CL Task Report",                  sort_order: 25,       app_type: "task" },
-  // { name: "red_ticket",                   label: "Red Ticket",                      sort_order: 26,       app_type: "task" },
+  { name: "cl_task_master",               label: "CL Task Master",                  sort_order: 26,       app_type: "task" },
+  { name: "cl_task",                      label: "CL Task",                         sort_order: 27,       app_type: "task" },
+  { name: "cl_task_verification",         label: "CL Task Verification",            sort_order: 28,       app_type: "task" },
+  { name: "task_report",                  label: "CL Task Report",                  sort_order: 29,       app_type: "task" },
+  { name: "red_ticket",                   label: "Red Ticket",                      sort_order: 30,       app_type: "task" },
+  { name: "category",                     label: "Category",                        sort_order: 31,       app_type: "task" },
+  { name: "holiday",                      label: "Holiday",                         sort_order: 32,       app_type: "task" },
 ];
 
