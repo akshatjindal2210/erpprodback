@@ -2,7 +2,7 @@ import ClTask from "../models/clTask.model.js";
 import RedTicket from "../models/redTicket.model.js";
 import MisScore from "../models/misScore.model.js";
 import { getISTDateString, normalizeDueTime, getClTaskFillBlockedReason, canSubmitPreviousTask, toYmd, getClTaskFillDeadlineYmd, isClTaskMissed } from "../helpers/clTaskTime.helper.js";
-import { parseFormSchema, parseFormResponses, validateFormEntries, mergeEntryUploadedFiles, buildClAttachmentMeta, parseClAttachments, getOpenFills, archiveOpenFill, buildOpenFormResponses, getAwaitingOpenFills, approveOpenFillInResponses, rejectOpenFillInResponses } from "../helpers/clTaskForm.helper.js";
+import { parseFormSchema, parseFormResponses, validateFormEntries, mergeEntryUploadedFiles, buildClAttachmentMeta, parseClAttachments, getOpenFills, archiveOpenFill, buildOpenFormResponses, getAwaitingOpenFills, approveOpenFillInResponses, rejectOpenFillInResponses, serializeOpenFillAsSubmission } from "../helpers/clTaskForm.helper.js";
 import { buildRecurrencePayload, validateClRecurrence, computeClNextOccurrence, computeClFirstOccurrence, clampDayOffset, parseRecurrenceArray, serializeClDate, isClOccurrenceDay } from "../helpers/clTaskRecurrence.helper.js";
 import {
   parseIdList,
@@ -285,9 +285,9 @@ function hasSubmissionPayload(row) {
 }
 
 /**
- * All past/current fills for same master + person (Open multi-submit).
- * Frequently: only the opened instance — other schedule days are separate tasks.
- * Sorted oldest → newest by submitted_at.
+ * Submission history for one master task + person.
+ * Open: merge archived fills and sibling instances.
+ * Frequently: only the opened instance.
  */
 async function loadSubmissionFillsForTask(task) {
   if (!task?.cl_task_id || !task?.person_id) return [];
@@ -297,6 +297,54 @@ async function loadSubmissionFillsForTask(task) {
 
   if (taskType === "frequently" && task.instance_id) {
     return hasSubmissionPayload(task) ? [serializeSubmissionFill(task)].filter(Boolean) : [];
+  }
+
+  if (taskType === "open") {
+    const openFills = getOpenFills(task.form_responses);
+    const fromCurrent = openFills.length
+      ? openFills.map((f) => serializeOpenFillAsSubmission(task, f)).filter(Boolean)
+      : [];
+
+    const rows = await ClTask.getInstances({
+      cl_task_id: masterId,
+      person_id: personId,
+      page: 1,
+      limit: 200,
+      sortBy: "submitted_at",
+      order: "ASC",
+    });
+
+    const fromSiblings = [];
+    for (const r of rows || []) {
+      if (Number(r.cl_task_id) !== masterId || Number(r.person_id) !== personId) continue;
+      if (String(r.status || "") === "pending") continue;
+
+      const nested = getOpenFills(r.form_responses);
+      if (nested.length) {
+        for (const f of nested) {
+          const row = serializeOpenFillAsSubmission(r, f);
+          if (row) fromSiblings.push(row);
+        }
+        continue;
+      }
+
+      const serialized = serializeSubmissionFill(r);
+      if (serialized) fromSiblings.push(serialized);
+    }
+
+    const merged = [];
+    const seen = new Set();
+    for (const f of [...fromCurrent, ...fromSiblings]) {
+      const key = f.fill_id ? `fill:${f.fill_id}` : `inst:${Number(f.instance_id)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(f);
+    }
+    return merged.sort((a, b) =>
+      String(a.submitted_at || a.scheduled_date || "").localeCompare(
+        String(b.submitted_at || b.scheduled_date || ""),
+      ),
+    );
   }
 
   const rows = await ClTask.getInstances({
@@ -793,7 +841,10 @@ export async function getClTaskInstanceDetail(req, res) {
 
     const submission_fills = await loadSubmissionFillsForTask(task);
     const currentId = Number(task.instance_id);
-    const sibling_fills = submission_fills.filter((f) => Number(f.instance_id) !== currentId);
+    /** Open fills share instance_id — keep them via fill_id; else exclude the opened instance. */
+    const sibling_fills = submission_fills.filter(
+      (f) => Number(f.instance_id) !== currentId || (f.fill_id != null && f.fill_id !== ""),
+    );
 
     res.json({
       success: true,

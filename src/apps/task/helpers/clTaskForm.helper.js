@@ -98,6 +98,36 @@ export function buildOpenFormResponses({ entries = [], fills = [] } = {}) {
 }
 
 /**
+ * Map one archived open fill to a submission history row.
+ * fill_id keeps multiple fills on the same instance distinct.
+ */
+export function serializeOpenFillAsSubmission(task, fill) {
+  if (!task || !fill) return null;
+  return {
+    instance_id: task.instance_id,
+    fill_id: fill.id || null,
+    cl_task_id: task.cl_task_id,
+    title: task.title,
+    task_type: task.task_type,
+    recurrence_type: task.recurrence_type || null,
+    status: fill.status || "completed",
+    score: fill.score != null ? Number(fill.score) : null,
+    weightage: task.weightage ?? task.wastage ?? null,
+    reject_count: Math.max(0, Number(fill.reject_count) || 0),
+    scheduled_date: fill.completed_at || fill.submitted_at || fill.filled_at || task.scheduled_date,
+    submitted_at: fill.submitted_at || fill.filled_at || null,
+    completed_at: fill.completed_at || null,
+    person_remark: fill.person_remark || null,
+    verifier_remark: fill.verifier_remark || null,
+    form_schema: task.form_schema,
+    form_responses: { entries: Array.isArray(fill.entries) ? fill.entries : [] },
+    person_name: task.person_name,
+    person_id: task.person_id,
+    verification_user_name: task.verification_user_name || null,
+  };
+}
+
+/**
  * Archive the current open-task cycle into fills[], then clear current entries
  * so the same instance can be filled again (no new DB row).
  *

@@ -3,7 +3,7 @@ import ReportReview from "../models/reportReview.model.js";
 import MisScore from "../models/misScore.model.js";
 import { getISTDateString, toYmd } from "../helpers/clTaskTime.helper.js";
 import { scoreToPercent, weightedPoints, weightedScorePercent, finalScorePercent } from "../helpers/clTaskScore.helper.js";
-import { getOpenFills } from "../helpers/clTaskForm.helper.js";
+import { getOpenFills, serializeOpenFillAsSubmission } from "../helpers/clTaskForm.helper.js";
 import { isSuperAdminReq } from "../../core/utils/permissionDays.js";
 import { paramsFromReq, listLimit } from "../shared/postRequest.js";
 
@@ -55,8 +55,8 @@ function effectiveScore(instance, review) {
 }
 
 /**
- * Open fills: average score, soft reject penalty (−0.5 per reject across fills), min 1.
- * One contribution per open instance (weightage once — not once per fill).
+ * Open-task compile: average score, −0.5 per reject, minimum 1.
+ * Weightage is applied once per open task (not per attempt).
  */
 function openCompileScore(fills = []) {
   const scored = fills.filter((f) => {
@@ -78,6 +78,7 @@ function openCompileScore(fills = []) {
 
 function pushTaskToMaps(taskRow, dayMap, userMap) {
   const day = taskRow.scheduled_date;
+  if (!day) return;
   if (!dayMap[day]) dayMap[day] = { date: day, tasks: [], day_score: 0, day_score_pct: 0 };
   dayMap[day].tasks.push(taskRow);
   const pid = Number(taskRow.person_id) || 0;
@@ -93,29 +94,172 @@ function pushTaskToMaps(taskRow, dayMap, userMap) {
   userMap.get(pid).tasks.push(taskRow);
 }
 
-/** Build compile items: open fills collapse to 1 avg+penalty score per instance. */
+/** One compile item per open task; frequently tasks stay one item each. */
 function compileItemsFromTasks(tasks = []) {
   const byOpen = new Map();
   const items = [];
   for (const t of tasks) {
-    if (t.is_open_fill) {
-      const key = t.instance_id;
+    if (t.is_open_fill || t.is_open_aggregated) {
+      const key = t.cl_task_id != null
+        ? `m:${t.cl_task_id}:${t.person_id}`
+        : `i:${t.instance_id}`;
       if (!byOpen.has(key)) {
         byOpen.set(key, { weightage: t.weightage, fills: [] });
       }
-      byOpen.get(key).fills.push({
-        score: t.effective_score_raw,
-        reject_count: t.reject_count,
-      });
+      if (t.is_open_aggregated && Number(t.effective_score_raw) > 0) {
+        byOpen.get(key).compiled = Number(t.effective_score_raw);
+      } else if (!t.is_open_aggregated) {
+        byOpen.get(key).fills.push({
+          score: t.effective_score_raw,
+          reject_count: t.reject_count,
+        });
+      }
     } else if (Number(t.effective_score_raw) > 0) {
       items.push({ score: t.effective_score_raw, weightage: t.weightage });
     }
   }
   for (const g of byOpen.values()) {
+    if (g.compiled != null) {
+      items.push({ score: g.compiled, weightage: g.weightage });
+      continue;
+    }
     const c = openCompileScore(g.fills);
     if (c) items.push({ score: c.adjusted, weightage: g.weightage });
   }
   return items;
+}
+
+function addDayScore(acc, ymd, scorePct) {
+  if (!ymd) return;
+  if (!acc[ymd]) acc[ymd] = { sumPct: 0, count: 0 };
+  acc[ymd].sumPct += Number(scorePct) || 0;
+  acc[ymd].count += 1;
+}
+
+function finalizeDayScores(acc) {
+  return Object.fromEntries(
+    Object.entries(acc).map(([ymd, v]) => [
+      ymd,
+      Math.round((v.sumPct / Math.max(1, v.count)) * 10) / 10,
+    ]),
+  );
+}
+
+function trackLatestInstance(group, inst, review, day) {
+  if (!inst?.instance_id) return;
+  if (!group.latest_instance_id) {
+    group.latest_instance_id = inst.instance_id;
+    group.latest_day = day || null;
+  }
+  if (!day) return;
+  if (!group.latest_day || day >= group.latest_day) {
+    group.latest_instance_id = inst.instance_id;
+    group.latest_day = day;
+    if (review && !group.awaiting) {
+      group.review = review;
+      group.is_red_flag = review.is_red_flag === true;
+      group.management_remark = review.management_remark ?? null;
+    }
+  }
+}
+
+/**
+ * Fold one open instance into a person + master group.
+ * Supports archived fills on one row, or one DB instance per submit.
+ */
+function absorbOpenInstance(group, inst, review, today) {
+  const weightage = Number(inst.weightage ?? inst.wastage) || 1;
+  if (group.weightage == null) group.weightage = weightage;
+  group.title = inst.title || group.title;
+  group.person_name = inst.person_name || group.person_name;
+  group.department_name = inst.department_name || group.department_name;
+  group.designation_name = inst.designation_name || group.designation_name;
+  group.verification_required = inst.verification_required;
+
+  if (inst.instance_id && !group.latest_instance_id) {
+    group.latest_instance_id = inst.instance_id;
+  }
+
+  const fills = getOpenFills(inst.form_responses);
+  let absorbedFromFills = 0;
+
+  for (const fill of fills) {
+    if (fill.status === "awaiting_verification" || fill.status === "rejected") continue;
+    const fillDay =
+      toYmd(fill.completed_at) ||
+      toYmd(fill.submitted_at) ||
+      toYmd(fill.filled_at) ||
+      toYmd(inst.scheduled_date);
+    if (!fillDay) continue;
+    const scoreRaw = Number(fill.score) > 0 ? Number(fill.score) : 0;
+    const scorePct = scoreToPercent(scoreRaw);
+    const rejectCount = Math.max(0, Number(fill.reject_count) || 0);
+    group.reject_total += rejectCount;
+    group.attempt_count += 1;
+    absorbedFromFills += 1;
+    if (scoreRaw > 0) {
+      group.done_count += 1;
+      group.score_parts.push({ score: scoreRaw, reject_count: rejectCount });
+    }
+    addDayScore(group.dayScoreAcc, fillDay, scorePct);
+    if (!group.minDay || fillDay < group.minDay) group.minDay = fillDay;
+    if (!group.maxDay || fillDay > group.maxDay) group.maxDay = fillDay;
+  }
+
+  if (absorbedFromFills) {
+    if (inst.status === "awaiting_verification") {
+      group.awaiting = true;
+      group.awaiting_day = toYmd(inst.scheduled_date) || today;
+      group.awaiting_instance_id = inst.instance_id;
+      group.not_done_count += 1;
+    }
+    trackLatestInstance(
+      group,
+      inst,
+      review,
+      toYmd(inst.completed_at) || toYmd(inst.submitted_at) || toYmd(inst.scheduled_date),
+    );
+    return;
+  }
+
+  // One instance per open submit (no fills array)
+  const day =
+    toYmd(inst.completed_at) ||
+    toYmd(inst.submitted_at) ||
+    toYmd(inst.scheduled_date);
+  if (!day) return;
+  if (inst.status === "pending") return;
+
+  if (inst.status === "awaiting_verification") {
+    group.awaiting = true;
+    group.awaiting_day = day;
+    group.awaiting_instance_id = inst.instance_id;
+    group.not_done_count += 1;
+    if (!group.minDay || day < group.minDay) group.minDay = day;
+    if (!group.maxDay || day > group.maxDay) group.maxDay = day;
+    trackLatestInstance(group, inst, null, day);
+    return;
+  }
+
+  const scoreRaw = effectiveScore(inst, review);
+  const scorePct = scoreToPercent(scoreRaw);
+  const rejectCount = Math.max(0, Number(inst.reject_count) || 0);
+  group.reject_total += rejectCount;
+  group.attempt_count += 1;
+  if (isDoneVerified(inst, today) || scoreRaw > 0) group.done_count += 1;
+  if (scoreRaw > 0) {
+    group.score_parts.push({ score: scoreRaw, reject_count: rejectCount });
+  }
+  addDayScore(group.dayScoreAcc, day, scorePct);
+  if (!group.minDay || day < group.minDay) group.minDay = day;
+  if (!group.maxDay || day > group.maxDay) group.maxDay = day;
+
+  if (review?.is_red_flag) {
+    group.is_red_flag = true;
+    group.management_remark = review.management_remark ?? group.management_remark;
+    group.review = review;
+  }
+  trackLatestInstance(group, inst, review, day);
 }
 
 export async function getDailyReport(req, res) {
@@ -186,120 +330,56 @@ export async function getDailyReport(req, res) {
     const scoredForCompile = [];
     let doneCount = 0;
     let notDoneCount = 0;
+    // Group open tasks by person + master task id
+    const openGroups = new Map();
 
     for (const inst of instances) {
       const review = reviewMap[inst.instance_id] ?? null;
       const weightage = Number(inst.weightage ?? inst.wastage) || 1;
       const pid = Number(inst.person_id) || 0;
-      const isOpen = inst.task_type === "open";
-      const fills = isOpen ? getOpenFills(inst.form_responses) : [];
+      const isOpen = String(inst.task_type || "").toLowerCase() === "open";
 
-          if (isOpen && fills.length) {
-        // Display: one calendar row per completed archived fill
-        for (const fill of fills) {
-          if (fill.status === "awaiting_verification" || fill.status === "rejected") continue;
-          const fillDay =
-            toYmd(fill.completed_at) ||
-            toYmd(fill.submitted_at) ||
-            toYmd(fill.filled_at) ||
-            toYmd(inst.scheduled_date);
-          if (!fillDay) continue;
-          const scoreRaw = Number(fill.score) > 0 ? Number(fill.score) : 0;
-          const scorePct = scoreToPercent(scoreRaw);
-          const wPoints = weightedPoints(scoreRaw, weightage);
-          const rejectCount = Math.max(0, Number(fill.reject_count) || 0);
-
-          if (scoreRaw > 0) doneCount += 1;
-
-          pushTaskToMaps(
-            {
-              instance_id: inst.instance_id,
-              fill_id: fill.id || null,
-              title: inst.title,
-              person_id: pid,
-              person_name: inst.person_name,
-              department_name: inst.department_name,
-              designation_name: inst.designation_name,
-              task_type: "open",
-              recurrence_type: null,
-              status: "completed",
-              score: scoreRaw || null,
-              effective_score_raw: scoreRaw,
-              effective_score: scorePct,
-              score_pct: scorePct,
-              weighted_points: wPoints,
-              scheduled_date: fillDay,
-              startDate: fillDay,
-              endDate: fillDay,
-              weightage: inst.weightage ?? inst.wastage ?? null,
-              done_verified: scoreRaw > 0 || inst.verification_required === false,
-              not_done: false,
-              reject_count: rejectCount,
-              is_open_fill: true,
-              is_red_flag: review?.is_red_flag === true,
-              management_remark: review?.management_remark ?? null,
-              review,
-            },
-            dayMap,
-            userMap,
-          );
+      if (isOpen) {
+        const masterId = Number(inst.cl_task_id) || 0;
+        const gKey = `${pid}:${masterId || inst.instance_id}`;
+        if (!openGroups.has(gKey)) {
+          openGroups.set(gKey, {
+            person_id: pid,
+            cl_task_id: masterId || null,
+            title: inst.title,
+            person_name: inst.person_name,
+            department_name: inst.department_name,
+            designation_name: inst.designation_name,
+            weightage,
+            dayScoreAcc: {},
+            score_parts: [],
+            attempt_count: 0,
+            done_count: 0,
+            not_done_count: 0,
+            reject_total: 0,
+            minDay: null,
+            maxDay: null,
+            awaiting: false,
+            awaiting_day: null,
+            awaiting_instance_id: null,
+            latest_instance_id: null,
+            latest_day: null,
+            is_red_flag: false,
+            management_remark: null,
+            review: null,
+            verification_required: inst.verification_required,
+          });
         }
-
-        // Compile once per open instance (avg score − soft reject penalty)
-        const compiled = openCompileScore(fills);
-        if (compiled) {
-          scoredForCompile.push({ score: compiled.adjusted, weightage });
-        }
-
-        // Current cycle still waiting / empty due
-        if (inst.status === "awaiting_verification") {
-          notDoneCount += 1;
-          const day = toYmd(inst.scheduled_date) || today;
-          pushTaskToMaps(
-            {
-              instance_id: inst.instance_id,
-              fill_id: null,
-              title: inst.title,
-              person_id: pid,
-              person_name: inst.person_name,
-              department_name: inst.department_name,
-              designation_name: inst.designation_name,
-              task_type: "open",
-              recurrence_type: null,
-              status: inst.status,
-              score: null,
-              effective_score_raw: 0,
-              effective_score: 0,
-              score_pct: 0,
-              weighted_points: 0,
-              scheduled_date: day,
-              startDate: day,
-              endDate: day,
-              weightage: inst.weightage ?? inst.wastage ?? null,
-              done_verified: false,
-              not_done: true,
-              reject_count: Number(inst.reject_count) || 0,
-              is_open_fill: false,
-              is_red_flag: false,
-              management_remark: null,
-              review: null,
-            },
-            dayMap,
-            userMap,
-          );
-        }
+        absorbOpenInstance(openGroups.get(gKey), inst, review, today);
         continue;
       }
 
-      // Frequently / legacy open (no fills array yet) — one row per instance
+      // Frequently: one calendar row per scheduled instance
       const day = toYmd(inst.scheduled_date);
       if (!day) continue;
 
       const doneVerified = isDoneVerified(inst, today);
-      const notDone = isOpen
-        ? inst.status === "awaiting_verification" ||
-          (inst.status === "pending" && fills.length === 0)
-        : isNotDone(inst, today);
+      const notDone = isNotDone(inst, today);
       const scoreRaw = effectiveScore(inst, review);
       const scorePct = scoreToPercent(scoreRaw);
       const wPoints = weightedPoints(scoreRaw, weightage);
@@ -314,6 +394,7 @@ export async function getDailyReport(req, res) {
       pushTaskToMaps(
         {
           instance_id: inst.instance_id,
+          cl_task_id: inst.cl_task_id || null,
           fill_id: null,
           title: inst.title,
           person_id: pid,
@@ -345,7 +426,71 @@ export async function getDailyReport(req, res) {
       );
     }
 
-    // Day % / points — open fills collapse to one score per instance
+    for (const group of openGroups.values()) {
+      doneCount += group.done_count;
+      notDoneCount += group.not_done_count;
+
+      const compiled = openCompileScore(group.score_parts);
+      if (compiled) {
+        scoredForCompile.push({ score: compiled.adjusted, weightage: group.weightage });
+      }
+
+      if (group.attempt_count <= 0 && !group.awaiting) continue;
+
+      const scoreRaw = compiled?.adjusted ?? 0;
+      const scorePct = scoreToPercent(scoreRaw);
+      const wPoints = weightedPoints(scoreRaw, group.weightage);
+      const day_scores = finalizeDayScores(group.dayScoreAcc);
+      const awaitingDay = group.awaiting_day || today;
+      const start = group.minDay || awaitingDay;
+      const end = group.maxDay || awaitingDay;
+      const instanceId =
+        (group.awaiting && group.awaiting_instance_id) ||
+        group.latest_instance_id ||
+        group.awaiting_instance_id;
+      if (!instanceId) continue;
+
+      pushTaskToMaps(
+        {
+          instance_id: instanceId,
+          cl_task_id: group.cl_task_id,
+          fill_id: null,
+          fill_count: group.attempt_count,
+          day_scores,
+          title: group.title,
+          person_id: group.person_id,
+          person_name: group.person_name,
+          department_name: group.department_name,
+          designation_name: group.designation_name,
+          task_type: "open",
+          recurrence_type: null,
+          status: group.awaiting ? "awaiting_verification" : "completed",
+          score: scoreRaw || null,
+          effective_score_raw: scoreRaw,
+          effective_score: scorePct,
+          score_pct: scorePct,
+          weighted_points: wPoints,
+          scheduled_date: group.awaiting ? awaitingDay : end,
+          startDate: start,
+          endDate: end,
+          weightage: group.weightage ?? null,
+          done_verified:
+            !group.awaiting &&
+            (scoreRaw > 0 || group.verification_required === false),
+          not_done: !!group.awaiting,
+          reject_count: group.reject_total,
+          is_open_fill: false,
+          is_open_aggregated: true,
+          is_red_flag: group.is_red_flag === true,
+          management_remark: group.management_remark ?? null,
+          review: group.awaiting ? null : group.review,
+        },
+        dayMap,
+        userMap,
+      );
+    }
+
+    // Day totals — open tasks count once after compile
     for (const day of Object.values(dayMap)) {
       const items = compileItemsFromTasks(day.tasks);
       day.day_score = items.reduce((s, i) => s + weightedPoints(i.score, i.weightage), 0);
@@ -489,9 +634,7 @@ export async function upsertReportReview(req, res) {
   }
 }
 
-/** Full CL instance for report score click — own row for users; all for Super Admin / EA.
- *  Includes sibling_fills (same master + person) so Open/Frequently multi-fills are visible.
- */
+/** Report click: load instance plus all related open submissions. */
 export async function getReportInstance(req, res) {
   try {
     const p = paramsFromReq(req);
@@ -511,8 +654,17 @@ export async function getReportInstance(req, res) {
       return res.status(403).json({ success: false, message: "You can only view your own tasks" });
     }
 
-    let sibling_fills = [];
-    if (task.cl_task_id && task.person_id && String(task.task_type || "").toLowerCase() === "open") {
+    let submission_fills = [];
+    const isOpen = String(task.task_type || "").toLowerCase() === "open";
+    const openFills = isOpen ? getOpenFills(task.form_responses) : [];
+
+    if (openFills.length) {
+      submission_fills = openFills
+        .map((f) => serializeOpenFillAsSubmission(task, f))
+        .filter(Boolean);
+    }
+
+    if (isOpen && task.cl_task_id && task.person_id) {
       const siblings = await ClTask.getInstances({
         cl_task_id: Number(task.cl_task_id),
         person_id: Number(task.person_id),
@@ -521,38 +673,67 @@ export async function getReportInstance(req, res) {
         sortBy: "scheduled_date",
         order: "ASC",
       });
-      sibling_fills = (siblings || [])
+      const fromInstances = (siblings || [])
         .filter((s) => Number(s.cl_task_id) === Number(task.cl_task_id))
         .filter((s) => Number(s.person_id) === Number(task.person_id))
-        .filter((s) => Number(s.instance_id) !== Number(task.instance_id))
         .filter((s) => String(s.status || "") !== "pending")
-        .map((s) => ({
-          instance_id: s.instance_id,
-          cl_task_id: s.cl_task_id,
-          title: s.title,
-          task_type: s.task_type,
-          recurrence_type: s.recurrence_type,
-          status: s.status,
-          score: s.score,
-          weightage: s.weightage ?? s.wastage ?? null,
-          scheduled_date: s.scheduled_date,
-          submitted_at: s.submitted_at,
-          person_remark: s.person_remark,
-          verifier_remark: s.verifier_remark,
-          form_schema: s.form_schema,
-          form_responses: s.form_responses,
-          person_id: s.person_id,
-          person_name: s.person_name,
-          verification_user_name: s.verification_user_name,
-        }));
+        .flatMap((s) => {
+          const nested = getOpenFills(s.form_responses);
+          if (nested.length) {
+            return nested.map((f) => serializeOpenFillAsSubmission(s, f)).filter(Boolean);
+          }
+          return [
+            {
+              instance_id: s.instance_id,
+              fill_id: null,
+              cl_task_id: s.cl_task_id,
+              title: s.title,
+              task_type: s.task_type,
+              recurrence_type: s.recurrence_type,
+              status: s.status,
+              score: s.score,
+              weightage: s.weightage ?? s.wastage ?? null,
+              reject_count: s.reject_count ?? 0,
+              scheduled_date: s.scheduled_date,
+              submitted_at: s.submitted_at,
+              person_remark: s.person_remark,
+              verifier_remark: s.verifier_remark,
+              form_schema: s.form_schema,
+              form_responses: s.form_responses,
+              person_id: s.person_id,
+              person_name: s.person_name,
+              verification_user_name: s.verification_user_name,
+            },
+          ];
+        });
+
+      const seen = new Set(submission_fills.map((f) => `${f.instance_id}:${f.fill_id || ""}`));
+      for (const row of fromInstances) {
+        const key = `${row.instance_id}:${row.fill_id || ""}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        submission_fills.push(row);
+      }
     }
+
+    submission_fills.sort((a, b) =>
+      String(a.submitted_at || a.scheduled_date || "").localeCompare(
+        String(b.submitted_at || b.scheduled_date || ""),
+      ),
+    );
+
+    const sibling_fills = submission_fills.filter(
+      (f) => Number(f.instance_id) !== Number(task.instance_id) || f.fill_id,
+    );
 
     res.json({
       success: true,
       data: {
         ...task,
+        fills: openFills,
+        submission_fills,
         sibling_fills,
-        fill_count: 1 + sibling_fills.length,
+        fill_count: submission_fills.length || 1,
       },
     });
   } catch (err) {
