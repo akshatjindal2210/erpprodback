@@ -36,6 +36,7 @@ const DEFAULT_FIELDS = [
   "fi.loose_box",
   "fi.loose_box_qty",
   "fi.total_qty",
+  "fi.schno",
   "fi.item_dcode::text AS item_code",
   "NULL::text AS item_desc",
   // Master-level data (must match summary/action context)
@@ -127,6 +128,7 @@ export const findForwardingNoteItems = async (options = {}) => {
     conditions.push(`(
       fi.fuid::text ILIKE $${i} OR
       fi.item_dcode::text ILIKE $${i} OR
+      fi.schno ILIKE $${i} OR
       fnm.po_number ILIKE $${i} OR
       fnm.acc_code::text ILIKE $${i} OR
       fnm.vehicle_number ILIKE $${i} OR

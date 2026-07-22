@@ -648,8 +648,9 @@ export const getForwardingNotesViews = async (req, res) => {
 export const printForwardingNoteBill = async (req, res) => {
   try {
     const { fuid: fuidRaw, company_info } = req.body || {};
-    const fuid = parseInt(fuidRaw, 10);
-    if (!Number.isInteger(fuid) || fuid < 1) {
+    // Use master fuid only — never treat item-wise `id` as fuid
+    const fuid = parseForwardingFuid(fuidRaw);
+    if (!fuid) {
       return res.status(400).json({ success: false, message: "Valid fuid required" });
     }
 

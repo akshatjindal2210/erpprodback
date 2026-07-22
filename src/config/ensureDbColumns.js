@@ -1,10 +1,10 @@
 /**
  * Schema patch helpers — used in each *.table.js on server start (initDB).
  *
- * Naya column → usi table ki *.table.js mein:
- *   1. CREATE TABLE mein column likho (naya DB)
- *   2. patchTableSchema + patchCol (purana DB)
- *   3. purana data fix → runIfColumnExists (optional, same file)
+ * To add a new column in that table's *.table.js:
+ *   1. Add the column to CREATE TABLE (for new databases)
+ *   2. Use patchTableSchema + patchCol (for existing databases)
+ *   3. Optionally backfill/fix old data with runIfColumnExists (same file)
  *
  * Example: audit.table.js, box_table.table.js
  */

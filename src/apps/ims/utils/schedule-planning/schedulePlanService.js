@@ -594,6 +594,14 @@ export async function saveSchedulePlan(body = {}, userName = null, opts = {}) {
   const fromStatus = effectiveFromStatus(existingRow);
   const isSuperAdmin = Boolean(opts?.isSuperAdmin);
 
+  if (fromStatus === SCHEDULE_PLAN_STATUS.COMPLETE) {
+    return {
+      success: false,
+      status: 400,
+      message: "Completed items cannot be planned.",
+    };
+  }
+
   if (!(isSuperAdmin && canTransitionAsSuperAdmin(fromStatus)) && !canPlanFrom(fromStatus)) {
     return {
       success: false,
@@ -650,6 +658,15 @@ export async function rejectSchedulePlan(body = {}, userName = null, opts = {}) 
   const fromStatus = effectiveFromStatus(existingRow);
   const rejectUpdate = fromStatus === SCHEDULE_PLAN_STATUS.REJECT;
   const isSuperAdmin = Boolean(opts?.isSuperAdmin);
+
+  if (fromStatus === SCHEDULE_PLAN_STATUS.COMPLETE) {
+    return {
+      success: false,
+      status: 400,
+      message: "Completed items cannot be rejected.",
+    };
+  }
+
   if (
     !rejectUpdate &&
     !(isSuperAdmin && canTransitionAsSuperAdmin(fromStatus)) &&

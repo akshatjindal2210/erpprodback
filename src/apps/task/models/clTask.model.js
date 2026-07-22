@@ -431,10 +431,11 @@ const ClTask = {
         title, description, sop_description, task_type, recurrence_type,
         recurrence_weekdays, recurrence_month_dates, recurrence_year_dates,
         weightage, verification_user_id, department_id, designation_id, person_id,
+        assignee_person_ids,
         due_time, day_offset, next_occurrence, approved,
         created_by, created_by_name, approved_by, approved_at,
         form_schema, verification_required, scoring_enabled, sop_required, attachment
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         data.title,
         data.description || null,
@@ -449,6 +450,9 @@ const ClTask = {
         data.department_id || null,
         data.designation_id || null,
         data.person_id || null,
+        data.assignee_person_ids?.length
+          ? JSON.stringify(data.assignee_person_ids.map(Number))
+          : null,
         data.due_time != null && data.due_time !== "" ? data.due_time : null,
         Number.isFinite(Number(data.day_offset)) ? Math.max(0, Math.min(14, Math.floor(Number(data.day_offset)))) : 0,
         data.next_occurrence || null,
@@ -493,6 +497,7 @@ const ClTask = {
         department_id = ?,
         designation_id = ?,
         person_id = ?,
+        assignee_person_ids = ?,
         due_time = ?,
         day_offset = ?,
         form_schema = ?,
@@ -518,6 +523,9 @@ const ClTask = {
         data.department_id || null,
         data.designation_id || null,
         data.person_id || null,
+        data.assignee_person_ids?.length
+          ? JSON.stringify(data.assignee_person_ids.map(Number))
+          : null,
         data.due_time != null && data.due_time !== "" ? data.due_time : null,
         Number.isFinite(Number(data.day_offset)) ? Math.max(0, Math.min(14, Math.floor(Number(data.day_offset)))) : 0,
         JSON.stringify(data.form_schema || []),
@@ -540,6 +548,7 @@ const ClTask = {
    * Completed & awaiting_verification stay frozen.
    */
   async syncPendingInstancesFromMaster(masterId, data) {
+    // Do not overwrite person_id / dept / desig on instances — each instance is person-bound.
     return dbQuery(
       `UPDATE ${INSTANCE_TABLE} SET
         title = ?,
@@ -552,9 +561,6 @@ const ClTask = {
         recurrence_year_dates = ?,
         weightage = ?,
         verification_user_id = ?,
-        department_id = ?,
-        designation_id = ?,
-        person_id = ?,
         due_time = ?,
         day_offset = ?,
         form_schema = ?,
@@ -576,9 +582,6 @@ const ClTask = {
         data.recurrence_year_dates?.length ? JSON.stringify(data.recurrence_year_dates) : null,
         data.weightage,
         data.verification_user_id || null,
-        data.department_id || null,
-        data.designation_id || null,
-        data.person_id || null,
         data.due_time != null && data.due_time !== "" ? data.due_time : null,
         data.task_type === "frequently"
           ? (Number.isFinite(Number(data.day_offset)) ? Math.max(0, Math.min(14, Math.floor(Number(data.day_offset)))) : 0)
@@ -931,6 +934,38 @@ const ClTask = {
 
   async deleteInstance(id) {
     return dbQuery(`DELETE FROM ${INSTANCE_TABLE} WHERE instance_id = ?`, [id]);
+  },
+
+  /** Pending instances for a master (for assignee-scope reconciliation). */
+  async getPendingInstancesForMaster(clTaskId) {
+    return dbQuery(
+      `SELECT instance_id, person_id, scheduled_date, status
+       FROM ${INSTANCE_TABLE}
+       WHERE cl_task_id = ?
+         AND status = 'pending'`,
+      [clTaskId],
+    );
+  },
+
+  /** Drop pending instances whose person is no longer in assignment scope. */
+  async deletePendingInstancesNotInPersons(clTaskId, allowedPersonIds = []) {
+    const ids = [...new Set((allowedPersonIds || []).map(Number).filter((n) => Number.isFinite(n) && n > 0))];
+    if (!ids.length) {
+      return dbQuery(
+        `DELETE FROM ${INSTANCE_TABLE}
+         WHERE cl_task_id = ?
+           AND status = 'pending'`,
+        [clTaskId],
+      );
+    }
+    const placeholders = ids.map(() => "?").join(", ");
+    return dbQuery(
+      `DELETE FROM ${INSTANCE_TABLE}
+       WHERE cl_task_id = ?
+         AND status = 'pending'
+         AND (person_id IS NULL OR person_id NOT IN (${placeholders}))`,
+      [clTaskId, ...ids],
+    );
   },
 
   async getStats(filters) {

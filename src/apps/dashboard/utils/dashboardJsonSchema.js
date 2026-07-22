@@ -45,7 +45,7 @@ function createPersistedWidgetId(seed = Date.now()) {
   return `w_${seed}_${Math.floor(Math.random() * 100000)}`;
 }
 
-export function remapDashboardWidgetIds(rawWidgets = [], layoutPx = []) {
+export function remapDashboardWidgetIds(rawWidgets = [], layoutPx = [], layoutPxMobile = []) {
   const widgets = rawWidgets.map((widget, idx) => widgetToStoredJson(widget, idx));
   const idMap = new Map();
   let seed = Date.now();
@@ -87,6 +87,7 @@ export function remapDashboardWidgetIds(rawWidgets = [], layoutPx = []) {
       nestedLayout: remapLayoutList(widget.nestedLayout),
       nestedLayoutPx: remapLayoutList(widget.nestedLayoutPx),
       mobileNestedLayout: remapLayoutList(widget.mobileNestedLayout),
+      mobileNestedLayoutPx: remapLayoutList(widget.mobileNestedLayoutPx),
       layout: sanitizeLayoutCoords({ ...(widget.layout || {}), i: newId }, newId, idx),
       mobileLayout: sanitizeLayoutCoords({ ...(widget.mobileLayout || {}), i: newId }, newId, idx),
       style: widget.style?.boxPx
@@ -103,6 +104,7 @@ export function remapDashboardWidgetIds(rawWidgets = [], layoutPx = []) {
   return {
     widgets: remappedWidgets,
     layoutPx: remapLayoutList(layoutPx),
+    layoutPxMobile: remapLayoutList(layoutPxMobile),
   };
 }
 
@@ -196,22 +198,38 @@ function hasManualWidgetLayout(widget = {}) {
 
 function readTableWidgetOptions(widget = {}, chartConfig = {}) {
   const cfg = chartConfig && typeof chartConfig === "object" ? chartConfig : {};
+  const rawPos = String(widget.tableSearchPosition ?? cfg.table_search_position ?? "right").trim().toLowerCase();
+  const tableSearchPosition =
+    rawPos === "left" || rawPos === "center" || rawPos === "full" ? rawPos : "right";
+  const widthRaw = Number(widget.tableSearchWidth ?? cfg.table_search_width);
+  const tableSearchWidth = Number.isFinite(widthRaw)
+    ? Math.max(160, Math.min(600, Math.round(widthRaw)))
+    : 280;
   return {
     tableSearchEnabled: widget.tableSearchEnabled === true || cfg.table_search_enabled === true,
     tableSearchPlaceholder: String(
       widget.tableSearchPlaceholder ?? cfg.table_search_placeholder ?? "",
     ).trim(),
-    tableSearchPosition: (widget.tableSearchPosition ?? cfg.table_search_position) === "left" ? "left" : "right",
+    tableSearchPosition,
+    tableSearchWidth,
     tableColumnSortEnabled: widget.tableColumnSortEnabled === true || cfg.table_column_sort_enabled === true,
     tableExportEnabled: widget.tableExportEnabled === true || cfg.table_export_enabled === true,
   };
 }
 
 function tableWidgetOptionsToChartConfig(options = {}) {
+  const rawPos = String(options.tableSearchPosition || "right").trim().toLowerCase();
+  const tableSearchPosition =
+    rawPos === "left" || rawPos === "center" || rawPos === "full" ? rawPos : "right";
+  const widthRaw = Number(options.tableSearchWidth);
+  const tableSearchWidth = Number.isFinite(widthRaw)
+    ? Math.max(160, Math.min(600, Math.round(widthRaw)))
+    : 280;
   return {
     table_search_enabled: options.tableSearchEnabled === true,
     table_search_placeholder: String(options.tableSearchPlaceholder || "").trim(),
-    table_search_position: options.tableSearchPosition === "left" ? "left" : "right",
+    table_search_position: tableSearchPosition,
+    table_search_width: tableSearchWidth,
     table_column_sort_enabled: options.tableColumnSortEnabled === true,
     table_export_enabled: options.tableExportEnabled === true,
   };
@@ -294,13 +312,30 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       linkUrl: String(widget.linkUrl || widget.link_url || "").trim(),
       linkAppId: String(widget.linkAppId || widget.link_app_id || "").trim(),
       linkPageId: String(widget.linkPageId || widget.link_page_id || "").trim(),
+      chart_config: {
+        ...(widget.chart_config || {}),
+        is_hybrid: widget.chart_config?.is_hybrid === true || String(widget.dataSource || "").toLowerCase() === "hybrid",
+        hybrid_mssql_query: widget.chart_config?.hybrid_mssql_query || "",
+        hybrid_external_source: widget.chart_config?.hybrid_external_source || "erp_mssql",
+      },
     };
   }
 
   const chartConfig = widget?.chart_config && typeof widget.chart_config === "object" ? widget.chart_config : {};
   const type = String(widget.type || "table").toLowerCase();
   const rawType =
-    type === "count" || type === "sum" ? "kpi" : type === "graph" ? "graph" : type === "heading" ? "heading" : type === "section" ? "container" : "table";
+    type === "count" || type === "sum"
+      ? "kpi"
+      : type === "graph"
+        ? "graph"
+        : type === "heading"
+          ? "heading"
+          : type === "section"
+            ? "container"
+            : type === "hybrid"
+              ? "table"
+              : "table";
+  const hybridMode = chartConfig.is_hybrid === true || type === "hybrid" || String(chartConfig.data_source || "").toLowerCase() === "hybrid";
   const tableOptions = readTableWidgetOptions(widget, chartConfig);
 
   return {
@@ -310,7 +345,7 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
     title: String(widget.title || "").trim(),
     description: String(widget.description || "").trim(),
     query: String(widget.query || "").trim(),
-    dataSource: String(chartConfig.data_source || "ims_postgresql").toLowerCase(),
+    dataSource: hybridMode ? "hybrid" : String(chartConfig.data_source || "ims_postgresql").toLowerCase(),
     erpFilter: chartConfig.erp_filter && typeof chartConfig.erp_filter === "object" ? chartConfig.erp_filter : {},
     emptyText: String(chartConfig.emptyText || "Click edit and add query"),
     ...tableOptions,
@@ -330,6 +365,7 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
     nestedLayout: Array.isArray(chartConfig.nested_layout) ? chartConfig.nested_layout : [],
     nestedLayoutPx: Array.isArray(chartConfig.nested_layout_px) ? chartConfig.nested_layout_px : [],
     mobileNestedLayout: Array.isArray(chartConfig.mobile_nested_layout) ? chartConfig.mobile_nested_layout : [],
+    mobileNestedLayoutPx: Array.isArray(chartConfig.mobile_nested_layout_px) ? chartConfig.mobile_nested_layout_px : [],
     mobilePaddingLeft: chartConfig.mobile_padding_left ?? 8,
     mobilePaddingRight: chartConfig.mobile_padding_right ?? 8,
     mobilePaddingTop: chartConfig.mobile_padding_top ?? 8,
@@ -381,6 +417,15 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
     linkUrl: String(chartConfig.link_url || widget.linkUrl || widget.link_url || "").trim(),
     linkAppId: String(chartConfig.link_app_id || widget.linkAppId || widget.link_app_id || "").trim(),
     linkPageId: String(chartConfig.link_page_id || widget.linkPageId || widget.link_page_id || "").trim(),
+    chart_config: {
+      ...chartConfig,
+      is_hybrid: hybridMode,
+      hybrid_mssql_query: chartConfig.hybrid_mssql_query || "",
+      hybrid_external_source: chartConfig.hybrid_external_source
+        || (String(chartConfig.data_source || "").toLowerCase() === "erp_mssql" ? "erp_mssql"
+          : String(chartConfig.data_source || "").toLowerCase() === "hrms_mssql" ? "hrms_mssql"
+            : "erp_mssql"),
+    },
   };
 }
 
@@ -396,9 +441,11 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
           ? "heading"
           : rawType === "container"
             ? "section"
-            : rawType === "count" || rawType === "sum" || rawType === "section"
-              ? rawType
-              : "table";
+            : rawType === "hybrid"
+              ? "table"
+              : rawType === "count" || rawType === "sum" || rawType === "section"
+                ? rawType
+                : "table";
   const tableChartConfig = tableWidgetOptionsToChartConfig(stored);
   const tableStyleChartConfig = tableStyleToChartConfig(stored.style);
 
@@ -454,6 +501,10 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       link_url: stored.linkUrl || "",
       link_app_id: stored.linkAppId || "",
       link_page_id: stored.linkPageId || "",
+      is_hybrid: stored.chart_config?.is_hybrid === true
+        || String(stored.dataSource || "").toLowerCase() === "hybrid",
+      hybrid_mssql_query: stored.chart_config?.hybrid_mssql_query || "",
+      hybrid_external_source: stored.chart_config?.hybrid_external_source || "erp_mssql",
     },
     layout: sanitizeLayoutCoords(stored.layout, stored.id || `cfg_${idx}`, idx),
     mobile_layout: sanitizeLayoutCoords(stored.mobileLayout, stored.id || `cfg_${idx}`, idx),

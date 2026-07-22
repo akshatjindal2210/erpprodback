@@ -73,6 +73,8 @@ const config = {
   frontend_url: process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",").map((u) => u.trim()).filter(Boolean) : ["http://localhost:3000"],
   uploadPath: getUploadPath(),
   uploadPublicPath: "uploads",
+  // Keep >= multer file uploads (20mb) and large dashboard JSON saves.
+  bodyParserLimit: "100mb",
   cookie_name: "auth_token",
   /** Live: NODE_ENV=production + DOMAIN=.jflbharat.com | Test: development + localhost */
   cookie_options: {

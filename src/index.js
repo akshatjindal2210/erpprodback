@@ -19,13 +19,16 @@ const app = express();
 
 app.set("trust proxy", 1);
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// CORS before body parsers so 413/parse errors still get Access-Control headers
+// (otherwise the browser reports a generic "Failed to fetch" / "Server not responding").
+app.use(cors(corsOptions));
+
+// Match/exceed file-upload size (multer 20mb) and large dashboard JSON.
+app.use(express.json({ limit: config.bodyParserLimit }));
+app.use(express.urlencoded({ extended: true, limit: config.bodyParserLimit }));
 
 app.use(morganMiddleware);
 app.use(requestLogger);
-
-app.use(cors(corsOptions));
 
 app.use(cookieParser());
 app.use(imsMetaMiddleware);
@@ -58,6 +61,13 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
+  if (err?.type === "entity.too.large" || err?.status === 413) {
+    logger.warn(`Payload too large — ${req.method} ${req.originalUrl}`);
+    return res.status(413).json({
+      success: false,
+      message: "Request payload is too large. Try saving fewer widgets or contact support.",
+    });
+  }
   logger.error(`${err.message} — ${req.method} ${req.originalUrl}`);
   res.status(500).json({ success: false, message: "Internal server error" });
 });

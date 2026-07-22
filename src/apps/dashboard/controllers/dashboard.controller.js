@@ -4,13 +4,15 @@ import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { getDashboardConfigByKey, listDashboardConfigs, getDashboardWidgetsFromConfig, saveDashboardWidgetsToConfig, upsertDashboardConfig, deactivateDashboardByKey, listUserAccessibleDashboards, listAllPublishedDashboards, resolveUserDefaultDashboardKey, userCanAccessDashboard, clearDefaultForUsersFromOtherDashboards } from "../models/dashboardConfig.model.js";
 import { parseDashboardDocument, remapDashboardWidgetIds, sanitizeLayoutCoords, widgetToRuntimeRow, widgetToStoredJson, normalizeDeviceTarget } from "../utils/dashboardJsonSchema.js";
 import { executeReadOnlyWidgetQuery } from "../utils/queryExecutor.js";
+import { HybridQueryEngine, resolveHybridPgSql } from "../utils/hybridQueryEngine.js";
 import { validateErpMssqlWidgetQuery, resolveErpMssqlSqlFromRequest, resolveErpMssqlRuntimeFilters, isErpMssqlDirectRequest, parseErpMssqlDirectRequest, isExternalMssqlSource, resolveExternalMssqlConfig, validateExternalMssqlWidgetQuery } from "../utils/erpMssqlQuery.js";
 import { validateSelectSql } from "../utils/sqlGenerator.js";
 import { isConfiguredWidgetQuery } from "../utils/widgetQuery.js";
 import { fetchImsDataRaw } from "../../ims/services/ims.service.js";
+import { clearImsMetaForResponse } from "../../ims/utils/erp-api/imsMeta.js";
 
 const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings"]);
-const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql"]);
+const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql", "hybrid"]);
 const ALLOWED_AUDIENCE_SCOPES = new Set(["global", "users"]);
 const APP_TABLE_PREFIX = {
   ims: ["ims_"],
@@ -246,13 +248,16 @@ export const getTables = async (req, res) => {
   try {
     const appKey = normalizeAppKey(req.query?.app || req.body?.app_key || "ims");
     const dbSource = normalizeDbSource(req.query?.db_source || req.body?.db_source || "ims_postgresql");
-    if (isExternalMssqlSource(dbSource)) {
-      const { tablesRequestedData } = resolveExternalMssqlConfig(dbSource);
+    const effectiveDbSource = dbSource === "hybrid" ? "ims_postgresql" : dbSource;
+    if (isExternalMssqlSource(effectiveDbSource)) {
+      const { tablesRequestedData } = resolveExternalMssqlConfig(effectiveDbSource);
       const imsRes = await fetchImsDataRaw(tablesRequestedData);
       const rows = Array.isArray(imsRes?.records) ? imsRes.records : [];
       const values = rows
         .map((row) => String(row?.table_name || row?.name || "").trim())
         .filter(Boolean);
+      // Schema browser only — don't attach a global IMS toast when the list is empty/soft-failed.
+      clearImsMetaForResponse();
       return res.json({ success: true, data: values });
     }
 
@@ -297,21 +302,39 @@ export const getColumns = async (req, res) => {
 };
 
 function sanitizeWidgetBody(body = {}) {
-  const allowedTypes = new Set(["count", "sum", "table", "graph", "heading", "section"]);
+  const allowedTypes = new Set(["count", "sum", "table", "graph", "heading", "section", "hybrid"]);
   const title = String(body.title || "").trim();
   const type = String(body.type || "").trim().toLowerCase();
   const query = String(body.query || "").trim();
   const dbSource = normalizeDbSource(body?.chart_config?.data_source || "ims_postgresql");
-  const requiresQuery = type === "count" || type === "sum" || type === "table" || type === "graph";
+  const isHybridWidget = body.chart_config?.is_hybrid === true || dbSource === "hybrid";
+  const hybridExternalSource = normalizeDbSource(
+    body?.chart_config?.hybrid_external_source
+      || (isExternalMssqlSource(dbSource) ? dbSource : "erp_mssql"),
+  );
+  const requiresQuery = type === "count" || type === "sum" || type === "table" || type === "graph" || type === "hybrid";
   const isDraft = body.is_published === false;
 
   if (!allowedTypes.has(type)) throw new Error("Invalid widget type.");
   if (requiresQuery && !query && !isDraft) throw new Error("Query is required.");
-  if (requiresQuery && query && !isExternalMssqlSource(dbSource)) {
-    validateSelectSql(query);
-  }
-  if (requiresQuery && query && isExternalMssqlSource(dbSource)) {
-    validateExternalMssqlWidgetQuery(query, dbSource);
+
+  if (isHybridWidget || type === "hybrid") {
+    if (!isDraft) {
+      const hybridMssql = String(body.chart_config?.hybrid_mssql_query || "").trim();
+      if (!hybridMssql) {
+        throw new Error("Hybrid widgets require an external MSSQL query.");
+      }
+      validateExternalMssqlWidgetQuery(hybridMssql, hybridExternalSource);
+      if (query) resolveHybridPgSql(query, {});
+    }
+  } else {
+    if (requiresQuery && query && !isDraft) {
+      if (!isExternalMssqlSource(dbSource)) {
+        validateSelectSql(query);
+      } else {
+        validateExternalMssqlWidgetQuery(query, dbSource);
+      }
+    }
   }
 
   const autoTitle =
@@ -323,11 +346,13 @@ function sanitizeWidgetBody(body = {}) {
           ? "Table Widget"
           : type === "graph"
             ? "Graph Widget"
-            : type === "heading"
-              ? "Dashboard Heading"
-              : type === "section"
-                ? ""
-                : "Widget";
+            : type === "hybrid"
+              ? "Hybrid Widget"
+              : type === "heading"
+                ? "Dashboard Heading"
+                : type === "section"
+                  ? ""
+                  : "Widget";
 
   const audienceScope = normalizeAudienceScope(body.audience_scope || "global");
   const targetUserIds = normalizeTargetUserIds(body.target_user_ids);
@@ -341,7 +366,9 @@ function sanitizeWidgetBody(body = {}) {
     query: requiresQuery ? query : "",
     chart_config: {
       ...(body.chart_config && typeof body.chart_config === "object" ? body.chart_config : {}),
-      data_source: dbSource,
+      data_source: isHybridWidget ? "hybrid" : dbSource,
+      is_hybrid: isHybridWidget,
+      hybrid_external_source: isHybridWidget ? hybridExternalSource : undefined,
       erp_filter:
         body?.chart_config?.erp_filter && typeof body.chart_config.erp_filter === "object"
           ? body.chart_config.erp_filter
@@ -661,14 +688,24 @@ export const previewWidgetHandler = async (req, res) => {
     }
 
     const dbSource = normalizeDbSource(body.db_source || q.db_source || "ims_postgresql");
-    if (isExternalMssqlSource(dbSource)) {
+    const isHybridWidget = body.chart_config?.is_hybrid === true || dbSource === "hybrid";
+    const hybridExternalSource = normalizeDbSource(
+      body?.chart_config?.hybrid_external_source
+        || (isExternalMssqlSource(dbSource) ? dbSource : "erp_mssql"),
+    );
+    if (isExternalMssqlSource(dbSource) && !isHybridWidget) {
       const rawSql = resolveErpMssqlSqlFromRequest(body, q);
       const runtimeFilters = resolveWidgetFiltersForUser(
         req,
         resolveErpMssqlRuntimeFilters(body, q),
       );
       validateExternalMssqlWidgetQuery(rawSql, dbSource);
-      const result = await executeReadOnlyWidgetQuery(rawSql, { source: dbSource, filters: runtimeFilters });
+      const result = await executeReadOnlyWidgetQuery(rawSql, { 
+        source: dbSource, 
+        filters: runtimeFilters,
+        is_hybrid: body.chart_config?.is_hybrid === true,
+        hybrid_mssql_query: body.chart_config?.hybrid_mssql_query
+      });
       return res.json({
         success: true,
         data: result.rows,
@@ -679,9 +716,68 @@ export const previewWidgetHandler = async (req, res) => {
 
     const rawSql = String(body.query || q.query || "").trim();
     const filters = resolveWidgetFiltersForUser(req, body.filters || q.filters || {});
-    validateSelectSql(rawSql);
-    const result = await executeReadOnlyWidgetQuery(rawSql, { source: dbSource, filters });
+    // Hybrid resolves {{temp_erp_data}} / date tokens inside the engine — skip pre-validate here.
+    if (!isHybridWidget) {
+      validateSelectSql(rawSql);
+    }
+    const result = await executeReadOnlyWidgetQuery(rawSql, { 
+      source: dbSource, 
+      filters,
+      is_hybrid: isHybridWidget,
+      hybrid_mssql_query: body.chart_config?.hybrid_mssql_query,
+      hybrid_external_source: hybridExternalSource,
+    });
     res.json({ success: true, data: result.rows });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const hybridPreviewHandler = async (req, res) => {
+  try {
+    const { mssql_query, pg_query, db_source, filters, stage_only } = req.body;
+
+    if (!mssql_query) {
+      throw new Error("External MSSQL query is required.");
+    }
+
+    const source = normalizeDbSource(db_source || "erp_mssql");
+    const externalSource = source === "hybrid" ? "erp_mssql" : source;
+    if (!isExternalMssqlSource(externalSource)) {
+      throw new Error("Hybrid staging requires an external SQL Server source (ERP / HRMS).");
+    }
+    const runtimeFilters = resolveWidgetFiltersForUser(req, filters || {});
+
+    if (stage_only === true || !pg_query) {
+      validateExternalMssqlWidgetQuery(mssql_query, externalSource);
+      const preview = await HybridQueryEngine.previewExternal(
+        { mssqlQuery: mssql_query, source: externalSource },
+        runtimeFilters,
+      );
+      return res.json({
+        success: true,
+        data: preview.sampleRows,
+        columns: preview.columns,
+        placeholder: preview.placeholder,
+        row_count: preview.sampleRows.length,
+        external_row_count: preview.externalRowCount,
+      });
+    }
+
+    validateExternalMssqlWidgetQuery(mssql_query, externalSource);
+
+    const result = await HybridQueryEngine.executeHybridPreview(
+      { mssqlQuery: mssql_query, source: externalSource },
+      pg_query,
+      runtimeFilters,
+    );
+
+    res.json({
+      success: true,
+      data: result.rows,
+      row_count: result.rowCount,
+      external_row_count: result.externalRowCount,
+    });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -841,17 +937,38 @@ export const getDashboardWidgetsHandler = async (req, res) => {
           continue;
         }
         const widgetSource = normalizeDbSource(widget?.chart_config?.data_source || "ims_postgresql");
+        const isHybridWidget = widget?.chart_config?.is_hybrid === true || widgetSource === "hybrid";
+        const hybridExternalSource = normalizeDbSource(
+          widget?.chart_config?.hybrid_external_source
+            || (isExternalMssqlSource(widgetSource) ? widgetSource : "erp_mssql"),
+        );
         const result = await executeReadOnlyWidgetQuery(widget.query, {
           source: widgetSource,
           filters: runtimeFilters,
+          is_hybrid: isHybridWidget,
+          hybrid_mssql_query: widget?.chart_config?.hybrid_mssql_query,
+          hybrid_external_source: hybridExternalSource,
         });
         results.push(toPublicWidget(widget, { data: result.rows, error: null, has_query: true }));
       } catch (error) {
         // Keep dashboard resilient: one bad widget should not break all.
-        results.push(toPublicWidget(widget, { data: [], error: "Failed to load this widget.", has_query: true }));
+        results.push(toPublicWidget(widget, {
+          data: [],
+          error: error?.message || "Failed to load this widget.",
+          has_query: true,
+        }));
       }
     }
 
+    // Only strip global IMS meta when something actually rendered. If every
+    // IMS-backed widget failed and returned no rows, leave ims_meta so the
+    // client canasts at failure time (not as a false positive beside content).
+    const hasUsableWidgetRows = results.some(
+      (widget) => Array.isArray(widget?.data) && widget.data.length > 0,
+    );
+    if (hasUsableWidgetRows) {
+      clearImsMetaForResponse();
+    }
     res.json({
       success: true,
       data: results,
@@ -900,9 +1017,10 @@ export const saveDashboardDraftHandler = async (req, res) => {
     });
     await applyDashboardDefaultForUsers(appKey, pageKey, dashboardKey, resolvedDefaultForUserIds, req.user?.id ?? null);
 
-    const { widgets: normalizedWidgets, layoutPx: normalizedLayoutPx } = remapDashboardWidgetIds(
+    const { widgets: normalizedWidgets, layoutPx: normalizedLayoutPx, layoutPxMobile: normalizedLayoutPxMobile } = remapDashboardWidgetIds(
       dashboardJson.widgets,
       dashboardJson.layout_px,
+      dashboardJson.layout_px_mobile,
     );
 
     const row = await upsertDashboardConfig({
@@ -917,6 +1035,7 @@ export const saveDashboardDraftHandler = async (req, res) => {
         ...dashboardJson,
         widgets: normalizedWidgets,
         ...(normalizedLayoutPx.length ? { layout_px: normalizedLayoutPx } : {}),
+        ...(normalizedLayoutPxMobile.length ? { layout_px_mobile: normalizedLayoutPxMobile } : {}),
       },
       actorId: req.user?.id ?? null,
       isPublished: keepPublished,
@@ -955,9 +1074,10 @@ export const publishDashboardConfigHandler = async (req, res) => {
       targetUserIds: resolvedTargetUserIds,
     });
     await applyDashboardDefaultForUsers(appKey, pageKey, dashboardKey, resolvedDefaultForUserIds, req.user?.id ?? null);
-    const { widgets: normalizedWidgets, layoutPx: normalizedLayoutPx } = remapDashboardWidgetIds(
+    const { widgets: normalizedWidgets, layoutPx: normalizedLayoutPx, layoutPxMobile: normalizedLayoutPxMobile } = remapDashboardWidgetIds(
       dashboardJson.widgets,
       dashboardJson.layout_px,
+      dashboardJson.layout_px_mobile,
     );
     const row = await upsertDashboardConfig({
       appKey,
@@ -971,6 +1091,7 @@ export const publishDashboardConfigHandler = async (req, res) => {
         ...dashboardJson,
         widgets: normalizedWidgets,
         ...(normalizedLayoutPx.length ? { layout_px: normalizedLayoutPx } : {}),
+        ...(normalizedLayoutPxMobile.length ? { layout_px_mobile: normalizedLayoutPxMobile } : {}),
       },
       actorId: req.user?.id ?? null,
       isPublished: true,

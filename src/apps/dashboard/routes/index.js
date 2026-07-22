@@ -19,6 +19,7 @@ router.post("/widgets/:id/publish", superAdminOnly, dashboardController.publishW
 router.post("/widgets/:id/unpublish", superAdminOnly, dashboardController.unpublishWidgetHandler);
 router.get("/widgets/preview", superAdminOnly, dashboardController.previewWidgetHandler);
 router.post("/widgets/preview", superAdminOnly, dashboardController.previewWidgetHandler);
+router.post("/widgets/hybrid-preview", superAdminOnly, dashboardController.hybridPreviewHandler);
 router.post("/configs/save-draft", superAdminOnly, dashboardController.saveDashboardDraftHandler);
 router.post("/configs/publish", superAdminOnly, dashboardController.publishDashboardConfigHandler);
 router.post("/configs/unpublish", superAdminOnly, dashboardController.unpublishDashboardConfigHandler);

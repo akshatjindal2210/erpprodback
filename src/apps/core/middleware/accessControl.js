@@ -242,7 +242,7 @@ export const accessControlAny = (alternatives) => {
   };
 };
 
-/** Body se permission_module + permission_action leke user ki page permission check karo. */
+/** Read permission_module and permission_action from the request body and enforce page permission. */
 export const dynamicAccessControl = () => {
   return (req, res, next) => {
     const moduleName = req.body?.permission_module;

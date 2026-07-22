@@ -2,6 +2,7 @@ import { withTransaction } from "../../../config/db.js";
 import { toSafeLimitedSql } from "./sqlGenerator.js";
 import { fetchImsDataRaw } from "../../ims/services/ims.service.js";
 import { buildExternalMssqlPayload, isExternalMssqlSource, resolveExternalMssqlSql } from "./externalMssqlQuery.js";
+import { HybridQueryEngine } from "./hybridQueryEngine.js";
 
 const QUERY_TIMEOUT_MS = 8000;
 const DATE_FILTER_KEYS = ["created_at", "createdat", "created_on", "createdon", "date", "doc_dt", "docdt", "approved_at", "updated_at"];
@@ -110,12 +111,29 @@ async function runExternalMssqlReadOnlyQuery(rawSql, filters = {}, source = "erp
 export async function executeReadOnlyWidgetQuery(rawSql, options = {}) {
   const source = String(options?.source || "ims_postgresql").toLowerCase();
   const filters = options?.filters && typeof options.filters === "object" ? options.filters : {};
+  const isHybrid = options?.is_hybrid === true || source === "hybrid";
+  const hybridMssql = String(options?.hybrid_mssql_query || "").trim();
+
+  if (isHybrid) {
+    if (!hybridMssql) {
+      throw new Error("Hybrid widget is missing the external MSSQL query.");
+    }
+    const externalSource = isExternalMssqlSource(source)
+      ? source
+      : String(options?.hybrid_external_source || "erp_mssql").toLowerCase();
+    const result = await HybridQueryEngine.executeHybridPreview(
+      { mssqlQuery: hybridMssql, source: externalSource },
+      rawSql,
+      filters,
+    );
+    return {
+      rows: result.rows,
+      erpRequest: { hybrid: true, tmpTable: result.tmpTableName },
+    };
+  }
+
   if (isExternalMssqlSource(source)) {
     const { rows, erpRequest } = await runExternalMssqlReadOnlyQuery(rawSql, filters, source);
-    // ERP SQL is authoritative — only {{fromDate}}/{{toDate}}/{{userId}}/{{fyuid}} in the query are applied
-    // (via resolveErpMssqlSql). Do not post-filter by docdt etc.; builder preview always sends
-    // today's dashboard dates and would hide rows whose docdt is outside that range.
-    // rows: applyResultFilters(rows, filters),
     return {
       rows,
       erpRequest,

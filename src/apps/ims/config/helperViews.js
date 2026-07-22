@@ -180,7 +180,7 @@ function fieldsForCategory(mod, act) {
   return null;
 }
 
-// ─── Sirf access check (SQL fields nahi) — [] = allowed ─────────────────────
+// ─── Access check only (no SQL fields) — [] = allowed ───────────────────────
 function allowOnly(mod, act, pageModule, allowedActions) {
   if (mod !== pageModule || act == null) return null;
   return allowedActions.includes(act) ? [] : null;
@@ -222,7 +222,7 @@ function fieldsForStockAdjustment(mod, act) {
   return allowOnly(mod, act, "stock_adjustment", [VIEW, ...FORM_ACTIONS]);
 }
 
-// ─── Route helper keys (helperAccess("...") mein same naam) ─────────────────
+// ─── Route helper keys (same names as helperAccess("...")) ──────────────────
 const BY_HELPER = {
   items: fieldsForItems,
   ledgers: fieldsForLedgers,

@@ -94,15 +94,20 @@ export const fetchImsDataRaw = async (requestedData, filter = null) => {
     }
     if (!ok) {
       const message = json.message || `IMS HTTP ${response.status}`;
-      noteImsIssue(message);
+      const records = Array.isArray(json.records) ? json.records : [];
+      // Only flag global IMS meta when nothing usable came back.
+      if (!records.length) noteImsIssue(message);
       return {
         success: false,
-        records: Array.isArray(json.records) ? json.records : [],
+        records,
         message,
       };
     }
     if (!json.success) {
-      noteImsIssue(json.message || `IMS "${requestedData}" reported failure.`);
+      const records = Array.isArray(json.records) ? json.records : [];
+      if (!records.length) {
+        noteImsIssue(json.message || `IMS "${requestedData}" reported failure.`);
+      }
     }
     return json;
   } catch (err) {

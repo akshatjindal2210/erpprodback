@@ -85,7 +85,7 @@ export const CRUD_MODULES = {
   forwarding_note_item_wise: {
     idField: "id",
     listFields: [
-      "fi.id", "fi.fuid", "fi.item_dcode", "fi.qty", 
+      "fi.id", "fi.fuid", "fi.item_dcode", "fi.qty", "fi.schno",
       "fi.item_dcode::text AS item_code", "fi.item_dcode AS itemdcode", "NULL::text AS item_desc",
       "fnm.out_entry_locked", "fnm.out_entry_locked_by", "fnm.out_entry_locked_at", "fnm.out_entry_locked_by AS out_entry_locked_by_name",
       "oe.out_uid AS out_entry_uid",

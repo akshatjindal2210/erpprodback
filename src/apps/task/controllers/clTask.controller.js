@@ -3,7 +3,17 @@ import RedTicket from "../models/redTicket.model.js";
 import MisScore from "../models/misScore.model.js";
 import { getISTDateString, normalizeDueTime, getClTaskFillBlockedReason, canSubmitPreviousTask, toYmd, getClTaskFillDeadlineYmd, isClTaskMissed } from "../helpers/clTaskTime.helper.js";
 import { parseFormSchema, parseFormResponses, validateFormEntries, mergeEntryUploadedFiles, buildClAttachmentMeta, parseClAttachments, getOpenFills, archiveOpenFill, buildOpenFormResponses, getAwaitingOpenFills, approveOpenFillInResponses, rejectOpenFillInResponses } from "../helpers/clTaskForm.helper.js";
-import { buildRecurrencePayload, validateClRecurrence, computeClNextOccurrence, computeClFirstOccurrence, clampDayOffset, parseRecurrenceArray, serializeClDate } from "../helpers/clTaskRecurrence.helper.js";
+import { buildRecurrencePayload, validateClRecurrence, computeClNextOccurrence, computeClFirstOccurrence, clampDayOffset, parseRecurrenceArray, serializeClDate, isClOccurrenceDay } from "../helpers/clTaskRecurrence.helper.js";
+import {
+  parseIdList,
+  resolveClMasterAssignees,
+  userMatchesClMasterScope,
+  getUserOrgIds,
+} from "../helpers/clTaskAssignee.helper.js";
+import {
+  masterSnapshotForInstance,
+  spawnInstancesForMasterDay,
+} from "../helpers/clTaskSpawn.helper.js";
 import { actorFromReq, logClTask, masterDeleteSnapshot } from "../services/clTaskLog.service.js";
 import { getCachedPermissions, setCachedPermissions } from "../../../config/permissionCache.js";
 import { assertWithinEditDays } from "../../core/utils/permissionDays.js";
@@ -87,14 +97,18 @@ function canScopeAllClMyTasks(req) {
   return canSeeAllOpenClTasks(req);
 }
 
-function canFillOpenClTask(taskOrMaster, req) {
+async function canFillOpenClTask(taskOrMaster, req) {
   const uid = Number(req.user?.id);
   if (!uid || !taskOrMaster) return false;
-  if (Number(taskOrMaster.person_id) === uid) return true;
   if (String(taskOrMaster.task_type || "").toLowerCase() === "open" && canSeeAllOpenClTasks(req)) {
     return true;
   }
-  return false;
+  // Instance already bound to a person
+  if (taskOrMaster.instance_id != null || taskOrMaster._source === "instance") {
+    return Number(taskOrMaster.person_id) === uid;
+  }
+  if (Number(taskOrMaster.person_id) === uid) return true;
+  return userMatchesClMasterScope(taskOrMaster, uid);
 }
 
 function truthyPermFlag(v) {
@@ -188,40 +202,6 @@ function serializeInstanceRow(row) {
   };
 }
 
-function masterSnapshotForInstance(master, scheduledDate) {
-  const recurrenceData = {
-    recurrence_weekdays: parseRecurrenceArray(master.recurrence_weekdays),
-    recurrence_month_dates: parseRecurrenceArray(master.recurrence_month_dates),
-    recurrence_year_dates: parseRecurrenceArray(master.recurrence_year_dates),
-  };
-  const attachments = parseClAttachments(master.attachment);
-  return {
-    cl_task_id: master.cl_task_id,
-    title: master.title,
-    description: master.description,
-    sop_description: master.sop_description,
-    task_type: master.task_type,
-    recurrence_type: master.recurrence_type,
-    ...recurrenceData,
-    weightage: Number(master.weightage ?? master.wastage) || 1,
-    verification_user_id: master.verification_user_id || null,
-    department_id: master.department_id || null,
-    designation_id: master.designation_id || null,
-    person_id: master.person_id || null,
-    due_time: master.task_type === "frequently" ? (master.due_time || "11:00") : null,
-    day_offset: master.task_type === "frequently"
-      ? (Number.isFinite(Number(master.day_offset)) ? Math.max(0, Math.min(14, Math.floor(Number(master.day_offset)))) : 0)
-      : 0,
-    scheduled_date: toYmd(scheduledDate) || getISTDateString(),
-    status: "pending",
-    form_schema: parseFormSchema(master.form_schema),
-    verification_required: master.verification_required !== false,
-    scoring_enabled: master.scoring_enabled !== false,
-    sop_required: master.sop_required === true,
-    attachment: attachments.length ? attachments : null,
-  };
-}
-
 /** On activate: spawn due instance(s) and advance next_occurrence (frequently only).
  *  Open tasks stay on Task Master — assignee Due loads masters; submit creates a CL instance. */
 async function spawnOnActivate(master) {
@@ -241,24 +221,10 @@ async function spawnOnActivate(master) {
     recurrence_year_dates: parseRecurrenceArray(master.recurrence_year_dates),
   };
 
-  // Catch up any overdue due dates through today (same as cron).
-  // Skip days already past fill window — those never appear in Due.
   let guard = 0;
   while (cursor && cursor <= today && guard < 60) {
     guard += 1;
-    const already = await ClTask.hasPendingInstanceForDay(master.cl_task_id, master.person_id, cursor);
-    if (!already) {
-      const shell = {
-        task_type: "frequently",
-        status: "pending",
-        scheduled_date: cursor,
-        due_time: master.due_time || "11:00",
-        day_offset: master.day_offset,
-      };
-      if (!isClTaskMissed(shell)) {
-        await ClTask.createInstance(masterSnapshotForInstance(master, cursor));
-      }
-    }
+    await spawnInstancesForMasterDay(master, cursor);
     cursor = computeClNextOccurrence(master.recurrence_type, recurrenceData, cursor);
   }
 
@@ -352,7 +318,7 @@ async function loadSubmissionFillsForTask(task) {
     });
 }
 
-function canViewSubmissionHistory(task, req) {
+async function canViewSubmissionHistory(task, req) {
   const uid = Number(req.user?.id);
   if (!uid || !task) return false;
   if (canSeeAllVerificationTasks(req)) return true;
@@ -360,19 +326,26 @@ function canViewSubmissionHistory(task, req) {
   if (Number(task.person_id) === uid) return true;
   if (Number(task.verification_user_id) === uid) return true;
   if (Number(task.master_created_by) === uid) return true;
+  // Open multi/dept master on Due: person_id may be stamped as viewer, or null on raw master
+  if (String(task.task_type || "").toLowerCase() === "open") {
+    return userMatchesClMasterScope(task, uid);
+  }
   return false;
 }
 
-/** Validate + normalize master payload from JSON or multipart body. */
+/** Validate + normalize master payload from JSON or multipart body.
+ *  One master stores assignment scope (dept / designation / person ids).
+ *  Instances are created per person at spawn / open-submit time. */
 function buildValidatedMasterFields(body) {
   const title = body.title;
   const task_type = body.task_type;
   const recurrence_type = body.recurrence_type;
   const weightage = body.weightage ?? body.wastage;
   const verification_user_id = body.verification_user_id;
-  const department_id = body.department_id;
-  const designation_id = body.designation_id;
-  const person_id = body.person_id;
+  const department_id = body.department_id ? Number(body.department_id) : null;
+  const designation_id = body.designation_id ? Number(body.designation_id) : null;
+  const assigneePersonIds = parseIdList(body.assignee_person_ids ?? body.person_ids);
+  let person_id = body.person_id ? Number(body.person_id) : null;
   const due_time = body.due_time;
   const form_schema = body.form_schema;
   const verification_required = body.verification_required;
@@ -386,9 +359,28 @@ function buildValidatedMasterFields(body) {
   if (!title?.trim()) {
     return { error: "Title is required" };
   }
-  if (!person_id) {
-    return { error: "Person is required" };
+
+  // Normalize: single person in list → person_id; multi → assignee_person_ids only
+  let storedPersonIds = assigneePersonIds;
+  if (!storedPersonIds.length && person_id) {
+    storedPersonIds = [person_id];
   }
+  if (storedPersonIds.length === 1) {
+    person_id = storedPersonIds[0];
+    storedPersonIds = [];
+  } else if (storedPersonIds.length > 1) {
+    person_id = null;
+  }
+
+  const hasDeptScope = !!department_id;
+  const hasPersonScope = !!person_id || storedPersonIds.length > 0;
+  if (!hasDeptScope && !hasPersonScope) {
+    return { error: "Select a department or at least one person" };
+  }
+  if (designation_id && !department_id && !hasPersonScope) {
+    return { error: "Department is required when designation is set" };
+  }
+
   if (!task_type || !["open", "frequently"].includes(task_type)) {
     return { error: "Task type must be open or frequently" };
   }
@@ -419,7 +411,17 @@ function buildValidatedMasterFields(body) {
   if (needsVerification && !verification_user_id) {
     return { error: "Verification person is required" };
   }
-  if (needsVerification && verification_user_id && person_id && Number(verification_user_id) === Number(person_id)) {
+  // Single person: assignee cannot verify themselves.
+  // Multi-person: any user may be the verifier.
+  // Dept/desig: external designated verifier only (checked against resolved assignees on create/update).
+  const isMultiPerson = storedPersonIds.length > 1;
+  if (
+    !isMultiPerson &&
+    needsVerification &&
+    verification_user_id &&
+    person_id &&
+    Number(verification_user_id) === Number(person_id)
+  ) {
     return { error: "Assignee cannot be the verification person" };
   }
 
@@ -456,6 +458,7 @@ function buildValidatedMasterFields(body) {
       department_id: department_id || null,
       designation_id: designation_id || null,
       person_id: person_id || null,
+      assignee_person_ids: storedPersonIds.length ? storedPersonIds : null,
       due_time: task_type === "frequently" ? (resolvedDueTime || "11:00") : null,
       day_offset: task_type === "frequently" ? clampDayOffset(day_offset) : 0,
       form_schema: parsedSchema,
@@ -671,12 +674,29 @@ export async function getMyClTasks(req, res) {
           order: "ASC",
         };
         if (!canScopeAllClMyTasks(req)) {
-          openMasterFilters.person_id = req.user.id;
+          // Scope match (dept / desig / person / assignee_person_ids) — not person_id only
+          openMasterFilters.person_id = undefined;
         }
         const openMasters = await ClTask.getMasters(openMasterFilters);
-        const masterRows = (openMasters || [])
-          .filter((m) => m && String(m.task_type) === "open")
-          .map(serializeOpenMasterDue)
+        const uid = Number(req.user.id);
+        const scopedMasters = [];
+        for (const m of openMasters || []) {
+          if (!m || String(m.task_type) !== "open") continue;
+          if (canScopeAllClMyTasks(req) || (await userMatchesClMasterScope(m, uid))) {
+            scopedMasters.push(m);
+          }
+        }
+        const masterRows = scopedMasters
+          .map((m) => {
+            const row = serializeOpenMasterDue(m);
+            if (!row) return null;
+            // Stamp viewer as assignee so fill history / FE person filters work for multi/dept masters
+            if (!canScopeAllClMyTasks(req)) {
+              row.person_id = uid;
+              row.person_name = req.user?.name || row.person_name || null;
+            }
+            return row;
+          })
           .filter(Boolean);
         // Frequently must have instance_id (clone). Drop any master-shaped frequent rows.
         const instanceRows = data.filter(
@@ -742,14 +762,14 @@ export async function getClTaskInstanceDetail(req, res) {
         if (!master) {
           return res.status(404).json({ success: false, message: "Task not found" });
         }
-        if (!canViewSubmissionHistory({ ...master, master_created_by: master.created_by }, req)) {
+        if (!(await canViewSubmissionHistory({ ...master, master_created_by: master.created_by }, req))) {
           return res.status(403).json({ success: false, message: "Not allowed to view this task" });
         }
         return res.json({
           success: true,
           data: {
             ...serializeOpenMasterDue(master),
-            person_id: master.person_id,
+            person_id: personIdHint || master.person_id,
             submission_fills: [],
             sibling_fills: [],
             fill_count: 0,
@@ -767,7 +787,7 @@ export async function getClTaskInstanceDetail(req, res) {
       return res.status(404).json({ success: false, message: "Task not found" });
     }
 
-    if (!canViewSubmissionHistory(task, req)) {
+    if (!(await canViewSubmissionHistory(task, req))) {
       return res.status(403).json({ success: false, message: "Not allowed to view this task" });
     }
 
@@ -799,6 +819,9 @@ export async function getVerificationClTasks(req, res) {
       sortBy = "submitted_at",
       order = "DESC",
       status = "approval",
+      department_id,
+      designation_id,
+      person_id,
     } = listParamsFromReq(req);
 
     /** UI: All / Due / Missed / Approval / Complete */
@@ -824,6 +847,9 @@ export async function getVerificationClTasks(req, res) {
       limit: Math.min(parseNumber(limit) || 1000, 5000),
       sortBy,
       order: String(order || "DESC").toUpperCase() === "DESC" ? "DESC" : "ASC",
+      department_id: parseNumber(department_id),
+      designation_id: parseNumber(designation_id),
+      person_id: parseNumber(person_id),
     };
     /** Normal users: only own verification queue. Super admin + EA: everyone. */
     if (!canSeeAllVerificationTasks(req)) {
@@ -880,6 +906,28 @@ export async function createClTask(req, res) {
     const built = buildValidatedMasterFields(req.body);
     if (built.error) {
       return res.status(400).json({ success: false, message: built.error });
+    }
+
+    const assignees = await resolveClMasterAssignees(built.data);
+    if (!assignees.length) {
+      return res.status(400).json({
+        success: false,
+        message: built.data.department_id
+          ? "No active users found for this department / designation"
+          : "No active assignees found",
+      });
+    }
+    const isMultiPerson = (built.data.assignee_person_ids || []).length > 1;
+    if (
+      !isMultiPerson &&
+      built.data.verification_required &&
+      built.data.verification_user_id &&
+      assignees.some((u) => Number(u.id) === Number(built.data.verification_user_id))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Assignee cannot be the verification person",
+      });
     }
 
     const uploaded = (req.files || []).map(buildClAttachmentMeta).filter(Boolean);
@@ -964,6 +1012,28 @@ export async function updateClTask(req, res) {
       return res.status(400).json({ success: false, message: built.error });
     }
 
+    const assignees = await resolveClMasterAssignees(built.data);
+    if (!assignees.length) {
+      return res.status(400).json({
+        success: false,
+        message: built.data.department_id
+          ? "No active users found for this department / designation"
+          : "No active assignees found",
+      });
+    }
+    const isMultiPerson = (built.data.assignee_person_ids || []).length > 1;
+    if (
+      !isMultiPerson &&
+      built.data.verification_required &&
+      built.data.verification_user_id &&
+      assignees.some((u) => Number(u.id) === Number(built.data.verification_user_id))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Assignee cannot be the verification person",
+      });
+    }
+
     const kept =
       req.body.existing_attachments != null
         ? parseClAttachments(req.body.existing_attachments)
@@ -983,6 +1053,27 @@ export async function updateClTask(req, res) {
     // Pending assigned tasks get latest form / SOP / attachment so assignee sees fields
     await ClTask.syncPendingInstancesFromMaster(id, payload);
 
+    // Reconcile assignee scope: drop pending for removed people; spawn today for new ones
+    const allowedIds = assignees.map((u) => Number(u.id));
+    await ClTask.deletePendingInstancesNotInPersons(id, allowedIds);
+
+    const refreshed = await ClTask.getMasterById(id);
+    if (
+      refreshed &&
+      isTruthyFlag(refreshed.approved ?? refreshed.is_active) &&
+      refreshed.task_type === "frequently"
+    ) {
+      const today = getISTDateString();
+      const recurrenceData = {
+        recurrence_weekdays: parseRecurrenceArray(refreshed.recurrence_weekdays),
+        recurrence_month_dates: parseRecurrenceArray(refreshed.recurrence_month_dates),
+        recurrence_year_dates: parseRecurrenceArray(refreshed.recurrence_year_dates),
+      };
+      if (isClOccurrenceDay(refreshed.recurrence_type, recurrenceData, today)) {
+        await spawnInstancesForMasterDay(refreshed, today);
+      }
+    }
+
     await logClTask(req, {
       action: "update",
       entity_id: id,
@@ -992,6 +1083,7 @@ export async function updateClTask(req, res) {
         task_type: built.data.task_type,
         person_id: built.data.person_id,
         day_offset: built.data.day_offset,
+        assignee_count: assignees.length,
       },
     });
 
@@ -1005,8 +1097,6 @@ export async function updateClTask(req, res) {
       await ClTask.updateNextOccurrence(id, null);
     } else if (built.data.task_type === "frequently") {
       const instanceCount = Number(existing.instance_count) || 0;
-      // Never activated: recompute first occurrence from day_offset.
-      // Already running: advance next cycle from today (IST).
       if (!isTruthyFlag(existing.approved ?? existing.is_active) && instanceCount === 0) {
         await ClTask.updateNextOccurrence(id, computeClFirstOccurrence(built.data.day_offset));
       } else if (isTruthyFlag(existing.approved ?? existing.is_active)) {
@@ -1052,12 +1142,16 @@ export async function submitClTask(req, res) {
       if (!isTruthyFlag(master.approved ?? master.is_active)) {
         return res.status(400).json({ success: false, message: "This open task is not active" });
       }
-      if (!canFillOpenClTask(master, req)) {
+      if (!(await canFillOpenClTask(master, req))) {
         return res.status(403).json({ success: false, message: "You are not assigned to this task" });
       }
-      id = await ClTask.createInstance(
-        masterSnapshotForInstance(master, getISTDateString()),
-      );
+      const org = await getUserOrgIds(userId);
+      const snap = masterSnapshotForInstance(master, getISTDateString(), {
+        id: userId,
+        department_id: org?.department_id ?? null,
+        designation_id: org?.designation_id ?? null,
+      });
+      id = await ClTask.createInstance(snap);
     }
 
     if (!id) {
@@ -1070,7 +1164,7 @@ export async function submitClTask(req, res) {
     }
     const isOpenTask = String(task.task_type || "").toLowerCase() === "open";
     if (isOpenTask) {
-      if (!canFillOpenClTask(task, req)) {
+      if (!(await canFillOpenClTask(task, req))) {
         return res.status(403).json({ success: false, message: "You are not assigned to this task" });
       }
     } else if (Number(task.person_id) !== Number(userId)) {

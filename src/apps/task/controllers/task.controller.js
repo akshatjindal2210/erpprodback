@@ -32,7 +32,9 @@ export async function getTasks(req, res) {
     const updatedTasksFilter = updated_tasks === "true" || updated_tasks === true;
 
     const userId   = req.user.id;
-    const userRole = (req.user.type ?? req.user.role ?? "user").toLowerCase();
+    const rawRole = (req.user.type ?? req.user.role ?? "user").toLowerCase();
+    // Legacy alias — same as frontend normalizeTaskRole
+    const userRole = rawRole === "team" ? "executive_assistant" : rawRole;
 
     const wantsReport = report === "true" || report === true;
     const isManager = await User.isManager(userId);

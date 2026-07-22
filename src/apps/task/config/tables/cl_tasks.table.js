@@ -1,5 +1,6 @@
 import dbQuery from "../../shared/db.js";
 import { MST_TABLES as C, TASK_TABLES as T } from "../../../../config/dbTables.js";
+import { patchTableSchema, patchCol } from "../../../../config/ensureDbColumns.js";
 
 export async function createTaskClTasksMasterTable() {
   await dbQuery(`
@@ -18,6 +19,7 @@ export async function createTaskClTasksMasterTable() {
       department_id          INT DEFAULT NULL REFERENCES ${C.DEPARTMENTS}(id) ON DELETE SET NULL,
       designation_id         INT DEFAULT NULL REFERENCES ${C.DESIGNATIONS}(id) ON DELETE SET NULL,
       person_id              INT DEFAULT NULL REFERENCES ${C.USERS}(id) ON DELETE SET NULL,
+      assignee_person_ids    JSONB DEFAULT NULL,
       due_time               VARCHAR(5) DEFAULT '11:00',
       day_offset             INT NOT NULL DEFAULT 0 CHECK (day_offset >= 0 AND day_offset <= 14),
       next_occurrence        DATE DEFAULT NULL,
@@ -37,6 +39,13 @@ export async function createTaskClTasksMasterTable() {
       updated_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // Patch for existing production DB
+  await patchTableSchema(dbQuery, T.CL_TASKS_MASTER, {
+    columns: [
+      patchCol("assignee_person_ids", "JSONB DEFAULT NULL"),
+    ],
+  });
 }
 
 export async function createTaskClTasksTable() {

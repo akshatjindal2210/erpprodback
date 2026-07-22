@@ -4,17 +4,18 @@ import { MST_TABLES as M } from "../../../config/dbTables.js";
 import { addTaskActivityLog, getTaskActivityLog, getTaskActivityLogCount, taskUnseenUpdatesSql, taskLogCountSubquery } from "../services/taskActivityLog.service.js";
 
 async function roleFilter(userRole, userId, report = false) {
-  
+  const role = userRole === "team" ? "executive_assistant" : userRole;
+
   let isManager = false;
   let department_id = null;
 
-  if (userRole === "user" || userRole === "executive_assistant") {
+  if (role === "user" || role === "executive_assistant") {
     const res = await dbQuery(
       `SELECT d.name AS designation, department_id FROM ${M.USERS} u LEFT JOIN ${M.DESIGNATIONS} d ON u.designation_id = d.id WHERE u.id = ?`,
       [userId]
     );
     if (res?.[0]) {
-      if (userRole === "user") {
+      if (role === "user") {
         isManager = res[0].designation?.toLowerCase() === "manager";
         department_id = res[0].department_id;
       }
@@ -23,12 +24,12 @@ async function roleFilter(userRole, userId, report = false) {
 
   if (report) {
     // executive_assistant role cross-department access
-    if (userRole === "executive_assistant") {
+    if (role === "executive_assistant") {
       return { clause: null, values: [] };
     }
 
     // Admin / super_admin
-    if (userRole === "admin" || userRole === "super_admin") {
+    if (role === "admin" || role === "super_admin") {
       return { clause: null, values: [] };
     }
 
@@ -97,7 +98,15 @@ const Task = {
     const where  = ["1=1"];
     const params = [];
 
-    const validSort = ["t.task_id","t.title","t.priority","t.status","t.due_date","t.created_at"];
+    const validSort = [
+      "t.task_id",
+      "t.title",
+      "t.priority",
+      "t.status",
+      "t.due_date",
+      "t.current_target_at",
+      "t.created_at",
+    ];
     const safeSort  = validSort.includes(sortBy) ? sortBy : "t.task_id";
     const safeOrder = order.toUpperCase() === "ASC" ? "ASC" : "DESC";
 
@@ -151,7 +160,8 @@ const Task = {
       params.push(...types);
     }
 
-    //  View (Legacy logic, kept for compatibility but refined)
+    // Personal tab views apply on Tasks only. Report stays role-scoped (dept/org)
+    // so managers/admins still see team data; use Assigned By / To filters instead.
     if (!report) {
       if (view === "created")     { where.push("t.created_by = ?");        params.push(userId); }
       if (view === "assigned_to") {
@@ -200,6 +210,7 @@ const Task = {
         t.task_type, t.is_recurring, t.recurrence_type, t.creator_type,
 
         TO_CHAR(t.due_date, 'YYYY-MM-DD') AS due_date,
+        TO_CHAR(t.current_target_at, 'YYYY-MM-DD HH24:MI') AS current_target_at,
         TO_CHAR(t.completed_at, 'YYYY-MM-DD HH24:MI') AS completed_at,
         TO_CHAR(t.created_at, 'YYYY-MM-DD HH24:MI') AS created_at,
         TO_CHAR(t.updated_at, 'YYYY-MM-DD HH24:MI') AS updated_at,
@@ -315,6 +326,7 @@ const Task = {
       params.push(...types);
     }
 
+    // Personal tab views apply on Tasks only. Report stays role-scoped (dept/org).
     if (!report) {
       if (view === "created")     { where.push("t.created_by = ?"); params.push(userId); }
       if (view === "assigned_to") {
@@ -427,6 +439,7 @@ const Task = {
       params.push(designation_id);
     }
 
+    // Personal tab views apply on Tasks only. Report stays role-scoped (dept/org).
     if (!report) {
       if (view === "created")     { where.push("t.created_by = ?");        params.push(userId); }
       if (view === "assigned_to") {

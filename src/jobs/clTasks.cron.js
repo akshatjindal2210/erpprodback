@@ -1,8 +1,9 @@
 import config from "../config/config.js";
 import ClTask from "../apps/task/models/clTask.model.js";
-import { parseFormSchema, parseClAttachments } from "../apps/task/helpers/clTaskForm.helper.js";
 import { parseRecurrenceArray, computeClNextOccurrence, isClOccurrenceDay } from "../apps/task/helpers/clTaskRecurrence.helper.js";
-import { getISTDateString, getISTHour, toYmd, isClTaskMissed } from "../apps/task/helpers/clTaskTime.helper.js";
+import { getISTDateString, getISTHour, toYmd } from "../apps/task/helpers/clTaskTime.helper.js";
+import { resolveClMasterAssignees } from "../apps/task/helpers/clTaskAssignee.helper.js";
+import { spawnInstancesForMasterDay } from "../apps/task/helpers/clTaskSpawn.helper.js";
 import { deferCronWork, scheduleDeferred } from "./cronUtil.js";
 
 /** Shared lock — main cron + hourly catch-up + startup/missed must not overlap. */
@@ -38,7 +39,8 @@ function mergeMastersById(...lists) {
 
 /**
  * Create missing frequent instances for Due.
- * Idempotent via hasPendingInstanceForDay — safe from cron + Due API.
+ * One master → N person instances (dept / designation / person scope).
+ * Idempotent via hasPendingInstanceForDay.
  */
 export async function processClFrequentTasks({ personId = null } = {}) {
   const today = getISTDateString();
@@ -48,7 +50,12 @@ export async function processClFrequentTasks({ personId = null } = {}) {
 
   if (personId != null && personId !== "") {
     const pid = Number(personId);
-    frequentTasks = frequentTasks.filter((ct) => Number(ct.person_id) === pid);
+    const scoped = [];
+    for (const ct of frequentTasks) {
+      const people = await resolveClMasterAssignees(ct);
+      if (people.some((p) => Number(p.id) === pid)) scoped.push(ct);
+    }
+    frequentTasks = scoped;
   }
 
   let created = 0;
@@ -61,14 +68,23 @@ export async function processClFrequentTasks({ personId = null } = {}) {
 
     let cursor = toYmd(ct.next_occurrence) || today;
 
-    // Recovery: next already jumped to tomorrow+ but today still needs a clone
-    // (classic bug: due_time 00:00 / 12:00 AM made today look "missed").
     if (cursor > today) {
-      const hasToday = await ClTask.hasPendingInstanceForDay(ct.cl_task_id, ct.person_id, today);
-      if (
-        !hasToday &&
-        isClOccurrenceDay(ct.recurrence_type, recurrenceData, today)
-      ) {
+      const people = await resolveClMasterAssignees(ct);
+      const targets =
+        personId != null && personId !== ""
+          ? people.filter((p) => Number(p.id) === Number(personId))
+          : people;
+      let needsToday = false;
+      if (isClOccurrenceDay(ct.recurrence_type, recurrenceData, today)) {
+        for (const person of targets) {
+          const hasToday = await ClTask.hasPendingInstanceForDay(ct.cl_task_id, person.id, today);
+          if (!hasToday) {
+            needsToday = true;
+            break;
+          }
+        }
+      }
+      if (needsToday) {
         cursor = today;
       } else {
         continue;
@@ -78,47 +94,14 @@ export async function processClFrequentTasks({ personId = null } = {}) {
     let guard = 0;
     while (cursor && cursor <= today && guard < 60) {
       guard += 1;
-      const already = await ClTask.hasPendingInstanceForDay(ct.cl_task_id, ct.person_id, cursor);
-      if (!already) {
-        const shell = {
-          task_type: "frequently",
-          status: "pending",
-          scheduled_date: cursor,
-          due_time: ct.due_time || "11:00",
-          day_offset: ct.day_offset,
-        };
-        if (!isClTaskMissed(shell)) {
-          const attachments = parseClAttachments(ct.attachment);
-          await ClTask.createInstance({
-            cl_task_id: ct.cl_task_id,
-            title: ct.title,
-            description: ct.description,
-            sop_description: ct.sop_description,
-            task_type: ct.task_type,
-            recurrence_type: ct.recurrence_type,
-            ...recurrenceData,
-            weightage: Number(ct.weightage) || 1,
-            verification_user_id: ct.verification_user_id,
-            department_id: ct.department_id,
-            designation_id: ct.designation_id,
-            person_id: ct.person_id,
-            due_time: ct.due_time || "11:00",
-            day_offset: ct.day_offset,
-            scheduled_date: cursor,
-            status: "pending",
-            form_schema: parseFormSchema(ct.form_schema),
-            verification_required: ct.verification_required,
-            scoring_enabled: ct.scoring_enabled,
-            sop_required: ct.sop_required === true,
-            attachment: attachments.length ? attachments : null,
-          });
-          created += 1;
-        }
-      }
+      created += await spawnInstancesForMasterDay(ct, cursor, { onlyPersonId: personId });
       cursor = computeClNextOccurrence(ct.recurrence_type, recurrenceData, cursor);
     }
 
-    await ClTask.updateNextOccurrence(ct.cl_task_id, cursor);
+    // Never advance master cursor on a single-person catch-up — other assignees would miss days.
+    if (personId == null || personId === "") {
+      await ClTask.updateNextOccurrence(ct.cl_task_id, cursor);
+    }
   }
 
   if (frequentTasks.length > 0) {
@@ -134,8 +117,6 @@ export async function processClFrequentTasks({ personId = null } = {}) {
  */
 export async function runClClone({ reason, personId = null } = {}) {
   if (cloneBusy) return 0;
-  // Due list must show today's frequent clones when the user opens the page.
-  // Cron / hourly still respect CL_CLONE_ALLOWED_HOUR.
   const bypassHourGate = reason === "due-list";
   if (!bypassHourGate && !canRunClCloneNow()) return 0;
 
@@ -152,11 +133,9 @@ export async function runClClone({ reason, personId = null } = {}) {
 
 /**
  * Frequent CL masters → instances at CL_CLONE_ALLOWED_HOUR (IST).
- * Blank env → midnight. Catch-up: startup, missed tick, hourly safety net.
  */
 export function initClTasksCron() {
   const expression = getClCloneCronExpression();
-  const hour = getCloneHour();
 
   scheduleDeferred(expression, runClClone, {
     name: "cl-tasks",
@@ -166,11 +145,6 @@ export function initClTasksCron() {
   scheduleDeferred("5 * * * *", () => runClClone({ reason: "hourly-catchup" }), {
     name: "cl-tasks-catchup",
   });
-
-  console.log(
-    `[cl-tasks] scheduled "${expression}" Asia/Kolkata` +
-      (hour == null ? " (CL_CLONE_ALLOWED_HOUR blank → midnight)" : ` (CL_CLONE_ALLOWED_HOUR=${hour})`),
-  );
 
   deferCronWork(() => runClClone({ reason: "startup" }));
 }
