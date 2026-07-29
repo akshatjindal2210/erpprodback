@@ -1,7 +1,7 @@
 /** ONE-TIME: INT audit user-id cols → TEXT names. Safe no-op when already done. */
-import dbQuery from "../config/db.js";
-import { migrateTableAuditColumnsToUserNames } from "../config/auditUserNameColumns.js";
-import { MST_TABLES as M, IMS_TABLES as I } from "../config/dbTables.js";
+import dbQuery from "../config/db/db.js";
+import { migrateTableAuditColumnsToUserNames } from "../config/audit/auditUserNameColumns.js";
+import { MST_TABLES as M, IMS_TABLES as I } from "../config/db/dbTables.js";
 
 const JOBS = [
   [M.USERS],

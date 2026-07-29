@@ -1,8 +1,8 @@
 import cron from "node-cron";
 import path from "path";
 
-import logger from "../apps/core/utils/logger.js";
-import { deferCronWork, scheduleDeferred } from "../jobs/cronUtil.js";
+import logger from "../apps/core/lib/utils/logging/logger.js";
+import { deferCronWork, scheduleDeferred } from "../jobs/shared/cronUtil.js";
 import { getLogSettings } from "./config.js";
 import { getLogDir, LOG_FILES } from "./paths.js";
 import { enforceLogRetention } from "./logRetention.js";

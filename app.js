@@ -3,16 +3,16 @@ import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
 
 import app from "./src/index.js";
-import config from "./src/config/config.js";
-import { corsOptions } from "./src/config/cors.js";
-import { initDB } from "./src/config/initDB.js";
-import { seedCoreRootUser } from "./src/apps/core/config/seed.js";
-import { seedImsData } from "./src/apps/ims/config/seed.js";
-import logger from "./src/apps/core/utils/logger.js";
+import config from "./src/config/app/config.js";
+import { corsOptions } from "./src/config/app/cors.js";
+import { initDB } from "./src/config/db/initDB.js";
+import { seedCoreRootUser } from "./src/apps/core/lib/config/db/seed.js";
+import { seedImsData } from "./src/apps/ims/lib/config/db/seed.js";
+import logger from "./src/apps/core/lib/utils/logging/logger.js";
 import { initRecurringTasksCron, initClTasksCron, initTaskNotificationsCron, startDbBackupCron, startLogCleanupCron } from "./src/jobs/index.js";
-import { initSocket } from "./src/apps/core/utils/socket.js";
-import { deliverUnreadInboxToSocket } from "./src/apps/task/services/taskPwaPush.service.js";
-import { getImsMapsSafe } from "./src/apps/ims/utils/erp-api/imsLookup.js";
+import { initSocket } from "./src/apps/core/lib/utils/realtime/socket.js";
+import { deliverUnreadInboxToSocket } from "./src/apps/task/manage/notifications/services/taskPwaPush.service.js";
+import { getImsMapsSafe } from "./src/apps/ims/lib/utils/erp-api/lookup/imsLookup.js";
 
 const server = http.createServer(app);
 

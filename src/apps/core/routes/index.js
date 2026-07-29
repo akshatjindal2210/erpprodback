@@ -1,15 +1,15 @@
 import { Router } from "express";
-import userCoreRoutes from "./user.route.js";
-import trainingRoutes from "./trainingVideo.routes.js";
-import sopRoutes from "./moduleSop.routes.js";
-import moduleRoutes from "./module.route.js";
-import permissionRoutes from "./permission.route.js";
-import departmentRoutes from "./department.route.js";
-import designationRoutes from "./designation.route.js";
-import activityLogRoutes from "./activityLog.route.js";
-import inboxRoutes from "./inbox.route.js";
-import pushRoutes from "./push.route.js";
-// import userAppPreferenceRoutes from "./userAppPreference.route.js";
+import userCoreRoutes from "../identity/users/routes/user.route.js";
+import trainingRoutes from "../training/videos/trainingVideo.routes.js";
+import sopRoutes from "../training/sops/moduleSop.routes.js";
+import moduleRoutes from "../identity/modules/routes/module.route.js";
+import permissionRoutes from "../identity/permissions/routes/permission.route.js";
+import departmentRoutes from "../identity/departments/routes/department.route.js";
+import designationRoutes from "../identity/designations/routes/designation.route.js";
+import activityLogRoutes from "../activity-logs/routes/activityLog.route.js";
+import inboxRoutes from "../notifications/inbox/inbox.route.js";
+import pushRoutes from "../notifications/push/push.route.js";
+// import userAppPreferenceRoutes from "../configuration/routes/userAppPreference.route.js";
 
 const router = Router();
 

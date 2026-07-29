@@ -2,18 +2,19 @@ import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import path from "path";
-import config from "./config/config.js";
-import { corsOptions } from "./config/cors.js";
+import config from "./config/app/config.js";
+import { corsOptions } from "./config/app/cors.js";
 
-import { morganMiddleware, requestLogger } from "./apps/core/utils/logger.js";
-import logger from "./apps/core/utils/logger.js";
-import { imsMetaMiddleware } from "./apps/ims/utils/erp-api/imsMeta.js";
-import { activityLogger } from "./apps/core/middleware/activityLogger.js";
+import { morganMiddleware, requestLogger } from "./apps/core/lib/utils/logging/logger.js";
+import logger from "./apps/core/lib/utils/logging/logger.js";
+import { imsMetaMiddleware } from "./apps/ims/lib/utils/erp-api/lookup/imsMeta.js";
+import { activityLogger } from "./apps/core/lib/middleware/activityLogger.js";
 
 import imsRoutes from "./apps/ims/routes/index.js";
 import taskRoutes from "./apps/task/routes/index.js";
 import coreRoutes from "./apps/core/routes/index.js";
 import dashboardRoutes from "./apps/dashboard/routes/index.js";
+// import rmstoreRoutes from "./apps/rmstore/routes/index.js";
 
 const app = express();
 
@@ -53,6 +54,7 @@ app.get("/api/version", (req, res) => {
 app.use("/api/core", activityLogger("portal"), coreRoutes);
 app.use("/api/task", activityLogger("task"), taskRoutes);
 app.use("/api/dashboard", activityLogger("dashboard"), dashboardRoutes);
+// app.use("/api/rmstore", activityLogger("rmstore"), rmstoreRoutes);
 app.use("/api", activityLogger("ims"), imsRoutes);
 
 app.use((req, res) => {

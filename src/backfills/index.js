@@ -3,12 +3,12 @@
  * Safe / idempotent — already-done rows are no-ops. Failures never block boot.
  * SA packing meta is not run (legacy done; new SA fills on approve).
  */
-import dbQuery from "../config/db.js";
-import { columnExists, runIfColumnExists } from "../config/ensureDbColumns.js";
-import { MST_TABLES as M, IMS_TABLES as T } from "../config/dbTables.js";
+import dbQuery from "../config/db/db.js";
+import { columnExists, runIfColumnExists } from "../config/db/ensureDbColumns.js";
+import { MST_TABLES as M, IMS_TABLES as T } from "../config/db/dbTables.js";
 import { runAuditUserNamesBackfill } from "./auditUserNames.js";
 import { runBoxDownloadLogBackfill } from "./boxDownloadLog.js";
-import { backfillDailyprodStickerColumns } from "../apps/ims/utils/packing-entry/backfillDailyprodStickerSnapshot.js";
+import { backfillDailyprodStickerColumns } from "../apps/ims/lib/utils/packing-entry/stickers/backfillDailyprodStickerSnapshot.js";
 
 async function safe(label, fn) {
   try {
@@ -75,14 +75,14 @@ export async function runStartupBackfills() {
 
   await safe("box category", async () => {
     const { runBoxCategoryBackfillOnStartup } = await import(
-      "../apps/ims/utils/box/backfillBoxCategory.js"
+      "../apps/ims/modules/box/utils/backfill/backfillBoxCategory.js"
     );
     await runBoxCategoryBackfillOnStartup();
   });
 
   await safe("box is_loose", async () => {
     const { runBoxIsLooseBackfillOnStartup } = await import(
-      "../apps/ims/utils/box/backfillBoxCategory.js"
+      "../apps/ims/modules/box/utils/backfill/backfillBoxCategory.js"
     );
     await runBoxIsLooseBackfillOnStartup();
   });

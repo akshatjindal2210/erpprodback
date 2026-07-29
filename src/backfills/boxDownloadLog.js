@@ -1,6 +1,6 @@
-import dbQuery from "../config/db.js";
-import { runIfColumnExists, dropColumnIfExists } from "../config/ensureDbColumns.js";
-import { IMS_TABLES as T } from "../config/dbTables.js";
+import dbQuery from "../config/db/db.js";
+import { runIfColumnExists, dropColumnIfExists } from "../config/db/ensureDbColumns.js";
+import { IMS_TABLES as T } from "../config/db/dbTables.js";
 
 /** Legacy download-log column rename / fill + drop obsolete cols (idempotent). */
 export async function runBoxDownloadLogBackfill() {

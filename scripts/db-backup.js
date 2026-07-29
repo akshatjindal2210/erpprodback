@@ -1,4 +1,4 @@
-import { runDbBackup } from "../src/jobs/dbBackup.js";
+import { runDbBackup } from "../src/jobs/system/dbBackup.js";
 
 try {
   const results = await runDbBackup();

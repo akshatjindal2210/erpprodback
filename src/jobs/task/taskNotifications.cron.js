@@ -1,0 +1,151 @@
+import dbQuery from "../../config/db/db.js";
+import { MST_TABLES as M, TASK_TABLES as T } from "../../config/db/dbTables.js";
+import NotificationTemplate from "../../apps/task/manage/notifications/models/notificationTemplate.model.js";
+import Task from "../../apps/task/modules/tasks/models/task.model.js";
+import { sendTaskNotification } from "../../apps/task/manage/notifications/services/notification.service.js";
+import { buildNotifyVarsFromDashboardStats } from "../../apps/task/lib/config/dashboard/dashboardStatKeys.js";
+import { getISTTimeHM } from "../../apps/task/modules/cl-task/helpers/time/clTaskTime.helper.js";
+import { scheduleDeferred, getCronDateString } from "../shared/cronUtil.js";
+
+const BATCH = 8;
+const DAILY_GRACE_MINUTES = 10;
+let lastDailyRunDate = "";
+
+function isWithinDailyWindow(triggerTime) {
+  const [hh, mm] = String(triggerTime || "").split(":").map(Number);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return false;
+  const [nowH, nowM] = getISTTimeHM().split(":").map(Number);
+  const nowMins = nowH * 60 + nowM;
+  const triggerMins = hh * 60 + mm;
+  return nowMins >= triggerMins && nowMins < triggerMins + DAILY_GRACE_MINUTES;
+}
+
+async function inBatches(items, fn, size = BATCH) {
+  let failed = 0;
+  for (let i = 0; i < items.length; i += size) {
+    const chunk = items.slice(i, i + size);
+    const results = await Promise.allSettled(chunk.map(fn));
+    failed += results.filter((r) => r.status === "rejected").length;
+  }
+  return failed;
+}
+
+async function getUsersForDailyReminder() {
+  return dbQuery(
+    `SELECT DISTINCT u.id, u.type AS role
+     FROM ${M.USERS} u
+     INNER JOIN ${T.TASKS} t ON (
+       t.first_assigned_to = u.id
+       OR t.current_holder_id = u.id
+       OR EXISTS (
+         SELECT 1 FROM ${T.ASSIGNMENTS} ta
+         WHERE ta.task_id = t.task_id AND ta.assigned_to = u.id AND ta.is_active = TRUE
+       )
+     )
+     WHERE u.is_deleted = false
+       AND u.status = 'active'
+       AND t.status NOT IN ('completed', 'closed')`
+  );
+}
+
+async function runDailyReminders() {
+  const tpl = await NotificationTemplate.getByKey("daily_reminder");
+  if (!tpl?.is_enabled || !tpl.trigger_time) return;
+
+  const today = getCronDateString(); // IST YYYY-MM-DD
+  if (lastDailyRunDate === today) return;
+  if (!isWithinDailyWindow(tpl.trigger_time)) return;
+
+  lastDailyRunDate = today;
+  const users = await getUsersForDailyReminder();
+  if (!users.length) return;
+
+  let sent = 0;
+  let skipped = 0;
+  const failed = await inBatches(users, async (row) => {
+    const stats = await Task.getStats({
+      userId: row.id,
+      userRole: row.role ?? "user",
+      view: "assigned_to",
+    });
+    const statVars = buildNotifyVarsFromDashboardStats(stats);
+    if (Number(statVars.action_required) === 0) {
+      skipped += 1;
+      return;
+    }
+    const result = await sendTaskNotification("daily_reminder", row.id, statVars, null, { tpl });
+    if (result?.ok) sent += 1;
+    else skipped += 1;
+  });
+
+  if (sent || failed) {
+    console.log(`[Task notify] daily: ${sent} sent, ${skipped} skipped, ${failed} failed`);
+  }
+}
+
+async function runPersonalReminders() {
+  const tpl = await NotificationTemplate.getByKey("personal_reminder");
+  if (!tpl?.is_enabled) return;
+
+  // reminder_at stored as IST wall-clock (naive). Compare against IST now, not DB UTC NOW().
+  const rows = await dbQuery(
+    `SELECT tsn.task_id, tsn.user_id, tsn.reminder_at, t.title, t.status
+     FROM ${T.SELF_NOTES} tsn
+     JOIN ${T.TASKS} t ON t.task_id = tsn.task_id
+     WHERE tsn.reminder_at IS NOT NULL
+       AND tsn.reminder_at <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+       AND tsn.reminder_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '15 minutes'
+       AND t.status != 'completed'`
+  );
+  if (!rows.length) return;
+
+  let sent = 0;
+  let skipped = 0;
+  const failed = await inBatches(rows, async (row) => {
+    const reminderAt = row.reminder_at instanceof Date
+      ? row.reminder_at.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+      : String(row.reminder_at);
+    const result = await sendTaskNotification(
+      "personal_reminder",
+      row.user_id,
+      {
+        task_title: row.title,
+        task_id: String(row.task_id),
+        reminder_at: reminderAt,
+        status: row.status,
+      },
+      row.task_id,
+      { tpl }
+    );
+    // Clear only after a real delivery — keep for retry if send no-oped / failed.
+    if (result?.ok) {
+      await dbQuery(
+        `UPDATE ${T.SELF_NOTES} SET reminder_at = NULL WHERE task_id = ? AND user_id = ?`,
+        [row.task_id, row.user_id]
+      );
+      sent += 1;
+    } else {
+      skipped += 1;
+    }
+  });
+
+  if (sent || failed || skipped) {
+    console.log(`[Task notify] personal: ${sent} sent, ${skipped} skipped, ${failed} failed`);
+  }
+}
+
+async function runTaskNotifications() {
+  try {
+    await runDailyReminders();
+    await runPersonalReminders();
+  } catch (err) {
+    console.error("Task notifications cron error:", err.message);
+  }
+}
+
+export function initTaskNotificationsCron() {
+  scheduleDeferred("*/2 * * * *", runTaskNotifications, {
+    name: "task-notifications",
+    onMissed: runTaskNotifications,
+  });
+}

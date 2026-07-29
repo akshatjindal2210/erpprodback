@@ -1,14 +1,14 @@
 import { Router } from "express";
 
-import tasksRoutes from "./task.route.js";
-import recurringRoutes from "./recurringTask.route.js";
-import categoriesRoutes from "./category.route.js";
-import holidaysRoutes from "./holiday.route.js";
-import remindersRoutes from "./reminder.route.js";
-import clTaskRoutes from "./clTask.route.js";
-import redTicketRoutes from "./redTicket.route.js";
-import reportRoutes from "./report.route.js";
-import notificationRoutes from "./notification.route.js";
+import tasksRoutes from "../modules/tasks/routes/task.route.js";
+import recurringRoutes from "../modules/recurring-task/routes/recurringTask.route.js";
+import categoriesRoutes from "../modules/category/routes/category.route.js";
+import holidaysRoutes from "../modules/holidays/routes/holiday.route.js";
+import remindersRoutes from "../modules/reminders/routes/reminder.route.js";
+import clTaskRoutes from "../modules/cl-task/routes/clTask.route.js";
+import redTicketRoutes from "../modules/red-ticket/routes/redTicket.route.js";
+import reportRoutes from "../modules/reports/routes/report.route.js";
+import notificationRoutes from "../manage/notifications/routes/notification.route.js";
 
 const router = Router();
 

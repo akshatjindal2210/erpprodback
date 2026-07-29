@@ -1,6 +1,6 @@
 {
   "name": "backend",
-  "version": "2.3.29",
+  "version": "2.4.30",
   "description": "",
   "main": "app.js",
   "scripts": {
