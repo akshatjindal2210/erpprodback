@@ -2,7 +2,7 @@ import fsp from "fs/promises";
 import path from "path";
 import dbQuery from "../../config/db/db.js";
 import config from "../../config/app/config.js";
-import { addTaskActivityLog } from "../../apps/task/manage/logs/services/taskActivityLog.service.js";
+import { addTaskActivityLog } from "../../apps/task/manage/activity-log/services/taskActivityLog.service.js";
 import { scheduleDeferred, getCronDateString, addCalendarDaysYmd, addCalendarMonthsYmd, addCalendarYearsYmd } from "../shared/cronUtil.js";
 import { toYmd } from "../../apps/task/modules/cl-task/helpers/time/clTaskTime.helper.js";
 

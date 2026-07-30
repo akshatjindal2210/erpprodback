@@ -22,7 +22,6 @@ function sendSimple(res, { success, message, data, status = 200, extra = {} }) {
 
 export const getSchedulePlanning = async (req, res) => {
   try {
-    console.log(req.body);
     const out = await listSchedulePlanning(req.body || {});
     if (out?.success === false && out?.status === 400 && out?.message?.includes("fin_year_id")) {
       return sendSimple(res, { success: false, message: out.message, data: [] });

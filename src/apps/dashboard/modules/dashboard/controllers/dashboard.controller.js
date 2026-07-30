@@ -11,7 +11,7 @@ import { isConfiguredWidgetQuery } from "../../../lib/utils/query/widgetQuery.js
 import { fetchImsDataRaw } from "../../../../ims/lib/services/ims.service.js";
 import { clearImsMetaForResponse } from "../../../../ims/lib/utils/erp-api/lookup/imsMeta.js";
 
-const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings" /* , "rmstore" */]);
+const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings", "rmstore"]);
 const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql", "hybrid"]);
 const ALLOWED_AUDIENCE_SCOPES = new Set(["global", "users"]);
 const APP_TABLE_PREFIX = {
@@ -19,7 +19,7 @@ const APP_TABLE_PREFIX = {
   task: ["task_"],
   settings: ["mst_", "sys_"],
   home: [],
-  // rmstore: ["rmstore_"],
+  rmstore: ["rmstore_"],
 };
 
 const TABLE_MODULE_OVERRIDES = {

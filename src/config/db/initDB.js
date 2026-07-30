@@ -19,8 +19,8 @@ export const initDB = async () => {
 
     console.log("✅ All Tables Ready");
 
-    await runStartupBackfills();
-    console.log("✅ Startup backfills finished");
+    // await runStartupBackfills();
+    // console.log("✅ Startup backfills finished");
   } catch (err) {
     console.error("❌ initDB Failed:", err.message);
     throw err;

@@ -6,8 +6,10 @@ export async function createRmStoreInventoryInwardsTable() {
     CREATE TABLE IF NOT EXISTS ${T.INVENTORY_INWARDS} (
       in_uid           SERIAL PRIMARY KEY,
       mrn_refs         TEXT,
+      mrn_uids         TEXT,
       heat_nos         TEXT,
       item_codes       TEXT,
+      item_descs       TEXT,
       qtys             TEXT,
       total_qty        NUMERIC DEFAULT 0,
       coil_count       INTEGER DEFAULT 0,

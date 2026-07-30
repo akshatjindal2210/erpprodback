@@ -248,12 +248,49 @@ export const clearCoilQcLink = async (coil_no_uids = [], userName) => {
     `UPDATE ${TABLE}
      SET qc_check_uid = NULL,
          qc_check_status = NULL,
+         status = CASE
+           WHEN qc_reject_uid IS NULL
+             AND ipr_uid IS NULL
+             AND LOWER(COALESCE(status, 'active')) = 'rejected'
+           THEN 'active'
+           ELSE status
+         END,
          updated_by = $1,
          updated_at = NOW()
      WHERE coil_no_uid = ANY($2::text[])
        AND is_deleted = false`,
     [userName ?? null, uids]
   );
+};
+
+/**
+ * Hold coil(s) after authorized QC fail — Rejection Pending until Store Out.
+ * Same stock hold pattern as in-process rejection (status rejected, no qc_reject_uid yet).
+ */
+export const markCoilsQcFailPending = async (qc_check_uid, coil_no_uids = [], userName) => {
+  const uids = (coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean);
+  if (!uids.length) return [];
+  const rows = await dbQuery(
+    `UPDATE ${TABLE}
+     SET location_id = NULL,
+         in_uid = NULL,
+         qc_check_uid = $1,
+         qc_check_status = 'failed',
+         status = 'rejected',
+         updated_by = $2,
+         updated_at = NOW()
+     WHERE coil_no_uid = ANY($3::text[])
+       AND is_deleted = false
+       AND qc_reject_uid IS NULL
+       AND ipr_uid IS NULL
+       AND (
+         COALESCE(status, 'active') = 'active'
+         OR LOWER(COALESCE(status, 'active')) = 'rejected'
+       )
+     RETURNING coil_no_uid, qty, mrn_no, heat_no, item_code, item_desc`,
+    [Number(qc_check_uid), userName ?? null, uids]
+  );
+  return rows ?? [];
 };
 
 /** Link coil(s) to a QC Check header and set qc_check_status. */
@@ -269,6 +306,50 @@ export const linkCoilsToQcCheck = async (qc_check_uid, coil_no_uids = [], qc_che
        AND is_deleted = false`,
     [qc_check_uid, qc_check_status ?? null, userName ?? null, coil_no_uids]
   );
+};
+
+/** Restore coils held for an in-process rejection (not yet in qc_rejection register). */
+export const revertCoilsInProcessRejection = async (ipr_uid, userName) => {
+  const id = Number(ipr_uid);
+  if (!Number.isFinite(id)) return [];
+  const rows = await dbQuery(
+    `UPDATE ${TABLE}
+     SET ipr_uid = NULL,
+         status = 'active',
+         updated_by = $2,
+         updated_at = NOW()
+     WHERE ipr_uid = $1
+       AND is_deleted = false
+       AND LOWER(COALESCE(status, 'active')) = 'rejected'
+       AND qc_reject_uid IS NULL
+     RETURNING coil_no_uid, qty, mrn_no, heat_no, item_code`,
+    [id, userName ?? null]
+  );
+  return rows ?? [];
+};
+
+/**
+ * Hold coils for an approved in-process rejection until RM Rejection → Store Out.
+ * Removes them from issue / store stock (status rejected, linked to ipr_uid).
+ */
+export const markCoilsInProcessRejectionPending = async (ipr_uid, coil_no_uids = [], userName) => {
+  const uids = (coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean);
+  if (!uids.length) return [];
+  const rows = await dbQuery(
+    `UPDATE ${TABLE}
+     SET location_id = NULL,
+         in_uid = NULL,
+         ipr_uid = $1,
+         status = 'rejected',
+         updated_by = $2,
+         updated_at = NOW()
+     WHERE coil_no_uid = ANY($3::text[])
+       AND is_deleted = false
+       AND COALESCE(status, 'active') = 'active'
+     RETURNING coil_no_uid, qty, mrn_no, heat_no, item_code, item_desc`,
+    [Number(ipr_uid), userName ?? null, uids]
+  );
+  return rows ?? [];
 };
 
 /** Mark coils QC-rejected (leave store / coil area). */
@@ -370,8 +451,21 @@ export const updateCoilsAfterStoreOut = async (out_uid, coil_no_uids = [], userN
  * RM Rejection Store Out — link rejection + out in one step.
  * Allows coils still in Coil Area (no location) or In Store.
  */
-export const updateCoilsAfterRejectionStoreOut = async (out_uid, qc_reject_uid, coil_no_uids = [], userName) => {
+export const updateCoilsAfterRejectionStoreOut = async (
+  out_uid,
+  qc_reject_uid,
+  coil_no_uids = [],
+  userName,
+  { fromIprUid = null } = {}
+) => {
   if (!coil_no_uids.length) return;
+  const iprId = Number(fromIprUid);
+  const hasIpr = Number.isFinite(iprId) && iprId > 0;
+  const statusClause = hasIpr
+    ? `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND ipr_uid = $5 AND qc_reject_uid IS NULL))`
+    : `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND qc_reject_uid IS NULL AND ipr_uid IS NULL))`;
+  const params = [out_uid, qc_reject_uid, userName ?? null, coil_no_uids];
+  if (hasIpr) params.push(iprId);
   await dbQuery(
     `UPDATE ${TABLE}
      SET location_id = NULL,
@@ -384,8 +478,8 @@ export const updateCoilsAfterRejectionStoreOut = async (out_uid, qc_reject_uid, 
          updated_at = NOW()
      WHERE coil_no_uid = ANY($4::text[])
        AND is_deleted = false
-       AND COALESCE(status, 'active') = 'active'`,
-    [out_uid, qc_reject_uid, userName ?? null, coil_no_uids]
+       AND ${statusClause}`,
+    params
   );
 };
 
@@ -448,7 +542,7 @@ export const softDeleteCoilsByMrn = async (mrn_uid, deleted_by = null) => {
   if (!uid) return 0;
   const rows = await dbQuery(
     `UPDATE ${TABLE}
-     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_at = NOW()
+     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_by = $2, updated_at = NOW()
      WHERE mrn_uid = $1 AND is_deleted = false
      RETURNING coil_uid`,
     [uid, deleted_by]
@@ -462,7 +556,7 @@ export const softDeleteCoilsByCoilNoUids = async (coil_no_uids = [], deleted_by 
   if (!uids.length) return 0;
   const rows = await dbQuery(
     `UPDATE ${TABLE}
-     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_at = NOW()
+     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_by = $2, updated_at = NOW()
      WHERE coil_no_uid = ANY($1::text[]) AND is_deleted = false
      RETURNING coil_uid`,
     [uids, deleted_by]

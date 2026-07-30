@@ -2,7 +2,7 @@ import RecurringTask from "../../recurring-task/models/recurringTask.model.js";
 import Task from "../models/task.model.js";
 import User from "../../../../core/identity/users/models/user.model.js";
 import { sendTaskNotification } from "../../../manage/notifications/services/notification.service.js";
-import { markTaskViewed } from "../../../manage/logs/services/taskActivityLog.service.js";
+import { markTaskViewed } from "../../../manage/activity-log/services/taskActivityLog.service.js";
 import { calculateNextOccurrence, chatMessage, ensureDir, saveAttachments, upsertRecurring, isDbTrue, parseSubUsers, parseAttachmentsJson, asArray, normalizeCreatorType } from "../../../lib/shared/index.js";
 import { isAssignedTask } from "../../../lib/shared/utils/targetDateHelper.js";
 import TargetDate from "../../reminders/models/targetDate.model.js";

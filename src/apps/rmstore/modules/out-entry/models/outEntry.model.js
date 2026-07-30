@@ -200,6 +200,18 @@ export const findOpenOutDraftForCoil = async (coil_no_uid, excludeOutUid = null)
   return row ?? null;
 };
 
+/** Coils on open (non-approved) store-out drafts — block issue request picks. */
+export const findOutDraftReservedCoilUids = async () => {
+  const rows = await dbQuery(
+    `SELECT DISTINCT LOWER(TRIM(s.coil_no_uid)) AS coil_no_uid
+     FROM ${SCANNED} s
+     JOIN ${TABLE} o ON o.out_uid = s.out_uid AND o.is_deleted = false
+     WHERE COALESCE(o.approved, false) = false
+       AND TRIM(s.coil_no_uid) <> ''`
+  );
+  return new Set((rows || []).map((r) => String(r.coil_no_uid || "").trim()).filter(Boolean));
+};
+
 export const clearOutEntryScannedCoils = async (out_uid) => {
   await dbQuery(`DELETE FROM ${SCANNED} WHERE out_uid = $1`, [Number(out_uid)]);
 };

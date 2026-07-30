@@ -189,10 +189,7 @@ export const updateSpec = async (req, res) => {
           message: "To change the RM item, save the record together with its specification lines.",
         });
       }
-      const approvalFields = {
-        updated_by: auditUserName(req),
-        updated_at: new Date(),
-      };
+      const approvalFields = {};
       applyApprovalWorkflow({
         req,
         fields: approvalFields,

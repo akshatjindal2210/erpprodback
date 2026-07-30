@@ -12,7 +12,7 @@ import { findBoxesByNoUids } from "../../../box/models/box.model.js";
 import { deleteForwardingNoteItems, findActiveForwardingNoteItemsByFuid, insertForwardingNoteItem } from "../../models/forwardingNoteItem.model.js";
 import { docNoFromStandardBoxNoUid } from "../../../box/utils/uid/boxUid.js";
 import { buildForwardingAvailableBoxes, enrichForwardingBoxesWithPackingStd, inferForwardingPackingStandardQty, isForwardingLooseBox, sumBoxQty } from "../stock/forwardingAvailableStock.js";
-import { loadScheduleDispatchQtyMap, loadScheduleQtyForKeys, planKey } from "../../../schedule-planning/utils/db/schedulePlanDb.js";
+import { loadScheduleQtyForKeys, planKey } from "../../../schedule-planning/utils/db/schedulePlanDb.js";
 
 const FN_RESERVE_LOCK_NS = 71;
 
@@ -83,15 +83,22 @@ function buildScheduleDemandByKey(items = []) {
     if (!(qty > 0)) continue;
 
     const key = planKey(schno, itemdcode);
-    byKey.set(key, (byKey.get(key) || 0) + qty);
+    const prev = byKey.get(key) || { qty: 0, targets: [], useSystemStd: false };
+    const targetRaw = item?.dispatch_target;
+    const target =
+      targetRaw != null && targetRaw !== "" && Number.isFinite(Number(targetRaw))
+        ? Number(targetRaw)
+        : null;
+    byKey.set(key, {
+      qty: prev.qty + qty,
+      targets: target != null ? [...prev.targets, target] : prev.targets,
+      useSystemStd: prev.useSystemStd || Boolean(item?.use_system_std),
+    });
   }
   return byKey;
 }
 
-/**
- * Schedule-linked FN lines cannot exceed remaining balance (schedule qty − other FNs).
- * Physical stock reserve alone is not enough — duplicate FNs were possible when FG stock > balance.
- */
+/** Schedule-linked FN lines must exist on the current plan (balance may go negative after FIFO over-dispatch). */
 export async function assertScheduleDispatchWithinBalance(items = [], exclude_fuid = null) {
   const demandByKey = buildScheduleDemandByKey(items);
   if (!demandByKey.size) return;
@@ -101,27 +108,14 @@ export async function assertScheduleDispatchWithinBalance(items = [], exclude_fu
     return { schno, itemdcode: Number(itemdcode) };
   });
 
-  const [scheduleQtyMap, dispatchMap] = await Promise.all([
-    loadScheduleQtyForKeys(pairs),
-    loadScheduleDispatchQtyMap({ excludeFuid: exclude_fuid }),
-  ]);
+  const scheduleQtyMap = await loadScheduleQtyForKeys(pairs);
 
-  for (const [key, demandQty] of demandByKey.entries()) {
+  for (const key of demandByKey.keys()) {
     const scheduleQty = Number(scheduleQtyMap.get(key) ?? 0);
     if (!(scheduleQty > 0)) {
       const [schno, itemdcode] = key.split("|");
       throw reserveValidationError(
         `Schedule Sch ${schno} item ${itemdcode} is not on the current schedule plan.`
-      );
-    }
-
-    const alreadyDispatched = Number(dispatchMap.get(key) ?? 0);
-    const remaining = Math.max(0, scheduleQty - alreadyDispatched);
-
-    if (demandQty > remaining + 0.0001) {
-      const [schno, itemdcode] = key.split("|");
-      throw reserveValidationError(
-        `Schedule Sch ${schno} item ${itemdcode}: dispatch qty ${demandQty} exceeds remaining balance ${remaining} (${alreadyDispatched} already on other forwarding notes).`
       );
     }
   }
@@ -367,33 +361,39 @@ async function persistForwardingNoteItems({ fuid, items, userName, excludeFuid, 
 }
 
 /** Insert all items for create (after master insert). */
-export async function saveForwardingNoteItems({ fuid, items = [], userName, excludeFuid = null }) {
+export async function saveForwardingNoteItems({ fuid, items = [], userName, excludeFuid = null, client = null }) {
   if (!items.length) return;
 
-  await withTransaction(async (client) => {
+  const work = async (txnClient) => {
     await persistForwardingNoteItems({
       fuid,
       items,
       userName,
       excludeFuid,
       replaceExisting: false,
-      client,
+      client: txnClient,
     });
-  });
+  };
+
+  if (client) return work(client);
+  return withTransaction(work);
 }
 
 /** Replace all items on update — delete + insert in one transaction. */
-export async function replaceForwardingNoteItems({ fuid, items = [], userName, excludeFuid = null }) {
+export async function replaceForwardingNoteItems({ fuid, items = [], userName, excludeFuid = null, client = null }) {
   if (!items.length) return;
 
-  await withTransaction(async (client) => {
+  const work = async (txnClient) => {
     await persistForwardingNoteItems({
       fuid,
       items,
       userName,
       excludeFuid,
       replaceExisting: true,
-      client,
+      client: txnClient,
     });
-  });
+  };
+
+  if (client) return work(client);
+  return withTransaction(work);
 }

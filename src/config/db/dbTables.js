@@ -95,7 +95,7 @@ export const DB_TABLES = {
     "rmstore_coil_table",
     "rmstore_inventory_inwards",
     "rmstore_qc_check",
-    "rmstore_qc_rejection",
+    "rmstore_rejection",
     "rmstore_issue_request",
     "rmstore_in_process_request",
     "rmstore_out_entry",

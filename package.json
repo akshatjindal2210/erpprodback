@@ -1,6 +1,6 @@
 {
   "name": "backend",
-  "version": "2.4.30",
+  "version": "2.4.31",
   "description": "",
   "main": "app.js",
   "scripts": {
@@ -25,10 +25,10 @@
     "node-fetch": "^3.3.2",
     "pg": "^8.20.0",
     "qrcode": "^1.5.4",
+    "read-excel-file": "^9.3.5",
     "socket.io": "^4.8.3",
     "uuid": "^13.0.0",
     "web-push": "^3.6.7",
-    "winston": "^3.19.0",
-    "xlsx": "^0.18.5"
+    "winston": "^3.19.0"
   }
 }

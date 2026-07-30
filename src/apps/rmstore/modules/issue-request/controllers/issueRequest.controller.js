@@ -5,6 +5,7 @@ import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/q
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
+import { assertIssueRequestCoilsAvailable, buildAvailableCoilsForIssue } from "../utils/stock/issueRequestCoilReserve.js";
 
 async function resolveCoils(coilInputs, { allowedRmItemCodes = null } = {}) {
   const uids = coilInputs
@@ -235,6 +236,12 @@ export const getIssueRequests = async (req, res) => {
       sortBy: "issue_uid",
       order: "DESC",
     });
+    console.log({
+      filters: sanitizeFilters(filters || {}, ["approved", "from_date", "to_date"]),
+      search: sanitizeSearch(search),
+      page,
+      limit,
+    });
     const result = await findIssueRequests({
       filters: sanitizeFilters(filters || {}, ["approved", "from_date", "to_date"]),
       search: sanitizeSearch(search),
@@ -306,6 +313,29 @@ export const getJobCardIssueSummary = async (req, res) => {
     });
 
     return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** FIFO coil pool minus reservations from other issue requests (IMS FN style). */
+export const getAvailableCoils = async (req, res) => {
+  try {
+    const rm_item_code = req.body?.rm_item_code != null ? String(req.body.rm_item_code).trim() : "";
+    const rm_item_dcode = parsePositiveIntId(req.body?.rm_item_dcode);
+    const excludeIssueUid = parsePositiveIntId(req.body?.exclude_issue_uid ?? req.body?.issue_uid);
+
+    if (!rm_item_code && !rm_item_dcode) {
+      return res.status(400).json({ success: false, message: "RM item code or item_dcode is required." });
+    }
+
+    const result = await buildAvailableCoilsForIssue({
+      rm_item_code: rm_item_code || null,
+      rm_item_dcode: rm_item_dcode || null,
+      excludeIssueUid,
+    });
+
+    return res.json({ success: true, ...result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -391,12 +421,15 @@ export const createIssueRequest = async (req, res) => {
       };
     }
 
-    const total_qty = built.flatCoils.reduce((s, c) => s + (Number(c.qty) || 0), 0);
+    try {
+      await assertIssueRequestCoilsAvailable(built.jobCards);
+    } catch (e) {
+      return res.status(e.status || 400).json({ success: false, message: e.message });
+    }
 
     const row = await insertIssueRequest({
       ...built.headerProdFields,
       requested_qty: built.requestedQty,
-      total_qty,
       coil_count: built.flatCoils.length,
       job_cards: built.jobCards,
       shift,
@@ -455,7 +488,6 @@ export const updateIssueRequestCtrl = async (req, res) => {
       rm_item_desc: existing.rm_item_desc,
     };
     let requested_qty = Number(existing.requested_qty);
-    let total_qty = Number(existing.total_qty) || 0;
     let coil_count = Number(existing.coil_count) || 0;
     let jobCards = await findIssueRequestJobCards(id);
     let coils = await findIssueRequestCoils(id);
@@ -469,9 +501,13 @@ export const updateIssueRequestCtrl = async (req, res) => {
       } catch (e) {
         return res.status(e.status || 400).json({ success: false, message: e.message });
       }
+      try {
+        await assertIssueRequestCoilsAvailable(built.jobCards, { excludeIssueUid: id });
+      } catch (e) {
+        return res.status(e.status || 400).json({ success: false, message: e.message });
+      }
       headerProdFields = built.headerProdFields;
       requested_qty = built.requestedQty;
-      total_qty = built.flatCoils.reduce((s, c) => s + (Number(c.qty) || 0), 0);
       coil_count = built.flatCoils.length;
       jobCards = built.jobCards;
       coils = await replaceIssueRequestCoils(id, built.flatCoils);
@@ -489,7 +525,25 @@ export const updateIssueRequestCtrl = async (req, res) => {
       } catch (e) {
         return res.status(e.status || 400).json({ success: false, message: e.message });
       }
-      total_qty = resolved.reduce((s, c) => s + (Number(c.qty) || 0), 0);
+      try {
+        await assertIssueRequestCoilsAvailable(
+          [
+            {
+              pjobcardno: existing.job_cards?.[0]?.pjobcardno || `IR-${id}`,
+              issue_qty: requested_qty,
+              rm_item_code: headerProdFields.rm_item_code,
+              rm_item_dcode: headerProdFields.rm_item_dcode,
+              coils: resolved.map((c) => ({
+                coil_no_uid: c.coil_no_uid,
+                qty: c.qty,
+              })),
+            },
+          ],
+          { excludeIssueUid: id }
+        );
+      } catch (e) {
+        return res.status(e.status || 400).json({ success: false, message: e.message });
+      }
       coil_count = resolved.length;
       coils = await replaceIssueRequestCoils(
         id,
@@ -530,13 +584,14 @@ export const updateIssueRequestCtrl = async (req, res) => {
     const updateFields = {
       ...headerProdFields,
       requested_qty,
-      total_qty,
       coil_count,
       shift,
       remarks,
-      updated_by: user,
-      updated_at: new Date(),
     };
+    if (hasBusinessChanges) {
+      updateFields.updated_by = user;
+      updateFields.updated_at = new Date();
+    }
     if (jobCardsChanged) updateFields.job_cards = jobCards;
 
     if (normalizedApproved !== undefined || hasBusinessChanges) {

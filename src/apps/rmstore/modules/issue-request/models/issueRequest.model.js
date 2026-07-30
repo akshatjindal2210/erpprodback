@@ -61,6 +61,7 @@ export const findIssueRequests = async (options = {}) => {
   const rows = await dbQuery(
     `SELECT r.*,
             r.created_by AS created_by_name,
+            r.updated_by AS updated_by_name,
             r.approved_by AS approved_by_name
      FROM ${TABLE} r
      ${where}
@@ -78,6 +79,7 @@ export const findIssueRequest = async (issue_uid) => {
   const [row] = await dbQuery(
     `SELECT r.*,
             r.created_by AS created_by_name,
+            r.updated_by AS updated_by_name,
             r.approved_by AS approved_by_name
      FROM ${TABLE} r
      WHERE r.issue_uid = $1 AND r.is_deleted = false
@@ -157,12 +159,39 @@ export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid
   );
 };
 
+/**
+ * Coils reserved on other issue requests (pending + approved). Edit excludes self via excludeIssueUid.
+ */
+export const findReservedCoilsFromRequests = async ({ excludeIssueUid = null } = {}) => {
+  const values = [];
+  let excludeClause = "";
+  const exclude = Number(excludeIssueUid);
+  if (Number.isFinite(exclude) && exclude > 0) {
+    values.push(exclude);
+    excludeClause = `AND r.issue_uid <> $1`;
+  }
+
+  return dbQuery(
+    `SELECT LOWER(TRIM(c->>'coil_no_uid')) AS coil_no_uid,
+            r.issue_uid,
+            r.approved
+     FROM ${TABLE} r
+     CROSS JOIN LATERAL jsonb_array_elements(
+       CASE WHEN jsonb_typeof(r.coils) = 'array' THEN r.coils ELSE '[]'::jsonb END
+     ) AS c
+     WHERE r.is_deleted = false
+       ${excludeClause}
+       AND TRIM(c->>'coil_no_uid') <> ''`,
+    values
+  );
+};
+
 export const insertIssueRequest = async (data) => {
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE}
      (production_id, item_dcode, item_code, item_desc, rm_item_dcode, rm_item_code, rm_item_desc,
-      requested_qty, total_qty, coil_count, job_cards, shift, remarks, approved, approved_by, approved_at, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17)
+      requested_qty, coil_count, job_cards, shift, remarks, approved, approved_by, approved_at, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16)
      RETURNING *`,
     [
       data.production_id ?? null,
@@ -173,7 +202,6 @@ export const insertIssueRequest = async (data) => {
       data.rm_item_code ?? null,
       data.rm_item_desc ?? null,
       data.requested_qty ?? 0,
-      data.total_qty ?? 0,
       data.coil_count ?? 0,
       JSON.stringify(data.job_cards || []),
       data.shift === "B" ? "B" : "A",
@@ -202,7 +230,7 @@ export const replaceIssueRequestCoils = async (issue_uid, coils = []) => {
     .filter((c) => c.coil_no_uid);
   const [row] = await dbQuery(
     `UPDATE ${TABLE}
-     SET coils = $2::jsonb, updated_at = NOW()
+     SET coils = $2::jsonb
      WHERE issue_uid = $1 AND is_deleted = false
      RETURNING coils`,
     [id, JSON.stringify(payload)]
@@ -214,7 +242,7 @@ export const updateIssueRequest = async (issue_uid, fields = {}) => {
   const allowed = [
     "production_id", "item_dcode", "item_code", "item_desc",
     "rm_item_dcode", "rm_item_code", "rm_item_desc",
-    "requested_qty", "total_qty", "coil_count", "job_cards", "shift", "remarks",
+    "requested_qty", "coil_count", "job_cards", "shift", "remarks",
     "approved", "approved_by", "approved_at", "updated_by", "updated_at",
   ];
   const safe = {};

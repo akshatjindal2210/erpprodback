@@ -31,6 +31,7 @@ export const initCoreDB = async () => {
   await createCoreUpdatedAtTriggers();
 
   // One-shot cleanup — remove after next prod deploy once these old tables are gone
-  await dbQuery(`DROP TABLE IF EXISTS ims_activity_logs CASCADE`);
-  await dbQuery(`DROP TABLE IF EXISTS task_users_logs CASCADE`);
+  // await dbQuery(`DROP TABLE IF EXISTS ims_activity_logs CASCADE`);
+  // await dbQuery(`DROP TABLE IF EXISTS task_users_logs CASCADE`);
+  await dbQuery(`DROP TABLE IF EXISTS mst_widgets CASCADE`);
 };

@@ -1,5 +1,5 @@
 import Holiday from "../models/holiday.model.js";
-import XLSX from "xlsx";
+import { readSpreadsheetRecords } from "../../../lib/shared/utils/excelSheet.js";
 import { isValidDate } from "../../../lib/shared/index.js";
 import { assertWithinEditDays, isSuperAdminReq } from "../../../../core/lib/utils/auth/permissionDays.js";
 import { paramsFromReq, idFromReq, listLimit } from "../../../lib/shared/postRequest.js";
@@ -169,15 +169,7 @@ export async function bulkUploadHolidays(req, res) {
       return res.status(400).json({ success: false, message: "File is required" });
     }
 
-    const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-
-    const rows = XLSX.utils.sheet_to_json(sheet, {
-      raw: false,
-      dateNF: "yyyy-mm-dd",
-      defval: "",
-    });
+    const rows = await readSpreadsheetRecords(req.file, { defval: "" });
 
     const validRows = [];
     const invalidRows = [];

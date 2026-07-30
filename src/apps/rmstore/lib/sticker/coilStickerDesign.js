@@ -3,6 +3,7 @@
  * Visual layout is portrait (100mm × 150mm) as used by RM MRN stickers.
  */
 import QRCode from "qrcode";
+import { findSpecItemDetail } from "../../modules/spec/models/specMaster.model.js";
 
 const STICKER_WIDTH_MM = 100;
 const STICKER_HEIGHT_MM = 150;
@@ -44,6 +45,13 @@ const DUMMY_STICKER_VALUES = Object.freeze({
 function withDummy(value, fallback) {
   const s = value == null ? "" : String(value).trim();
   return s ? s : fallback;
+}
+
+/** Preview uses layout placeholders; real prints show "—" when a field is missing. */
+function displayField(value, fallback, { preview = false } = {}) {
+  const s = value == null ? "" : String(value).trim();
+  if (s && s !== "—") return s;
+  return preview ? fallback : "—";
 }
 
 const formatStickerTopDate = (v) => {
@@ -117,6 +125,47 @@ export function mapCoilToStickerPrintRow(coil = {}, mrn = {}, opts = {}) {
     operator_name: blank(coil.operator_name ?? mrn.operator_name, DUMMY_STICKER_VALUES.operator_name),
     box_no_uid: coil.coil_no_uid || "",
     box_uid: coil.coil_uid ?? null,
+  };
+}
+
+/** RM Spec Master → sticker fields (print time only; nothing saved on coil). */
+export async function loadSpecStickerFields(item_dcode) {
+  const item = Number(item_dcode);
+  if (!Number.isFinite(item) || item <= 0) return {};
+
+  const detail = await findSpecItemDetail(item);
+  if (!detail) return {};
+
+  const out = {};
+  if (detail.grade) out.grade = String(detail.grade).trim();
+  if (detail.condition) out.condition = String(detail.condition).trim();
+  if (detail.size) out.base_size = String(detail.size).trim();
+
+  for (const line of detail.specs || []) {
+    const val = String(line.print_val || "").trim();
+    const name = String(line.spec_name || "").trim().toLowerCase();
+    if (!val || !name) continue;
+    if (name.includes("finish")) out.finish_size = val;
+    else if (name.includes("next proc")) out.next_process = val;
+    else if (name.includes("next dep")) out.next_department = val;
+    else if (name.includes("work order") || name === "wo no") out.work_order_no = val;
+    else if (name.includes("op name") || name.includes("operator name")) out.operator_name = val;
+    else if (name.includes("op code") || name.includes("operator code")) out.operator_code = val;
+    else if (name.includes("base size")) out.base_size = val;
+    else if (name.includes("grade")) out.grade = val;
+    else if (name.includes("condition")) out.condition = val;
+  }
+
+  return out;
+}
+
+/** Coil + MRN + optional spec snapshot → print row (pass `spec` in bulk to skip re-fetch). */
+export function buildCoilStickerPrintRow(coil = {}, mrn = {}, opts = {}) {
+  const spec = opts.spec || {};
+  const { isQc = false, ...mapOpts } = opts;
+  return {
+    ...mapCoilToStickerPrintRow({ ...spec, ...coil }, { ...spec, ...mrn }, mapOpts),
+    ...(isQc ? { is_qc: true, sticker_kind: "qc" } : {}),
   };
 }
 
@@ -299,10 +348,15 @@ export function buildCoilStickerPrintDocument(cards = [], { mrn_no } = {}) {
  * Change labels/layout here only (does not affect IMS).
  */
 async function buildStickerCardHtmlBase(row, { preview = false } = {}) {
-  const uid = withDummy(row.coil_no_uid || row.box_no_uid, DUMMY_STICKER_VALUES.coil_no_uid);
+  const disp = (value, fallback) => displayField(value, fallback, { preview });
+
+  const uid = disp(row.coil_no_uid || row.box_no_uid, DUMMY_STICKER_VALUES.coil_no_uid);
   const isQc = row.is_qc === true || String(row.sticker_kind || "").toLowerCase() === "qc";
   // QC stickers encode QC|{uid} so inspect gate rejects plain coil / MRN / user scans
-  const qrPayload = isQc ? `QC|${uid || String(row.coil_uid || DUMMY_STICKER_VALUES.qr_fallback_uid)}` : (uid || String(row.coil_uid || DUMMY_STICKER_VALUES.qr_fallback_uid));
+  const qrFallback = preview ? DUMMY_STICKER_VALUES.qr_fallback_uid : "";
+  const qrPayload = isQc
+    ? `QC|${uid || String(row.coil_uid || qrFallback)}`
+    : (uid || String(row.coil_uid || qrFallback));
 
   let qrUrl = "";
   try {
@@ -317,26 +371,32 @@ async function buildStickerCardHtmlBase(row, { preview = false } = {}) {
     qrUrl = "";
   }
 
-  const accName = escapeHtmlText(withDummy(row.acc_name, DUMMY_STICKER_VALUES.customer));
-  const itemCode = escapeHtmlText(withDummy(row.item_code, DUMMY_STICKER_VALUES.item_code));
-  const heatNo = escapeHtmlText(withDummy(row.job_no, DUMMY_STICKER_VALUES.qr_fallback_uid));
-  const lotNo = escapeHtmlText(withDummy(row.lot_no, DUMMY_STICKER_VALUES.lot_no));
-  const rightTopCode = escapeHtmlText(withDummy(row.packing_number, DUMMY_STICKER_VALUES.right_panel_code));
+  const accName = escapeHtmlText(disp(row.acc_name, DUMMY_STICKER_VALUES.customer));
+  const itemCode = escapeHtmlText(disp(row.item_code, DUMMY_STICKER_VALUES.item_code));
+  const lotNo = escapeHtmlText(disp(row.lot_no, DUMMY_STICKER_VALUES.lot_no));
+  const rightTopCode = escapeHtmlText(disp(row.packing_number, DUMMY_STICKER_VALUES.right_panel_code));
   const safeQty = Number(row.qty);
-  const qtyValue = Number.isFinite(safeQty) && safeQty > 0 ? Math.round(safeQty).toLocaleString() : DUMMY_STICKER_VALUES.qty;
-  const qtyUnit = withDummy(row.unit, DUMMY_STICKER_VALUES.unit);
-  const qtyText = `${qtyValue}${qtyUnit ? ` ${qtyUnit}` : ""}`;
-  const grade = escapeHtmlText(withDummy(row.grade || row.itemdesc, DUMMY_STICKER_VALUES.grade));
-  const baseSize = escapeHtmlText(withDummy(row.base_size, DUMMY_STICKER_VALUES.base_size));
-  const finishSize = escapeHtmlText(withDummy(row.finish_size, DUMMY_STICKER_VALUES.finish_size));
-  const condition = escapeHtmlText(withDummy(row.condition, DUMMY_STICKER_VALUES.condition));
-  const nextProcess = escapeHtmlText(withDummy(row.next_process, DUMMY_STICKER_VALUES.next_process));
-  const nextDepartment = escapeHtmlText(withDummy(row.next_department, DUMMY_STICKER_VALUES.next_department));
-  const workOrderNo = escapeHtmlText(withDummy(row.work_order_no, DUMMY_STICKER_VALUES.work_order_no));
-  const operatorCode = escapeHtmlText(withDummy(row.operator_code, DUMMY_STICKER_VALUES.operator_code));
-  const operatorName = escapeHtmlText(withDummy(row.operator_name, DUMMY_STICKER_VALUES.operator_name));
+  const qtyValue =
+    Number.isFinite(safeQty) && safeQty > 0
+      ? Math.round(safeQty).toLocaleString()
+      : preview
+        ? DUMMY_STICKER_VALUES.qty
+        : "0";
+  const qtyUnit = disp(row.unit, DUMMY_STICKER_VALUES.unit);
+  const qtyText = `${qtyValue}${qtyUnit && qtyUnit !== "—" ? ` ${qtyUnit}` : ""}`;
+  const grade = escapeHtmlText(disp(row.grade || row.itemdesc, DUMMY_STICKER_VALUES.grade));
+  const baseSize = escapeHtmlText(disp(row.base_size, DUMMY_STICKER_VALUES.base_size));
+  const finishSize = escapeHtmlText(disp(row.finish_size, DUMMY_STICKER_VALUES.finish_size));
+  const condition = escapeHtmlText(disp(row.condition, DUMMY_STICKER_VALUES.condition));
+  const nextProcess = escapeHtmlText(disp(row.next_process, DUMMY_STICKER_VALUES.next_process));
+  const nextDepartment = escapeHtmlText(disp(row.next_department, DUMMY_STICKER_VALUES.next_department));
+  const workOrderNo = escapeHtmlText(disp(row.work_order_no, DUMMY_STICKER_VALUES.work_order_no));
+  const operatorCode = escapeHtmlText(disp(row.operator_code, DUMMY_STICKER_VALUES.operator_code));
+  const operatorName = escapeHtmlText(disp(row.operator_name, DUMMY_STICKER_VALUES.operator_name));
   const computedTopDate = formatStickerTopDate(row.doc_dt);
-  const topDate = escapeHtmlText(withDummy(computedTopDate === "--" ? "" : computedTopDate, DUMMY_STICKER_VALUES.top_date));
+  const topDate = escapeHtmlText(
+    disp(computedTopDate === "--" ? "" : computedTopDate, DUMMY_STICKER_VALUES.top_date)
+  );
   const bannerText = isQc ? (preview ? "QC PREVIEW" : "QC STICKER") : "";
   const qcBanner = isQc
     ? preview
@@ -415,7 +475,7 @@ async function buildStickerCardHtmlBase(row, { preview = false } = {}) {
           </div>
           <div class="st-left-cell">
             <p class="st-label">Coil No</p>
-            <span class="st-val st-small">${escapeHtmlText(withDummy(uid, DUMMY_STICKER_VALUES.coil_no_uid))}</span>
+            <span class="st-val st-small">${escapeHtmlText(disp(uid, DUMMY_STICKER_VALUES.coil_no_uid))}</span>
           </div>
           <div class="st-left-cell">
             <p class="st-label">Wt.(Kg)</p>

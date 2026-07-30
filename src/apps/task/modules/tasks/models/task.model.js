@@ -1,7 +1,7 @@
 import dbQuery from "../../../lib/shared/db.js";
 import { normalizeCreatorType } from "../../../lib/shared/utils/helper.js";
 import { MST_TABLES as M } from "../../../../../config/db/dbTables.js";
-import { addTaskActivityLog, getTaskActivityLog, getTaskActivityLogCount, taskUnseenUpdatesSql, taskLogCountSubquery } from "../../../manage/logs/services/taskActivityLog.service.js";
+import { addTaskActivityLog, getTaskActivityLog, getTaskActivityLogCount, taskUnseenUpdatesSql, taskLogCountSubquery } from "../../../manage/activity-log/services/taskActivityLog.service.js";
 
 async function roleFilter(userRole, userId, report = false) {
   const role = userRole === "team" ? "executive_assistant" : userRole;

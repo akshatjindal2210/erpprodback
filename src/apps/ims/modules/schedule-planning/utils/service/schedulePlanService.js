@@ -33,8 +33,18 @@ function normDate(v) {
   if (v == null || !String(v).trim()) return null;
   const s = String(v).trim();
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  const parts = s.split("/");
+  if (parts.length === 3) {
+    let [d, m, y] = parts.map((p) => p.trim());
+    if (y.length === 2) y = `20${y}`;
+    const dd = String(Number(d)).padStart(2, "0");
+    const mm = String(Number(m)).padStart(2, "0");
+    if (/^\d{4}$/.test(y) && Number(m) >= 1 && Number(m) <= 12 && Number(d) >= 1) {
+      return `${y}-${mm}-${dd}`;
+    }
+  }
+  const parsed = new Date(s);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
 }
 
 function localTodayYmd() {
@@ -384,7 +394,7 @@ async function enrichScheduleDispatchBalances(records, { excludeFuid = null } = 
     return records.map((r) => {
       const scheduleQty = Number(r.totalqty ?? r.total_qty ?? 0);
       const dispatched = Number(dispatchMap.get(planKey(r.schno, r.itemdcode)) ?? 0);
-      const balanceQty = Math.max(0, scheduleQty - dispatched);
+      const balanceQty = scheduleQty - dispatched;
       return {
         ...r,
         schedule_qty: scheduleQty,
@@ -405,6 +415,18 @@ function currentScheduleMonth() {
   return String(new Date().getMonth() + 1);
 }
 
+function monthDocdtBounds(monthNum) {
+  const m = Number(monthNum);
+  if (!Number.isFinite(m) || m < 1 || m > 12) return { from: null, to: null };
+  const year = new Date().getFullYear();
+  const mm = String(m).padStart(2, "0");
+  const lastDay = new Date(year, m, 0).getDate();
+  return {
+    from: `${year}-${mm}-01`,
+    to: `${year}-${mm}-${String(lastDay).padStart(2, "0")}`,
+  };
+}
+
 function buildImsScheduleFilterSql(body, finYearId) {
   const fyId = Number(finYearId);
   if (!Number.isFinite(fyId)) return null;
@@ -420,13 +442,19 @@ function buildImsScheduleFilterSql(body, finYearId) {
     const m = Number(monthRaw);
     if (Number.isFinite(m) && m >= 1 && m <= 12) {
       parts.push(`m.schmonth = ${m}`);
+      // Month-only: IMS expects docdt bounds too (same as manual date-range filter).
+      if (!from && !to) {
+        const bounds = monthDocdtBounds(m);
+        if (bounds.from) parts.push(`m.docdt >= '${bounds.from}'`);
+        if (bounds.to) parts.push(`m.docdt <= '${bounds.to}'`);
+      }
     }
   }
   if (from) {
-    parts.push(`m.schdt >= '${from}'`);
+    parts.push(`m.docdt >= '${from}'`);
   }
   if (to) {
-    parts.push(`m.schdt <= '${to}'`);
+    parts.push(`m.docdt <= '${to}'`);
   }
 
   return parts.join(" and ");
@@ -441,27 +469,30 @@ function customReportHasMonthOrDate(body) {
 
 function reportScopeBounds(body) {
   const reportType = String(body?.reportType ?? SCHEDULE_REPORT_FILTER.DEFAULT).toLowerCase();
-  if (reportType !== SCHEDULE_REPORT_FILTER.CUSTOM) {
-    const month = Number(currentScheduleMonth());
-    return {
-      month: Number.isFinite(month) && month >= 1 && month <= 12 ? month : null,
-      from: null,
-      to: null,
-    };
-  }
+  if (reportType !== SCHEDULE_REPORT_FILTER.CUSTOM) return null;
 
   const monthRaw = body?.month != null ? String(body.month).trim() : "";
   const hasMonth = monthRaw && monthRaw.toLowerCase() !== "all";
-  const from = normDate(body?.fromDate);
-  const to = normDate(body?.toDate) || from;
+  let from = normDate(body?.fromDate);
+  let to = normDate(body?.toDate) || from;
   let month = null;
   if (hasMonth) {
     const m = Number(monthRaw);
     if (Number.isFinite(m) && m >= 1 && m <= 12) month = m;
   }
+  if (month != null && !normDate(body?.fromDate) && !normDate(body?.toDate)) {
+    const bounds = monthDocdtBounds(month);
+    from = bounds.from;
+    to = bounds.to;
+  }
   return { month, from, to };
 }
 
+function rowScheduleDate(row) {
+  return normDate(row?.docdt ?? row?.schdt);
+}
+
+/** Custom post-filter — drops orphan DB rows outside selected month/date (IMS SQL can miss these). */
 function rowMatchesReportScope(row, scope) {
   if (!scope) return true;
   const { month, from, to } = scope;
@@ -473,17 +504,22 @@ function rowMatchesReportScope(row, scope) {
     }
   }
 
-  const schdt = normDate(row?.schdt);
-  if (from && schdt && schdt < from) return false;
-  if (to && schdt && schdt > to) return false;
+  if (from || to) {
+    const docdt = rowScheduleDate(row);
+    if (!docdt) return false;
+    if (from && docdt < from) return false;
+    if (to && docdt > to) return false;
+  }
 
   return true;
 }
 
 function applyReportScopeFilter(records, body) {
   if (!Array.isArray(records) || !records.length) return records;
+  const reportType = String(body?.reportType ?? SCHEDULE_REPORT_FILTER.DEFAULT).toLowerCase();
+  if (reportType !== SCHEDULE_REPORT_FILTER.CUSTOM) return records;
   const scope = reportScopeBounds(body);
-  if (scope.month == null && !scope.from && !scope.to) return records;
+  if (!scope || (scope.month == null && !scope.from && !scope.to)) return records;
   return records.filter((row) => rowMatchesReportScope(row, scope));
 }
 
@@ -515,11 +551,11 @@ function decorateScheduleDisplayRows(records) {
   return records.map(decorateScheduleDisplayStatus);
 }
 
-/** Default = IMS object `{ fin_year_id, month }`. Custom = SQL on m.fyid / m.schmonth / m.schdt. */
+/** Default = `{ requestedData: "schdule" }`. Custom = SQL on m.fyid / m.schmonth / m.docdt. */
 function imsFilterForReport(body, finYearId) {
   const reportType = String(body?.reportType ?? SCHEDULE_REPORT_FILTER.DEFAULT).toLowerCase();
   if (reportType !== SCHEDULE_REPORT_FILTER.CUSTOM) {
-    return { fin_year_id: finYearId, month: currentScheduleMonth() };
+    return null;
   }
   return buildImsScheduleFilterSql(body, finYearId);
 }
@@ -608,6 +644,14 @@ export async function listSchedulePlanning(body = {}) {
   }
 
   const imsFilter = imsFilterForReport(body, fy.finYearId);
+  if (reportType === SCHEDULE_REPORT_FILTER.CUSTOM && !imsFilter) {
+    return {
+      success: false,
+      status: 400,
+      message: "Invalid financial year for custom report.",
+      records: [],
+    };
+  }
 
   const [imsResult, planMap, lastTxnMap, planDateHistoryMap] = await Promise.all([
     fetchImsDataRaw(IMS_SCHEDULE_LIST, imsFilter),

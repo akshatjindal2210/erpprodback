@@ -103,14 +103,18 @@ async function resolveCoilsForInward(uids, { editInUid = null } = {}) {
 
 function buildInwardHeaderMeta(resolved) {
   const mrnRefs = [...new Set(resolved.map((c) => c.mrn_no).filter((v) => v != null))].join(" | ");
+  const mrnUids = [...new Set(resolved.map((c) => c.mrn_uid).filter(Boolean))].join(" | ");
   const heatNos = [...new Set(resolved.map((c) => c.heat_no).filter(Boolean))].join(" | ");
   const itemCodes = [...new Set(resolved.map((c) => c.item_code).filter(Boolean))].join(" | ");
+  const itemDescs = [...new Set(resolved.map((c) => c.item_desc).filter(Boolean))].join(" | ");
   const total_qty = resolved.reduce((s, c) => s + (Number(c.qty) || 0), 0);
   const qtys = resolved.map((c) => c.qty ?? "").join(",");
   return {
     mrn_refs: mrnRefs || null,
+    mrn_uids: mrnUids || null,
     heat_nos: heatNos || null,
     item_codes: itemCodes || null,
+    item_descs: itemDescs || null,
     qtys,
     total_qty,
     coil_count: resolved.length,
@@ -336,11 +340,7 @@ export const updateInwardCtrl = async (req, res) => {
 
     // Approve-only (no coil/location body)
     if (!hasLocationsBody && normalizedApproved !== undefined) {
-      const approvalFields = {
-        remarks,
-        updated_by: user,
-        updated_at: new Date(),
-      };
+      const approvalFields = { remarks };
       applyApprovalWorkflow({
         req,
         fields: approvalFields,

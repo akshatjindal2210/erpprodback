@@ -3,7 +3,13 @@ import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/q
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
-import { findCoilByUid, markCoilsConsumed, revertCoilsConsumed } from "../../coil/models/coil.model.js";
+import {
+  findCoilByUid,
+  markCoilsConsumed,
+  revertCoilsConsumed,
+  markCoilsInProcessRejectionPending,
+  revertCoilsInProcessRejection,
+} from "../../coil/models/coil.model.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 
@@ -99,6 +105,12 @@ const isApprovedConsume = (row) =>
   normalizeRequestType(row.request_type) === IPR_REQUEST_TYPE.CONSUME &&
   row.approved === true;
 
+const isApprovedRejectionPending = (row) =>
+  Boolean(row) &&
+  normalizeRequestType(row.request_type) === IPR_REQUEST_TYPE.REJECTION &&
+  row.approved === true &&
+  row.downstream === IPR_DOWNSTREAM.PENDING_STORE_OUT;
+
 const coilKeys = (coils = []) =>
   [...new Set(coils.map((c) => String(c?.coil_no_uid || "").trim().toLowerCase()).filter(Boolean))].sort();
 
@@ -107,6 +119,19 @@ const sameCoilSet = (a = [], b = []) => {
   const y = coilKeys(b);
   return x.length === y.length && x.every((v, idx) => v === y[idx]);
 };
+
+function hasInProcessContentChanges(existing, fields) {
+  if (!existing) return true;
+  if (!sameCoilSet(existing.coils, fields.coils)) return true;
+  if (!sameCoilSet(existing.proposed_coils, fields.proposed_coils)) return true;
+  if (String(fields.reason || "") !== String(existing.reason || "")) return true;
+  if (String(fields.remarks || "") !== String(existing.remarks || "")) return true;
+  if (normalizeRequestType(fields.request_type) !== normalizeRequestType(existing.request_type)) {
+    return true;
+  }
+  if (String(fields.rejection_type || "") !== String(existing.rejection_type || "")) return true;
+  return false;
+}
 
 /**
  * A coil can only be consumed while it is live stock. A coil already consumed by
@@ -123,6 +148,29 @@ async function assertCoilsConsumable(coils = [], iprUid = null) {
     if (status === "consumed" && iprUid && Number(coil.ipr_uid) === Number(iprUid)) continue;
     throw Object.assign(
       new Error(`Coil ${c.coil_no_uid} cannot be consumed. Its current status is ${status}.`),
+      { status: 400 }
+    );
+  }
+}
+
+async function assertCoilsRejectable(coils = [], iprUid = null) {
+  for (const c of coils) {
+    const coil = await findCoilByUid(c.coil_no_uid);
+    if (!coil) {
+      throw Object.assign(new Error(`Coil ${c.coil_no_uid} was not found.`), { status: 400 });
+    }
+    const status = String(coil.status || "active").toLowerCase();
+    if (status === "active") continue;
+    if (
+      status === "rejected" &&
+      iprUid &&
+      Number(coil.ipr_uid) === Number(iprUid) &&
+      !coil.qc_reject_uid
+    ) {
+      continue;
+    }
+    throw Object.assign(
+      new Error(`Coil ${c.coil_no_uid} cannot be rejected. Its current status is ${status}.`),
       { status: 400 }
     );
   }
@@ -158,6 +206,48 @@ async function releaseConsumedCoils(row, user, req) {
   if (!restored.length) return 0;
   logCoilTransactionSafe({
     transaction_type: COIL_TX_TYPES.CONSUME_REVERT,
+    source_module: MODULE,
+    source_id: String(row.ipr_uid),
+    user_name: user,
+    user_id: req.user?.id,
+    rows: restored,
+    details: { ipr_uid: row.ipr_uid, coil_count: restored.length },
+  });
+  return restored.length;
+}
+
+/** Approving an in-process rejection holds coils until RM Rejection → Store Out. */
+async function holdCoilsForRejection(row, user, req) {
+  const held = await markCoilsInProcessRejectionPending(
+    row.ipr_uid,
+    (row.coils || []).map((c) => c.coil_no_uid),
+    user
+  );
+  if (!held.length) return 0;
+  logCoilTransactionSafe({
+    transaction_type: COIL_TX_TYPES.QC_REJECT,
+    source_module: MODULE,
+    source_id: String(row.ipr_uid),
+    user_name: user,
+    user_id: req.user?.id,
+    rows: held,
+    details: {
+      ipr_uid: row.ipr_uid,
+      reason: row.reason || null,
+      rejection_type: row.rejection_type || null,
+      coil_count: held.length,
+      pending_store_out: true,
+    },
+  });
+  return held.length;
+}
+
+/** Un-approve / delete / coil change before store-out — restore held coils. */
+async function releaseRejectedCoils(row, user, req) {
+  const restored = await revertCoilsInProcessRejection(row.ipr_uid, user);
+  if (!restored.length) return 0;
+  logCoilTransactionSafe({
+    transaction_type: COIL_TX_TYPES.QC_REJECT_REVERT,
     source_module: MODULE,
     source_id: String(row.ipr_uid),
     user_name: user,
@@ -255,11 +345,19 @@ export const createInProcessRequest = async (req, res) => {
     const incomingApproved = normalizeApprovedInput(req.body?.approved);
     const record = { ...fields, created_by: user, downstream: IPR_DOWNSTREAM.NONE };
     const isConsume = fields.request_type === IPR_REQUEST_TYPE.CONSUME;
+    const isRejection = fields.request_type === IPR_REQUEST_TYPE.REJECTION;
 
     if (incomingApproved === true) {
       if (isConsume) {
         try {
           await assertCoilsConsumable(fields.coils);
+        } catch (e) {
+          return res.status(e.status || 400).json({ success: false, message: e.message });
+        }
+      }
+      if (isRejection) {
+        try {
+          await assertCoilsRejectable(fields.coils);
         } catch (e) {
           return res.status(e.status || 400).json({ success: false, message: e.message });
         }
@@ -276,6 +374,8 @@ export const createInProcessRequest = async (req, res) => {
     if (isApprovedConsume(data)) {
       await consumeCoils(data, user, req);
       data = await findInProcessRequest(row.ipr_uid);
+    } else if (isApprovedRejectionPending(data)) {
+      await holdCoilsForRejection(data, user, req);
     }
 
     const messages = {
@@ -283,7 +383,9 @@ export const createInProcessRequest = async (req, res) => {
       [IPR_REQUEST_TYPE.CONSUME]: isApprovedConsume(data)
         ? `Consume request created. ${data.coil_count} coil(s) marked as consumed.`
         : "Consume request created successfully.",
-      [IPR_REQUEST_TYPE.REJECTION]: "In-process rejection created successfully.",
+      [IPR_REQUEST_TYPE.REJECTION]: isApprovedRejectionPending(data)
+        ? "In-process rejection created and queued in RM Rejection Pending."
+        : "In-process rejection created successfully.",
     };
 
     return res.status(201).json({
@@ -317,7 +419,11 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     }
 
     const incomingApproved = normalizeApprovedInput(req.body?.approved);
-    const updateFields = { ...fields, updated_by: user, updated_at: new Date() };
+    const updateFields = { ...fields };
+    if (hasInProcessContentChanges(existing, fields)) {
+      updateFields.updated_by = user;
+      updateFields.updated_at = new Date();
+    }
 
     // Editing content re-opens approval; an explicit approve=true wins.
     const hasBusinessChanges = incomingApproved !== true;
@@ -333,11 +439,23 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     const wasConsumed = isApprovedConsume(existing);
     const willConsume =
       fields.request_type === IPR_REQUEST_TYPE.CONSUME && updateFields.approved === true;
+    const wasRejectionPending = isApprovedRejectionPending(existing);
+    const willRejectPending =
+      fields.request_type === IPR_REQUEST_TYPE.REJECTION &&
+      updateFields.approved === true &&
+      updateFields.downstream === IPR_DOWNSTREAM.PENDING_STORE_OUT;
     const coilsChanged = !sameCoilSet(existing.coils, fields.coils);
 
     if (willConsume && (!wasConsumed || coilsChanged)) {
       try {
         await assertCoilsConsumable(fields.coils, wasConsumed ? id : null);
+      } catch (e) {
+        return res.status(e.status || 400).json({ success: false, message: e.message });
+      }
+    }
+    if (willRejectPending && (!wasRejectionPending || coilsChanged)) {
+      try {
+        await assertCoilsRejectable(fields.coils, wasRejectionPending ? id : null);
       } catch (e) {
         return res.status(e.status || 400).json({ success: false, message: e.message });
       }
@@ -348,17 +466,24 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     if (wasConsumed && (!willConsume || coilsChanged)) {
       await releaseConsumedCoils(existing, user, req);
     }
+    if (wasRejectionPending && (!willRejectPending || coilsChanged)) {
+      await releaseRejectedCoils(existing, user, req);
+    }
 
     let data = await findInProcessRequest(id);
     if (willConsume && (!wasConsumed || coilsChanged)) {
       await consumeCoils(data, user, req);
       data = await findInProcessRequest(id);
     }
+    if (willRejectPending && (!wasRejectionPending || coilsChanged)) {
+      await holdCoilsForRejection(data, user, req);
+      data = await findInProcessRequest(id);
+    }
 
     const approvedMessages = {
       [IPR_REQUEST_TYPE.STORE_IN]: "Store-in request approved and queued for Store In.",
       [IPR_REQUEST_TYPE.CONSUME]: `Consume request approved. ${data?.coil_count ?? 0} coil(s) marked as consumed.`,
-      [IPR_REQUEST_TYPE.REJECTION]: "In-process rejection approved and queued for Store Out.",
+      [IPR_REQUEST_TYPE.REJECTION]: "In-process rejection approved and queued in RM Rejection Pending.",
     };
 
     return res.json({
@@ -387,6 +512,9 @@ export const deleteInProcessRequest = async (req, res) => {
     // Deleting an approved consume request puts its coils back in stock.
     if (isApprovedConsume(existing)) {
       await releaseConsumedCoils(existing, user, req);
+    }
+    if (isApprovedRejectionPending(existing)) {
+      await releaseRejectedCoils(existing, user, req);
     }
 
     await softDeleteInProcessRequest(id, user);

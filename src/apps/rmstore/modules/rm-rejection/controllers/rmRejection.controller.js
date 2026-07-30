@@ -1,7 +1,8 @@
-import { findQcRejections, findQcRejection, insertQcRejection, updateQcRejection, softDeleteQcRejection } from "../models/qcRejection.model.js";
+import { findQcRejections, findQcRejection, insertQcRejection, updateQcRejection, softDeleteQcRejection } from "../models/rmRejection.model.js";
+import { findInProcessRequest, findInProcessRejectionsPendingRejection, normalizeRequestType, IPR_DOWNSTREAM, IPR_REQUEST_TYPE, updateInProcessRequest } from "../../in-process-request/models/inProcessRequest.model.js";
 import { findCoilByUid, updateCoilsAfterQcReject, updateCoilsAfterRejectionStoreOut, clearCoilsForQcReject, findCoils } from "../../coil/models/coil.model.js";
 import { findQcCheck, findFailedQcChecksPendingRejection, reopenQcChecksForRejection, linkFailedQcChecksToRejection } from "../../qc-check/models/qcCheck.model.js";
-import { insertOutEntry, findOutEntry } from "../../out-entry/models/outEntry.model.js";
+import { insertOutEntry, findOutEntry, buildOutEntryCoilSummary } from "../../out-entry/models/outEntry.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
@@ -25,14 +26,38 @@ export const getQcRejections = async (req, res) => {
     ]);
     const status = String(safeFilters.status || "").trim().toLowerCase();
 
-    // Pending = virtual failed QC checks (not yet in rejection DB)
+    // Pending = failed QC checks + approved in-process rejections (not yet in rejection register)
     if (status === "pending") {
-      const result = await findFailedQcChecksPendingRejection({
-        search: sanitizeSearch(search),
-        page,
-        limit,
+      const [qcResult, iprResult] = await Promise.all([
+        findFailedQcChecksPendingRejection({
+          search: sanitizeSearch(search),
+          page: 1,
+          limit: 1000,
+        }),
+        findInProcessRejectionsPendingRejection({
+          search: sanitizeSearch(search),
+          page: 1,
+          limit: 1000,
+        }),
+      ]);
+      const merged = [...(iprResult.data || []), ...(qcResult.data || [])].sort((a, b) => {
+        const ta = new Date(a.approved_at || a.inspected_at || a.created_at || 0).getTime();
+        const tb = new Date(b.approved_at || b.inspected_at || b.created_at || 0).getTime();
+        return tb - ta;
       });
-      return res.json({ success: true, ...result });
+      const safePage = Math.max(1, Number(page) || 1);
+      const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 100));
+      const offset = (safePage - 1) * safeLimit;
+      const data = merged.slice(offset, offset + safeLimit);
+      const total = merged.length;
+      return res.json({
+        success: true,
+        data,
+        total,
+        page: safePage,
+        limit: safeLimit,
+        totalPages: Math.ceil(total / safeLimit),
+      });
     }
 
     const listFilters = { ...safeFilters };
@@ -132,7 +157,7 @@ export const createQcRejection = async (req, res) => {
 
     logCoilTransactionSafe({
       transaction_type: COIL_TX_TYPES.QC_REJECT,
-      source_module: "qc_rejection",
+      source_module: "rm_rejection",
       source_id: String(row.qc_reject_uid),
       user_name: user,
       user_id: req.user?.id,
@@ -219,7 +244,7 @@ export const registerQcRejectionFromCheck = async (req, res) => {
 
     logCoilTransactionSafe({
       transaction_type: COIL_TX_TYPES.QC_REJECT,
-      source_module: "qc_rejection",
+      source_module: "rm_rejection",
       source_id: String(row.qc_reject_uid),
       user_name: user,
       user_id: req.user?.id,
@@ -281,7 +306,13 @@ export const generateStoreOutFromQcCheck = async (req, res) => {
       return res.status(400).json({ success: false, message: `Coil ${check.coil_no_uid} was not found.` });
     }
     const coilStatus = String(coil.status || "active").toLowerCase();
-    if (coilStatus !== "active") {
+    const qcFailHeld =
+      coilStatus === "rejected" &&
+      !coil.qc_reject_uid &&
+      !coil.out_uid &&
+      (String(coil.qc_check_status || "").toLowerCase() === "failed" ||
+        Number(coil.qc_check_uid) === id);
+    if (coilStatus !== "active" && !qcFailHeld) {
       return res.status(400).json({
         success: false,
         message: `Coil ${check.coil_no_uid} is not available. Its current status is ${coilStatus}.`,
@@ -325,7 +356,8 @@ export const generateStoreOutFromQcCheck = async (req, res) => {
       outRow.out_uid,
       rejection.qc_reject_uid,
       [check.coil_no_uid],
-      user
+      user,
+      coil.ipr_uid != null ? { fromIprUid: coil.ipr_uid } : {}
     );
     await linkFailedQcChecksToRejection(rejection.qc_reject_uid, [check.coil_no_uid], user);
     await updateQcRejection(rejection.qc_reject_uid, {
@@ -344,7 +376,7 @@ export const generateStoreOutFromQcCheck = async (req, res) => {
 
     logCoilTransactionSafe({
       transaction_type: COIL_TX_TYPES.QC_REJECT,
-      source_module: "qc_rejection",
+      source_module: "rm_rejection",
       source_id: String(rejection.qc_reject_uid),
       user_name: user,
       user_id: req.user?.id,
@@ -391,6 +423,173 @@ export const generateStoreOutFromQcCheck = async (req, res) => {
   }
 };
 
+/**
+ * Approved in-process rejection → Rejection Register + Store Out (type RM Rejection).
+ * body: { ipr_uid, reason?, remarks?, approved? }
+ */
+export const generateStoreOutFromInProcessRequest = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.ipr_uid ?? req.body?.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "A valid in-process request ID is required." });
+    }
+
+    const ipr = await findInProcessRequest(id);
+    if (!ipr) return res.status(404).json({ success: false, message: "In-process request not found." });
+    if (normalizeRequestType(ipr.request_type) !== IPR_REQUEST_TYPE.REJECTION) {
+      return res.status(400).json({ success: false, message: "Only an in-process rejection can generate Store Out." });
+    }
+    if (ipr.approved !== true) {
+      return res.status(400).json({ success: false, message: "Authorize the in-process rejection before generating Store Out." });
+    }
+    if (ipr.downstream !== IPR_DOWNSTREAM.PENDING_STORE_OUT) {
+      return res.status(400).json({
+        success: false,
+        message: "This in-process rejection is not pending Store Out (it may already be processed).",
+      });
+    }
+
+    const reason =
+      (req.body?.reason != null ? String(req.body.reason).trim() : "") ||
+      String(ipr.reason || "").trim();
+    if (!reason) {
+      return res.status(400).json({ success: false, message: "A rejection reason is required." });
+    }
+    const remarks =
+      req.body?.remarks != null
+        ? String(req.body.remarks).trim()
+        : ipr.remarks || `RM Rejection from In-Process Request #${id}`;
+    const normalizedApproved = normalizeApprovedInput(req.body?.approved);
+    const user = auditUserName(req);
+
+    const coilUids = (ipr.coils || []).map((c) => String(c?.coil_no_uid || "").trim()).filter(Boolean);
+    if (!coilUids.length) {
+      return res.status(400).json({ success: false, message: "There are no coils on this in-process rejection." });
+    }
+
+    const resolved = [];
+    for (const uid of coilUids) {
+      const coil = await findCoilByUid(uid);
+      if (!coil) {
+        return res.status(400).json({ success: false, message: `Coil ${uid} was not found.` });
+      }
+      const status = String(coil.status || "active").toLowerCase();
+      if (status === "rejected" && Number(coil.ipr_uid) === id && !coil.qc_reject_uid) {
+        resolved.push(coil);
+        continue;
+      }
+      if (status !== "active") {
+        return res.status(400).json({
+          success: false,
+          message: `Coil ${uid} is not available for rejection store-out. Its current status is ${status}.`,
+        });
+      }
+      resolved.push(coil);
+    }
+
+    const summary = buildOutEntryCoilSummary(resolved);
+    const rejection = await insertQcRejection({
+      ipr_uid: id,
+      mrn_refs: summary.mrn_refs,
+      heat_nos: summary.heat_nos,
+      item_codes: summary.item_codes,
+      qtys: summary.qtys,
+      total_qty: summary.total_qty,
+      coil_count: summary.coil_count,
+      reason,
+      remarks,
+      created_by: user,
+    });
+
+    const outRow = await insertOutEntry({
+      entry_type: OUT_ENTRY_TYPE.RM_REJECTION,
+      qc_reject_uid: rejection.qc_reject_uid,
+      mrn_refs: summary.mrn_refs,
+      heat_nos: summary.heat_nos,
+      item_codes: summary.item_codes,
+      qtys: summary.qtys,
+      total_qty: summary.total_qty,
+      coil_count: summary.coil_count,
+      location_refs: summary.location_refs,
+      remarks: remarks || reason,
+      created_by: user,
+      scan_complete: true,
+    });
+
+    await updateCoilsAfterRejectionStoreOut(
+      outRow.out_uid,
+      rejection.qc_reject_uid,
+      coilUids,
+      user,
+      { fromIprUid: id }
+    );
+    await updateQcRejection(rejection.qc_reject_uid, {
+      out_uid: outRow.out_uid,
+      updated_by: user,
+      updated_at: new Date().toISOString(),
+    });
+    await updateInProcessRequest(id, { downstream: IPR_DOWNSTREAM.STORE_OUT_DONE });
+
+    if (normalizedApproved === true) {
+      const fields = {};
+      applyApprovalWorkflow({
+        req, fields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true,
+      });
+      await updateQcRejection(rejection.qc_reject_uid, fields);
+    }
+
+    logCoilTransactionSafe({
+      transaction_type: COIL_TX_TYPES.QC_REJECT,
+      source_module: "in_process_request",
+      source_id: String(id),
+      user_name: user,
+      user_id: req.user?.id,
+      rows: resolved,
+      details: {
+        ipr_uid: id,
+        qc_reject_uid: rejection.qc_reject_uid,
+        out_uid: outRow.out_uid,
+        reason,
+        rejection_type: ipr.rejection_type || null,
+        coil_count: resolved.length,
+        from_in_process: true,
+        store_out: true,
+      },
+    });
+    logCoilTransactionSafe({
+      transaction_type: COIL_TX_TYPES.STORE_OUT,
+      source_module: "out_entry",
+      source_id: String(outRow.out_uid),
+      user_name: user,
+      user_id: req.user?.id,
+      rows: resolved,
+      details: {
+        out_uid: outRow.out_uid,
+        qc_reject_uid: rejection.qc_reject_uid,
+        ipr_uid: id,
+        entry_type: OUT_ENTRY_TYPE.RM_REJECTION,
+        coil_count: resolved.length,
+      },
+    });
+
+    const rejectionData = await findQcRejection(rejection.qc_reject_uid);
+    const outData = await findOutEntry(outRow.out_uid);
+    const coils = await findCoils({ filters: { out_uid: outRow.out_uid }, limit: 5000 });
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        rejection: rejectionData,
+        out_entry: { ...outData, coils: coils.data },
+        ipr_uid: id,
+      },
+      message: "Store Out created from in-process rejection successfully.",
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const deleteQcRejection = async (req, res) => {
   try {
     const id = parsePositiveIntId(req.body?.qc_reject_uid ?? req.body?.id);
@@ -411,7 +610,7 @@ export const deleteQcRejection = async (req, res) => {
 
     logCoilTransactionSafe({
       transaction_type: COIL_TX_TYPES.QC_REJECT_REVERT,
-      source_module: "qc_rejection",
+      source_module: "rm_rejection",
       source_id: String(id),
       user_name: user,
       user_id: req.user?.id,

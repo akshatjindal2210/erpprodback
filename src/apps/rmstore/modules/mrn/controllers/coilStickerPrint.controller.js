@@ -3,14 +3,7 @@ import { findCoilByUid, findCoils, formatCoilNoUid, incrementCoilDownloadCount }
 import { insertCoilDownloadLog } from "../../coil/models/coilDownloadLog.model.js";
 import { getBoxNoUidPrefix } from "../../../../core/configuration/models/appConfig.model.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
-import {
-  buildCoilStickerCardHtml,
-  buildCoilStickerPreviewCardHtml,
-  buildCoilStickerPreviewDocument,
-  buildCoilStickerPrintDocument,
-  buildCoilStickerPrintDocumentTitle,
-  mapCoilToStickerPrintRow,
-} from "../../../lib/sticker/coilStickerDesign.js";
+import { buildCoilStickerCardHtml, buildCoilStickerPreviewCardHtml, buildCoilStickerPreviewDocument, buildCoilStickerPrintDocument, buildCoilStickerPrintDocumentTitle, buildCoilStickerPrintRow, loadSpecStickerFields } from "../../../lib/sticker/coilStickerDesign.js";
 import { splitQtyAcrossCoils } from "./mrnSticker.controller.js";
 
 /** Accept boolean / "true" / sticker_kind=qc from JSON bodies. */
@@ -83,11 +76,12 @@ export const previewCoilSticker = async (req, res) => {
       it_lot_no: body.it_lot_no ?? body.itLotNo,
     };
 
-    const isQc = isQcRequest(body);
-    const printRow = {
-      ...mapCoilToStickerPrintRow(sampleCoil, mrn, { fillDummy: true }),
-      ...(isQc ? { is_qc: true, sticker_kind: "qc" } : {}),
-    };
+    const spec = await loadSpecStickerFields(body.item_dcode ?? body.itemdcode);
+    const printRow = buildCoilStickerPrintRow(sampleCoil, mrn, {
+      fillDummy: true,
+      isQc: isQcRequest(body),
+      spec,
+    });
     const card = await buildCoilStickerPreviewCardHtml(printRow);
     const html = buildCoilStickerPreviewDocument(card);
 
@@ -116,10 +110,8 @@ export const renderSingleCoilSticker = async (req, res) => {
     if (!coil) return res.status(404).json({ success: false, message: "Coil not found." });
 
     const mrn = coil.mrn_uid ? await findMrnByUid(coil.mrn_uid) : null;
-    const printRow = {
-      ...mapCoilToStickerPrintRow(coil, mrn || {}),
-      ...(isQc ? { is_qc: true, sticker_kind: "qc" } : {}),
-    };
+    const spec = await loadSpecStickerFields(coil.item_dcode ?? mrn?.item_dcode);
+    const printRow = buildCoilStickerPrintRow(coil, mrn || {}, { isQc, spec });
     const card = await buildCoilStickerCardHtml(printRow);
     const html = buildCoilStickerPrintDocument([card], { mrn_no: coil.mrn_no });
     const print_title = isQc
@@ -183,11 +175,8 @@ export const renderBatchQcSticker = async (req, res) => {
       total_coils: coils.length,
     };
 
-    const printRow = {
-      ...mapCoilToStickerPrintRow(batchCoil, mrn),
-      is_qc: true,
-      sticker_kind: "qc",
-    };
+    const spec = await loadSpecStickerFields(base.item_dcode ?? mrn.item_dcode);
+    const printRow = buildCoilStickerPrintRow(batchCoil, mrn, { isQc: true, spec });
     const card = await buildCoilStickerCardHtml(printRow);
     const html = buildCoilStickerPrintDocument([card], { mrn_no: mrn.mrn_no });
     const print_title = mrn.mrn_no ? `MRN No. ${mrn.mrn_no} — Batch QC` : "Batch QC Sticker";
@@ -249,18 +238,15 @@ export const renderBulkCoilStickers = async (req, res) => {
       return res.status(404).json({ success: false, message: "There are no coils to print." });
     }
 
-    // Keep print order stable by coil_index when UIDs were supplied out of order.
     coils = [...coils].sort(
       (a, b) => (Number(a.coil_index) || 0) - (Number(b.coil_index) || 0)
     );
 
     const mrn = coils[0].mrn_uid ? await findMrnByUid(coils[0].mrn_uid) : null;
+    const spec = await loadSpecStickerFields(coils[0].item_dcode ?? mrn?.item_dcode);
     const cards = [];
     for (const coil of coils) {
-      const printRow = {
-        ...mapCoilToStickerPrintRow(coil, mrn || {}),
-        ...(isQc ? { is_qc: true, sticker_kind: "qc" } : {}),
-      };
+      const printRow = buildCoilStickerPrintRow(coil, mrn || {}, { isQc, spec });
       cards.push(await buildCoilStickerCardHtml(printRow));
     }
 

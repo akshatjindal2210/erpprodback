@@ -28,8 +28,10 @@ export const findInwards = async (options = {}) => {
     const idx = i++;
     conditions.push(`(
       COALESCE(i.mrn_refs,'') ILIKE $${idx} OR
+      COALESCE(i.mrn_uids,'') ILIKE $${idx} OR
       COALESCE(i.heat_nos,'') ILIKE $${idx} OR
       COALESCE(i.item_codes,'') ILIKE $${idx} OR
+      COALESCE(i.item_descs,'') ILIKE $${idx} OR
       COALESCE(i.remarks,'') ILIKE $${idx}
     )`);
   }
@@ -72,15 +74,15 @@ export const findInward = async (in_uid) => {
 
 export const insertInward = async (data) => {
   const {
-    mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count, remarks, created_by,
+    mrn_refs, mrn_uids, heat_nos, item_codes, item_descs, qtys, total_qty, coil_count, remarks, created_by,
   } = data;
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE}
-     (mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count, remarks, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     (mrn_refs, mrn_uids, heat_nos, item_codes, item_descs, qtys, total_qty, coil_count, remarks, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
      RETURNING *`,
     [
-      mrn_refs ?? null, heat_nos ?? null, item_codes ?? null, qtys ?? null,
+      mrn_refs ?? null, mrn_uids ?? null, heat_nos ?? null, item_codes ?? null, item_descs ?? null, qtys ?? null,
       total_qty ?? 0, coil_count ?? 0, remarks ?? null, created_by,
     ]
   );
@@ -89,7 +91,7 @@ export const insertInward = async (data) => {
 
 export const updateInward = async (in_uid, fields = {}) => {
   const allowed = [
-    "mrn_refs", "heat_nos", "item_codes", "qtys", "total_qty", "coil_count", "remarks",
+    "mrn_refs", "mrn_uids", "heat_nos", "item_codes", "item_descs", "qtys", "total_qty", "coil_count", "remarks",
     "approved", "approved_by", "approved_at", "updated_by", "updated_at",
   ];
   const safe = {};
@@ -100,7 +102,7 @@ export const updateInward = async (in_uid, fields = {}) => {
   if (!keys.length) return findInward(in_uid);
   const values = Object.values(safe);
   values.push(Number(in_uid));
-  const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(", ");
+  const setClause = keys.map((k, idx) => `${k} = $${idx + 1}`).join(", ");
   const [row] = await dbQuery(
     `UPDATE ${TABLE} SET ${setClause}
      WHERE in_uid = $${keys.length + 1} AND is_deleted = false

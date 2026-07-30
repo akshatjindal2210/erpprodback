@@ -475,7 +475,7 @@ export const replaceQcCheckItems = async (qc_check_uid, items = []) => {
   }));
   const [row] = await dbQuery(
     `UPDATE ${TABLE}
-     SET items = $2::jsonb, updated_at = NOW()
+     SET items = $2::jsonb
      WHERE qc_check_uid = $1 AND is_deleted = false
      RETURNING items`,
     [id, JSON.stringify(payload)]
@@ -512,7 +512,7 @@ export const softDeleteQcChecksByCoilNoUids = async (coil_no_uids = [], deleted_
   if (!uids.length) return 0;
   const rows = await dbQuery(
     `UPDATE ${TABLE}
-     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_at = NOW()
+     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_by = $2, updated_at = NOW()
      WHERE coil_no_uid = ANY($1::text[]) AND is_deleted = false
      RETURNING qc_check_uid`,
     [uids, deleted_by]
@@ -525,7 +525,7 @@ export const softDeleteQcChecksByMrn = async (mrn_uid, deleted_by = null) => {
   if (!uid) return 0;
   const rows = await dbQuery(
     `UPDATE ${TABLE}
-     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_at = NOW()
+     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_by = $2, updated_at = NOW()
      WHERE mrn_uid = $1 AND is_deleted = false
      RETURNING qc_check_uid`,
     [uid, deleted_by]
@@ -539,7 +539,7 @@ export const softDeleteQcCheck = async (qc_check_uid, deleted_by = null) => {
   if (!Number.isFinite(id)) return null;
   const [row] = await dbQuery(
     `UPDATE ${TABLE}
-     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_at = NOW()
+     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_by = $2, updated_at = NOW()
      WHERE qc_check_uid = $1 AND is_deleted = false
      RETURNING *`,
     [id, deleted_by]
@@ -613,7 +613,7 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
          AND (
            c.qc_reject_uid IS NOT NULL
            OR c.out_uid IS NOT NULL
-           OR LOWER(COALESCE(c.status, 'active')) IN ('rejected', 'out', 'consumed')
+           OR LOWER(COALESCE(c.status, 'active')) IN ('out', 'consumed')
          )
      )`,
   ];
@@ -656,6 +656,9 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
             q.remarks,
             q.inspected_by,
             q.inspected_at,
+            q.approved_by,
+            q.approved_at,
+            q.created_by,
             q.created_at,
             q.inspected_by AS inspected_by_name,
             TRUE AS is_virtual_pending
@@ -668,6 +671,8 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
 
   const data = (rows || []).map((r) => ({
     ...r,
+    pending_source: "qc_check",
+    pending_type: "qc_fail",
     // Rejection Pending list shape (no qc_reject_uid in DB yet)
     qc_reject_uid: null,
     mrn_refs: r.mrn_no != null ? String(r.mrn_no) : null,

@@ -1,6 +1,6 @@
 import { findOutEntries, findOutEntry, insertOutEntry, updateOutEntry, softDeleteOutEntry, replaceOutEntryScannedCoils, findOutEntryScannedCoilUids, findOutEntryScannedCoilsDetailed, findOpenOutDraftForCoil, clearOutEntryScannedCoils, buildOutEntryCoilSummary, findStoredMrnSummaries, findStoredMrnDetail, findStoredPendingForOut } from "../models/outEntry.model.js";
 import { findCoilByUid, updateCoilsAfterStoreOut, clearCoilsForStoreOut, clearCoilsForRejectionStoreOut, findCoils } from "../../coil/models/coil.model.js";
-import { updateQcRejection, findQcRejection } from "../../qc-rejection/models/qcRejection.model.js";
+import { updateQcRejection, findQcRejection } from "../../rm-rejection/models/rmRejection.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
@@ -353,16 +353,19 @@ export const updateOutEntryCtrl = async (req, res) => {
         updated_at: new Date(),
       });
     } else {
-      const fields = {
-        remarks,
-        updated_by: user,
-        updated_at: new Date(),
-      };
+      const fields = { remarks };
       if (incomingScanComplete !== undefined) {
         fields.scan_complete = scan_complete;
       }
 
-      const hasBusinessChanges = String(remarks || "") !== String(existing.remarks || "");
+      const hasBusinessChanges =
+        String(remarks || "") !== String(existing.remarks || "") ||
+        (incomingScanComplete !== undefined &&
+          scan_complete !== isTruthyFlag(existing.scan_complete));
+      if (hasBusinessChanges) {
+        fields.updated_by = user;
+        fields.updated_at = new Date();
+      }
       const shouldPersist =
         hasBusinessChanges ||
         incomingScanComplete !== undefined ||
@@ -411,8 +414,6 @@ export const updateOutEntryCtrl = async (req, res) => {
         req, fields: approveFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true,
       });
       approveFields.scan_complete = true;
-      approveFields.updated_by = user;
-      approveFields.updated_at = new Date();
       await updateOutEntry(id, approveFields);
     }
 
@@ -445,8 +446,6 @@ export const updateOutEntryCtrl = async (req, res) => {
           req, fields: approveFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true,
         });
         approveFields.scan_complete = true;
-        approveFields.updated_by = user;
-        approveFields.updated_at = new Date();
         await updateOutEntry(id, approveFields);
       }
     }

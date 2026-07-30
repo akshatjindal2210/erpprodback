@@ -214,11 +214,11 @@ export const updateProduction = async (req, res) => {
     const fields = {
       ...(item_dcode !== undefined && { item_dcode: nextItem }),
       ...(rm_item_dcode !== undefined && { rm_item_dcode: nextRm }),
-      updated_by: auditUserName(req),
-      updated_at: new Date(),
     };
 
     if (hasBusinessChanges) {
+      fields.updated_by = auditUserName(req);
+      fields.updated_at = new Date();
       const snapshot = await resolveProductionSnapshot(nextItem, nextRm);
       fields.item_dcode = snapshot.item_dcode ?? nextItem;
       fields.item_code = snapshot.item_code;

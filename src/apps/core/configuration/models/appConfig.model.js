@@ -3,7 +3,7 @@ import { getBoxNoUidPrefixFromFinancialYear } from "../../lib/utils/date/indianF
 import { getCachedAppConfig, setCachedAppConfig, invalidateAppConfigCache } from "../../lib/utils/config/appConfigCache.js";
 import { CORE_APP_CONFIG_KEYS } from "../app.config.js";
 import { IMS_APP_CONFIG_KEYS, IMS_LIST_VIEW_SPAN } from "../../../ims/lib/config/app.config.js";
-// import { RMSTORE_APP_CONFIG_KEYS } from "../../../rmstore/lib/config/app.config.js";
+import { RMSTORE_APP_CONFIG_KEYS } from "../../../rmstore/lib/config/app.config.js";
 
 /*
   Post-deploy settings (`ims_app_config` table). Read at runtime from DB.
@@ -15,7 +15,7 @@ import { IMS_APP_CONFIG_KEYS, IMS_LIST_VIEW_SPAN } from "../../../ims/lib/config
 export const APP_CONFIG_KEYS = {
   ...CORE_APP_CONFIG_KEYS,
   ...IMS_APP_CONFIG_KEYS,
-  // ...RMSTORE_APP_CONFIG_KEYS,
+  ...RMSTORE_APP_CONFIG_KEYS,
 };
 
 const COMPANY_INFO_DEFAULTS = Object.freeze({

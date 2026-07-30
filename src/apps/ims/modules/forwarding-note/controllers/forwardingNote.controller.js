@@ -9,6 +9,7 @@ import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js"
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
+import { withTransaction } from "../../../../../config/db/db.js";
 import { findForwardingNoteItems } from "../models/forwardingNoteItem.model.js";
 import { sanitizeSearch, buildForwardingNoteBillDocument } from "../../../../core/lib/utils/helper/helper.js";
 import { fetchFromIMS } from "../../../lib/services/ims.service.js";
@@ -123,19 +124,8 @@ export const createForwardingNote = async (req, res) => {
       });
     }
 
-    // 1. Insert Master
-    const row = await insertForwardingNote({ ...rest, schno, created_by: auditUserName(req) });
-
-    await saveForwardingNoteItems({
-      fuid: row.fuid,
-      items,
-      userName: auditUserName(req),
-    });
-
-    // 3. Apply initial approval state when requested (re-validate reserve before locking stock)
+    const approvalFields = {};
     if (normalizedApproved === true) {
-      await validateExistingForwardingNoteItems({ fuid: row.fuid, excludeFuid: row.fuid });
-      const approvalFields = {};
       applyApprovalWorkflow({
         req,
         fields: approvalFields,
@@ -143,10 +133,26 @@ export const createForwardingNote = async (req, res) => {
         hasBusinessChanges: false,
         auditAsName: true,
       });
-      await updateForwardingNotes(approvalFields, { fuid: row.fuid });
     }
 
-    // 4. Full data fetch with joins
+    const row = await withTransaction(async (client) => {
+      const inserted = await insertForwardingNote(
+        { ...rest, schno, created_by: auditUserName(req) },
+        { client }
+      );
+      await saveForwardingNoteItems({
+        fuid: inserted.fuid,
+        items,
+        userName: auditUserName(req),
+        client,
+      });
+      if (normalizedApproved === true && Object.keys(approvalFields).length) {
+        await updateForwardingNotes(approvalFields, { fuid: inserted.fuid }, { client });
+      }
+      return inserted;
+    });
+
+    // Full data fetch with joins
     const data = await findForwardingNote({ fuid: row.fuid });
     const enrichedData = await enrichForwardingNoteDetail(data);
 
@@ -281,17 +287,22 @@ export const updateForwardingNote = async (req, res) => {
       !(existing.approved === true || existing.approved === "true" || existing.approved === 1);
 
     if (items.length > 0) {
-      await replaceForwardingNoteItems({
-        fuid,
-        items,
-        userName: auditUserName(req),
-        excludeFuid: fuid,
+      await withTransaction(async (client) => {
+        await replaceForwardingNoteItems({
+          fuid,
+          items,
+          userName: auditUserName(req),
+          excludeFuid: fuid,
+          client,
+        });
+        await updateForwardingNotes(fields, { fuid }, { client });
       });
     } else if (isNewApproval) {
       await validateExistingForwardingNoteItems({ fuid, excludeFuid: fuid });
+      await updateForwardingNotes(fields, { fuid });
+    } else {
+      await updateForwardingNotes(fields, { fuid });
     }
-
-    await updateForwardingNotes(fields, { fuid });
 
     const data = await findForwardingNote({ fuid });
     const enrichedData = await enrichForwardingNoteDetail(data);

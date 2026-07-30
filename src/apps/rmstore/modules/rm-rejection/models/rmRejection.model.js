@@ -1,7 +1,7 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 
-const TABLE = T.QC_REJECTION;
+const TABLE = T.REJECTION;
 
 export const findQcRejections = async (options = {}) => {
   const { filters = {}, search, page = 1, limit = 100 } = options;
@@ -69,14 +69,16 @@ export const findQcRejection = async (qc_reject_uid) => {
 
 export const insertQcRejection = async (data) => {
   const {
+    ipr_uid,
     mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count, reason, remarks, created_by,
   } = data;
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE}
-     (mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count, reason, remarks, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     (ipr_uid, mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count, reason, remarks, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
      RETURNING *`,
     [
+      ipr_uid ?? null,
       mrn_refs ?? null, heat_nos ?? null, item_codes ?? null, qtys ?? null,
       total_qty ?? 0, coil_count ?? 0, reason ?? null, remarks ?? null, created_by,
     ]

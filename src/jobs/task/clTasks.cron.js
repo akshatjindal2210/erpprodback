@@ -104,9 +104,9 @@ export async function processClFrequentTasks({ personId = null } = {}) {
     }
   }
 
-  if (frequentTasks.length > 0) {
-    console.log(`✅ CL frequent tasks processed (${frequentTasks.length} master(s), ${created} new)`);
-  }
+  // if (frequentTasks.length > 0) {
+  //   console.log(`✅ CL frequent tasks processed (${frequentTasks.length} master(s), ${created} new)`);
+  // }
 
   return frequentTasks.length;
 }

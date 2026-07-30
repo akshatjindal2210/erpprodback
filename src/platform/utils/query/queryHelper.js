@@ -12,8 +12,7 @@ export const sanitizeFilters = (filters = {}, allowedFields = []) => {
 
 export const extractListParams = (body = {}, defaults = {}) => {
   const rawOrder = body.order ?? body.sortDir ?? defaults.order ?? "DESC";
-  const order =
-    typeof rawOrder === "string" && rawOrder.toUpperCase() === "ASC" ? "ASC" : "DESC";
+  const order = typeof rawOrder === "string" && rawOrder.toUpperCase() === "ASC" ? "ASC" : "DESC";
 
   const {
     page    = defaults.page    ?? 1,

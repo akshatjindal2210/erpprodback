@@ -1,7 +1,7 @@
 import { findQcChecks, findQcCheck, findQcCheckItems, findPendingQcCheckByCoil, findPendingCoilsForQc, findLiveQcCheckByCoil, insertQcCheck, replaceQcCheckItems, updateQcCheck, softDeleteQcCheck } from "../models/qcCheck.model.js";
-import { findCoilByUid, linkCoilsToQcCheck, clearCoilQcLink, clearCoilsForQcReject } from "../../coil/models/coil.model.js";
+import { findCoilByUid, linkCoilsToQcCheck, clearCoilQcLink, clearCoilsForQcReject, markCoilsQcFailPending } from "../../coil/models/coil.model.js";
 import { findSpecItemDetail } from "../../spec/models/specMaster.model.js";
-import { softDeleteQcRejection } from "../../qc-rejection/models/qcRejection.model.js";
+import { softDeleteQcRejection } from "../../rm-rejection/models/rmRejection.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
@@ -764,7 +764,7 @@ export const approveQcCheck = async (req, res) => {
     const overallStatus = forceFail ? "failed" : "passed";
 
     if (forceFail) {
-      await linkCoilsToQcCheck(id, [check.coil_no_uid], "failed", user);
+      await markCoilsQcFailPending(id, [check.coil_no_uid], user);
       await updateQcCheck(id, {
         status: "failed",
         failure_reason: failure_reason || null,

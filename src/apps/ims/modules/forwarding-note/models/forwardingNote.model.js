@@ -238,7 +238,7 @@ export const findForwardingNote = async (filters = {}) => {
   return row;
 };
 
-export const insertForwardingNote = async (data) => {
+export const insertForwardingNote = async (data, { client } = {}) => {
   const fields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage", "total_items", "packing_category_id", "schno", "bill_no", "approved", "created_by"];
   const hasBill = data.bill_no != null && String(data.bill_no).trim() !== "";
   if (hasBill) {
@@ -250,17 +250,23 @@ export const insertForwardingNote = async (data) => {
     return data[f] ?? null;
   });
   const placeholders = fields.map((_, idx) => `$${idx + 1}`).join(", ");
+  const run = client?.query
+    ? async (sql, params) => {
+        const result = await client.query(sql, params);
+        return result.rows;
+      }
+    : dbQuery;
 
-  const [row] = await dbQuery(
+  const rows = await run(
     `INSERT INTO ims_forwarding_note_master (${fields.join(", ")})
      VALUES (${placeholders})
      RETURNING *`,
     values
   );
-  return row;
+  return rows[0] ?? null;
 };
 
-export const updateForwardingNotes = async (fields = {}, filters = {}) => {
+export const updateForwardingNotes = async (fields = {}, filters = {}, { client } = {}) => {
   const safeFields = {};
   const safeFilters = {};
 
@@ -280,8 +286,14 @@ export const updateForwardingNotes = async (fields = {}, filters = {}) => {
   const values = [...Object.values(safeFields), ...Object.values(safeFilters)];
   const setClause = fieldKeys.map((k, i) => `${k} = $${i + 1}`).join(", ");
   const whereClause = filterKeys.map((k, i) => `${k} = $${fieldKeys.length + i + 1}`).join(" AND ");
+  const run = client?.query
+    ? async (sql, params) => {
+        const result = await client.query(sql, params);
+        return result.rows;
+      }
+    : dbQuery;
 
-  const [row] = await dbQuery(
+  const rows = await run(
     `UPDATE ims_forwarding_note_master
      SET ${setClause}
      WHERE ${whereClause}
@@ -289,16 +301,18 @@ export const updateForwardingNotes = async (fields = {}, filters = {}) => {
      RETURNING *`,
     values
   );
+  const row = rows[0] ?? null;
 
   if (row) return row;
 
   // Hard security guard: if row is locked, block update at model level.
   const lockFilterValue = safeFilters.fuid;
   if (lockFilterValue !== undefined && lockFilterValue !== null) {
-    const [lockRow] = await dbQuery(
+    const lockRows = await run(
       `SELECT out_entry_locked FROM ims_forwarding_note_master WHERE fuid = $1 LIMIT 1`,
       [lockFilterValue]
     );
+    const lockRow = lockRows[0] ?? null;
     if (lockRow?.out_entry_locked) {
       const err = new Error("This forwarding note is locked because it is linked to an out entry.");
       err.statusCode = 409;

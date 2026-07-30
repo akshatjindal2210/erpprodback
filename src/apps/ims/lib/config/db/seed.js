@@ -1,7 +1,7 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { CORE_APP_CONFIG_SEEDS } from "../../../../core/configuration/app.config.js";
 import { IMS_APP_CONFIG_SEEDS } from "../app.config.js";
-// import { RMSTORE_APP_CONFIG_SEEDS } from "../../../../rmstore/lib/config/app.config.js";
+import { RMSTORE_APP_CONFIG_SEEDS } from "../../../../rmstore/lib/config/app.config.js";
 
 const CATEGORIES = [
   { name: "OEM" },
@@ -15,7 +15,7 @@ const STICKER_TYPES = [
 const APP_CONFIG_SEEDS = {
   ...CORE_APP_CONFIG_SEEDS,
   ...IMS_APP_CONFIG_SEEDS,
-  // ...RMSTORE_APP_CONFIG_SEEDS,
+  ...RMSTORE_APP_CONFIG_SEEDS,
 };
 
 export async function seedImsData() {

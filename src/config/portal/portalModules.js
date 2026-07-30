@@ -1,18 +1,18 @@
 export const APP_GATES = {
   core: "app_core",
   ims: "app_ims",
-  // rmstore: "app_rmstore",
+  rmstore: "app_rmstore",
   task: "app_task",
 };
 
 export const APP_META = {
   core: { label: "Admin Console", permissions: true },
   ims: { label: "IMS", permissions: true },
-  // rmstore: { label: "RM Store", permissions: true },
+  rmstore: { label: "RM Store", permissions: true },
   task: { label: "Task", permissions: true },
 };
 
-export const PORTAL_APP_KEYS = ["core", "ims", /* "rmstore", */ "task"];
+export const PORTAL_APP_KEYS = ["core", "ims", "task"]; // rmstore — not live yet
 
 export const SETTINGS_MODULES = ["users", "modules", "training_videos", "departments", "designations"];
 
@@ -46,7 +46,25 @@ export const MODULES = {
     { name: "qc_hold_material", label: "QC Hold Material" },
     { name: "schedule_planning", label: "Schedule Planning" },
   ],
-  rmstore: [],
+  rmstore: [
+    /*
+    { name: "rm_production_master", label: "Production Master" },
+    { name: "rm_spec_master", label: "RM Spec Master" },
+    { name: "rm_store_location_master", label: "RM Store Location Master" },
+    { name: "rm_mrn_portal", label: "MRN Portal" },
+    { name: "rm_coils", label: "Coils" },
+    { name: "rm_inventory_inwards", label: "Store In" },
+    { name: "rm_qc_check", label: "QC Check" },
+    { name: "rm_rejection", label: "RM Rejection" },
+    { name: "rm_issue_request", label: "Issue Request" },
+    { name: "rm_out_entry", label: "Store Out" },
+    { name: "rm_stock_adjustment", label: "Stock Adjustment" },
+    { name: "rm_inventory_report", label: "RM Inventory" },
+    { name: "rm_activity_logs", label: "Activity Logs" },
+    { name: "rm_coil_transaction_logs", label: "Coil Transaction Logs" },
+    { name: "rm_coil_download_logs", label: "Sticker Download Logs" },
+    */
+  ],
   task: [
     { name: "cl_task_master", label: "CL Task Master" },
     { name: "cl_task", label: "CL Task" },
@@ -91,39 +109,21 @@ export const SEED_MODULES = [
   { name: "red_ticket",                   label: "Red Ticket",                      sort_order: 30,       app_type: "task" },
   { name: "category",                     label: "Category",                        sort_order: 31,       app_type: "task" },
   { name: "holiday",                      label: "Holiday",                         sort_order: 32,       app_type: "task" },
-  // { name: "rm_production_master",         label: "Production Master",               sort_order: 33,       app_type: "rmstore" },
-  // { name: "rm_spec_master",               label: "RM Spec Master",                  sort_order: 34,       app_type: "rmstore" },
-  // { name: "rm_store_location_master",     label: "RM Store Location Master",        sort_order: 35,       app_type: "rmstore" },
-  // { name: "rm_mrn_portal",                label: "MRN Portal",                      sort_order: 36,       app_type: "rmstore" },
-  // { name: "rm_coils",                     label: "Coils",                           sort_order: 37,       app_type: "rmstore" },
-  // { name: "rm_inventory_inwards",         label: "Store In",                        sort_order: 38,       app_type: "rmstore" },
-  // { name: "rm_qc_check",                  label: "QC Check",                        sort_order: 39,       app_type: "rmstore" },
-  // { name: "rm_qc_rejection",              label: "RM Rejection",                    sort_order: 40,       app_type: "rmstore" },
-  // { name: "rm_issue_request",             label: "Issue Request",                   sort_order: 41,       app_type: "rmstore" },
-  // { name: "rm_out_entry",                 label: "Store Out",                       sort_order: 42,       app_type: "rmstore" },
-  // { name: "rm_stock_adjustment",          label: "Stock Adjustment",                sort_order: 43,       app_type: "rmstore" },
-  // { name: "rm_inventory_report",          label: "RM Inventory",                    sort_order: 44,       app_type: "rmstore" },
-  // { name: "rm_activity_logs",             label: "Activity Logs",                   sort_order: 45,       app_type: "rmstore" },
-  // { name: "rm_coil_transaction_logs",     label: "Coil Transaction Logs",           sort_order: 46,       app_type: "rmstore" },
-  // { name: "rm_coil_download_logs",        label: "Sticker Download Logs",           sort_order: 47,       app_type: "rmstore" },
+  /*
+  { name: "rm_production_master",         label: "Production Master",               sort_order: 33,       app_type: "rmstore" },
+  { name: "rm_spec_master",               label: "RM Spec Master",                  sort_order: 34,       app_type: "rmstore" },
+  { name: "rm_store_location_master",     label: "RM Store Location Master",        sort_order: 35,       app_type: "rmstore" },
+  { name: "rm_mrn_portal",                label: "MRN Portal",                      sort_order: 36,       app_type: "rmstore" },
+  { name: "rm_coils",                     label: "Coils",                           sort_order: 37,       app_type: "rmstore" },
+  { name: "rm_inventory_inwards",         label: "Store In",                        sort_order: 38,       app_type: "rmstore" },
+  { name: "rm_qc_check",                  label: "QC Check",                        sort_order: 39,       app_type: "rmstore" },
+  { name: "rm_rejection",                 label: "RM Rejection",                    sort_order: 40,       app_type: "rmstore" },
+  { name: "rm_issue_request",             label: "Issue Request",                   sort_order: 41,       app_type: "rmstore" },
+  { name: "rm_out_entry",                 label: "Store Out",                       sort_order: 42,       app_type: "rmstore" },
+  { name: "rm_stock_adjustment",          label: "Stock Adjustment",                sort_order: 43,       app_type: "rmstore" },
+  { name: "rm_inventory_report",          label: "RM Inventory",                    sort_order: 44,       app_type: "rmstore" },
+  { name: "rm_activity_logs",             label: "Activity Logs",                   sort_order: 45,       app_type: "rmstore" },
+  { name: "rm_coil_transaction_logs",     label: "Coil Transaction Logs",           sort_order: 46,       app_type: "rmstore" },
+  { name: "rm_coil_download_logs",        label: "Sticker Download Logs",           sort_order: 47,       app_type: "rmstore" },
+  */
 ];
-
-/* 
-rmstore: [
-    { name: "rm_production_master", label: "Production Master" },
-    { name: "rm_spec_master", label: "RM Spec Master" },
-    { name: "rm_store_location_master", label: "RM Store Location Master" },
-    { name: "rm_mrn_portal", label: "MRN Portal" },
-    { name: "rm_coils", label: "Coils" },
-    { name: "rm_inventory_inwards", label: "Store In" },
-    { name: "rm_qc_check", label: "QC Check" },
-    { name: "rm_qc_rejection", label: "RM Rejection" },
-    { name: "rm_issue_request", label: "Issue Request" },
-    { name: "rm_out_entry", label: "Store Out" },
-    { name: "rm_stock_adjustment", label: "Stock Adjustment" },
-    { name: "rm_inventory_report", label: "RM Inventory" },
-    { name: "rm_activity_logs", label: "Activity Logs" },
-    { name: "rm_coil_transaction_logs", label: "Coil Transaction Logs" },
-    { name: "rm_coil_download_logs", label: "Coil Download Logs" },
-  ],
-*/ 
