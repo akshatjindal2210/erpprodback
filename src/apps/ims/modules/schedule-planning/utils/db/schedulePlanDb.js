@@ -129,11 +129,20 @@ export async function setPlanShortageNo({ fin_year_id, schno, itemdcode, shortag
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
+const DISPATCH_PLAN_STATUSES = new Set([
+  SCHEDULE_PLAN_STATUS.PLANNED,
+  SCHEDULE_PLAN_STATUS.RUNNING,
+  SCHEDULE_PLAN_STATUS.COMPLETE,
+  SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH,
+]);
+
+const DISPATCH_PLAN_TXN_TYPES = new Set(["plan", "complete", "ready"]);
+
 /**
  * Today Dispatch Plan rows.
  * Same month: action_date from month-start through today.
  * Plan tab: Planned / Running + action_type plan.
- * Complete tab: Planned / Running / Complete + action_type plan|complete.
+ * Complete tab: use loadDispatchCompleteTabItems (schmonth + balance rule).
  */
 export async function loadDispatchPlanItems(
   fromDate,
@@ -141,17 +150,14 @@ export async function loadDispatchPlanItems(
   statuses = [SCHEDULE_PLAN_STATUS.PLANNED],
   { actionTypes = ["plan"] } = {}
 ) {
-  const statusList = uniqueStatuses(statuses, [SCHEDULE_PLAN_STATUS.PLANNED]).filter(
-    (s) =>
-      s === SCHEDULE_PLAN_STATUS.PLANNED ||
-      s === SCHEDULE_PLAN_STATUS.RUNNING ||
-      s === SCHEDULE_PLAN_STATUS.COMPLETE
+  const statusList = uniqueStatuses(statuses, [SCHEDULE_PLAN_STATUS.PLANNED]).filter((s) =>
+    DISPATCH_PLAN_STATUSES.has(s)
   );
   const codes = statusList.length ? statusList : [SCHEDULE_PLAN_STATUS.PLANNED];
 
   const types = (Array.isArray(actionTypes) ? actionTypes : ["plan"])
     .map((t) => String(t || "").trim().toLowerCase())
-    .filter((t) => t === "plan" || t === "complete");
+    .filter((t) => DISPATCH_PLAN_TXN_TYPES.has(t));
   const txnTypes = types.length ? types : ["plan"];
 
   const rows = await dbQuery(
@@ -180,6 +186,52 @@ export async function loadDispatchPlanItems(
        AND EXTRACT(YEAR FROM lt.action_date) = EXTRACT(YEAR FROM $2::date)
      ORDER BY lt.action_date ASC, sp.schno, sp.item_code`,
     [fromDate, toDate, codes, txnTypes]
+  );
+  return rows || [];
+}
+
+/**
+ * Today Dispatch — Complete tab source rows.
+ * Current schedule month · Plan / Running / Ready / Complete (no Hold/Reject).
+ * Balance filter (<= 0) applied after dispatch qty enrich in service layer.
+ */
+export async function loadDispatchCompleteTabItems(toDate, finYearId = null, statuses = []) {
+  const d = String(toDate ?? "").slice(0, 10);
+  const month = Number(d.slice(5, 7));
+  if (!Number.isFinite(month) || month < 1 || month > 12) return [];
+
+  const statusList = uniqueStatuses(statuses, [
+    SCHEDULE_PLAN_STATUS.PLANNED,
+    SCHEDULE_PLAN_STATUS.RUNNING,
+    SCHEDULE_PLAN_STATUS.COMPLETE,
+    SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH,
+  ]).filter((s) => DISPATCH_PLAN_STATUSES.has(s));
+  const codes = statusList.length ? statusList : [...DISPATCH_PLAN_STATUSES];
+
+  const fy = String(finYearId ?? "").trim();
+  const rows = await dbQuery(
+    `SELECT
+       sp.plan_id, sp.fin_year_id, sp.schno, sp.itemdcode,
+       sp.schmonth, sp.schdt::text AS schdt,
+       sp.acc_code, sp.acc_name, sp.item_code, sp.itemdesc, sp.totalqty,
+       sp.is_planned, sp.shortage_no,
+       lt.action_date::text AS action_date,
+       lt.remark AS item_remark
+     FROM ${T.SCHEDULE_PLAN} sp
+     LEFT JOIN LATERAL (
+       SELECT action_date, remark
+       FROM ${T.SCHEDULE_PLAN_TRANSACTION}
+       WHERE fin_year_id = sp.fin_year_id
+         AND schno = sp.schno
+         AND itemdcode = sp.itemdcode
+       ORDER BY created_at DESC, txn_id DESC
+       LIMIT 1
+     ) lt ON true
+     WHERE sp.is_planned = ANY($1::int[])
+       AND sp.schmonth = $2
+       AND ($3 = '' OR sp.fin_year_id = $3)
+     ORDER BY lt.action_date ASC NULLS LAST, sp.schno, sp.item_code`,
+    [codes, month, fy]
   );
   return rows || [];
 }

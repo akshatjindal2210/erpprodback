@@ -1,8 +1,8 @@
 import dbQuery, { withTransaction } from "../../../../../../config/db/db.js";
 import { fetchImsDataRaw } from "../../../../lib/services/ims.service.js";
 import { buildInventoryReportSql } from "../../../inventory-report/utils/sql/inventoryReportSql.js";
-import { deletePlans, loadAllPlanMap, loadCustomerMonthScheduleItems, loadDispatchPlanItems, loadPlanRow, loadScheduleDispatchQtyMap, planKey, upsertPlan, updatePlanStatus, setPlanShortageNo } from "../db/schedulePlanDb.js";
-import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canReadyFrom, canRejectFrom, canTransitionAsSuperAdmin, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel, isScheduleCompleteRow, isScheduleOpenPlanRow } from "../status/schedulePlanStatus.js";
+import { deletePlans, loadAllPlanMap, loadCustomerMonthScheduleItems, loadDispatchCompleteTabItems, loadDispatchPlanItems, loadPlanRow, loadScheduleDispatchQtyMap, planKey, upsertPlan, updatePlanStatus, setPlanShortageNo } from "../db/schedulePlanDb.js";
+import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canReadyFrom, canRejectFrom, canTransitionAsSuperAdmin, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel, isScheduleCompleteRow, isScheduleOpenPlanRow, filterScheduleRowsByBalanceTab } from "../status/schedulePlanStatus.js";
 import { insertScheduleTransaction, loadActionDates, loadActionReasons, loadItemTransactionHistory, loadLastTransactionMap, loadPlanDateHistoryMap, deletePlanTransactions } from "../db/schedulePlanTransactionDb.js";
 import { buildScheduleComparison, hasScheduleComparisonMismatch } from "../compare/schedulePlanCompare.js";
 import { toPublicImsMessage } from "../../../../lib/utils/erp-api/lookup/imsMeta.js";
@@ -668,9 +668,9 @@ export async function listSchedulePlanning(body = {}) {
   records = decorateScheduleDisplayRows(records);
 
   if (filterMode === SCHEDULE_LIST_FILTER.PLAN) {
-    records = records.filter(isScheduleOpenPlanRow);
+    records = filterScheduleRowsByBalanceTab(records, { complete: false });
   } else if (filterMode === SCHEDULE_LIST_FILTER.COMPLETE) {
-    records = records.filter(isScheduleCompleteRow);
+    records = filterScheduleRowsByBalanceTab(records, { complete: true });
   }
 
   const imsOk = imsResult?.success === true;
@@ -1294,9 +1294,10 @@ function parseDispatchStatusFilter(rawStatus) {
         SCHEDULE_PLAN_STATUS.PLANNED,
         SCHEDULE_PLAN_STATUS.RUNNING,
         SCHEDULE_PLAN_STATUS.COMPLETE,
+        SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH,
       ],
       showComplete: true,
-      actionTypes: ["plan", "complete"],
+      actionTypes: ["plan", "complete", "ready"],
     };
   }
   return {
@@ -1328,19 +1329,6 @@ function mapDispatchPlanRecord(row) {
   };
 }
 
-/** Today Dispatch badges: Plan tab → Planned; Complete tab → Complete. */
-function decorateDispatchDisplayRows(rows, showComplete) {
-  return (rows || []).map((r) => {
-    const dbStatus = Number(r.is_planned ?? SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH);
-    const code = showComplete ? SCHEDULE_PLAN_STATUS.COMPLETE : SCHEDULE_PLAN_STATUS.PLANNED;
-    return {
-      ...r,
-      db_is_planned: dbStatus,
-      is_planned: code,
-      status_label: statusLabel(code),
-    };
-  });
-}
 
 /**
  * Forwarding Note item picker — current-month Ready/Plan for one customer.
@@ -1446,41 +1434,31 @@ export async function listCustomerMonthSchedules(body = {}) {
 
 /**
  * Today Dispatch Plan for Forwarding Note.
- * Same month · action_date from month start through today · no Hold.
+ * Same month · action_date month-start → today · no Hold.
+ * Plan tab → balance_qty > 0 · Complete tab → balance_qty <= 0 or manual Complete.
  */
 export async function listScheduleDispatchPlan(body = {}) {
   const now = new Date();
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const day = String(now.getDate()).padStart(2, "0");
+  const toDate = `${year}-${month}-${day}`;
   const { codes, showComplete, actionTypes } = parseDispatchStatusFilter(body?.status);
+  const finYearId = String(body?.fin_year_id ?? "").trim() || null;
 
   try {
-    const rows = await loadDispatchPlanItems(
-      `${year}-${month}-01`,
-      `${year}-${month}-${day}`,
-      codes,
-      { actionTypes }
-    );
+    const rows = showComplete
+      ? await loadDispatchCompleteTabItems(toDate, finYearId, codes)
+      : await loadDispatchPlanItems(`${year}-${month}-01`, toDate, codes, { actionTypes });
 
     let records = await enrichFgStock((rows || []).map(mapDispatchPlanRecord));
     records = await enrichScheduleDispatchBalances(records);
+    records = decorateScheduleDisplayRows(records);
+    records = filterScheduleRowsByBalanceTab(records, { complete: showComplete });
 
-    if (showComplete) {
-      records = records.filter((r) => {
-        const st = Number(r.is_planned);
-        const bal = Number(r.balance_qty ?? 0);
-        return st === SCHEDULE_PLAN_STATUS.COMPLETE ||
-          ((st === SCHEDULE_PLAN_STATUS.PLANNED || st === SCHEDULE_PLAN_STATUS.RUNNING) && bal <= 0);
-      });
-    } else {
-      records = records.filter((r) => Number(r.balance_qty ?? 0) > 0);
-    }
-
-    // Balance first (highest remaining qty on top)
     records.sort((a, b) => Number(b.balance_qty ?? 0) - Number(a.balance_qty ?? 0));
 
-    return { success: true, records: decorateDispatchDisplayRows(records, showComplete) };
+    return { success: true, records };
   } catch (err) {
     console.error("[schedule-planning] dispatch helper error:", err?.message || err);
     return { success: false, records: [], message: "Could not load dispatch plan data." };

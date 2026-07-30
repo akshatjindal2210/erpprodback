@@ -229,17 +229,42 @@ export function isActiveScheduleStatus(code) {
   return s === SCHEDULE_PLAN_STATUS.PLANNED || s === SCHEDULE_PLAN_STATUS.RUNNING;
 }
 
-/** Complete filter: manual Complete, or Plan/Running fully dispatched (balance 0). */
-export function isScheduleCompleteRow(row) {
-  const st = Number(row?.db_is_planned ?? row?.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);
-  const bal = Number(row?.balance_qty ?? 0);
-  if (st === SCHEDULE_PLAN_STATUS.COMPLETE) return true;
-  return (st === SCHEDULE_PLAN_STATUS.PLANNED || st === SCHEDULE_PLAN_STATUS.RUNNING) && bal <= 0;
+export function scheduleBalanceQty(row) {
+  const raw = row?.balance_qty;
+  if (raw == null || raw === "") return null;
+  const n = Number(raw);
+  if (Number.isFinite(n)) return n;
+  const parsed = Number(String(raw).replace(/,/g, "").trim());
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
-/** Plan filter: Plan/Running with remaining balance. */
+/** balance_qty <= 0 → Complete (Plan / Running / Ready). Manual Complete bhi. */
+export function isScheduleCompleteRow(row) {
+  const st = Number(row?.db_is_planned ?? row?.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);
+  const bal = scheduleBalanceQty(row);
+  if (st === SCHEDULE_PLAN_STATUS.COMPLETE) return true;
+  if (
+    st === SCHEDULE_PLAN_STATUS.REJECT ||
+    st === SCHEDULE_PLAN_STATUS.HOLD ||
+    st === SCHEDULE_PLAN_STATUS.PENDING
+  ) {
+    return false;
+  }
+  if (bal != null && bal <= 0) return true;
+  return false;
+}
+
+/** Plan tab: Plan/Running + balance_qty > 0. */
 export function isScheduleOpenPlanRow(row) {
   const st = Number(row?.db_is_planned ?? row?.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);
-  const bal = Number(row?.balance_qty ?? 0);
-  return (st === SCHEDULE_PLAN_STATUS.PLANNED || st === SCHEDULE_PLAN_STATUS.RUNNING) && bal > 0;
+  const bal = scheduleBalanceQty(row);
+  if (!(st === SCHEDULE_PLAN_STATUS.PLANNED || st === SCHEDULE_PLAN_STATUS.RUNNING)) return false;
+  if (bal == null) return true;
+  return bal > 0;
+}
+
+/** After balance enrich: Plan tab vs Complete tab split. */
+export function filterScheduleRowsByBalanceTab(records, { complete = false } = {}) {
+  const list = Array.isArray(records) ? records : [];
+  return complete ? list.filter(isScheduleCompleteRow) : list.filter(isScheduleOpenPlanRow);
 }
