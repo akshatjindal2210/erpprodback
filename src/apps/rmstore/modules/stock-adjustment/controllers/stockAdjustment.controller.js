@@ -6,8 +6,10 @@ import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/q
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
+import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 
 const MODULE = "rm_stock_adjustment";
+const log = createRmstoreActivityLogger(MODULE);
 
 function normalizeEntryType(raw) {
   const t = String(raw || "").trim().toLowerCase();
@@ -264,12 +266,24 @@ export const createAdjustment = async (req, res) => {
       }
       const data = await findAdjustmentById(row.adjustment_id);
       const coils = await findCoilsBySaId(row.adjustment_id);
+      log(req, "create_approve", String(row.adjustment_id), {
+        adjustment_id: row.adjustment_id,
+        entry_type: row.entry_type,
+        coil_count: coils?.length ?? 0,
+        approved: true,
+      }, data);
       return res.status(201).json({
         success: true,
         data: { ...data, coils },
         message: "Stock adjustment created and approved successfully.",
       });
     }
+
+    log(req, "create", String(row.adjustment_id), {
+      adjustment_id: row.adjustment_id,
+      entry_type: row.entry_type,
+      approved: false,
+    }, row);
 
     return res.status(201).json({
       success: true,

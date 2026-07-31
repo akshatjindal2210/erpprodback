@@ -28,7 +28,10 @@ export async function createRmStoreMrnTable() {
       tc_file_path             TEXT,
       tc_file_name             VARCHAR(255),
       rmtc_file_path           TEXT,
-      rmtc_file_name           VARCHAR(255)
+      rmtc_file_name           VARCHAR(255),
+      sticker_draft            JSONB,
+      sticker_draft_at         TIMESTAMP WITH TIME ZONE,
+      sticker_draft_by         VARCHAR(255)
     );
 
     CREATE INDEX IF NOT EXISTS rmstore_mrn_sticker_generated_idx

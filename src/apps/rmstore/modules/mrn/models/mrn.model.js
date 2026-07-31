@@ -13,6 +13,7 @@ const DEFAULT_FIELDS = [
   "m.internal_create_user", "m.internal_create_date",
   "m.system_generate_user", "m.system_generate_date",
   "m.tc_file_path", "m.tc_file_name", "m.rmtc_file_path", "m.rmtc_file_name",
+  "m.sticker_draft", "m.sticker_draft_at", "m.sticker_draft_by",
   "m.system_generate_user AS system_generate_user_name",
   "m.system_generate_user AS created_by_name",
   "m.system_generate_date AS created_at",
@@ -136,10 +137,43 @@ export const setMrnStickerGenerated = async (uid, { user, at, sticker_mode } = {
      SET sticker_generated = true,
          system_generate_user = COALESCE($2::text, system_generate_user),
          system_generate_date = COALESCE($3::timestamptz, NOW()),
-         sticker_mode = COALESCE($4::text, sticker_mode)
+         sticker_mode = COALESCE($4::text, sticker_mode),
+         sticker_draft = NULL,
+         sticker_draft_at = NULL,
+         sticker_draft_by = NULL
      WHERE uid = $1
      RETURNING *`,
     [String(uid), user ?? null, at ?? null, sticker_mode ?? null]
+  );
+  return row ?? null;
+};
+
+export const saveMrnStickerDraft = async (uid, { draft, user, at } = {}) => {
+  const key = String(uid || "").trim();
+  if (!key) return null;
+  const [row] = await dbQuery(
+    `UPDATE ${TABLE}
+     SET sticker_draft = $2::jsonb,
+         sticker_draft_at = COALESCE($3::timestamptz, NOW()),
+         sticker_draft_by = COALESCE($4::text, sticker_draft_by)
+     WHERE uid = $1
+     RETURNING *`,
+    [key, draft ?? null, at ?? null, user ?? null]
+  );
+  return row ?? null;
+};
+
+export const clearMrnStickerDraft = async (uid) => {
+  const key = String(uid || "").trim();
+  if (!key) return null;
+  const [row] = await dbQuery(
+    `UPDATE ${TABLE}
+     SET sticker_draft = NULL,
+         sticker_draft_at = NULL,
+         sticker_draft_by = NULL
+     WHERE uid = $1
+     RETURNING *`,
+    [key]
   );
   return row ?? null;
 };
@@ -150,7 +184,10 @@ export const resetMrnStickerGenerated = async (uid) => {
      SET sticker_generated = false,
          system_generate_user = NULL,
          system_generate_date = NULL,
-         sticker_mode = NULL
+         sticker_mode = NULL,
+         sticker_draft = NULL,
+         sticker_draft_at = NULL,
+         sticker_draft_by = NULL
      WHERE uid = $1
      RETURNING *`,
     [String(uid)]

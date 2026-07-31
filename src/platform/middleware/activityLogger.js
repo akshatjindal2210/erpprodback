@@ -1,5 +1,5 @@
 import ActivityLog from "../../apps/core/activity-logs/models/activityLog.model.js";
-import { buildMiddlewareLogPayload } from "../utils/activity/activityLogPayload.js";
+import { buildMiddlewareLogPayload, resolveMiddlewareEntityId } from "../utils/activity/activityLogPayload.js";
 
 const ACTION_LABELS = { POST: "CREATE", PUT: "UPDATE", PATCH: "MODIFY", DELETE: "DELETE" };
 
@@ -78,16 +78,7 @@ export const activityLogger = (appType) => {
             }
           }
 
-          const d = data?.data;
-          const entityId =
-            req.params.id ||
-            req.body?.id ||
-            req.body?.uid ||
-            req.body?.mrn_uid ||
-            req.body?.coil_no_uid ||
-            (d && typeof d === "object"
-              ? d.id ?? d.uid ?? d.mrn_uid ?? d.coil_no_uid ?? d.qc_check_uid ?? d.out_uid ?? d.in_uid ?? null
-              : null);
+          const entityId = resolveMiddlewareEntityId(req, data?.data);
           const { description, log_data, entity_id, entity_ref } = buildMiddlewareLogPayload({
             actionType,
             module,

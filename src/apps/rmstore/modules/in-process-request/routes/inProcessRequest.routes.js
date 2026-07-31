@@ -1,5 +1,5 @@
 import express from "express";
-import { getInProcessRequests, getInProcessRequestById, getInProcessReasons, getPendingStoreIn, getPendingStoreOut, createInProcessRequest, updateInProcessRequestCtrl, deleteInProcessRequest } from "../controllers/inProcessRequest.controller.js";
+import { getInProcessRequests, getInProcessRequestById, getInProcessReasons, getPendingStoreIn, getPendingStoreOut, createInProcessRequest, updateInProcessRequestCtrl, completeStoreInCtrl, deleteInProcessRequest } from "../controllers/inProcessRequest.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
 
@@ -24,6 +24,7 @@ router.post("/pending-store-out", authenticate, storeOutReader, getPendingStoreO
 router.post("/create", authenticate, accessControl(MODULE, "add"), createInProcessRequest);
 router.post("/update", authenticate, accessControl(MODULE, "edit"), updateInProcessRequestCtrl);
 router.post("/approve", authenticate, accessControl(MODULE, "authorize"), updateInProcessRequestCtrl);
+router.post("/complete-store-in", authenticate, accessControl(MODULE, "authorize"), completeStoreInCtrl);
 router.post("/delete", authenticate, accessControl(MODULE, "delete"), deleteInProcessRequest);
 
 export default router;

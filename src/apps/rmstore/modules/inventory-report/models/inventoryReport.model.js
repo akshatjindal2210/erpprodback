@@ -4,7 +4,8 @@ import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 /**
  * RM Inventory — simple coil qty zones (one readable query).
  *
- * Total Stock     = active coils (in store + unassigned)
+ * Total Stock     = active coils (in store + unassigned) — excludes shop floor
+ * Shop Floor      = status out (issued to machine) — separate from stock
  * In Store        = active + location set
  * Unassigned Area = active + no location (Coil Area)
  * Pending QC      = active + QC not finished (null / draft / awaiting / pending)
@@ -22,6 +23,7 @@ export function buildRmInventoryReportSql() {
     COALESCE(c.status, 'active') = 'rejected'
     OR ${QC_STATUS} = 'failed'
   )`;
+  const SHOP_FLOOR = `COALESCE(c.status, 'active') = 'out'`;
 
   return `
     SELECT
@@ -39,12 +41,14 @@ export function buildRmInventoryReportSql() {
       COALESCE(NULLIF(TRIM(MAX(c.acc_name)), ''), MAX(c.acc_code)::text, '—') AS customer_name,
 
       COALESCE(SUM(c.qty) FILTER (WHERE ${ACTIVE}), 0)::numeric AS total_stock_qty,
+      COALESCE(SUM(c.qty) FILTER (WHERE ${SHOP_FLOOR}), 0)::numeric AS shop_floor_qty,
       COALESCE(SUM(c.qty) FILTER (WHERE ${IN_STORE}), 0)::numeric AS in_store_qty,
       COALESCE(SUM(c.qty) FILTER (WHERE ${UNASSIGNED}), 0)::numeric AS unassigned_qty,
       COALESCE(SUM(c.qty) FILTER (WHERE ${PENDING_QC}), 0)::numeric AS pending_qc_qty,
       COALESCE(SUM(c.qty) FILTER (WHERE ${PENDING_REJECT}), 0)::numeric AS pending_reject_qty,
 
       COUNT(*) FILTER (WHERE ${IN_STORE})::int AS in_store_coils,
+      COUNT(*) FILTER (WHERE ${SHOP_FLOOR})::int AS shop_floor_coils,
       COUNT(*) FILTER (WHERE ${UNASSIGNED})::int AS unassigned_coils,
       COUNT(*) FILTER (WHERE ${ACTIVE})::int AS stock_coil_count,
       COALESCE(
@@ -73,6 +77,7 @@ export function buildRmInventoryReportSql() {
     HAVING
       COALESCE(SUM(c.qty) FILTER (WHERE ${ACTIVE}), 0) > 0
       OR COALESCE(SUM(c.qty) FILTER (WHERE ${PENDING_REJECT}), 0) > 0
+      OR COALESCE(SUM(c.qty) FILTER (WHERE ${SHOP_FLOOR}), 0) > 0
   `;
 }
 
@@ -140,11 +145,13 @@ export async function findRmInventoryReport(options = {}) {
        COALESCE(rep.location_details, '—') AS location_details,
        COALESCE(rep.in_store_location_ids, ARRAY[]::text[]) AS in_store_location_ids,
        COALESCE(rep.total_stock_qty, 0) AS total_stock_qty,
+       COALESCE(rep.shop_floor_qty, 0) AS shop_floor_qty,
        COALESCE(rep.in_store_qty, 0) AS in_store_qty,
        COALESCE(rep.unassigned_qty, 0) AS unassigned_qty,
        COALESCE(rep.pending_qc_qty, 0) AS pending_qc_qty,
        COALESCE(rep.pending_reject_qty, 0) AS pending_reject_qty,
        COALESCE(rep.in_store_coils, 0) AS in_store_coils,
+       COALESCE(rep.shop_floor_coils, 0) AS shop_floor_coils,
        COALESCE(rep.stock_coil_count, 0) AS stock_coil_count,
        COALESCE(rep.stock_coil_nos, ARRAY[]::text[]) AS stock_coil_nos
      FROM (${baseSql}) rep

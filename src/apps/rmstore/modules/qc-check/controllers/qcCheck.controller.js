@@ -8,7 +8,11 @@ import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
+import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { evaluateSpecLine, formatExpected } from "../../../lib/utils/qc/evaluateSpec.js";
+
+const MODULE = "rm_qc_check";
+const log = createRmstoreActivityLogger(MODULE);
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
 
 async function buildCheckDetail(qc_check_uid) {
@@ -586,6 +590,16 @@ export const submitQcCheck = async (req, res) => {
     });
 
     const data = await buildCheckDetail(checkId);
+    log(req, isEditSubmit ? "resubmit" : "submit", String(checkId), {
+      qc_check_uid: checkId,
+      coil_no_uid: coil.coil_no_uid,
+      mrn_no: coil.mrn_no ?? null,
+      item_code: coil.item_code ?? null,
+      status: overallStatus,
+      failure_reason: failure_reason || null,
+      has_mismatch: anyFail,
+      failed_specs: evaluated.filter((e) => e.result === "fail").map((e) => e.spec_name),
+    }, data);
     return res.json({
       success: true,
       data,
@@ -813,6 +827,16 @@ export const approveQcCheck = async (req, res) => {
     });
 
     const data = await buildCheckDetail(id);
+    log(req, forceFail ? "approve_fail" : "approve_pass", String(id), {
+      qc_check_uid: id,
+      coil_no_uid: coil.coil_no_uid,
+      mrn_no: coil.mrn_no ?? null,
+      item_code: coil.item_code ?? null,
+      status: overallStatus,
+      failure_reason: failure_reason || null,
+      approved: true,
+      overall_override: isSuperAdmin && (overrideRaw === "pass" || overrideRaw === "fail") ? overrideRaw : null,
+    }, data);
     return res.json({
       success: true,
       data,
@@ -858,6 +882,13 @@ export const reopenQcCheck = async (req, res) => {
 
     await softDeleteQcCheck(id, user);
 
+    log(req, "reopen", String(id), {
+      qc_check_uid: id,
+      coil_no_uid: check.coil_no_uid,
+      previous_status: status,
+      qc_reject_uid: check.qc_reject_uid ?? null,
+    }, check);
+
     return res.json({
       success: true,
       message: "QC check reopened. The coil is back in Pending for re-inspection.",
@@ -890,6 +921,12 @@ export const deleteQcCheck = async (req, res) => {
     const user = auditUserName(req);
     await softDeleteQcCheck(id, user);
     await clearCoilQcLink([check.coil_no_uid], user);
+
+    log(req, "delete", String(id), {
+      qc_check_uid: id,
+      coil_no_uid: check.coil_no_uid,
+      previous_status: status,
+    }, check);
 
     return res.json({
       success: true,

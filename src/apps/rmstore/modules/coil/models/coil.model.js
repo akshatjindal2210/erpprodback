@@ -4,6 +4,9 @@ import { hasCoilJourneyFilter, appendCoilJourneyCondition } from "../../../lib/u
 
 const TABLE = T.COIL_TABLE;
 
+/** List columns only (no remarks/audit) — faster reads from coil_table. */
+const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, c.mrn_no, c.serial_no, c.heat_no, c.item_dcode, c.item_code, c.item_desc, c.acc_code, c.acc_name, c.qty, c.coil_index, c.total_coils, c.location_id, c.in_uid, c.qc_reject_uid, c.qc_check_uid, c.qc_check_status, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, c.status, c.created_at`;
+
 /** IMS sticker-prefix coil UID: {prefix}_mrnno_serialno_totalno_colino e.g. 26_1001_3_10_03 */
 export function formatCoilNoUid({ prefix, mrn_no, serial_no, total, index }) {
   const pfx = String(prefix ?? "").trim() || "0";
@@ -132,7 +135,7 @@ export const findCoils = async (options = {}) => {
   const sortOrder = String(order).toUpperCase() === "ASC" ? "ASC" : "DESC";
 
   const rows = await dbQuery(
-    `SELECT c.*,
+    `SELECT ${COIL_LIST_SELECT},
             lm.location_no,
             lm.rack_no,
             lm.row_no
@@ -352,14 +355,43 @@ export const markCoilsInProcessRejectionPending = async (ipr_uid, coil_no_uids =
   return rows ?? [];
 };
 
-/** Mark coils QC-rejected (leave store / coil area). */
+/** Link coils to rejection register — hold for Store Out scan (no out_uid yet). */
+export const linkCoilsToRejectionRegister = async (
+  qc_reject_uid,
+  coil_no_uids = [],
+  userName,
+  { fromIprUid = null } = {}
+) => {
+  const uids = (coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean);
+  if (!uids.length) return;
+  const iprId = Number(fromIprUid);
+  const hasIpr = Number.isFinite(iprId) && iprId > 0;
+  const statusClause = hasIpr
+    ? `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND ipr_uid = $4 AND (qc_reject_uid IS NULL OR qc_reject_uid = $1)))`
+    : `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND (qc_reject_uid IS NULL OR qc_reject_uid = $1) AND ipr_uid IS NULL))`;
+  const params = [Number(qc_reject_uid), userName ?? null, uids];
+  if (hasIpr) params.push(iprId);
+  await dbQuery(
+    `UPDATE ${TABLE}
+     SET qc_reject_uid = $1,
+         status = 'rejected',
+         qc_check_status = COALESCE(qc_check_status, 'failed'),
+         out_uid = NULL,
+         updated_by = $2,
+         updated_at = NOW()
+     WHERE coil_no_uid = ANY($3::text[])
+       AND is_deleted = false
+       AND ${statusClause}`,
+    params
+  );
+};
+
+/** Mark coils QC-rejected — keep rack location until Store Out removes stock. */
 export const updateCoilsAfterQcReject = async (qc_reject_uid, coil_no_uids = [], userName) => {
   if (!coil_no_uids.length) return;
   await dbQuery(
     `UPDATE ${TABLE}
-     SET location_id = NULL,
-         in_uid = NULL,
-         qc_reject_uid = $1,
+     SET qc_reject_uid = $1,
          out_uid = NULL,
          status = 'rejected',
          qc_check_status = COALESCE(qc_check_status, 'failed'),
@@ -369,6 +401,23 @@ export const updateCoilsAfterQcReject = async (qc_reject_uid, coil_no_uids = [],
        AND is_deleted = false
        AND COALESCE(status, 'active') = 'active'`,
     [qc_reject_uid, userName ?? null, coil_no_uids]
+  );
+};
+
+/** Restore coils after RM Rejection register delete — back to QC fail / IPR pending hold. */
+export const revertCoilsFromRejectionRegister = async (qc_reject_uid, userName) => {
+  await dbQuery(
+    `UPDATE ${TABLE}
+     SET qc_reject_uid = NULL,
+         status = 'rejected',
+         qc_check_status = CASE
+           WHEN ipr_uid IS NOT NULL THEN qc_check_status
+           ELSE COALESCE(qc_check_status, 'failed')
+         END,
+         updated_by = $2,
+         updated_at = NOW()
+     WHERE qc_reject_uid = $1 AND is_deleted = false`,
+    [Number(qc_reject_uid), userName ?? null]
   );
 };
 
@@ -398,13 +447,14 @@ export const markCoilsConsumed = async (ipr_uid, coil_no_uids = [], userName) =>
     `UPDATE ${TABLE}
      SET location_id = NULL,
          in_uid = NULL,
+         out_uid = NULL,
          ipr_uid = $1,
          status = 'consumed',
          updated_by = $2,
          updated_at = NOW()
      WHERE coil_no_uid = ANY($3::text[])
        AND is_deleted = false
-       AND COALESCE(status, 'active') = 'active'
+       AND COALESCE(status, 'active') = 'out'
      RETURNING coil_no_uid, qty, mrn_no`,
     [Number(ipr_uid), userName ?? null, uids]
   );
@@ -426,6 +476,292 @@ export const revertCoilsConsumed = async (ipr_uid, userName) => {
     [id, userName ?? null]
   );
   return rows ?? [];
+};
+
+/**
+ * In-process consume — full or partial used qty per coil.
+ * Full: coil → consumed. Partial: log used qty, reduce coil qty, keep on shop floor (out) for Store In later.
+ */
+export const processConsumeCoils = async (ipr_uid, coilLines = [], userName) => {
+  const fullConsumed = [];
+  const partialConsumed = [];
+
+  for (const line of coilLines || []) {
+    const uid = String(line?.coil_no_uid || "").trim();
+    if (!uid) continue;
+
+    const original = Number(line.original_qty ?? line.qty) || 0;
+    const used =
+      line.consumed_qty != null ? Number(line.consumed_qty) || 0 : original;
+    const balance =
+      line.remaining_qty != null
+        ? Number(line.remaining_qty) || 0
+        : Math.max(0, original - used);
+
+    if (used <= 0) {
+      throw Object.assign(
+        new Error(`Used qty for coil ${uid} must be greater than 0.`),
+        { status: 400 }
+      );
+    }
+    if (used > original) {
+      throw Object.assign(
+        new Error(`Used qty for coil ${uid} cannot exceed issued qty (${original}).`),
+        { status: 400 }
+      );
+    }
+
+    const coil = await findCoilByUid(uid);
+    if (!coil) {
+      throw Object.assign(new Error(`Coil ${uid} was not found.`), { status: 400 });
+    }
+    const status = String(coil.status || "active").toLowerCase();
+    if (status !== "out") {
+      throw Object.assign(
+        new Error(`Coil ${uid} is not on the shop floor (status: ${status}).`),
+        { status: 400 }
+      );
+    }
+
+    if (balance <= 0 || used >= original) {
+      const rows = await dbQuery(
+        `UPDATE ${TABLE}
+         SET location_id = NULL,
+             in_uid = NULL,
+             out_uid = NULL,
+             ipr_uid = $1,
+             status = 'consumed',
+             updated_by = $2,
+             updated_at = NOW()
+         WHERE coil_no_uid = $3
+           AND is_deleted = false
+           AND status = 'out'
+         RETURNING coil_no_uid, qty, mrn_no, out_uid`,
+        [Number(ipr_uid), userName ?? null, uid]
+      );
+      if (rows?.[0]) {
+        fullConsumed.push({
+          ...rows[0],
+          consumed_qty: original,
+          original_qty: original,
+          partial: false,
+        });
+      }
+      continue;
+    }
+
+    const rows = await dbQuery(
+      `UPDATE ${TABLE}
+       SET qty = $1,
+           updated_by = $2,
+           updated_at = NOW()
+       WHERE coil_no_uid = $3
+         AND is_deleted = false
+         AND status = 'out'
+       RETURNING coil_no_uid, qty, mrn_no, out_uid`,
+      [balance, userName ?? null, uid]
+    );
+    if (rows?.[0]) {
+      partialConsumed.push({
+        ...rows[0],
+        consumed_qty: used,
+        original_qty: original,
+        remaining_qty: balance,
+        partial: true,
+      });
+    }
+  }
+
+  return { fullConsumed, partialConsumed };
+};
+
+/**
+ * Store-in return from machine — partial or full.
+ * Each line: original_qty (issued), remaining_qty (return to stock), consumed = original - remaining.
+ */
+export const processStoreInReturnCoils = async (ipr_uid, coilLines = [], userName) => {
+  const returned = [];
+  const consumed = [];
+
+  for (const line of coilLines || []) {
+    const uid = String(line?.coil_no_uid || "").trim();
+    if (!uid) continue;
+
+    const original = Number(line.original_qty ?? line.qty) || 0;
+    const remaining = Number(line.remaining_qty ?? line.qty) || 0;
+    const used =
+      line.consumed_qty != null
+        ? Number(line.consumed_qty) || 0
+        : Math.max(0, original - remaining);
+
+    if (remaining > original) {
+      throw Object.assign(
+        new Error(`Return qty for coil ${uid} cannot exceed issued qty (${original}).`),
+        { status: 400 }
+      );
+    }
+
+    const coil = await findCoilByUid(uid);
+    if (!coil) {
+      throw Object.assign(new Error(`Coil ${uid} was not found.`), { status: 400 });
+    }
+    const status = String(coil.status || "active").toLowerCase();
+    if (status !== "out") {
+      throw Object.assign(
+        new Error(`Coil ${uid} is not out at the machine (status: ${status}).`),
+        { status: 400 }
+      );
+    }
+
+    if (remaining <= 0) {
+      const rows = await dbQuery(
+        `UPDATE ${TABLE}
+         SET location_id = NULL,
+             in_uid = NULL,
+             out_uid = NULL,
+             ipr_uid = $1,
+             status = 'consumed',
+             updated_by = $2,
+             updated_at = NOW()
+         WHERE coil_no_uid = $3
+           AND is_deleted = false
+           AND status = 'out'
+         RETURNING coil_no_uid, qty, mrn_no, out_uid`,
+        [Number(ipr_uid), userName ?? null, uid]
+      );
+      if (rows?.[0]) {
+        consumed.push({
+          ...rows[0],
+          consumed_qty: original,
+          original_qty: original,
+          partial: false,
+        });
+      }
+      continue;
+    }
+
+    const rows = await dbQuery(
+      `UPDATE ${TABLE}
+       SET location_id = NULL,
+           in_uid = NULL,
+           out_uid = NULL,
+           ipr_uid = NULL,
+           status = 'active',
+           qty = $1,
+           updated_by = $2,
+           updated_at = NOW()
+       WHERE coil_no_uid = $3
+         AND is_deleted = false
+         AND status = 'out'
+       RETURNING coil_no_uid, qty, mrn_no, out_uid`,
+      [remaining, userName ?? null, uid]
+    );
+    if (rows?.[0]) {
+      returned.push({
+        ...rows[0],
+        original_qty: original,
+        consumed_qty: used,
+        remaining_qty: remaining,
+      });
+      if (used > 0) {
+        consumed.push({
+          coil_no_uid: uid,
+          qty: used,
+          mrn_no: rows[0].mrn_no,
+          consumed_qty: used,
+          original_qty: original,
+          partial: true,
+        });
+      }
+    }
+  }
+
+  return { returned, consumed };
+};
+
+/** Undo an approved store-in return — put coils back out at the machine. */
+export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], userName) => {
+  const id = Number(ipr_uid);
+  if (!Number.isFinite(id)) return { restored: [] };
+  const restored = [];
+
+  for (const line of previousCoils || []) {
+    const uid = String(line?.coil_no_uid || "").trim();
+    if (!uid) continue;
+    const original = Number(line.original_qty ?? line.qty) || 0;
+    const outUid = line.out_uid != null ? Number(line.out_uid) : null;
+
+    const coil = await findCoilByUid(uid);
+    if (!coil) continue;
+
+    const status = String(coil.status || "active").toLowerCase();
+    if (status === "consumed" && Number(coil.ipr_uid) === id) {
+      const rows = await dbQuery(
+        `UPDATE ${TABLE}
+         SET ipr_uid = NULL,
+             status = 'out',
+             out_uid = COALESCE($1, out_uid),
+             qty = $2,
+             updated_by = $3,
+             updated_at = NOW()
+         WHERE coil_no_uid = $4 AND is_deleted = false AND status = 'consumed'
+         RETURNING coil_no_uid, qty, mrn_no`,
+        [outUid, original, userName ?? null, uid]
+      );
+      if (rows?.[0]) restored.push(rows[0]);
+      continue;
+    }
+
+    if (status === "active") {
+      const rows = await dbQuery(
+        `UPDATE ${TABLE}
+         SET status = 'out',
+             out_uid = COALESCE($1, out_uid),
+             qty = $2,
+             updated_by = $3,
+             updated_at = NOW()
+         WHERE coil_no_uid = $4 AND is_deleted = false AND status = 'active'
+         RETURNING coil_no_uid, qty, mrn_no`,
+        [outUid, original, userName ?? null, uid]
+      );
+      if (rows?.[0]) restored.push(rows[0]);
+      continue;
+    }
+
+    if (status === "out") {
+      const rows = await dbQuery(
+        `UPDATE ${TABLE}
+         SET qty = $1,
+             out_uid = COALESCE($2, out_uid),
+             updated_by = $3,
+             updated_at = NOW()
+         WHERE coil_no_uid = $4 AND is_deleted = false AND status = 'out'
+         RETURNING coil_no_uid, qty, mrn_no`,
+        [original, outUid, userName ?? null, uid]
+      );
+      if (rows?.[0]) restored.push(rows[0]);
+    }
+  }
+
+  return { restored };
+};
+
+/** Job Card Store Out — active coils may be in Coil Area (no location) or In Store. */
+export const updateCoilsAfterJobCardStoreOut = async (out_uid, coil_no_uids = [], userName) => {
+  if (!coil_no_uids.length) return;
+  await dbQuery(
+    `UPDATE ${TABLE}
+     SET location_id = NULL,
+         in_uid = NULL,
+         out_uid = $1,
+         status = 'out',
+         updated_by = $2,
+         updated_at = NOW()
+     WHERE coil_no_uid = ANY($3::text[])
+       AND is_deleted = false
+       AND COALESCE(status, 'active') = 'active'`,
+    [out_uid, userName ?? null, coil_no_uids]
+  );
 };
 
 /** Store Out — remove coils from location. */
@@ -462,8 +798,8 @@ export const updateCoilsAfterRejectionStoreOut = async (
   const iprId = Number(fromIprUid);
   const hasIpr = Number.isFinite(iprId) && iprId > 0;
   const statusClause = hasIpr
-    ? `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND ipr_uid = $5 AND qc_reject_uid IS NULL))`
-    : `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND qc_reject_uid IS NULL AND ipr_uid IS NULL))`;
+    ? `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND ipr_uid = $5 AND (qc_reject_uid IS NULL OR qc_reject_uid = $2)))`
+    : `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND (qc_reject_uid IS NULL OR qc_reject_uid = $2) AND ipr_uid IS NULL))`;
   const params = [out_uid, qc_reject_uid, userName ?? null, coil_no_uids];
   if (hasIpr) params.push(iprId);
   await dbQuery(

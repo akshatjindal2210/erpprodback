@@ -548,18 +548,15 @@ export const softDeleteQcCheck = async (qc_check_uid, deleted_by = null) => {
 };
 
 /**
- * When a QC Rejection is deleted, soft-delete linked failed checks
- * so coils reappear as virtual pending (no QC row).
+ * When RM Rejection register is deleted, unlink failed QC checks
+ * so they reappear in Rejection Pending (QC Fail).
  */
 export const reopenQcChecksForRejection = async (qc_reject_uid, updated_by = null) => {
   const id = Number(qc_reject_uid);
   if (!Number.isFinite(id)) return 0;
   const rows = await dbQuery(
     `UPDATE ${TABLE}
-     SET is_deleted = true,
-         deleted_at = NOW(),
-         deleted_by = $2,
-         qc_reject_uid = NULL,
+     SET qc_reject_uid = NULL,
          updated_by = $2,
          updated_at = NOW()
      WHERE qc_reject_uid = $1 AND is_deleted = false AND LOWER(status) = 'failed'

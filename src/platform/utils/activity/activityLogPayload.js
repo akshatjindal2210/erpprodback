@@ -20,6 +20,11 @@ const SKIP_KEYS = new Set([
   "action",
   "entity",
   "entity_ref",
+  "coils",
+  "previous_coils",
+  "proposed_coils",
+  "scanned_coil_uids",
+  "job_cards",
 ]);
 
 const RECORD_KEYS = [
@@ -123,6 +128,67 @@ function parseEntityId(entity_id) {
   return { numeric: null, ref: String(entity_id) };
 }
 
+/** Known primary-key / reference fields across IMS, RM Store, and Task. */
+const ENTITY_ID_KEYS = [
+  "id",
+  "uid",
+  "mrn_uid",
+  "coil_no_uid",
+  "qc_check_uid",
+  "qc_reject_uid",
+  "out_uid",
+  "in_uid",
+  "ipr_uid",
+  "issue_uid",
+  "adjustment_id",
+  "production_id",
+  "location_id",
+  "hold_id",
+  "audit_id",
+  "box_uid",
+  "standard_id",
+  "fuid",
+  "item_dcode",
+  "source_item_dcode",
+  "doc_no",
+];
+
+function hasEntityIdValue(value) {
+  return value != null && String(value).trim() !== "";
+}
+
+function pickEntityIdFromObject(obj) {
+  if (!isPlainObject(obj)) return null;
+  for (const key of ENTITY_ID_KEYS) {
+    const value = obj[key];
+    if (hasEntityIdValue(value)) return String(value).trim();
+  }
+  return null;
+}
+
+function pickEntityIdFromResponseData(data) {
+  const direct = pickEntityIdFromObject(data);
+  if (direct) return direct;
+  if (!isPlainObject(data)) return null;
+  for (const value of Object.values(data)) {
+    if (!isPlainObject(value)) continue;
+    const nested = pickEntityIdFromObject(value);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+/** Resolve entity ref for auto middleware logs (params → body → response). */
+export function resolveMiddlewareEntityId(req, responseData = null) {
+  const fromParams = req?.params?.id;
+  if (hasEntityIdValue(fromParams)) return String(fromParams).trim();
+
+  const fromBody = pickEntityIdFromObject(req?.body);
+  if (fromBody) return fromBody;
+
+  return pickEntityIdFromResponseData(responseData);
+}
+
 function isPlainObject(v) {
   return v != null && typeof v === "object" && !Array.isArray(v);
 }
@@ -131,12 +197,36 @@ function labelField(key) {
   return FIELD_LABELS[key] || String(key).replace(/_/g, " ");
 }
 
+function formatObjectRef(obj) {
+  if (!isPlainObject(obj)) return null;
+  const ref =
+    obj.coil_no_uid ??
+    obj.box_uid ??
+    obj.box_no_uid ??
+    obj.uid ??
+    obj.id;
+  if (ref != null && String(ref).trim() !== "") return String(ref).trim();
+  return null;
+}
+
 function formatValue(value) {
   if (value === true) return "Yes";
   if (value === false) return "No";
   if (value == null || value === "") return null;
-  if (Array.isArray(value)) return value.join(", ");
-  if (typeof value === "object") return null;
+  if (Array.isArray(value)) {
+    if (!value.length) return null;
+    const parts = value
+      .map((item) => {
+        if (item == null || item === "") return null;
+        if (typeof item === "object") return formatObjectRef(item);
+        const text = String(item).trim();
+        return text || null;
+      })
+      .filter(Boolean);
+    if (parts.length) return parts.join(", ");
+    return `${value.length} item(s)`;
+  }
+  if (typeof value === "object") return formatObjectRef(value);
   return String(value);
 }
 

@@ -59,7 +59,7 @@ export function toPrdRunJcPickerRow(row) {
     itemdesc: row.itemdesc,
     macname: row.macname,
     label: row.pjobcardno,
-    sub: [row.item_code, row.itemdesc].filter(Boolean).join(" · "),
+    sub: [row.macname, row.item_code, row.itemdesc].filter(Boolean).join(" · "),
   };
 }
 

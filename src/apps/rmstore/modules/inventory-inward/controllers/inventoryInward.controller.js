@@ -1,5 +1,6 @@
 import { findInwards, findInward, insertInward, updateInward, softDeleteInward } from "../models/inventoryInward.model.js";
 import { findCoilByUid, updateCoilsAfterInward, clearCoilsForInward, findCoils } from "../../coil/models/coil.model.js";
+import { findInProcessRequests, IPR_REQUEST_TYPE, IPR_DOWNSTREAM } from "../../in-process-request/models/inProcessRequest.model.js";
 import { findPackingAreaByMrn } from "../utils/list/packingAreaList.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
@@ -7,6 +8,10 @@ import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "..
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
+import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
+
+const MODULE = "rm_inventory_inwards";
+const log = createRmstoreActivityLogger(MODULE);
 
 /** Client may send coils as UID strings or `{ coil_no_uid }`. */
 function inwardCoilUids(coils) {
@@ -132,6 +137,29 @@ export const getInwards = async (req, res) => {
       search: sanitizeSearch(search),
       page,
       limit,
+    });
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** Approved in-process store-in returns waiting to be received (one pending API). */
+export const getPendingStoreInList = async (req, res) => {
+  try {
+    const { page, limit, search } = extractListParams(req.body || {}, {
+      sortBy: "ipr_uid",
+      order: "DESC",
+    });
+    const result = await findInProcessRequests({
+      filters: {
+        request_type: IPR_REQUEST_TYPE.STORE_IN,
+        approved: true,
+        downstream: IPR_DOWNSTREAM.PENDING_STORE_IN,
+      },
+      search: sanitizeSearch(search),
+      page,
+      limit: limit || 1000,
     });
     return res.json({ success: true, ...result });
   } catch (err) {
@@ -284,6 +312,18 @@ export const createInward = async (req, res) => {
 
     const data = await findInward(row.in_uid);
     const coilRows = linked.data || [];
+    log(req, "create", String(row.in_uid), {
+      in_uid: row.in_uid,
+      mrn_no: meta.mrn_no ?? null,
+      mrn_uid: meta.mrn_uid ?? null,
+      item_code: meta.item_code ?? null,
+      location_count: locations.length,
+      locations: locations.map((l) => ({ location_id: l.location_id, coil_count: l.coils.length })),
+      coil_count: resolved.length,
+      coil_no_uids: uids,
+      remarks,
+      approved: true,
+    }, data);
     return res.status(201).json({
       success: true,
       data: {
@@ -352,6 +392,12 @@ export const updateInwardCtrl = async (req, res) => {
       const data = await findInward(id);
       const coils = await findCoils({ filters: { in_uid: id }, limit: 5000 });
       const coilRows = coils.data || [];
+      log(req, approvalFields.approved ? "approve" : "unapprove", String(id), {
+        in_uid: id,
+        approved: approvalFields.approved === true,
+        coil_count: coilRows.length,
+        remarks,
+      }, data);
       return res.json({
         success: true,
         data: {
@@ -449,6 +495,14 @@ export const updateInwardCtrl = async (req, res) => {
     const data = await findInward(id);
     const coils = await findCoils({ filters: { in_uid: id }, limit: 5000 });
     const coilRows = coils.data || [];
+    log(req, hasLocationsBody && locations.length ? "update" : "update_remarks", String(id), {
+      in_uid: id,
+      location_count: locations.length,
+      coil_count: coilRows.length,
+      coil_no_uids: coilRows.map((c) => c.coil_no_uid),
+      approved: data?.approved === true,
+      remarks,
+    }, data);
     return res.json({
       success: true,
       data: {
@@ -486,6 +540,13 @@ export const deleteInward = async (req, res) => {
       rows: coils.data || [],
       details: { in_uid: id, coil_count: coils.data?.length || 0 },
     });
+
+    log(req, "delete", String(id), {
+      in_uid: id,
+      mrn_no: existing.mrn_no ?? null,
+      coil_count: coils.data?.length || 0,
+      coil_no_uids: (coils.data || []).map((c) => c.coil_no_uid),
+    }, existing);
 
     return res.json({ success: true, message: "Store In deleted successfully." });
   } catch (err) {

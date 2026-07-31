@@ -1,6 +1,6 @@
 import express from "express";
 import { getMrnList, generateMrn, deleteGeneratedMrn } from "../controllers/mrn.controller.js";
-import { getMrnDetail, generateMrnStickers, getMrnCoils, uploadMrnDocs } from "../controllers/mrnSticker.controller.js";
+import { getMrnDetail, generateMrnStickers, getMrnCoils, uploadMrnDocs, saveMrnStickerDraftCtrl } from "../controllers/mrnSticker.controller.js";
 import { previewCoilSticker, renderSingleCoilSticker, renderBulkCoilStickers, renderBatchQcSticker } from "../controllers/coilStickerPrint.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
@@ -18,6 +18,15 @@ router.post("/coils", authenticate, accessControl(MODULE, "view"), getMrnCoils);
 
 /** Generate stickers — JSON body only (no files). */
 router.post("/generate-stickers", authenticate, accessControl(MODULE, "add"), generateMrnStickers);
+
+/** Save sticker form draft — optional TC/RMTC upload, no coils created. */
+router.post(
+  "/save-sticker-draft",
+  authenticate,
+  accessControl(MODULE, "add"),
+  rmTcUpload.fields([{ name: "tc", maxCount: 1 }, { name: "rmtc", maxCount: 1 }]),
+  saveMrnStickerDraftCtrl
+);
 
 /** Simple TC/RMTC upload after generate. */
 router.post("/upload-docs", authenticate, accessControl(MODULE, "add"), rmTcUpload.fields([{ name: "tc", maxCount: 1 }, { name: "rmtc", maxCount: 1 }]), uploadMrnDocs);

@@ -298,12 +298,17 @@ function buildFilteredList(imsRecords, filterMode, planMap, lastTxnMap = new Map
       return allRows.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.PENDING);
 
     case SCHEDULE_LIST_FILTER.READY_TO_DISPATCH:
-      return allRows.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH);
+      // return allRows.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH);
+      return allRows.filter((r) => {
+        const code = Number(r.is_planned);
+        return code === SCHEDULE_PLAN_STATUS.PENDING || code === SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH;
+      });
 
     case SCHEDULE_LIST_FILTER.PENDING_HOLD_REJECT:
       return allRows.filter((r) => {
         const code = Number(r.is_planned);
-        return (code === SCHEDULE_PLAN_STATUS.PENDING || code === SCHEDULE_PLAN_STATUS.HOLD || code === SCHEDULE_PLAN_STATUS.REJECT);
+        // return (code === SCHEDULE_PLAN_STATUS.PENDING || code === SCHEDULE_PLAN_STATUS.HOLD || code === SCHEDULE_PLAN_STATUS.REJECT);
+        return code === SCHEDULE_PLAN_STATUS.HOLD || code === SCHEDULE_PLAN_STATUS.REJECT;
       });
 
     case SCHEDULE_LIST_FILTER.PLAN:

@@ -7,6 +7,7 @@ import { createRmStoreInventoryInwardsTable } from "../tables/inventory-inward/i
 import { createRmStoreQcCheckTable } from "../tables/qc-check/qc_check.table.js";
 import { createRmStoreRejectionTable } from "../tables/rm-rejection/rejection.table.js";
 import { createRmStoreIssueRequestTable } from "../tables/issue-request/issue_request.table.js";
+import { createRmStoreIssueRequestJobCardTable } from "../tables/issue-request/issue_request_job_card.table.js";
 import { createRmStoreInProcessRequestTable } from "../tables/in-process-request/in_process_request.table.js";
 import { createRmStoreOutEntryTable } from "../tables/out-entry/out_entry.table.js";
 import { createRmStoreOutEntryScannedCoilTable } from "../tables/out-entry/out_entry_scanned_coil.table.js";
@@ -23,6 +24,7 @@ export async function initRmStoreDB() {
   await createRmStoreQcCheckTable();
   await createRmStoreRejectionTable();
   await createRmStoreIssueRequestTable();
+  await createRmStoreIssueRequestJobCardTable();
   await createRmStoreInProcessRequestTable();
   await createRmStoreOutEntryTable();
   await createRmStoreOutEntryScannedCoilTable();

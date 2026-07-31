@@ -97,6 +97,7 @@ export const DB_TABLES = {
     "rmstore_qc_check",
     "rmstore_rejection",
     "rmstore_issue_request",
+    "rmstore_issue_request_job_card",
     "rmstore_in_process_request",
     "rmstore_out_entry",
     "rmstore_out_entry_scanned_coil",

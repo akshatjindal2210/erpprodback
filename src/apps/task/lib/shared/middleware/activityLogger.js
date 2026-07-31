@@ -1,5 +1,5 @@
 import ActivityLog from "../../../../core/activity-logs/models/activityLog.model.js";
-import { buildMiddlewareLogPayload } from "../../../../core/lib/utils/activity/activityLogPayload.js";
+import { buildMiddlewareLogPayload, resolveMiddlewareEntityId } from "../../../../core/lib/utils/activity/activityLogPayload.js";
 
 const ACTION_LABELS = { POST: "CREATE", PUT: "UPDATE", PATCH: "MODIFY", DELETE: "DELETE" };
 
@@ -65,18 +65,25 @@ export function activityLogger(req, res, next) {
 
         const parts = req.originalUrl.split("/").filter(Boolean);
         const module = (parts[parts.length - 1] || "record").replace(/-/g, " ");
-        const resourceId = req.params?.id || data?.data?.id || req.body?.id || null;
+        const entityId = resolveMiddlewareEntityId(req, data?.data);
 
-        const { description, log_data, entity_id } = buildMiddlewareLogPayload({
+        const { description, log_data, entity_id, entity_ref } = buildMiddlewareLogPayload({
           actionType,
           module,
-          entityId: resourceId,
+          entityId,
           body: req.body,
           responseData: data?.data,
           route: routeUrl,
         });
 
         req._activityLogged = true;
+
+        const storedEntityId =
+          entity_ref != null && String(entity_ref).trim() !== ""
+            ? String(entity_ref).trim()
+            : entity_id != null
+              ? String(entity_id)
+              : null;
 
         ActivityLog.create({
           user_id: userId,
@@ -88,7 +95,7 @@ export function activityLogger(req, res, next) {
           ip_address: req.ip,
           user_agent: req.get("User-Agent"),
           entity: module,
-          entity_id,
+          entity_id: storedEntityId,
         }).catch((err) => console.error("[Task ActivityLogger] Error:", err.message));
       }
     }

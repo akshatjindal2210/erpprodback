@@ -1,4 +1,4 @@
-import { findMrnByUid, insertMrn, setMrnStickerGenerated, updateMrnDocs } from "../models/mrn.model.js";
+import { findMrnByUid, insertMrn, setMrnStickerGenerated, updateMrnDocs, saveMrnStickerDraft } from "../models/mrn.model.js";
 import { formatCoilNoUid, countCoilsForMrn, insertBulkCoils, findCoils, softDeleteCoilsByCoilNoUids } from "../../coil/models/coil.model.js";
 import { softDeleteQcChecksByCoilNoUids } from "../../qc-check/models/qcCheck.model.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
@@ -144,6 +144,8 @@ export const getMrnDetail = async (req, res) => {
         datec: mrn.internal_create_date ?? null,
         coils: coils.data || [],
         sticker_generated: !!mrn.sticker_generated,
+        sticker_draft: mrn.sticker_draft ?? null,
+        has_sticker_draft: !!(mrn.sticker_draft && typeof mrn.sticker_draft === "object" && Object.keys(mrn.sticker_draft).length),
         coil_count: (coils.data || []).length,
         qty_editable,
         qty_auto_calc,
@@ -364,6 +366,88 @@ export const generateMrnStickers = async (req, res) => {
   }
 };
 
+/** Save in-progress sticker form without creating coils. */
+export const saveMrnStickerDraftCtrl = async (req, res) => {
+  try {
+    const resolved = await resolveMrnForGenerate(req);
+    if (resolved.error) {
+      return res.status(resolved.error.status).json({ success: false, message: resolved.error.message });
+    }
+    const mrn = resolved.mrn;
+    const uid = String(mrn.uid);
+
+    if (mrn.sticker_generated || (await countCoilsForMrn(uid)) > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "Stickers have already been generated for this MRN.",
+      });
+    }
+
+    const coil_count = Math.max(1, Number(req.body?.coil_count) || 1);
+    let coil_qtys = parseCoilQtys(req.body, coil_count);
+    if (!coil_qtys && Array.isArray(req.body?.coil_qtys)) {
+      coil_qtys = req.body.coil_qtys.map((q) => round3(Number(q)));
+    }
+    const total_qty =
+      req.body?.total_qty != null && req.body.total_qty !== ""
+        ? round3(Number(req.body.total_qty))
+        : round3(Number(mrn.it_recp_qty));
+
+    const draft = {
+      heat_no: req.body?.heat_no != null ? String(req.body.heat_no).trim() : "",
+      coil_count,
+      coil_qtys: coil_qtys || [],
+      total_qty: Number.isFinite(total_qty) ? total_qty : null,
+      remarks: req.body?.remarks != null ? String(req.body.remarks).trim() : "",
+    };
+
+    const user = auditUserName(req);
+    const saved = await saveMrnStickerDraft(uid, { draft, user, at: new Date().toISOString() });
+
+    const docMerge = await mergeMrnDocUploads(req, uid, { requireBoth: false });
+    if (docMerge.error) {
+      return res.status(docMerge.error.status).json({ success: false, message: docMerge.error.message });
+    }
+    const finalMrn = docMerge.mrn ?? saved ?? mrn;
+
+    await log(req, "save_draft", uid, {
+      uid,
+      mrn_no: mrn.mrn_no,
+      serial_no: mrn.serial_no,
+      item_code: mrn.item_code,
+      item_desc: mrn.item_desc,
+      heat_no: draft.heat_no || null,
+      coil_count: draft.coil_count,
+      total_qty: draft.total_qty,
+      coil_qtys: draft.coil_qtys,
+      remarks: draft.remarks || null,
+      tc_file_name: finalMrn?.tc_file_name ?? null,
+      rmtc_file_name: finalMrn?.rmtc_file_name ?? null,
+      uploaded_tc: !!req.files?.tc?.[0],
+      uploaded_rmtc: !!req.files?.rmtc?.[0],
+      created_mrn_row: !!resolved.created,
+    }, finalMrn);
+
+    return res.json({
+      success: true,
+      data: {
+        uid,
+        sticker_draft: draft,
+        has_sticker_draft: true,
+        sticker_draft_at: finalMrn?.sticker_draft_at ?? saved?.sticker_draft_at ?? null,
+        sticker_draft_by: finalMrn?.sticker_draft_by ?? saved?.sticker_draft_by ?? null,
+        tc_file_path: finalMrn?.tc_file_path ?? null,
+        tc_file_name: finalMrn?.tc_file_name ?? null,
+        rmtc_file_path: finalMrn?.rmtc_file_path ?? null,
+        rmtc_file_name: finalMrn?.rmtc_file_name ?? null,
+      },
+      message: "Sticker draft saved successfully.",
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const getMrnCoils = async (req, res) => {
   try {
     const uid = String(req.body?.uid ?? req.body?.mrn_uid ?? "").trim();
@@ -381,18 +465,61 @@ export const getMrnCoils = async (req, res) => {
   }
 };
 
-/** Separate TC / RMTC upload after stickers exist — both required. */
+/** Merge optional TC/RMTC uploads onto the MRN row (keeps existing files when omitted). */
+async function mergeMrnDocUploads(req, uid, { requireBoth = false } = {}) {
+  const key = String(uid || "").trim();
+  if (!key) return { error: { status: 400, message: "MRN UID is required." } };
+
+  const mrn = await findMrnByUid(key);
+  if (!mrn) return { error: { status: 404, message: "MRN not found." } };
+
+  const tcFile = req.files?.tc?.[0] || null;
+  const rmtcFile = req.files?.rmtc?.[0] || null;
+
+  if (requireBoth && (!tcFile || !rmtcFile)) {
+    return {
+      error: {
+        status: 400,
+        message: "Both the TC and RMTC documents are required.",
+      },
+    };
+  }
+  if (!tcFile && !rmtcFile) {
+    return { mrn, docs: null };
+  }
+
+  const docs = {};
+  if (tcFile) {
+    docs.tc_file_path = toRmPublicUploadPath(tcFile, "tc");
+    docs.tc_file_name = tcFile.originalname;
+  }
+  if (rmtcFile) {
+    docs.rmtc_file_path = toRmPublicUploadPath(rmtcFile, "rmtc");
+    docs.rmtc_file_name = rmtcFile.originalname;
+  }
+
+  const updated = await updateMrnDocs(key, docs);
+  return { mrn: updated ?? mrn, docs };
+}
+
+function mrnHasBothDocs(mrn) {
+  return Boolean(String(mrn?.tc_file_path || "").trim() && String(mrn?.rmtc_file_path || "").trim());
+}
+
+/** TC / RMTC upload — full replace on generate; partial allowed when one file changes. */
 export const uploadMrnDocs = async (req, res) => {
   try {
     const uid = String(req.body?.uid ?? req.body?.mrn_uid ?? "").trim();
     if (!uid) return res.status(400).json({ success: false, message: "MRN UID is required." });
 
-    const mrn = await findMrnByUid(uid);
-    if (!mrn) return res.status(404).json({ success: false, message: "MRN not found." });
+    const requireBoth = req.body?.require_both !== "false" && req.body?.require_both !== false;
+    const merged = await mergeMrnDocUploads(req, uid, { requireBoth });
+    if (merged.error) {
+      return res.status(merged.error.status).json({ success: false, message: merged.error.message });
+    }
 
-    const tcFile = req.files?.tc?.[0] || null;
-    const rmtcFile = req.files?.rmtc?.[0] || null;
-    if (!tcFile || !rmtcFile) {
+    const finalMrn = await findMrnByUid(uid);
+    if (!mrnHasBothDocs(finalMrn)) {
       return res.status(400).json({
         success: false,
         message: "Both the TC and RMTC documents are required.",
@@ -400,22 +527,24 @@ export const uploadMrnDocs = async (req, res) => {
     }
 
     const docs = {
-      tc_file_path: toRmPublicUploadPath(tcFile, "tc"),
-      tc_file_name: tcFile.originalname,
-      rmtc_file_path: toRmPublicUploadPath(rmtcFile, "rmtc"),
-      rmtc_file_name: rmtcFile.originalname,
+      uid,
+      tc_file_path: finalMrn.tc_file_path,
+      tc_file_name: finalMrn.tc_file_name,
+      rmtc_file_path: finalMrn.rmtc_file_path,
+      rmtc_file_name: finalMrn.rmtc_file_name,
     };
-    await updateMrnDocs(uid, docs);
 
     await log(req, "upload_docs", uid, {
       uid,
       tc_file_name: docs.tc_file_name,
       rmtc_file_name: docs.rmtc_file_name,
-    }, { uid, ...docs });
+      uploaded_tc: !!req.files?.tc?.[0],
+      uploaded_rmtc: !!req.files?.rmtc?.[0],
+    }, docs);
 
     return res.json({
       success: true,
-      data: { uid, ...docs },
+      data: docs,
       message: "Documents uploaded successfully.",
     });
   } catch (err) {

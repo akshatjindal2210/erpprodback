@@ -2,6 +2,7 @@ import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 
 const TABLE = T.IN_PROCESS_REQUEST;
+const REJECTION_TABLE = T.REJECTION;
 
 export const IPR_REQUEST_TYPE = {
   REJECTION: "rejection",
@@ -14,6 +15,7 @@ export const IPR_DOWNSTREAM = {
   PENDING_STORE_OUT: "pending_store_out",
   PENDING_STORE_IN: "pending_store_in",
   CONSUMED: "consumed",
+  STORE_IN_DONE: "store_in_done",
   STORE_OUT_DONE: "store_out_done",
 };
 
@@ -29,7 +31,7 @@ export function normalizeRequestType(value) {
   return KNOWN_REQUEST_TYPES.has(type) ? type : IPR_REQUEST_TYPE.REJECTION;
 }
 
-/** Consume needs no queue — approval takes the coils out of stock directly. */
+/** Store-in approval queues for receive; coil update happens on complete (same UID, return qty). */
 export function resolveDownstream(requestType, approved) {
   if (!approved) return IPR_DOWNSTREAM.NONE;
   const type = normalizeRequestType(requestType);
@@ -89,6 +91,7 @@ export function normalizeCoils(coils) {
         mrn_no: c.mrn_no ?? null,
         location_id: c.location_id ?? null,
         location_no: str(c.location_no),
+        out_uid: c.out_uid ?? null,
         status: str(c.status),
         source: str(c.source),
         is_seed_scan: Boolean(c.is_seed_scan),
@@ -134,7 +137,9 @@ export function summarizeRow(row) {
     ? proposed_coils.length
       ? proposed_coils.reduce((s, c) => s + num(c.qty), 0)
       : coils.reduce((s, c) => s + num(c.remaining_qty ?? c.qty), 0)
-    : coils.reduce((s, c) => s + num(c.qty), 0);
+    : isConsume
+      ? coils.reduce((s, c) => s + num(c.consumed_qty ?? c.qty), 0)
+      : coils.reduce((s, c) => s + num(c.qty), 0);
 
   const mrnNos = coils.map((c) => c.mrn_no).filter((n) => n != null && n !== "");
   const heatNos = coils.map((c) => c.heat_no).filter(Boolean);
@@ -177,6 +182,11 @@ export function summarizeRow(row) {
     consumed_qty: isStoreIn
       ? Math.max(0, previous_qty - total_qty)
       : isConsume
+        ? total_qty
+        : 0,
+    balance_qty: isConsume
+      ? coils.reduce((s, c) => s + num(c.remaining_qty), 0)
+      : isStoreIn
         ? total_qty
         : 0,
     item_code: resolved_item_code,
@@ -374,6 +384,10 @@ export const findInProcessRejectionsPendingRejection = async (options = {}) => {
     "r.approved = true",
     `r.request_type = '${IPR_REQUEST_TYPE.REJECTION}'`,
     `r.downstream = '${IPR_DOWNSTREAM.PENDING_STORE_OUT}'`,
+    `NOT EXISTS (
+      SELECT 1 FROM ${REJECTION_TABLE} rej
+      WHERE rej.is_deleted = false AND rej.ipr_uid = r.ipr_uid
+    )`,
   ];
 
   if (search) {

@@ -1,5 +1,5 @@
 import express from "express";
-import { getQcRejections, getQcRejectionById, createQcRejection, registerQcRejectionFromCheck, generateStoreOutFromQcCheck, generateStoreOutFromInProcessRequest, updateQcRejectionBill, getQcRejectionBillNumbersViews, deleteQcRejection } from "../controllers/rmRejection.controller.js";
+import { getQcRejections, getPendingRejectionQueueList, getQcRejectionById, createQcRejection, registerQcRejectionFromCheck, generateStoreOutFromQcCheck, generateStoreOutFromInProcessRequest, approveRejectionRegister, updateQcRejectionBill, getQcRejectionBillNumbersViews, deleteQcRejection } from "../controllers/rmRejection.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
 
@@ -7,11 +7,13 @@ const router = express.Router();
 const MODULE = "rm_rejection";
 
 router.post("/list", authenticate, accessControl(MODULE, "view"), getQcRejections);
+router.post("/pending-list", authenticate, accessControl(MODULE, "view"), getPendingRejectionQueueList);
 router.post("/get", authenticate, accessControl(MODULE, "view"), getQcRejectionById);
 router.post("/create", authenticate, accessControl(MODULE, "add"), createQcRejection);
 router.post("/register-from-check", authenticate, accessControl(MODULE, "add"), registerQcRejectionFromCheck);
 router.post("/generate-store-out", authenticate, accessControl(MODULE, "add"), generateStoreOutFromQcCheck);
 router.post("/generate-store-out-from-ipr", authenticate, accessControl(MODULE, "add"), generateStoreOutFromInProcessRequest);
+router.post("/approve-register", authenticate, accessControl(MODULE, "authorize"), approveRejectionRegister);
 router.post("/update-bill", authenticate, accessControl(MODULE, "add"), updateQcRejectionBill);
 router.post("/bill-helper", authenticate, accessControl(MODULE, "view"), getQcRejectionBillNumbersViews);
 router.post("/delete", authenticate, accessControl(MODULE, "delete"), deleteQcRejection);

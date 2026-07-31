@@ -5,15 +5,19 @@ import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "..
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import {
   findCoilByUid,
-  markCoilsConsumed,
   revertCoilsConsumed,
   markCoilsInProcessRejectionPending,
   revertCoilsInProcessRejection,
+  processStoreInReturnCoils,
+  revertStoreInReturnCoils,
+  processConsumeCoils,
 } from "../../coil/models/coil.model.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
+import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 
-const MODULE = "in_process_request";
+const MODULE = "rm_issue_request";
+const log = createRmstoreActivityLogger(MODULE);
 
 const trimOrNull = (v) => {
   if (v == null) return null;
@@ -47,7 +51,21 @@ function buildRecordFields(body = {}, prev = null) {
   const previous_coils = normalizeCoils(previousInput);
   const proposed_coils = isStoreIn
     ? normalizeProposedCoils(
-        body.proposed_coils !== undefined ? body.proposed_coils : prev?.proposed_coils
+        body.proposed_coils !== undefined
+          ? body.proposed_coils
+          : coils
+              .filter((c) => (Number(c.remaining_qty ?? c.qty) || 0) > 0)
+              .map((c, i) => ({
+                temp_id: `ret-${String(c.coil_no_uid || i).toLowerCase()}`,
+                coil_no_uid: c.coil_no_uid,
+                from_coil_uid: c.coil_no_uid,
+                qty: Number(c.remaining_qty ?? c.qty) || 0,
+                item_code: c.item_code,
+                item_desc: c.item_desc,
+                heat_no: c.heat_no,
+                mrn_uid: c.mrn_uid,
+                mrn_no: c.mrn_no,
+              }))
       )
     : [];
 
@@ -95,10 +113,47 @@ function validate(fields) {
     }
     seen.add(key);
   }
-  if (fields.request_type === IPR_REQUEST_TYPE.STORE_IN && !fields.proposed_coils.length) {
-    throw Object.assign(new Error("Enter a return quantity for at least one coil."), { status: 400 });
+  if (fields.request_type === IPR_REQUEST_TYPE.STORE_IN) {
+    for (const c of fields.coils) {
+      const original = Number(c.original_qty ?? c.qty) || 0;
+      const remaining = Number(c.remaining_qty ?? c.qty) || 0;
+      if (remaining > original) {
+        throw Object.assign(
+          new Error(`Return qty for coil ${c.coil_no_uid} cannot exceed issued qty.`),
+          { status: 400 }
+        );
+      }
+    }
+  }
+  if (fields.request_type === IPR_REQUEST_TYPE.CONSUME) {
+    for (const c of fields.coils) {
+      const orig = Number(c.original_qty ?? c.qty) || 0;
+      const used = Number(c.consumed_qty) || 0;
+      if (used <= 0) {
+        throw Object.assign(new Error("Used qty must be greater than 0 for each coil."), {
+          status: 400,
+        });
+      }
+      if (used > orig) {
+        throw Object.assign(new Error(`Used qty for coil ${c.coil_no_uid} exceeds issued qty.`), {
+          status: 400,
+        });
+      }
+    }
   }
 }
+
+const isApprovedStoreInPending = (row) =>
+  Boolean(row) &&
+  normalizeRequestType(row.request_type) === IPR_REQUEST_TYPE.STORE_IN &&
+  row.approved === true &&
+  row.downstream === IPR_DOWNSTREAM.PENDING_STORE_IN;
+
+const isApprovedStoreInDone = (row) =>
+  Boolean(row) &&
+  normalizeRequestType(row.request_type) === IPR_REQUEST_TYPE.STORE_IN &&
+  row.approved === true &&
+  row.downstream === IPR_DOWNSTREAM.STORE_IN_DONE;
 
 const isApprovedConsume = (row) =>
   Boolean(row) &&
@@ -134,8 +189,7 @@ function hasInProcessContentChanges(existing, fields) {
 }
 
 /**
- * A coil can only be consumed while it is live stock. A coil already consumed by
- * this same request is allowed through so re-approving an unchanged request works.
+ * Consume — coil must be out at shop floor (issued). Re-approve of same request allowed.
  */
 async function assertCoilsConsumable(coils = [], iprUid = null) {
   for (const c of coils) {
@@ -144,10 +198,34 @@ async function assertCoilsConsumable(coils = [], iprUid = null) {
       throw Object.assign(new Error(`Coil ${c.coil_no_uid} was not found.`), { status: 400 });
     }
     const status = String(coil.status || "active").toLowerCase();
-    if (status === "active") continue;
+    if (status === "out") continue;
     if (status === "consumed" && iprUid && Number(coil.ipr_uid) === Number(iprUid)) continue;
     throw Object.assign(
-      new Error(`Coil ${c.coil_no_uid} cannot be consumed. Its current status is ${status}.`),
+      new Error(
+        `Coil ${c.coil_no_uid} is not on the shop floor (status: ${status}). Scan only issued-out coils.`
+      ),
+      { status: 400 }
+    );
+  }
+}
+
+async function assertCoilsForStoreInReturn(coils = [], iprUid = null) {
+  for (const c of coils) {
+    const coil = await findCoilByUid(c.coil_no_uid);
+    if (!coil) {
+      throw Object.assign(new Error(`Coil ${c.coil_no_uid} was not found.`), { status: 400 });
+    }
+    const status = String(coil.status || "active").toLowerCase();
+    if (status === "out") continue;
+    if (iprUid && status === "active") {
+      throw Object.assign(
+        new Error(`Coil ${c.coil_no_uid} is already back in stock.`),
+        { status: 400 }
+      );
+    }
+    if (iprUid && status === "consumed" && Number(coil.ipr_uid) === Number(iprUid)) continue;
+    throw Object.assign(
+      new Error(`Coil ${c.coil_no_uid} must be out at the machine (status: ${status}).`),
       { status: 400 }
     );
   }
@@ -176,32 +254,78 @@ async function assertCoilsRejectable(coils = [], iprUid = null) {
   }
 }
 
-/** Approving a consume request takes its coils out of stock. */
+/** Approving a consume request — full or partial used qty per coil. */
 async function consumeCoils(row, user, req) {
-  const consumed = await markCoilsConsumed(
+  const source = row.previous_coils?.length ? row.previous_coils : row.coils;
+  const { fullConsumed, partialConsumed } = await processConsumeCoils(
     row.ipr_uid,
-    (row.coils || []).map((c) => c.coil_no_uid),
+    source,
     user
   );
-  if (!consumed.length) return 0;
-  logCoilTransactionSafe({
-    transaction_type: COIL_TX_TYPES.CONSUME,
-    source_module: MODULE,
-    source_id: String(row.ipr_uid),
-    user_name: user,
-    user_id: req.user?.id,
-    rows: consumed,
-    details: {
-      ipr_uid: row.ipr_uid,
-      reason: row.reason || null,
-      coil_count: consumed.length,
-    },
-  });
-  return consumed.length;
+
+  if (fullConsumed.length) {
+    logCoilTransactionSafe({
+      transaction_type: COIL_TX_TYPES.CONSUME,
+      source_module: MODULE,
+      source_id: String(row.ipr_uid),
+      user_name: user,
+      user_id: req.user?.id,
+      rows: fullConsumed,
+      details: {
+        ipr_uid: row.ipr_uid,
+        reason: row.reason || null,
+        coil_count: fullConsumed.length,
+        full_consume: true,
+      },
+    });
+  }
+
+  if (partialConsumed.length) {
+    logCoilTransactionSafe({
+      transaction_type: COIL_TX_TYPES.CONSUME,
+      source_module: MODULE,
+      source_id: String(row.ipr_uid),
+      user_name: user,
+      user_id: req.user?.id,
+      rows: partialConsumed.map((c) => ({
+        coil_no_uid: c.coil_no_uid,
+        qty: c.consumed_qty,
+        mrn_no: c.mrn_no,
+      })),
+      details: {
+        ipr_uid: row.ipr_uid,
+        reason: row.reason || null,
+        partial: true,
+        coil_count: partialConsumed.length,
+        shop_floor_balance: partialConsumed.map((c) => ({
+          coil_no_uid: c.coil_no_uid,
+          remaining_qty: c.remaining_qty,
+        })),
+      },
+    });
+  }
+
+  return fullConsumed.length + partialConsumed.length;
 }
 
-/** Un-approving or deleting a consume request puts its coils back in stock. */
+/** Un-approving or deleting a consume request puts coils back out at the machine when they were issued. */
 async function releaseConsumedCoils(row, user, req) {
+  const snapshot = row.previous_coils?.length ? row.previous_coils : row.coils;
+  const fromOut = (snapshot || []).some((c) => c.out_uid != null);
+  if (fromOut) {
+    const { restored } = await revertStoreInReturnCoils(row.ipr_uid, snapshot, user);
+    if (!restored.length) return 0;
+    logCoilTransactionSafe({
+      transaction_type: COIL_TX_TYPES.CONSUME_REVERT,
+      source_module: MODULE,
+      source_id: String(row.ipr_uid),
+      user_name: user,
+      user_id: req.user?.id,
+      rows: restored,
+      details: { ipr_uid: row.ipr_uid, coil_count: restored.length, restore_out: true },
+    });
+    return restored.length;
+  }
   const restored = await revertCoilsConsumed(row.ipr_uid, user);
   if (!restored.length) return 0;
   logCoilTransactionSafe({
@@ -212,6 +336,89 @@ async function releaseConsumedCoils(row, user, req) {
     user_id: req.user?.id,
     rows: restored,
     details: { ipr_uid: row.ipr_uid, coil_count: restored.length },
+  });
+  return restored.length;
+}
+
+/** Approving store-in — return remainder to stock and record consumed qty. */
+async function applyStoreInReturn(row, user, req) {
+  const source = row.previous_coils?.length ? row.previous_coils : row.coils;
+  const { returned, consumed } = await processStoreInReturnCoils(row.ipr_uid, source, user);
+
+  if (returned.length) {
+    logCoilTransactionSafe({
+      transaction_type: COIL_TX_TYPES.STORE_OUT_REVERT,
+      source_module: MODULE,
+      source_id: String(row.ipr_uid),
+      user_name: user,
+      user_id: req.user?.id,
+      rows: returned,
+      details: {
+        ipr_uid: row.ipr_uid,
+        reason: row.reason || null,
+        request_type: IPR_REQUEST_TYPE.STORE_IN,
+        returned_count: returned.length,
+        issued_snapshot: true,
+      },
+    });
+  }
+
+  const fullConsumed = consumed.filter((c) => !c.partial);
+  if (fullConsumed.length) {
+    logCoilTransactionSafe({
+      transaction_type: COIL_TX_TYPES.CONSUME,
+      source_module: MODULE,
+      source_id: String(row.ipr_uid),
+      user_name: user,
+      user_id: req.user?.id,
+      rows: fullConsumed,
+      details: {
+        ipr_uid: row.ipr_uid,
+        reason: row.reason || null,
+        coil_count: fullConsumed.length,
+        from_store_in: true,
+      },
+    });
+  }
+
+  const partialConsumed = consumed.filter((c) => c.partial);
+  if (partialConsumed.length) {
+    logCoilTransactionSafe({
+      transaction_type: COIL_TX_TYPES.CONSUME,
+      source_module: MODULE,
+      source_id: String(row.ipr_uid),
+      user_name: user,
+      user_id: req.user?.id,
+      rows: partialConsumed.map((c) => ({ coil_no_uid: c.coil_no_uid, qty: c.consumed_qty, mrn_no: c.mrn_no })),
+      details: {
+        ipr_uid: row.ipr_uid,
+        reason: row.reason || null,
+        partial: true,
+        coil_count: partialConsumed.length,
+        from_store_in: true,
+      },
+    });
+  }
+
+  return { returned: returned.length, consumed: consumed.length };
+}
+
+async function releaseStoreInReturn(row, user, req) {
+  const snapshot = row.previous_coils?.length ? row.previous_coils : row.coils;
+  const { restored } = await revertStoreInReturnCoils(row.ipr_uid, snapshot, user);
+  if (!restored.length) return 0;
+  logCoilTransactionSafe({
+    transaction_type: COIL_TX_TYPES.STORE_OUT,
+    source_module: MODULE,
+    source_id: String(row.ipr_uid),
+    user_name: user,
+    user_id: req.user?.id,
+    rows: restored,
+    details: {
+      ipr_uid: row.ipr_uid,
+      revert_store_in: true,
+      coil_count: restored.length,
+    },
   });
   return restored.length;
 }
@@ -332,6 +539,60 @@ export const getPendingStoreOut = async (req, res) => {
   }
 };
 
+/** Receive an authorized store-in — update same coil qty, move to Unassigned Area (no new coil row). */
+export const completeStoreInCtrl = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.ipr_uid ?? req.body?.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "A valid in-process request ID is required." });
+    }
+
+    const existing = await findInProcessRequest(id);
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "In-process request not found." });
+    }
+    if (!isApprovedStoreInPending(existing)) {
+      return res.status(400).json({
+        success: false,
+        message: "Only an authorized Store In request in the pending queue can be received.",
+      });
+    }
+
+    const user = auditUserName(req);
+    try {
+      await assertCoilsForStoreInReturn(existing.coils, id);
+    } catch (e) {
+      return res.status(e.status || 400).json({ success: false, message: e.message });
+    }
+
+    await applyStoreInReturn(existing, user, req);
+    await updateInProcessRequest(id, {
+      downstream: IPR_DOWNSTREAM.STORE_IN_DONE,
+      updated_by: user,
+      updated_at: new Date(),
+    });
+
+    const data = await findInProcessRequest(id);
+    log(req, "complete_store_in", String(id), {
+      ipr_uid: id,
+      coil_count: data?.coil_count ?? 0,
+      downstream: data?.downstream ?? null,
+    }, data);
+
+    return res.json({
+      success: true,
+      data,
+      message:
+        "Store-in received. Same coil updated with return qty in Unassigned Area (Coil Area).",
+    });
+  } catch (err) {
+    if (err?.statusCode === 403 || err?.statusCode === 400) {
+      return res.status(err.statusCode).json({ success: false, message: err.message });
+    }
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const createInProcessRequest = async (req, res) => {
   try {
     const user = auditUserName(req);
@@ -346,11 +607,19 @@ export const createInProcessRequest = async (req, res) => {
     const record = { ...fields, created_by: user, downstream: IPR_DOWNSTREAM.NONE };
     const isConsume = fields.request_type === IPR_REQUEST_TYPE.CONSUME;
     const isRejection = fields.request_type === IPR_REQUEST_TYPE.REJECTION;
+    const isStoreIn = fields.request_type === IPR_REQUEST_TYPE.STORE_IN;
 
     if (incomingApproved === true) {
       if (isConsume) {
         try {
           await assertCoilsConsumable(fields.coils);
+        } catch (e) {
+          return res.status(e.status || 400).json({ success: false, message: e.message });
+        }
+      }
+      if (isStoreIn) {
+        try {
+          await assertCoilsForStoreInReturn(fields.coils);
         } catch (e) {
           return res.status(e.status || 400).json({ success: false, message: e.message });
         }
@@ -379,14 +648,29 @@ export const createInProcessRequest = async (req, res) => {
     }
 
     const messages = {
-      [IPR_REQUEST_TYPE.STORE_IN]: "Store-in request created successfully.",
+      [IPR_REQUEST_TYPE.STORE_IN]: isApprovedStoreInPending(data)
+        ? "Store-in authorized and queued. Receive when ready — same coil updates to Unassigned Area with return qty."
+        : "Store-in request saved as pending.",
       [IPR_REQUEST_TYPE.CONSUME]: isApprovedConsume(data)
-        ? `Consume request created. ${data.coil_count} coil(s) marked as consumed.`
+        ? `Consume processed. ${data?.coil_count ?? 0} coil line(s); used qty recorded${
+            Number(data?.balance_qty) > 0
+              ? ` — ${Number(data.balance_qty).toLocaleString()} balance on shop floor for Store In`
+              : ""
+          }.`
         : "Consume request created successfully.",
       [IPR_REQUEST_TYPE.REJECTION]: isApprovedRejectionPending(data)
         ? "In-process rejection created and queued in RM Rejection Pending."
         : "In-process rejection created successfully.",
     };
+
+    log(req, "create", String(row.ipr_uid), {
+      ipr_uid: row.ipr_uid,
+      request_type: fields.request_type,
+      coil_count: data?.coil_count ?? fields.coils?.length ?? 0,
+      coil_no_uids: (fields.coils || []).map((c) => c.coil_no_uid || c),
+      approved: data?.approved === true,
+      reason: fields.reason ?? null,
+    }, data);
 
     return res.status(201).json({
       success: true,
@@ -434,11 +718,23 @@ export const updateInProcessRequestCtrl = async (req, res) => {
       fields.request_type,
       updateFields.approved === true
     );
+    if (
+      normalizeRequestType(fields.request_type) === IPR_REQUEST_TYPE.STORE_IN &&
+      isApprovedStoreInDone(existing) &&
+      updateFields.approved === true &&
+      !hasInProcessContentChanges(existing, fields)
+    ) {
+      updateFields.downstream = IPR_DOWNSTREAM.STORE_IN_DONE;
+    }
 
-    // Consumption is applied on approval, so reconcile the coils around this save.
+    // Consumption is applied on approval; store-in coil update runs on receive (complete).
     const wasConsumed = isApprovedConsume(existing);
     const willConsume =
       fields.request_type === IPR_REQUEST_TYPE.CONSUME && updateFields.approved === true;
+    const wasStoreInPending = isApprovedStoreInPending(existing);
+    const wasStoreInDone = isApprovedStoreInDone(existing);
+    const willApproveStoreIn =
+      fields.request_type === IPR_REQUEST_TYPE.STORE_IN && updateFields.approved === true;
     const wasRejectionPending = isApprovedRejectionPending(existing);
     const willRejectPending =
       fields.request_type === IPR_REQUEST_TYPE.REJECTION &&
@@ -449,6 +745,13 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     if (willConsume && (!wasConsumed || coilsChanged)) {
       try {
         await assertCoilsConsumable(fields.coils, wasConsumed ? id : null);
+      } catch (e) {
+        return res.status(e.status || 400).json({ success: false, message: e.message });
+      }
+    }
+    if (willApproveStoreIn && !wasStoreInDone) {
+      try {
+        await assertCoilsForStoreInReturn(fields.coils, wasStoreInPending ? id : null);
       } catch (e) {
         return res.status(e.status || 400).json({ success: false, message: e.message });
       }
@@ -466,6 +769,9 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     if (wasConsumed && (!willConsume || coilsChanged)) {
       await releaseConsumedCoils(existing, user, req);
     }
+    if (wasStoreInDone && (!willApproveStoreIn || coilsChanged)) {
+      await releaseStoreInReturn(existing, user, req);
+    }
     if (wasRejectionPending && (!willRejectPending || coilsChanged)) {
       await releaseRejectedCoils(existing, user, req);
     }
@@ -481,10 +787,23 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     }
 
     const approvedMessages = {
-      [IPR_REQUEST_TYPE.STORE_IN]: "Store-in request approved and queued for Store In.",
-      [IPR_REQUEST_TYPE.CONSUME]: `Consume request approved. ${data?.coil_count ?? 0} coil(s) marked as consumed.`,
+      [IPR_REQUEST_TYPE.STORE_IN]: isApprovedStoreInPending(data)
+        ? "Store-in authorized and queued in Store In Pending."
+        : isApprovedStoreInDone(data)
+          ? "Store-in request updated."
+          : "Store-in request saved.",
+      [IPR_REQUEST_TYPE.CONSUME]: `Consume approved. ${data?.coil_count ?? 0} coil line(s) processed.`,
       [IPR_REQUEST_TYPE.REJECTION]: "In-process rejection approved and queued in RM Rejection Pending.",
     };
+
+    log(req, data?.approved ? "approve" : "update", String(id), {
+      ipr_uid: id,
+      request_type: data?.request_type,
+      coil_count: data?.coil_count ?? 0,
+      coil_no_uids: (data?.coils || []).map((c) => c?.coil_no_uid).filter(Boolean),
+      approved: data?.approved === true,
+      downstream: data?.downstream ?? null,
+    }, data);
 
     return res.json({
       success: true,
@@ -513,11 +832,20 @@ export const deleteInProcessRequest = async (req, res) => {
     if (isApprovedConsume(existing)) {
       await releaseConsumedCoils(existing, user, req);
     }
+    if (isApprovedStoreInDone(existing)) {
+      await releaseStoreInReturn(existing, user, req);
+    }
     if (isApprovedRejectionPending(existing)) {
       await releaseRejectedCoils(existing, user, req);
     }
 
     await softDeleteInProcessRequest(id, user);
+    log(req, "delete", String(id), {
+      ipr_uid: id,
+      request_type: existing.request_type,
+      coil_count: existing.coil_count ?? existing.coils?.length ?? 0,
+      approved: existing.approved === true,
+    }, existing);
     return res.json({ success: true, message: "In-process request deleted successfully." });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

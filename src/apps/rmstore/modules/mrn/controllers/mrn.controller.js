@@ -145,6 +145,33 @@ function isDbStickerGenerated(dbRow) {
   return dbRow?.sticker_generated === true || dbRow?.sticker_generated === "true";
 }
 
+function hasStickerDraft(dbRow) {
+  const raw = dbRow?.sticker_draft;
+  if (!raw) return false;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed != null && typeof parsed === "object" && Object.keys(parsed).length > 0;
+    } catch {
+      return false;
+    }
+  }
+  return typeof raw === "object" && Object.keys(raw).length > 0;
+}
+
+function decoratePendingListRow(erpRow, dbRow) {
+  const draft = hasStickerDraft(dbRow);
+  return {
+    ...erpRow,
+    status: draft ? "draft" : "pending",
+    id: erpRow.uid,
+    sticker_generated: false,
+    has_sticker_draft: draft,
+    sticker_draft_at: dbRow?.sticker_draft_at ?? null,
+    sticker_draft_by: dbRow?.sticker_draft_by ?? null,
+  };
+}
+
 /** Frozen MRN columns saved in RM Store at sticker generate (DB side of comparison). */
 function buildMrnLocalSnapshot(dbRow) {
   if (!dbRow) return null;
@@ -335,7 +362,7 @@ export const getMrnList = async (req, res) => {
         const saved = dbMap.get(r.uid);
         return !saved || !isDbStickerGenerated(saved);
       });
-      rows = rows.map((r) => ({ ...r, status: "pending", id: r.uid, sticker_generated: false }));
+      rows = rows.map((r) => decoratePendingListRow(r, dbMap.get(r.uid)));
     } else {
       // all — merge ERP with DB status
       rows = rows.map((r) => {
@@ -356,7 +383,7 @@ export const getMrnList = async (req, res) => {
             internal_create_date: saved.internal_create_date ?? r.internal_create_date ?? null,
           };
         }
-        return { ...r, status: "pending", id: r.uid, sticker_generated: false };
+        return decoratePendingListRow(r, saved);
       });
     }
 

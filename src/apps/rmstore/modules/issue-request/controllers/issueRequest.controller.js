@@ -1,4 +1,5 @@
-import { findIssueRequests, findIssueRequest, findIssueRequestCoils, findIssueRequestJobCards, findIssuedQtyByJobCards, insertIssueRequest, replaceIssueRequestCoils, updateIssueRequest, softDeleteIssueRequest } from "../models/issueRequest.model.js";
+import { findIssueRequests, findIssueRequestJobCardRows, findIssueRequest, findIssueRequestCoils, findIssueRequestJobCards, findIssuedQtyByJobCards, insertIssueRequest, updateIssueRequest, softDeleteIssueRequest, lockIssueRequestForStoreOut as applyIssueRequestStoreOutLock, unlockIssueRequestForStoreOut as applyIssueRequestStoreOutUnlock } from "../models/issueRequest.model.js";
+import { replaceIssueRequestJobCards } from "../models/issueRequestJobCard.model.js";
 import { findProduction, findProductions } from "../../production/models/productionMaster.model.js";
 import { findCoilByUid } from "../../coil/models/coil.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -6,6 +7,10 @@ import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { assertIssueRequestCoilsAvailable, buildAvailableCoilsForIssue } from "../utils/stock/issueRequestCoilReserve.js";
+import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
+
+const MODULE = "rm_issue_request";
+const log = createRmstoreActivityLogger(MODULE);
 
 async function resolveCoils(coilInputs, { allowedRmItemCodes = null } = {}) {
   const uids = coilInputs
@@ -190,9 +195,6 @@ async function buildJobCardsPayload(rawCards) {
       flatCoils.push({
         coil_no_uid: c.coil_no_uid,
         qty: c.qty,
-        item_code: c.item_code,
-        heat_no: c.heat_no,
-        mrn_no: c.mrn_no,
         pjobcardno,
       });
     }
@@ -214,9 +216,6 @@ async function buildJobCardsPayload(rawCards) {
       coils: resolved.map((c) => ({
         coil_no_uid: c.coil_no_uid,
         qty: c.qty,
-        item_code: c.item_code,
-        heat_no: c.heat_no,
-        mrn_no: c.mrn_no,
       })),
     });
   }
@@ -236,14 +235,27 @@ export const getIssueRequests = async (req, res) => {
       sortBy: "issue_uid",
       order: "DESC",
     });
-    console.log({
-      filters: sanitizeFilters(filters || {}, ["approved", "from_date", "to_date"]),
+    const result = await findIssueRequests({
+      filters: sanitizeFilters(filters || {}, ["approved", "from_date", "to_date", "out_entry_locked", "out_entry_complete"]),
       search: sanitizeSearch(search),
       page,
       limit,
     });
-    const result = await findIssueRequests({
-      filters: sanitizeFilters(filters || {}, ["approved", "from_date", "to_date"]),
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** Job-card-wise list — one row per job card (like forwarding note item-wise). */
+export const getIssueRequestJobCardRows = async (req, res) => {
+  try {
+    const { page, limit, filters, search } = extractListParams(req.body || {}, {
+      sortBy: "issue_uid",
+      order: "DESC",
+    });
+    const result = await findIssueRequestJobCardRows({
+      filters: sanitizeFilters(filters || {}, ["approved", "from_date", "to_date", "out_entry_locked", "out_entry_complete"]),
       search: sanitizeSearch(search),
       page,
       limit,
@@ -403,21 +415,14 @@ export const createIssueRequest = async (req, res) => {
             coils: resolved.map((c) => ({
               coil_no_uid: c.coil_no_uid,
               qty: c.qty,
-              item_code: c.item_code,
-              heat_no: c.heat_no,
-              mrn_no: c.mrn_no,
             })),
           },
         ],
         flatCoils: resolved.map((c) => ({
           coil_no_uid: c.coil_no_uid,
           qty: c.qty,
-          item_code: c.item_code,
-          heat_no: c.heat_no,
-          mrn_no: c.mrn_no,
         })),
         requestedQty: requested_qty,
-        headerProdFields: prodFields,
       };
     }
 
@@ -428,16 +433,18 @@ export const createIssueRequest = async (req, res) => {
     }
 
     const row = await insertIssueRequest({
-      ...built.headerProdFields,
       requested_qty: built.requestedQty,
       coil_count: built.flatCoils.length,
-      job_cards: built.jobCards,
       shift,
       remarks,
       created_by: user,
     });
 
-    await replaceIssueRequestCoils(row.issue_uid, built.flatCoils);
+    await replaceIssueRequestJobCards({
+      issue_uid: row.issue_uid,
+      jobCards: built.jobCards,
+      userName: user,
+    });
 
     if (normalizedApproved === true) {
       const fields = {};
@@ -450,13 +457,19 @@ export const createIssueRequest = async (req, res) => {
     const data = await findIssueRequest(row.issue_uid);
     const coils = await findIssueRequestCoils(row.issue_uid);
     const job_cards = await findIssueRequestJobCards(row.issue_uid);
+    log(req, "create", String(row.issue_uid), {
+      issue_uid: row.issue_uid,
+      job_card_count: job_cards?.length ?? 0,
+      coil_count: coils?.length ?? 0,
+      approved: data?.approved === true,
+    }, data);
     return res.status(201).json({
       success: true,
       data: { ...data, coils, job_cards },
       message: "Issue request created successfully.",
     });
   } catch (err) {
-    if (err?.statusCode === 403 || err?.statusCode === 400) {
+    if (err?.statusCode === 403 || err?.statusCode === 400 || err?.statusCode === 409) {
       return res.status(err.statusCode).json({ success: false, message: err.message });
     }
     return res.status(500).json({ success: false, message: err.message });
@@ -473,25 +486,21 @@ export const updateIssueRequestCtrl = async (req, res) => {
 
     const existing = await findIssueRequest(id);
     if (!existing) return res.status(404).json({ success: false, message: "Issue request not found." });
+    if (existing.out_entry_locked) {
+      return res.status(409).json({
+        success: false,
+        message: "This issue request is locked for store out.",
+      });
+    }
 
     const user = auditUserName(req);
     const shift =
       req.body?.shift !== undefined ? normalizeShift(req.body.shift) : normalizeShift(existing.shift);
 
-    let headerProdFields = {
-      production_id: existing.production_id,
-      item_dcode: existing.item_dcode,
-      item_code: existing.item_code,
-      item_desc: existing.item_desc,
-      rm_item_dcode: existing.rm_item_dcode,
-      rm_item_code: existing.rm_item_code,
-      rm_item_desc: existing.rm_item_desc,
-    };
     let requested_qty = Number(existing.requested_qty);
     let coil_count = Number(existing.coil_count) || 0;
     let jobCards = await findIssueRequestJobCards(id);
     let coils = await findIssueRequestCoils(id);
-    let coilsChanged = false;
     let jobCardsChanged = false;
 
     if (Array.isArray(req.body?.job_cards)) {
@@ -506,21 +515,21 @@ export const updateIssueRequestCtrl = async (req, res) => {
       } catch (e) {
         return res.status(e.status || 400).json({ success: false, message: e.message });
       }
-      headerProdFields = built.headerProdFields;
       requested_qty = built.requestedQty;
       coil_count = built.flatCoils.length;
       jobCards = built.jobCards;
-      coils = await replaceIssueRequestCoils(id, built.flatCoils);
-      coilsChanged = true;
+      coils = built.flatCoils;
       jobCardsChanged = true;
     } else if (Array.isArray(req.body?.coils)) {
       if (!req.body.coils.length) {
         return res.status(400).json({ success: false, message: "At least one coil is required." });
       }
+      const jcRows = await findIssueRequestJobCards(id);
+      const headerRm = jcRows[0] || {};
       let resolved;
       try {
         resolved = await resolveCoils(req.body.coils, {
-          allowedRmItemCodes: headerProdFields.rm_item_code ? [headerProdFields.rm_item_code] : null,
+          allowedRmItemCodes: headerRm.rm_item_code ? [headerRm.rm_item_code] : null,
         });
       } catch (e) {
         return res.status(e.status || 400).json({ success: false, message: e.message });
@@ -529,10 +538,10 @@ export const updateIssueRequestCtrl = async (req, res) => {
         await assertIssueRequestCoilsAvailable(
           [
             {
-              pjobcardno: existing.job_cards?.[0]?.pjobcardno || `IR-${id}`,
+              pjobcardno: jcRows[0]?.pjobcardno || `IR-${id}`,
               issue_qty: requested_qty,
-              rm_item_code: headerProdFields.rm_item_code,
-              rm_item_dcode: headerProdFields.rm_item_dcode,
+              rm_item_code: headerRm.rm_item_code,
+              rm_item_dcode: headerRm.rm_item_dcode,
               coils: resolved.map((c) => ({
                 coil_no_uid: c.coil_no_uid,
                 qty: c.qty,
@@ -545,17 +554,19 @@ export const updateIssueRequestCtrl = async (req, res) => {
         return res.status(e.status || 400).json({ success: false, message: e.message });
       }
       coil_count = resolved.length;
-      coils = await replaceIssueRequestCoils(
-        id,
-        resolved.map((c) => ({
-          coil_no_uid: c.coil_no_uid,
-          qty: c.qty,
-          item_code: c.item_code,
-          heat_no: c.heat_no,
-          mrn_no: c.mrn_no,
-        }))
-      );
-      coilsChanged = true;
+      coils = resolved.map((c) => ({
+        coil_no_uid: c.coil_no_uid,
+        qty: c.qty,
+        pjobcardno: jcRows[0]?.pjobcardno || null,
+      }));
+      jobCardsChanged = true;
+      jobCards = [
+        {
+          ...(jcRows[0] || {}),
+          issue_qty: requested_qty,
+          coils: resolved.map((c) => ({ coil_no_uid: c.coil_no_uid, qty: c.qty })),
+        },
+      ];
       if (req.body?.requested_qty != null) {
         requested_qty = Number(req.body.requested_qty);
         if (!Number.isFinite(requested_qty) || requested_qty <= 0) {
@@ -576,13 +587,11 @@ export const updateIssueRequestCtrl = async (req, res) => {
 
     const hasBusinessChanges =
       jobCardsChanged ||
-      coilsChanged ||
       shift !== normalizeShift(existing.shift) ||
       Number(requested_qty) !== Number(existing.requested_qty) ||
       (req.body?.remarks !== undefined && String(remarks || "") !== String(existing.remarks || ""));
 
     const updateFields = {
-      ...headerProdFields,
       requested_qty,
       coil_count,
       shift,
@@ -592,7 +601,6 @@ export const updateIssueRequestCtrl = async (req, res) => {
       updateFields.updated_by = user;
       updateFields.updated_at = new Date();
     }
-    if (jobCardsChanged) updateFields.job_cards = jobCards;
 
     if (normalizedApproved !== undefined || hasBusinessChanges) {
       applyApprovalWorkflow({
@@ -605,17 +613,30 @@ export const updateIssueRequestCtrl = async (req, res) => {
     }
 
     await updateIssueRequest(id, updateFields);
+    if (jobCardsChanged) {
+      await replaceIssueRequestJobCards({
+        issue_uid: id,
+        jobCards,
+        userName: user,
+      });
+    }
 
     const data = await findIssueRequest(id);
     const coilRows = coils?.length ? coils : await findIssueRequestCoils(id);
     const jcRows = jobCardsChanged ? jobCards : await findIssueRequestJobCards(id);
+    log(req, data?.approved ? "approve" : "update", String(id), {
+      issue_uid: id,
+      job_card_count: jcRows?.length ?? 0,
+      coil_count: coilRows?.length ?? 0,
+      approved: data?.approved === true,
+    }, data);
     return res.json({
       success: true,
       data: { ...data, coils: coilRows, job_cards: jcRows },
       message: data?.approved ? "Issue request authorized successfully." : "Issue request updated successfully.",
     });
   } catch (err) {
-    if (err?.statusCode === 403 || err?.statusCode === 400) {
+    if (err?.statusCode === 403 || err?.statusCode === 400 || err?.statusCode === 409) {
       return res.status(err.statusCode).json({ success: false, message: err.message });
     }
     return res.status(500).json({ success: false, message: err.message });
@@ -628,8 +649,56 @@ export const deleteIssueRequest = async (req, res) => {
     if (!id) return res.status(400).json({ success: false, message: "A valid issue request ID is required." });
     const existing = await findIssueRequest(id);
     if (!existing) return res.status(404).json({ success: false, message: "Issue request not found." });
+    if (existing.out_entry_locked) {
+      return res.status(409).json({
+        success: false,
+        message: "This issue request is locked for store out.",
+      });
+    }
     await softDeleteIssueRequest(id, auditUserName(req));
     return res.json({ success: true, message: "Issue request deleted successfully." });
+  } catch (err) {
+    if (err?.statusCode === 409) {
+      return res.status(409).json({ success: false, message: err.message });
+    }
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const lockIssueRequestForStoreOut = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.issue_uid ?? req.body?.id);
+    if (!id) return res.status(400).json({ success: false, message: "A valid issue request ID is required." });
+    const existing = await findIssueRequest(id);
+    if (!existing) return res.status(404).json({ success: false, message: "Issue request not found." });
+    if (existing.out_entry_locked) {
+      return res.status(409).json({ success: false, message: "This issue request is already locked." });
+    }
+    const locked = await applyIssueRequestStoreOutLock({ issue_uid: id, userName: auditUserName(req) });
+    if (!locked) return res.status(404).json({ success: false, message: "Not found" });
+    return res.json({
+      success: true,
+      message: "Issue request locked successfully.",
+      data: locked,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const unlockIssueRequestForStoreOut = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.issue_uid ?? req.body?.id);
+    if (!id) return res.status(400).json({ success: false, message: "A valid issue request ID is required." });
+    const existing = await findIssueRequest(id);
+    if (!existing) return res.status(404).json({ success: false, message: "Issue request not found." });
+    const unlocked = await applyIssueRequestStoreOutUnlock({ issue_uid: id });
+    if (!unlocked) return res.status(404).json({ success: false, message: "Not found" });
+    return res.json({
+      success: true,
+      message: "Issue request unlocked successfully.",
+      data: unlocked,
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

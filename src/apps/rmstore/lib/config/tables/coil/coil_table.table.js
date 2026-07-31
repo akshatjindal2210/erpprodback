@@ -52,12 +52,9 @@ export async function createRmStoreCoilTable() {
     CREATE INDEX IF NOT EXISTS rmstore_coil_qc_check_status_idx ON ${T.COIL_TABLE}(qc_check_status);
     CREATE INDEX IF NOT EXISTS rmstore_coil_out_uid_idx ON ${T.COIL_TABLE}(out_uid);
     CREATE INDEX IF NOT EXISTS rmstore_coil_status_idx ON ${T.COIL_TABLE}(status);
-    CREATE INDEX IF NOT EXISTS rmstore_coil_area_idx
-      ON ${T.COIL_TABLE}(is_deleted, location_id)
-      WHERE is_deleted = false AND location_id IS NULL;
-    CREATE INDEX IF NOT EXISTS rmstore_coil_sa_id_idx
-      ON ${T.COIL_TABLE}(sa_id) WHERE is_deleted = false;
-    CREATE INDEX IF NOT EXISTS rmstore_coil_ipr_uid_idx
-      ON ${T.COIL_TABLE}(ipr_uid) WHERE is_deleted = false;
+    CREATE INDEX IF NOT EXISTS rmstore_coil_area_idx ON ${T.COIL_TABLE}(is_deleted, location_id) WHERE is_deleted = false AND location_id IS NULL;
+    CREATE INDEX IF NOT EXISTS rmstore_coil_sa_id_idx ON ${T.COIL_TABLE}(sa_id) WHERE is_deleted = false;
+    CREATE INDEX IF NOT EXISTS rmstore_coil_ipr_uid_idx ON ${T.COIL_TABLE}(ipr_uid) WHERE is_deleted = false;
+    CREATE INDEX IF NOT EXISTS rmstore_coil_created_at_idx ON ${T.COIL_TABLE}(created_at DESC) WHERE is_deleted = false;
   `);
 }

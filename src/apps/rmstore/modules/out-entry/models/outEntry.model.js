@@ -5,6 +5,36 @@ const TABLE = T.OUT_ENTRY;
 const SCANNED = T.OUT_ENTRY_SCANNED_COIL;
 const COIL = T.COIL_TABLE;
 const LOC = T.MASTER_LOCATION;
+const ISSUE_REQUEST = T.ISSUE_REQUEST;
+const ISSUE_REQUEST_JC = T.ISSUE_REQUEST_JOB_CARD;
+const REJECTION = T.REJECTION;
+
+/** Active coil not already out and not on an open store-out draft. */
+function coilAvailableForOutSql(alias = "c") {
+  return `${alias}.out_uid IS NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM ${SCANNED} s
+      JOIN ${TABLE} o ON o.out_uid = s.out_uid AND o.is_deleted = false
+      WHERE LOWER(TRIM(s.coil_no_uid)) = LOWER(TRIM(${alias}.coil_no_uid))
+        AND COALESCE(o.approved, false) = false
+    )`;
+}
+
+/** Coil already on an approved issue-request job card — show under Job Card pending only. */
+function coilNotOnApprovedIssueRequestSql(alias = "c") {
+  return `NOT EXISTS (
+    SELECT 1
+    FROM ${ISSUE_REQUEST} ir
+    INNER JOIN ${ISSUE_REQUEST_JC} jc
+      ON jc.issue_uid = ir.issue_uid AND jc.is_deleted = false
+    CROSS JOIN LATERAL jsonb_array_elements(
+      CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
+    ) AS jc_coil(coil)
+    WHERE ir.is_deleted = false
+      AND ir.approved = true
+      AND LOWER(TRIM(jc_coil.coil->>'coil_no_uid')) = LOWER(TRIM(${alias}.coil_no_uid))
+  )`;
+}
 
 export const findOutEntries = async (options = {}) => {
   const { filters = {}, search, page = 1, limit = 100 } = options;
@@ -312,7 +342,7 @@ export const findStoredMrnDetail = async (mrn_uid) => {
   if (!uid) return null;
 
   const [mrn] = await dbQuery(
-    `SELECT m.uid AS mrn_uid, m.mrn_no, m.sticker_mode, m.item_code, m.item_desc, m.acc_name
+    `SELECT m.uid AS mrn_uid, m.mrn_no, m.sticker_mode, m.item_code, m.item_dcode, m.item_desc, m.acc_name
      FROM ${T.MRN} m
      WHERE m.uid = $1
      LIMIT 1`,
@@ -357,14 +387,20 @@ export const findStoredMrnDetail = async (mrn_uid) => {
 
   const heat_nos = [...new Set(coils.map((c) => c.heat_no).filter(Boolean))];
   const total_qty = coils.reduce((s, c) => s + (Number(c.qty) || 0), 0);
+  const itemFromCoils =
+    coils.find((c) => c.item_code)?.item_code ||
+    coils.find((c) => c.item_dcode)?.item_dcode ||
+    null;
+  const accFromCoils = coils.find((c) => c.acc_name)?.acc_name || null;
 
   return {
     mrn_uid: uid,
     mrn_no: mrn?.mrn_no ?? first.mrn_no ?? null,
     sticker_mode,
-    item_code: mrn?.item_code || first.item_code || null,
+    item_code: mrn?.item_code || first.item_code || itemFromCoils || null,
+    item_dcode: mrn?.item_dcode ?? first.item_dcode ?? null,
     item_desc: mrn?.item_desc || first.item_desc || null,
-    acc_name: mrn?.acc_name || null,
+    acc_name: mrn?.acc_name || first.acc_name || accFromCoils || null,
     heat_nos: heat_nos.join(", ") || null,
     coil_count: coils.length,
     total_qty,
@@ -374,183 +410,321 @@ export const findStoredMrnDetail = async (mrn_uid) => {
   };
 };
 
+const JC_ISSUE_QTY_EXPR = `COALESCE(jc.issue_qty, 0)`;
+
+/** True when coil is on an approved issue-request job card and still pending Store Out. */
+export const isCoilPendingJobCardStoreOut = async (coil_no_uid, excludeOutUid = null) => {
+  const uid = String(coil_no_uid || "").trim();
+  if (!uid) return false;
+
+  const values = [uid.toLowerCase()];
+  let draftExclude = "";
+  if (excludeOutUid != null && excludeOutUid !== "") {
+    values.push(Number(excludeOutUid));
+    draftExclude = `AND o.out_uid <> $${values.length}`;
+  }
+
+  const [row] = await dbQuery(
+    `WITH jc_coils AS (
+       SELECT TRIM(c.coil->>'coil_no_uid') AS coil_no_uid
+       FROM ${ISSUE_REQUEST} r
+       INNER JOIN ${ISSUE_REQUEST_JC} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
+       CROSS JOIN LATERAL jsonb_array_elements(
+         CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
+       ) AS c(coil)
+       WHERE r.is_deleted = false AND r.approved = true
+     ),
+     available_coils AS (
+       SELECT LOWER(TRIM(c.coil_no_uid)) AS coil_key
+       FROM ${COIL} c
+       WHERE c.is_deleted = false
+         AND COALESCE(c.status, 'active') = 'active'
+         AND c.out_uid IS NULL
+     ),
+     draft_blocked AS (
+       SELECT DISTINCT LOWER(TRIM(s.coil_no_uid)) AS coil_key
+       FROM ${SCANNED} s
+       JOIN ${TABLE} o ON o.out_uid = s.out_uid AND o.is_deleted = false
+       WHERE COALESCE(o.approved, false) = false
+         AND TRIM(s.coil_no_uid) <> ''
+         ${draftExclude}
+     )
+     SELECT 1 AS ok
+     FROM jc_coils j
+     INNER JOIN available_coils s ON s.coil_key = LOWER(TRIM(j.coil_no_uid))
+     LEFT JOIN draft_blocked db ON db.coil_key = s.coil_key
+     WHERE LOWER(TRIM(j.coil_no_uid)) = $1
+       AND TRIM(j.coil_no_uid) <> ''
+       AND db.coil_key IS NULL
+     LIMIT 1`,
+    values
+  );
+  return Boolean(row);
+};
+
 /**
- * Pending Store Out list — coil-wise vs batch-wise (same idea as QC Check).
- * Coil MRNs → one row per stored coil.
- * Batch MRNs → one aggregated row per mrn_uid.
- * expand_coils: true → never aggregate (flat coil list).
+ * Pending Store Out grouped by approved issue-request job card.
+ * Coils still not physically out (out_uid null) — store-in + coil area (same pool as Issue Request).
+ * Excludes coils already on open store-out drafts.
  */
-export const findStoredPendingForOut = async (options = {}) => {
-  const { search, page = 1, limit = 1000, expand_coils = false } = options;
+export const findPendingStoreOutByJobCard = async (options = {}) => {
+  const { search, page = 1, limit = 1000 } = options;
   const values = [];
   let i = 1;
-  const conditions = [
-    "c.is_deleted = false",
-    "c.location_id IS NOT NULL",
-    `COALESCE(c.status, 'active') = 'active'`,
-  ];
+  const conditions = ["r.is_deleted = false", "r.approved = true", "jc.is_deleted = false"];
 
   if (search) {
     const term = `%${search}%`;
     values.push(term);
     const idx = i++;
     conditions.push(`(
-      c.coil_no_uid ILIKE $${idx} OR
-      COALESCE(c.mrn_uid, '') ILIKE $${idx} OR
-      COALESCE(c.heat_no, '') ILIKE $${idx} OR
-      COALESCE(c.item_code, '') ILIKE $${idx} OR
-      COALESCE(c.item_desc, '') ILIKE $${idx} OR
-      c.mrn_no::text ILIKE $${idx} OR
-      COALESCE(lm.location_no, '') ILIKE $${idx}
+      COALESCE(jc.item_code,'') ILIKE $${idx} OR
+      COALESCE(jc.rm_item_code,'') ILIKE $${idx} OR
+      COALESCE(jc.pjobcardno,'') ILIKE $${idx} OR
+      COALESCE(jc.item_desc,'') ILIKE $${idx} OR
+      COALESCE(jc.macname,'') ILIKE $${idx} OR
+      r.issue_uid::text ILIKE $${idx}
     )`);
   }
 
-  const where = `WHERE ${conditions.join(" AND ")}`;
-  const expand = expand_coils === true || expand_coils === "true";
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const safePage = Math.max(1, Number(page) || 1);
   const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 1000));
   const offset = (safePage - 1) * safeLimit;
 
-  if (expand) {
-    const countRes = await dbQuery(
-      `SELECT COUNT(*)::int AS count
-       FROM ${COIL} c
-       LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-       ${where}`,
-      values
-    );
-    const total = Number(countRes[0]?.count || 0);
-    const rows = await dbQuery(
-      `SELECT c.*,
-              lm.location_no,
-              lm.rack_no,
-              lm.row_no,
-              COALESCE(NULLIF(LOWER(TRIM(m.sticker_mode)), ''), 'coil')::varchar AS sticker_mode,
-              1::int AS coil_count,
-              false AS is_batch_pending
-       FROM ${COIL} c
-       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
-       LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-       ${where}
-       ORDER BY c.coil_uid DESC
-       LIMIT $${i++} OFFSET $${i}`,
-      [...values, safeLimit, offset]
-    );
-    return {
-      data: rows,
-      total,
-      page: safePage,
-      limit: safeLimit,
-      totalPages: Math.ceil(total / safeLimit) || 1,
-    };
-  }
+  const baseCte = `
+    WITH jc_coils AS (
+      SELECT
+        r.issue_uid,
+        r.shift,
+        r.approved_at,
+        r.approved_by AS approved_by_name,
+        TRIM(jc.pjobcardno) AS pjobcardno,
+        jc.macname,
+        jc.item_code,
+        jc.item_desc,
+        jc.rm_item_code,
+        jc.rm_item_desc,
+        ${JC_ISSUE_QTY_EXPR}::float8 AS issue_qty,
+        TRIM(c.coil->>'coil_no_uid') AS coil_no_uid
+      FROM ${ISSUE_REQUEST} r
+      INNER JOIN ${ISSUE_REQUEST_JC} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
+      CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
+      ) AS c(coil)
+      ${where}
+    ),
+    available_coils AS (
+      SELECT
+        LOWER(TRIM(c.coil_no_uid)) AS coil_key,
+        c.coil_no_uid,
+        c.qty,
+        c.mrn_uid,
+        c.mrn_no,
+        c.heat_no,
+        lm.location_no
+      FROM ${COIL} c
+      LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
+      WHERE c.is_deleted = false
+        AND COALESCE(c.status, 'active') = 'active'
+        AND c.out_uid IS NULL
+    ),
+    draft_blocked AS (
+      SELECT DISTINCT LOWER(TRIM(s.coil_no_uid)) AS coil_key
+      FROM ${SCANNED} s
+      JOIN ${TABLE} o ON o.out_uid = s.out_uid AND o.is_deleted = false
+      WHERE COALESCE(o.approved, false) = false
+        AND TRIM(s.coil_no_uid) <> ''
+    ),
+    pending AS (
+      SELECT
+        j.issue_uid,
+        j.pjobcardno,
+        MAX(j.shift) AS shift,
+        MAX(j.macname) AS macname,
+        MAX(j.item_code) AS item_code,
+        MAX(j.item_desc) AS item_desc,
+        MAX(j.rm_item_code) AS rm_item_code,
+        MAX(j.rm_item_desc) AS rm_item_desc,
+        MAX(j.issue_qty) AS issue_qty,
+        MAX(j.approved_at) AS approved_at,
+        MAX(j.approved_by_name) AS approved_by_name,
+        'job_card'::varchar AS pending_type,
+        COUNT(s.coil_no_uid)::int AS pending_coil_count,
+        COALESCE(SUM(s.qty), 0)::float8 AS pending_qty,
+        STRING_AGG(DISTINCT s.mrn_no::text, ', ' ORDER BY s.mrn_no::text) AS mrn_nos,
+        MIN(s.mrn_uid) AS mrn_uid,
+        STRING_AGG(s.coil_no_uid, ', ' ORDER BY s.coil_no_uid) AS coil_no_uids
+      FROM jc_coils j
+      INNER JOIN available_coils s ON s.coil_key = LOWER(TRIM(j.coil_no_uid))
+      LEFT JOIN draft_blocked db ON db.coil_key = s.coil_key
+      WHERE TRIM(j.coil_no_uid) <> ''
+        AND db.coil_key IS NULL
+      GROUP BY j.issue_uid, j.pjobcardno
+      HAVING COUNT(s.coil_no_uid) > 0
+    )`;
 
-  const countRes = await dbQuery(
-    `WITH stored AS (
-       SELECT
-         c.coil_no_uid,
-         c.mrn_uid,
-         COALESCE(NULLIF(LOWER(TRIM(m.sticker_mode)), ''), 'coil') AS sticker_mode
-       FROM ${COIL} c
-       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
-       LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-       ${where}
-     )
-     SELECT COUNT(*)::int AS count FROM (
-       SELECT coil_no_uid FROM stored WHERE sticker_mode <> 'batch'
-       UNION ALL
-       SELECT mrn_uid FROM stored WHERE sticker_mode = 'batch' AND mrn_uid IS NOT NULL GROUP BY mrn_uid
-     ) x`,
-    values
-  );
+  const countRes = await dbQuery(`${baseCte} SELECT COUNT(*)::int AS count FROM pending`, values);
   const total = Number(countRes[0]?.count || 0);
 
   const rows = await dbQuery(
-    `WITH stored AS (
-       SELECT
-         c.coil_uid,
-         c.coil_no_uid,
-         c.mrn_uid,
-         c.mrn_no,
-         c.heat_no,
-         c.item_dcode,
-         c.item_code,
-         c.item_desc,
-         c.qty,
-         c.location_id,
-         lm.location_no,
-         lm.rack_no,
-         lm.row_no,
-         c.created_at,
-         c.created_by,
-         COALESCE(NULLIF(LOWER(TRIM(m.sticker_mode)), ''), 'coil') AS sticker_mode
-       FROM ${COIL} c
-       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
-       LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-       ${where}
-     ),
-     coil_rows AS (
-       SELECT
-         coil_uid,
-         coil_no_uid,
-         mrn_uid,
-         mrn_no,
-         heat_no,
-         item_dcode,
-         item_code,
-         item_desc,
-         qty,
-         location_id,
-         location_no,
-         rack_no,
-         row_no,
-         created_at,
-         created_by,
-         sticker_mode,
-         1::int AS coil_count,
-         false AS is_batch_pending
-       FROM stored
-       WHERE sticker_mode <> 'batch'
-     ),
-     batch_rows AS (
-       SELECT
-         MIN(coil_uid)::int AS coil_uid,
-         STRING_AGG(coil_no_uid, ', ' ORDER BY created_at ASC, coil_no_uid ASC)::varchar AS coil_no_uid,
-         mrn_uid,
-         MAX(mrn_no) AS mrn_no,
-         MAX(heat_no) AS heat_no,
-         MAX(item_dcode) AS item_dcode,
-         MAX(item_code) AS item_code,
-         MAX(item_desc) AS item_desc,
-         SUM(COALESCE(qty, 0)) AS qty,
-         NULL::int AS location_id,
-         CASE
-           WHEN COUNT(DISTINCT location_id) = 1 THEN MAX(location_no)
-           ELSE (COUNT(DISTINCT location_id)::text || ' locs')
-         END AS location_no,
-         NULL::varchar AS rack_no,
-         NULL::varchar AS row_no,
-         MAX(created_at) AS created_at,
-         MAX(created_by) AS created_by,
-         'batch'::varchar AS sticker_mode,
-         COUNT(*)::int AS coil_count,
-         true AS is_batch_pending
-       FROM stored
-       WHERE sticker_mode = 'batch' AND mrn_uid IS NOT NULL
-       GROUP BY mrn_uid
-     )
-     SELECT * FROM (
-       SELECT * FROM coil_rows
-       UNION ALL
-       SELECT * FROM batch_rows
-     ) u
-     ORDER BY created_at DESC NULLS LAST, coil_uid DESC
+    `${baseCte}
+     SELECT *
+     FROM pending
+     ORDER BY approved_at DESC NULLS LAST, issue_uid DESC, pjobcardno ASC
      LIMIT $${i++} OFFSET $${i}`,
     [...values, safeLimit, offset]
   );
 
   return {
     data: rows,
+    total,
+    page: safePage,
+    limit: safeLimit,
+    totalPages: Math.ceil(total / safeLimit) || 1,
+  };
+};
+
+/**
+ * RM Rejection authorized — virtual pending (no open out_entry draft) + existing store-out drafts.
+ */
+export const findPendingRejectionStoreOut = async (options = {}) => {
+  const { search, page = 1, limit = 1000 } = options;
+  const values = [];
+  let i = 1;
+
+  const openDraftExistsSql = `NOT EXISTS (
+    SELECT 1 FROM ${TABLE} o
+    WHERE o.is_deleted = false
+      AND COALESCE(o.approved, false) = false
+      AND (
+        (r.out_uid IS NOT NULL AND o.out_uid = r.out_uid)
+        OR (o.qc_reject_uid IS NOT NULL AND o.qc_reject_uid = r.qc_reject_uid)
+      )
+  )`;
+
+  const virtualConditions = [
+    "r.is_deleted = false",
+    "r.approved = true",
+    `COALESCE(TRIM(r.bill_no), '') = ''`,
+    openDraftExistsSql,
+  ];
+  const draftConditions = [
+    "o.is_deleted = false",
+    "COALESCE(o.approved, false) = false",
+    "r.is_deleted = false",
+    "r.approved = true",
+    `COALESCE(TRIM(r.bill_no), '') = ''`,
+    "(o.out_uid = r.out_uid OR (o.qc_reject_uid IS NOT NULL AND o.qc_reject_uid = r.qc_reject_uid))",
+  ];
+
+  if (search) {
+    const term = `%${search}%`;
+    values.push(term);
+    const idx = i++;
+    const searchClause = `(
+      COALESCE(r.mrn_refs,'') ILIKE $${idx} OR
+      COALESCE(r.heat_nos,'') ILIKE $${idx} OR
+      COALESCE(r.item_codes,'') ILIKE $${idx} OR
+      COALESCE(r.reason,'') ILIKE $${idx} OR
+      r.qc_reject_uid::text ILIKE $${idx} OR
+      COALESCE(r.out_uid::text,'') ILIKE $${idx} OR
+      EXISTS (
+        SELECT 1 FROM ${COIL} c
+        WHERE c.is_deleted = false AND c.qc_reject_uid = r.qc_reject_uid
+          AND COALESCE(c.coil_no_uid,'') ILIKE $${idx}
+      )
+    )`;
+    virtualConditions.push(searchClause);
+    draftConditions.push(`(
+      o.out_uid::text ILIKE $${idx} OR
+      COALESCE(o.mrn_refs,'') ILIKE $${idx} OR
+      COALESCE(o.heat_nos,'') ILIKE $${idx} OR
+      COALESCE(o.item_codes,'') ILIKE $${idx} OR
+      COALESCE(r.reason,'') ILIKE $${idx} OR
+      r.qc_reject_uid::text ILIKE $${idx}
+    )`);
+  }
+
+  const virtualWhere = `WHERE ${virtualConditions.join(" AND ")}`;
+  const draftWhere = `WHERE ${draftConditions.join(" AND ")}`;
+
+  const virtualRows = await dbQuery(
+    `SELECT
+       NULL::int AS out_uid,
+       r.qc_reject_uid,
+       r.mrn_refs AS mrn_no,
+       r.mrn_refs,
+       r.heat_nos AS heat_no,
+       r.heat_nos,
+       r.item_codes AS item_code,
+       r.item_codes,
+       r.total_qty AS qty,
+       r.total_qty,
+       r.coil_count,
+       false AS scan_complete,
+       r.remarks,
+       r.remarks AS rejection_remarks,
+       r.approved_at AS created_at,
+       'rm_rejection'::varchar AS entry_type,
+       r.reason,
+       r.ipr_uid,
+       'rejection'::varchar AS pending_type,
+       true AS is_virtual_pending,
+       r.approved_at AS sort_at
+     FROM ${REJECTION} r
+     ${virtualWhere}`,
+    values
+  );
+
+  const draftFrom = `
+    FROM ${TABLE} o
+    INNER JOIN ${REJECTION} r ON r.is_deleted = false
+      AND r.approved = true
+      AND (o.out_uid = r.out_uid OR (o.qc_reject_uid IS NOT NULL AND o.qc_reject_uid = r.qc_reject_uid))`;
+
+  const draftRows = await dbQuery(
+    `SELECT
+       o.out_uid,
+       o.qc_reject_uid,
+       o.mrn_refs AS mrn_no,
+       o.mrn_refs,
+       o.heat_nos AS heat_no,
+       o.heat_nos,
+       o.item_codes AS item_code,
+       o.item_codes,
+       o.total_qty AS qty,
+       o.total_qty,
+       o.coil_count,
+       o.scan_complete,
+       o.remarks,
+       r.remarks AS rejection_remarks,
+       o.created_at,
+       o.entry_type,
+       r.reason,
+       r.ipr_uid,
+       'rejection'::varchar AS pending_type,
+       false AS is_virtual_pending,
+       o.created_at AS sort_at
+     ${draftFrom}
+     ${draftWhere}`,
+    values
+  );
+
+  const merged = [...(virtualRows || []), ...(draftRows || [])].sort((a, b) => {
+    const ta = new Date(a.sort_at || 0).getTime();
+    const tb = new Date(b.sort_at || 0).getTime();
+    return tb - ta;
+  });
+
+  const total = merged.length;
+  const safePage = Math.max(1, Number(page) || 1);
+  const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 1000));
+  const offset = (safePage - 1) * safeLimit;
+  const data = merged.slice(offset, offset + safeLimit);
+
+  return {
+    data,
     total,
     page: safePage,
     limit: safeLimit,
