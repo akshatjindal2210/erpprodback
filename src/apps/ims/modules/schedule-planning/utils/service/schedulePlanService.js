@@ -218,10 +218,10 @@ function attachComparison(imsRow, planRow, mergedRow) {
 }
 
 /**
- * IMS line not in our DB → Pending (0).
+ * IMS line not in our DB → Ready to Dispatch (7). Status 0 kept in code for future.
  */
 function imsOnlyReadyRow(imsRow) {
-  const st = SCHEDULE_PLAN_STATUS.PENDING;
+  const st = SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH;
   return {
     ...imsRow,
     is_planned: st,
