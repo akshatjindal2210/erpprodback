@@ -1,4 +1,5 @@
 import dbQuery from "../../../../../../config/db/db.js";
+import { patchTableSchema, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
 export async function createRmStoreOutEntryTable() {
@@ -6,6 +7,8 @@ export async function createRmStoreOutEntryTable() {
     CREATE TABLE IF NOT EXISTS ${T.OUT_ENTRY} (
       out_uid          SERIAL PRIMARY KEY,
       entry_type       VARCHAR(40) DEFAULT 'store_out',
+      issue_uid        INTEGER,
+      pjobcardno       VARCHAR(80),
       qc_reject_uid    INTEGER,
       mrn_refs         TEXT,
       heat_nos         TEXT,
@@ -34,5 +37,7 @@ export async function createRmStoreOutEntryTable() {
       ON ${T.OUT_ENTRY}(entry_type) WHERE is_deleted = false;
     CREATE INDEX IF NOT EXISTS rmstore_out_entry_qc_reject_uid_idx
       ON ${T.OUT_ENTRY}(qc_reject_uid) WHERE is_deleted = false;
+    CREATE INDEX IF NOT EXISTS rmstore_out_entry_issue_uid_idx
+      ON ${T.OUT_ENTRY}(issue_uid) WHERE is_deleted = false AND issue_uid IS NOT NULL;
   `);
 }

@@ -127,6 +127,15 @@ export function statusLabel(code) {
   return SCHEDULE_PLAN_STATUS_LABEL[Number(code)] ?? "Pending";
 }
 
+/** IMS-only / legacy Pending (0) → Ready to Dispatch (7). Pending step removed. */
+export function normalizeScheduleStatus(status) {
+  if (status == null || status === "") return SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH;
+  const s = Number(status);
+  if (!Number.isFinite(s)) return SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH;
+  if (s === SCHEDULE_PLAN_STATUS.PENDING) return SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH;
+  return s;
+}
+
 export function actionTypeLabel(actionType) {
   const map = {
     plan: "Planned",

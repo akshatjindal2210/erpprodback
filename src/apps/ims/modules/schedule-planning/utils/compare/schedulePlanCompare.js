@@ -42,7 +42,16 @@ function compareDateField(imsVal, localVal) {
   };
 }
 
-/** Compare live IMS row with DB plan snapshot. */
+/** Fields shown in Comparison tab mismatch (party name/code excluded). */
+export function comparisonFieldMismatch(fields, { ignoreCustomer = true } = {}) {
+  if (!fields || typeof fields !== "object") return false;
+  return Object.entries(fields).some(([key, f]) => {
+    if (ignoreCustomer && (key === "acc_name" || key === "acc_code")) return false;
+    return Boolean(f?.mismatch);
+  });
+}
+
+/** Compare live ERP row (API) with our DB plan snapshot. */
 export function buildScheduleComparison(imsRow, planRow) {
   if (!imsRow || !planRow) {
     return { has_mismatch: false, fields: {} };
@@ -61,13 +70,13 @@ export function buildScheduleComparison(imsRow, planRow) {
     ),
   };
   return {
-    has_mismatch: Object.values(fields).some((f) => f.mismatch),
+    has_mismatch: comparisonFieldMismatch(fields),
     fields,
   };
 }
 
 export function hasScheduleComparisonMismatch(row) {
   if (!row) return false;
-  if (row.comparison?.missing_ims) return true;
-  return Boolean(row.has_comparison_mismatch ?? row.comparison?.has_mismatch);
+  if (row.comparison?.missing_ims) return false;
+  return comparisonFieldMismatch(row.comparison?.fields);
 }

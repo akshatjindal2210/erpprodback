@@ -16,6 +16,12 @@ const storeOutReader = accessControlAny([
   { moduleName: "rm_out_entry", actions: "view" },
 ]);
 
+/** Store In receive — production (issue request) or store staff may complete. */
+const storeInReceiver = accessControlAny([
+  { moduleName: MODULE, actions: "authorize" },
+  { moduleName: "rm_inventory_inwards", actions: "authorize" },
+]);
+
 router.post("/list", authenticate, accessControl(MODULE, "view"), getInProcessRequests);
 router.post("/get", authenticate, accessControl(MODULE, "view"), getInProcessRequestById);
 router.post("/reasons", authenticate, accessControl(MODULE, "view"), getInProcessReasons);
@@ -24,7 +30,7 @@ router.post("/pending-store-out", authenticate, storeOutReader, getPendingStoreO
 router.post("/create", authenticate, accessControl(MODULE, "add"), createInProcessRequest);
 router.post("/update", authenticate, accessControl(MODULE, "edit"), updateInProcessRequestCtrl);
 router.post("/approve", authenticate, accessControl(MODULE, "authorize"), updateInProcessRequestCtrl);
-router.post("/complete-store-in", authenticate, accessControl(MODULE, "authorize"), completeStoreInCtrl);
+router.post("/complete-store-in", authenticate, storeInReceiver, completeStoreInCtrl);
 router.post("/delete", authenticate, accessControl(MODULE, "delete"), deleteInProcessRequest);
 
 export default router;

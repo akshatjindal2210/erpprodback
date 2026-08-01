@@ -3,7 +3,7 @@ import { initImsDB } from "../../apps/ims/lib/config/db/initDB.js";
 import { initTaskDB } from "../../apps/task/lib/config/db/initDB.js";
 import { initCoreDB } from "../../apps/core/lib/config/db/initDB.js";
 import { initDashboardDB } from "../../apps/dashboard/lib/config/db/initDB.js";
-// import { initRmStoreDB } from "../../apps/rmstore/lib/config/db/initDB.js";
+import { initRmStoreDB } from "../../apps/rmstore/lib/config/db/initDB.js";
 import { runStartupBackfills } from "../../backfills/index.js";
 
 export const initDB = async () => {

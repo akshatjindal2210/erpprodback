@@ -1,4 +1,4 @@
-import { findOutEntries, findOutEntry, insertOutEntry, updateOutEntry, softDeleteOutEntry, replaceOutEntryScannedCoils, findOutEntryScannedCoilUids, findOutEntryScannedCoilsDetailed, findOpenOutDraftForCoil, clearOutEntryScannedCoils, buildOutEntryCoilSummary, findStoredMrnSummaries, findStoredMrnDetail, findPendingStoreOutByJobCard, findPendingRejectionStoreOut, isCoilPendingJobCardStoreOut } from "../models/outEntry.model.js";
+import { findOutEntries, findOutEntry, insertOutEntry, updateOutEntry, softDeleteOutEntry, replaceOutEntryScannedCoils, findOutEntryScannedCoilUids, findOutEntryScannedCoilsDetailed, findOpenOutDraftForCoil, clearOutEntryScannedCoils, buildOutEntryCoilSummary, findStoredMrnSummaries, findStoredMrnDetail, findPendingStoreOutByJobCard, findPendingJobCardStoreOutDrafts, findPendingRejectionStoreOut, isCoilPendingJobCardStoreOut } from "../models/outEntry.model.js";
 import { findCoilByUid, updateCoilsAfterStoreOut, updateCoilsAfterJobCardStoreOut, updateCoilsAfterRejectionStoreOut, clearCoilsForStoreOut, clearCoilsForRejectionStoreOut, findCoils } from "../../coil/models/coil.model.js";
 import { updateQcRejection, findQcRejection } from "../../rm-rejection/models/rmRejection.model.js";
 import { updateInProcessRequest, IPR_DOWNSTREAM } from "../../in-process-request/models/inProcessRequest.model.js";
@@ -215,16 +215,19 @@ export const getPendingStoreOutList = async (req, res) => {
     const wantJobCard = pendingType === "all" || pendingType === "job_card";
     const wantRejection = pendingType === "all" || pendingType === "rejection";
 
-    const [jcResult, rejResult] = await Promise.all([
+    const [jcResult, jcDraftResult, rejResult] = await Promise.all([
       wantJobCard
         ? findPendingStoreOutByJobCard({ search: searchOpt, page: 1, limit: 5000 })
+        : Promise.resolve({ data: [] }),
+      wantJobCard
+        ? findPendingJobCardStoreOutDrafts({ search: searchOpt, page: 1, limit: 5000 })
         : Promise.resolve({ data: [] }),
       wantRejection
         ? findPendingRejectionStoreOut({ search: searchOpt, page: 1, limit: 5000 })
         : Promise.resolve({ data: [] }),
     ]);
 
-    const merged = [...(jcResult.data || []), ...(rejResult.data || [])]
+    const merged = [...(jcResult.data || []), ...(jcDraftResult.data || []), ...(rejResult.data || [])]
       .map(normalizePendingStoreOutRow)
       .sort((a, b) => {
         const ta = new Date(a.sort_at || 0).getTime();
@@ -368,8 +371,18 @@ export const createOutEntry = async (req, res) => {
 
     const summary = buildOutEntryCoilSummary(resolved);
 
+    const issue_uid = isJobCardOutEntry(savedEntryType)
+      ? parsePositiveIntId(req.body?.issue_uid)
+      : null;
+    const pjobcardno =
+      isJobCardOutEntry(savedEntryType) && req.body?.pjobcardno != null
+        ? String(req.body.pjobcardno).trim() || null
+        : null;
+
     const row = await insertOutEntry({
       entry_type: savedEntryType,
+      ...(issue_uid != null ? { issue_uid } : {}),
+      ...(pjobcardno ? { pjobcardno } : {}),
       ...(qcRejectUid != null ? { qc_reject_uid: qcRejectUid } : {}),
       ...summary,
       remarks,

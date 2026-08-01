@@ -2,7 +2,7 @@ import dbQuery, { withTransaction } from "../../../../../../config/db/db.js";
 import { fetchImsDataRaw } from "../../../../lib/services/ims.service.js";
 import { buildInventoryReportSql } from "../../../inventory-report/utils/sql/inventoryReportSql.js";
 import { deletePlans, loadAllPlanMap, loadCustomerMonthScheduleItems, loadDispatchCompleteTabItems, loadDispatchPlanItems, loadPlanRow, loadScheduleDispatchQtyMap, planKey, upsertPlan, updatePlanStatus, setPlanShortageNo } from "../db/schedulePlanDb.js";
-import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canReadyFrom, canRejectFrom, canTransitionAsSuperAdmin, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel, isScheduleCompleteRow, isScheduleOpenPlanRow, filterScheduleRowsByBalanceTab } from "../status/schedulePlanStatus.js";
+import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canReadyFrom, canRejectFrom, canTransitionAsSuperAdmin, normalizeScheduleStatus, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel, isScheduleCompleteRow, isScheduleOpenPlanRow, filterScheduleRowsByBalanceTab } from "../status/schedulePlanStatus.js";
 import { insertScheduleTransaction, loadActionDates, loadActionReasons, loadItemTransactionHistory, loadLastTransactionMap, loadPlanDateHistoryMap, deletePlanTransactions } from "../db/schedulePlanTransactionDb.js";
 import { buildScheduleComparison, hasScheduleComparisonMismatch } from "../compare/schedulePlanCompare.js";
 import { toPublicImsMessage } from "../../../../lib/utils/erp-api/lookup/imsMeta.js";
@@ -147,7 +147,7 @@ function txnSnapshot(txn) {
 /** API row — display values from last transaction; plan table holds status + IMS snapshot only. */
 function planToRow(plan, ims = {}, lastTxn = null) {
   const imsRemarks = ims.Remarks ?? ims.remarks ?? null;
-  const st = Number(plan.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);
+  const st = normalizeScheduleStatus(plan.is_planned ?? SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH);
   return attachLastTxn({
     schno: plan.schno ?? ims.schno,
     schmonth: plan.schmonth ?? ims.schmonth,
@@ -232,12 +232,12 @@ function imsOnlyReadyRow(imsRow) {
   };
 }
 
-/** No DB row → Pending (0) for transitions. */
+/** No DB row / legacy Pending (0) → Ready to Dispatch (7) for transitions. */
 function effectiveFromStatus(existingRow) {
   if (existingRow?.is_planned != null && existingRow.is_planned !== "") {
-    return Number(existingRow.is_planned);
+    return normalizeScheduleStatus(existingRow.is_planned);
   }
-  return SCHEDULE_PLAN_STATUS.PENDING;
+  return SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH;
 }
 
 function buildFilteredList(imsRecords, filterMode, planMap, lastTxnMap = new Map()) {
@@ -252,7 +252,7 @@ function buildFilteredList(imsRecords, filterMode, planMap, lastTxnMap = new Map
     const plan = map.get(k);
     const lastTxn = txnMap.get(k) ?? null;
     if (!plan) {
-      // Not in plan table → Pending (0).
+      // Not in plan table → Ready to Dispatch (7).
       // If txn history has a real to_status (Ready/Plan/Hold/…), use that.
       const txnStatus =
         lastTxn?.to_status != null && lastTxn.to_status !== ""
@@ -291,7 +291,11 @@ function buildFilteredList(imsRecords, filterMode, planMap, lastTxnMap = new Map
     });
   }
 
-  const allRows = [...mergedFromIms, ...orphanPlans];
+  // Comparison = live ERP/API rows only (skip DB-only rows not in current API).
+  const allRows =
+    filterMode === SCHEDULE_LIST_FILTER.COMPARISON
+      ? mergedFromIms
+      : [...mergedFromIms, ...orphanPlans];
 
   switch (filterMode) {
     case SCHEDULE_LIST_FILTER.PENDING:
@@ -330,6 +334,7 @@ function buildFilteredList(imsRecords, filterMode, planMap, lastTxnMap = new Map
       return allRows.filter((r) => Number(r.is_planned) === SCHEDULE_PLAN_STATUS.HOLD);
 
     case SCHEDULE_LIST_FILTER.COMPARISON:
+      // ERP (live API) + our DB snapshot + field mismatch only.
       return allRows.filter((r) => {
         const k = planKey(r.schno, r.itemdcode);
         if (!map.has(k)) return false;
@@ -497,7 +502,7 @@ function rowScheduleDate(row) {
   return normDate(row?.docdt ?? row?.schdt);
 }
 
-/** Custom post-filter — drops orphan DB rows outside selected month/date (IMS SQL can miss these). */
+/** Custom post-filter — drops rows outside selected month/date (IMS SQL can miss orphan DB rows). */
 function rowMatchesReportScope(row, scope) {
   if (!scope) return true;
   const { month, from, to } = scope;
@@ -573,7 +578,7 @@ async function listScheduleItemsForSchno(fy, schno) {
   }
 
   const [imsResult, planMap, lastTxnMap] = await Promise.all([
-    fetchImsDataRaw(IMS_SCHEDULE_LIST, { fin_year_id: fy.finYearId, month: "all" }),
+    fetchImsDataRaw(IMS_SCHEDULE_LIST, null),
     loadAllPlanMap(fy.finYearId),
     loadLastTransactionMap(fy.finYearId),
   ]);
@@ -666,13 +671,18 @@ export async function listSchedulePlanning(body = {}) {
   ]);
 
   let records = buildFilteredList(imsResult?.records, filterMode, planMap, lastTxnMap);
+  // Hide DB-only rows no longer returned by ERP/API (all tabs including Comparison).
+  records = records.filter((r) => !r.comparison?.missing_ims);
   records = applyReportScopeFilter(records, body);
   records = enrichPlanDateHistory(records, planDateHistoryMap);
   records = await enrichFgStock(records);
   records = await enrichScheduleDispatchBalances(records);
   records = decorateScheduleDisplayRows(records);
 
-  if (filterMode === SCHEDULE_LIST_FILTER.PLAN) {
+  if (filterMode === SCHEDULE_LIST_FILTER.READY_TO_DISPATCH) {
+    // Exclude fully dispatched rows (balance 0) — still is_planned 7 but display = Complete.
+    records = records.filter((r) => !isScheduleCompleteRow(r));
+  } else if (filterMode === SCHEDULE_LIST_FILTER.PLAN) {
     records = filterScheduleRowsByBalanceTab(records, { complete: false });
   } else if (filterMode === SCHEDULE_LIST_FILTER.COMPLETE) {
     records = filterScheduleRowsByBalanceTab(records, { complete: true });
@@ -730,7 +740,6 @@ export async function saveSchedulePlan(body = {}, userName = null, opts = {}) {
       message: "Completed items cannot be planned.",
     };
   }
-
   if (!(isSuperAdmin && canTransitionAsSuperAdmin(fromStatus)) && !canPlanFrom(fromStatus)) {
     return {
       success: false,
@@ -1134,7 +1143,7 @@ export async function submitScheduleShortage(body = {}, userId = null, userName 
       itemdcode: body.itemdcode,
       snap,
       user_name: userName,
-      is_planned: SCHEDULE_PLAN_STATUS.PENDING,
+      is_planned: SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH,
     });
     if (!created) {
       return { success: false, status: 500, message: "Could not save schedule plan for shortage." };
@@ -1353,11 +1362,9 @@ export async function listCustomerMonthSchedules(body = {}) {
     Number.isFinite(excludeFuidRaw) && excludeFuidRaw > 0 ? excludeFuidRaw : null;
 
   try {
+    const imsFilter = buildImsScheduleFilterSql({ month: currentScheduleMonth() }, fy.finYearId);
     const [imsResult, planMap, lastTxnMap] = await Promise.all([
-      fetchImsDataRaw(IMS_SCHEDULE_LIST, {
-        fin_year_id: fy.finYearId,
-        month: currentScheduleMonth(),
-      }),
+      fetchImsDataRaw(IMS_SCHEDULE_LIST, imsFilter),
       loadAllPlanMap(fy.finYearId),
       loadLastTransactionMap(fy.finYearId),
     ]);
@@ -1394,8 +1401,8 @@ export async function listCustomerMonthSchedules(body = {}) {
       }
       const rowMonth = Number(r.schmonth);
       if (Number.isFinite(rowMonth) && rowMonth > 0 && rowMonth !== month) {
-        // IMS-only Pending other-month lines still allowed.
-        if (!r.plan_id && st === SCHEDULE_PLAN_STATUS.PENDING) return true;
+        // IMS-only Ready other-month lines still allowed.
+        if (!r.plan_id && normalizeScheduleStatus(st) === SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH) return true;
         return false;
       }
       return true;

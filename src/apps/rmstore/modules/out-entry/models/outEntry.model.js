@@ -116,17 +116,19 @@ export const findOutEntry = async (out_uid) => {
 
 export const insertOutEntry = async (data) => {
   const {
-    entry_type, qc_reject_uid, mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count,
+    entry_type, issue_uid, pjobcardno, qc_reject_uid, mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count,
     location_refs, remarks, created_by, scan_complete,
   } = data;
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE}
-     (entry_type, qc_reject_uid, mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count,
+     (entry_type, issue_uid, pjobcardno, qc_reject_uid, mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count,
       location_refs, remarks, created_by, scan_complete)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
      RETURNING *`,
     [
       entry_type ?? "store_out",
+      issue_uid ?? null,
+      pjobcardno ?? null,
       qc_reject_uid ?? null,
       mrn_refs ?? null, heat_nos ?? null, item_codes ?? null, qtys ?? null,
       total_qty ?? 0, coil_count ?? 0, location_refs ?? null, remarks ?? null, created_by,
@@ -572,6 +574,98 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
      SELECT *
      FROM pending
      ORDER BY approved_at DESC NULLS LAST, issue_uid DESC, pjobcardno ASC
+     LIMIT $${i++} OFFSET $${i}`,
+    [...values, safeLimit, offset]
+  );
+
+  return {
+    data: rows,
+    total,
+    page: safePage,
+    limit: safeLimit,
+    totalPages: Math.ceil(total / safeLimit) || 1,
+  };
+};
+
+/**
+ * Open job-card Store Out drafts — shown in Pending after coils are scanned/submitted.
+ * Keeps the two-step flow: Issue Request → scan here → authorize moves stock to shop floor.
+ */
+export const findPendingJobCardStoreOutDrafts = async (options = {}) => {
+  const { search, page = 1, limit = 1000 } = options;
+  const values = [];
+  let i = 1;
+  const conditions = [
+    "o.is_deleted = false",
+    "COALESCE(o.approved, false) = false",
+    "LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'",
+  ];
+
+  if (search) {
+    const term = `%${search}%`;
+    values.push(term);
+    const idx = i++;
+    conditions.push(`(
+      COALESCE(o.pjobcardno,'') ILIKE $${idx} OR
+      COALESCE(o.item_codes,'') ILIKE $${idx} OR
+      COALESCE(o.mrn_refs,'') ILIKE $${idx} OR
+      COALESCE(jc.item_code,'') ILIKE $${idx} OR
+      COALESCE(jc.rm_item_code,'') ILIKE $${idx} OR
+      COALESCE(jc.macname,'') ILIKE $${idx} OR
+      o.out_uid::text ILIKE $${idx} OR
+      o.issue_uid::text ILIKE $${idx}
+    )`);
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const safePage = Math.max(1, Number(page) || 1);
+  const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 1000));
+  const offset = (safePage - 1) * safeLimit;
+
+  const fromClause = `
+    FROM ${TABLE} o
+    LEFT JOIN ${ISSUE_REQUEST} ir ON ir.issue_uid = o.issue_uid AND ir.is_deleted = false
+    LEFT JOIN ${ISSUE_REQUEST_JC} jc
+      ON jc.issue_uid = ir.issue_uid
+     AND jc.is_deleted = false
+     AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(o.pjobcardno))`;
+
+  const countRes = await dbQuery(`SELECT COUNT(*)::int AS count ${fromClause} ${where}`, values);
+  const total = Number(countRes[0]?.count || 0);
+
+  const rows = await dbQuery(
+    `SELECT
+       o.out_uid,
+       o.issue_uid,
+       TRIM(o.pjobcardno) AS pjobcardno,
+       o.scan_complete,
+       o.approved,
+       o.entry_type,
+       o.coil_count,
+       o.total_qty AS pending_qty,
+       o.coil_count AS pending_coil_count,
+       o.item_codes AS rm_item_code,
+       o.mrn_refs AS mrn_nos,
+       o.created_at,
+       o.created_at AS sort_at,
+       ir.shift,
+       ir.approved_at,
+       ir.approved_by AS approved_by_name,
+       jc.macname,
+       jc.item_code,
+       jc.item_desc,
+       jc.rm_item_desc,
+       jc.issue_qty,
+       'job_card'::varchar AS pending_type,
+       false AS is_virtual_pending,
+       (
+         SELECT STRING_AGG(s.coil_no_uid, ', ' ORDER BY s.created_at ASC, s.coil_no_uid ASC)
+         FROM ${SCANNED} s
+         WHERE s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
+       ) AS coil_no_uids
+     ${fromClause}
+     ${where}
+     ORDER BY o.created_at DESC, o.out_uid DESC
      LIMIT $${i++} OFFSET $${i}`,
     [...values, safeLimit, offset]
   );
