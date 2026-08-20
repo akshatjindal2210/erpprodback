@@ -1,5 +1,6 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { portalMrnCoilSql } from "../../coil/models/coil.model.js";
 
 const TABLE = T.MRN;
 
@@ -7,6 +8,7 @@ const DEFAULT_FIELDS = [
   "m.uid", "m.mrn_no", "m.serial_no", "m.mrn_dt",
   "m.bill_no", "m.bill_dt", "m.acc_code", "m.acc_name",
   "m.item_dcode", "m.item_code", "m.item_desc",
+  "m.heat_no", "m.remarks",
   "m.it_recp_qty", "m.it_lot_no", "m.it_unit", "m.fyid",
   "m.sticker_mode",
   "m.sticker_generated",
@@ -31,6 +33,51 @@ export const findMrnByUid = async (uid) => {
   return row ?? null;
 };
 
+/** Resolve local MRN by uid, `{mrn_no}_{serial_no}`, or plain mrn_no. */
+export const findMrnByLookup = async (key) => {
+  const k = String(key || "").trim();
+  if (!k) return null;
+
+  const byUid = await findMrnByUid(k);
+  if (byUid) return byUid;
+
+  const composite = k.match(/^(\d+)_(\d+)$/);
+  if (composite) {
+    const [row] = await dbQuery(
+      `SELECT ${DEFAULT_FIELDS.join(", ")}
+       FROM ${TABLE} m
+       WHERE m.mrn_no::text = $1 AND m.serial_no::text = $2
+       LIMIT 1`,
+      [composite[1], composite[2]]
+    );
+    if (row) return row;
+  }
+
+  if (/^\d+$/.test(k)) {
+    const [row] = await dbQuery(
+      `SELECT ${DEFAULT_FIELDS.join(", ")}
+       FROM ${TABLE} m
+       WHERE m.mrn_no::text = $1
+       ORDER BY m.sticker_generated DESC, m.serial_no ASC NULLS LAST
+       LIMIT 1`,
+      [k]
+    );
+    if (row) return row;
+  }
+
+  return null;
+};
+
+/** All MRN UIDs sharing the same mrn_no (for minus coil picker). */
+export const findMrnUidsByMrnNo = async (mrn_no) => {
+  if (mrn_no == null || String(mrn_no).trim() === "") return [];
+  const rows = await dbQuery(
+    `SELECT uid FROM ${TABLE} WHERE mrn_no::text = $1`,
+    [String(mrn_no).trim()]
+  );
+  return (rows || []).map((r) => String(r.uid || "").trim()).filter(Boolean);
+};
+
 export const findAllActiveMrnByUid = async () => {
   const rows = await dbQuery(
     `SELECT ${DEFAULT_FIELDS.join(", ")}
@@ -46,7 +93,15 @@ export const findAllActiveMrnByUid = async () => {
 export const findGeneratedMrns = async ({ search, page = 1, limit = 1000, from_date, to_date } = {}) => {
   const values = [];
   let i = 1;
-  const conditions = ["m.sticker_generated = true"];
+  const conditions = [
+    "m.sticker_generated = true",
+    `EXISTS (
+      SELECT 1 FROM ${T.COIL_TABLE} c
+      WHERE c.mrn_uid = m.uid
+        AND c.is_deleted = false
+        AND ${portalMrnCoilSql("c")}
+    )`,
+  ];
 
   if (from_date) {
     values.push(from_date);
@@ -93,6 +148,7 @@ export const insertMrn = async (data) => {
   const {
     uid, mrn_no, serial_no, mrn_dt, bill_no, bill_dt,
     acc_code, acc_name, item_dcode, item_code, item_desc,
+    heat_no,
     it_recp_qty, it_lot_no, it_unit, fyid,
     internal_create_user, internal_create_date,
     system_generate_user, system_generate_date,
@@ -115,20 +171,86 @@ export const insertMrn = async (data) => {
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE}
      (uid, mrn_no, serial_no, mrn_dt, bill_no, bill_dt,
-      acc_code, acc_name, item_dcode, item_code, item_desc,
+      acc_code, acc_name, item_dcode, item_code, item_desc, heat_no,
       it_recp_qty, it_lot_no, it_unit, fyid,
       internal_create_user, internal_create_date,
       system_generate_user, system_generate_date, sticker_generated)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
      RETURNING *`,
     [
       String(uid), mrn_no ?? null, serial_no ?? null, mrn_dt ?? null, bill_no ?? null, bill_dt ?? null,
       acc_code ?? null, acc_name ?? null, item_dcode ?? null, item_code ?? null, item_desc ?? null,
+      heat_no ?? null,
       it_recp_qty ?? null, it_lot_no ?? null, it_unit ?? null, fyid ?? null,
       internalUser, internalDate, systemUser, system_generate_date ?? null, !!sticker_generated,
     ]
   );
   return row;
+};
+
+/** Minimal MRN row built from a coil list/detail row (MRN join fields). */
+export function mrnSnapshotFromCoil(coil, mrn_uid = null) {
+  if (!coil) return null;
+  const uid = String(mrn_uid || coil.mrn_uid || "").trim();
+  if (!uid) return null;
+  return {
+    uid,
+    mrn_no: coil.mrn_no ?? null,
+    serial_no: coil.serial_no ?? null,
+    mrn_dt: coil.mrn_dt ?? null,
+    bill_no: coil.bill_no ?? null,
+    bill_dt: coil.bill_dt ?? null,
+    acc_code: coil.acc_code ?? null,
+    acc_name: coil.acc_name ?? null,
+    item_dcode: coil.item_dcode ?? null,
+    item_code: coil.item_code ?? null,
+    item_desc: coil.item_desc ?? null,
+    heat_no: coil.heat_no ?? null,
+    remarks: coil.remarks ?? null,
+    it_recp_qty: coil.it_recp_qty ?? null,
+    it_lot_no: coil.it_lot_no ?? null,
+    it_unit: coil.it_unit ?? null,
+    fyid: coil.fyid ?? null,
+    sticker_generated: true,
+  };
+}
+
+export const updateMrnStickerMeta = async (uid, { heat_no, remarks } = {}) => {
+  const key = String(uid || "").trim();
+  if (!key) return null;
+  const [row] = await dbQuery(
+    `UPDATE ${TABLE}
+     SET heat_no = COALESCE($2, heat_no),
+         remarks = COALESCE($3, remarks)
+     WHERE uid = $1
+     RETURNING *`,
+    [key, heat_no ?? null, remarks ?? null]
+  );
+  return row ?? null;
+};
+
+/** Copy it_lot_no → heat_no when heat_no is blank (SA stub / ERP lot rows). */
+export const syncMrnHeatFromLot = async (uid, preferredHeat = null) => {
+  const key = String(uid || "").trim();
+  if (!key) return null;
+  const heat = preferredHeat != null ? String(preferredHeat).trim() || null : null;
+  const [row] = await dbQuery(
+    `UPDATE ${TABLE}
+     SET heat_no = COALESCE(
+           NULLIF(TRIM($2::text), ''),
+           NULLIF(TRIM(heat_no), ''),
+           NULLIF(TRIM(it_lot_no), '')
+         ),
+         it_lot_no = COALESCE(NULLIF(TRIM(it_lot_no), ''), NULLIF(TRIM($2::text), ''))
+     WHERE uid = $1
+       AND (
+         NULLIF(TRIM(COALESCE(heat_no, '')), '') IS NULL
+         OR NULLIF(TRIM(COALESCE(it_lot_no, '')), '') IS NULL
+       )
+     RETURNING *`,
+    [key, heat]
+  );
+  return row ?? null;
 };
 
 export const setMrnStickerGenerated = async (uid, { user, at, sticker_mode } = {}) => {
@@ -193,6 +315,17 @@ export const resetMrnStickerGenerated = async (uid) => {
     [String(uid)]
   );
   return row ?? null;
+};
+
+/** Permanently remove local MRN row (after coils/QC are gone). */
+export const hardDeleteMrnByUid = async (uid) => {
+  const key = String(uid || "").trim();
+  if (!key) return false;
+  const rows = await dbQuery(
+    `DELETE FROM ${TABLE} WHERE uid = $1 RETURNING uid`,
+    [key]
+  );
+  return Array.isArray(rows) && rows.length > 0;
 };
 
 /** Store TC / RMTC once on the MRN (not on each coil). */

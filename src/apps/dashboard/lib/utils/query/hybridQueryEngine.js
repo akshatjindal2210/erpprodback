@@ -61,7 +61,10 @@ export class HybridQueryEngine {
     const resolved = resolveExternalMssqlSql(mssqlQuery, runtimeFilters);
     const payload = buildExternalMssqlPayload(resolved, source);
     const res = await fetchImsDataRaw(payload.requestedData, payload.filter);
-    if (!res.success) throw new Error(`External MSSQL Error: ${res.message}`);
+    if (!res.success) {
+      const detail = String(res?.message || res?.error || "Unknown error").trim();
+      throw new Error(`External MSSQL Error: ${detail}`);
+    }
     return Array.isArray(res.records) ? res.records : [];
   }
 

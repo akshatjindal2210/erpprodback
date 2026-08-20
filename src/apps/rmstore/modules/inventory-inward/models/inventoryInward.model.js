@@ -1,5 +1,6 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
 
 const TABLE = T.INVENTORY_INWARDS;
 
@@ -100,12 +101,11 @@ export const updateInward = async (in_uid, fields = {}) => {
   }
   const keys = Object.keys(safe);
   if (!keys.length) return findInward(in_uid);
-  const values = Object.values(safe);
+  const { setParts, values, nextIndex } = buildNaiveTimestampUpdateParts(safe);
   values.push(Number(in_uid));
-  const setClause = keys.map((k, idx) => `${k} = $${idx + 1}`).join(", ");
   const [row] = await dbQuery(
-    `UPDATE ${TABLE} SET ${setClause}
-     WHERE in_uid = $${keys.length + 1} AND is_deleted = false
+    `UPDATE ${TABLE} SET ${setParts.join(", ")}
+     WHERE in_uid = $${nextIndex} AND is_deleted = false
      RETURNING *`,
     values
   );

@@ -193,7 +193,15 @@ export const createLocation = async (req, res) => {
 
     await log(req, "create", row.location_id, { rack_no: normalizedRackNo, row_no: normalizedRowNo, location_no: locationNo, item_dcode: itemSnap.item_dcode }, row);
 
-    return res.status(201).json({ success: true, data: data ?? row, message: "Store location created successfully." });
+    const authorized = normalizedApproved === true;
+    return res.status(201).json({
+      success: true,
+      data: data ?? row,
+      toast_type: "success",
+      message: authorized
+        ? "Store location created and authorized."
+        : "Store location created. Pending authorization.",
+    });
   } catch (err) {
     console.error("[rmstore/store-location/create]", err?.message || err);
     if (err?.code === "23505") {
@@ -309,7 +317,17 @@ export const updateLocation = async (req, res) => {
 
     await log(req, "update", id, { updated_fields: fields });
 
-    return res.json({ success: true, data: updated, message: "Store location updated successfully." });
+    const authorized = fields.approved === true || updated?.approved === true;
+    return res.json({
+      success: true,
+      data: updated,
+      toast_type: "success",
+      message: authorized
+        ? "Store location updated and authorized."
+        : hasBusinessChanges
+          ? "Store location updated. Pending re-authorization."
+          : "Store location set to pending.",
+    });
   } catch (err) {
     console.error("[rmstore/store-location/update]", err?.message || err);
     if (err?.code === "23505") {

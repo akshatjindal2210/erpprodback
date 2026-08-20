@@ -1,6 +1,6 @@
 import { createRmStoreLocationMasterTable } from "../tables/store-location/store_location_master.table.js";
 import { createRmStoreProductionMasterTable } from "../tables/production/production_master.table.js";
-import { createRmStoreSpecMasterTable } from "../tables/spec/spec_master.table.js";
+import { createRmStoreSpecMasterTable, createRmStoreSpecDetailTable } from "../tables/spec/spec_master.table.js";
 import { createRmStoreMrnTable } from "../tables/mrn/mrn.table.js";
 import { createRmStoreCoilTable } from "../tables/coil/coil_table.table.js";
 import { createRmStoreInventoryInwardsTable } from "../tables/inventory-inward/inventory_inwards.table.js";
@@ -18,6 +18,7 @@ export async function initRmStoreDB() {
   await createRmStoreLocationMasterTable();
   await createRmStoreProductionMasterTable();
   await createRmStoreSpecMasterTable();
+  await createRmStoreSpecDetailTable();
   await createRmStoreMrnTable();
   await createRmStoreCoilTable();
   await createRmStoreInventoryInwardsTable();

@@ -39,9 +39,59 @@ function allowErpHelper(mod, act) {
       mod === "rm_spec_master" ||
       mod === "rm_store_location_master" ||
       mod === "rm_issue_request" ||
+      mod === "rm_in_process_request" ||
       mod === "rm_stock_adjustment") &&
     (act === VIEW || isForm(act))
   ) {
+    return [];
+  }
+  return null;
+}
+
+/** Coil table helper — verify coils from pages that lack rm_coils module access. */
+function fieldsForCoils(mod, act) {
+  if (mod == null || act == null) return null;
+  const allowedModules = [
+    "rm_coils",
+    "rm_inventory_inwards",
+    "rm_issue_request",
+    "rm_in_process_request",
+    "rm_stock_adjustment",
+    "rm_qc_check",
+    "rm_out_entry",
+    "rm_mrn_portal",
+    "rm_store_location_master",
+    "rm_rejection",
+    "rm_coil_transaction_logs",
+    "rm_coil_download_logs",
+    "rm_inventory_report",
+  ];
+  if (allowedModules.includes(mod) && (act === VIEW || isForm(act))) {
+    return [];
+  }
+  return null;
+}
+
+function fieldsForQcCheck(mod, act) {
+  if (mod == null || act == null) return null;
+  if (mod === "rm_rejection" && (act === VIEW || isForm(act))) {
+    return [];
+  }
+  return null;
+}
+
+function fieldsForIssueRequest(mod, act) {
+  if (mod == null || act == null) return null;
+  if (mod === "rm_rejection" && (act === VIEW || isForm(act))) {
+    return [];
+  }
+  return null;
+}
+
+function fieldsForinProcessRequest(mod, act) {
+  if (mod == null || act == null) return null;
+  const allowed = ["rm_rejection", "rm_coils", "rm_qc_check", "rm_in_process_request"];
+  if (allowed.includes(mod) && (act === VIEW || isForm(act))) {
     return [];
   }
   return null;
@@ -52,6 +102,10 @@ const BY_HELPER = {
   productionItems: allowErpHelper,
   rmItems: allowErpHelper,
   prdRunJc: allowErpHelper,
+  coils: fieldsForCoils,
+  qcCheck: fieldsForQcCheck,
+  issueRequest: fieldsForIssueRequest,
+  inProcessRequest: fieldsForinProcessRequest,
 };
 
 function resolveHelperFields(helper, { permission_module, permission_action } = {}) {
@@ -60,7 +114,7 @@ function resolveHelperFields(helper, { permission_module, permission_action } = 
   return fn(permission_module, permission_action);
 }
 
-/** Route middleware — helperAccess("locations" | "productionItems" | "rmItems") */
+/** Route middleware — helperAccess("locations" | "productionItems" | "rmItems" | "coils") */
 export function helperAccess(helper) {
   return (req, res, next) => {
     const page = req.body?.permission_module;

@@ -9,8 +9,8 @@ export function hasJourneyFilter(filters = {}) {
 function pushJourneyParams(journey, values) {
   const j = sanitizeSearch(journey);
   if (!j) return null;
-  values.push(j, `${j}%`);
-  return { exactIdx: values.length - 1, prefixIdx: values.length };
+  values.push(j, `${j}%`, `%${j}%`);
+  return { exactIdx: values.length - 2, prefixIdx: values.length - 1, containsIdx: values.length };
 }
 
 const JOURNEY_BOXES_CTE = `
@@ -24,6 +24,13 @@ journey_boxes AS (
       OR b.box_uid::text = $1
       OR TRIM(b.packing_number::text) = $1
       OR b.packing_number ILIKE $2
+      OR TRIM(b.packing_number::text) IN (
+        SELECT TRIM(dp.doc_no::text) FROM ims_dailyprod dp WHERE dp.job_card_no ILIKE $3
+      )
+      OR b.sa_id IN (
+        SELECT sa.adjustment_id FROM ims_stock_adjustment sa
+        WHERE sa.is_deleted = false AND sa.job_card_no ILIKE $3
+      )
     )
   LIMIT 300
 )`;
@@ -34,12 +41,13 @@ journey_item_packings AS (
   SELECT TRIM(dp.doc_no::text) AS packing_number
   FROM ims_dailyprod dp
   WHERE dp.item_code ILIKE $1
+    OR dp.job_card_no ILIKE $3
 ),
 journey_item_adjustments AS (
   SELECT sa.adjustment_id, NULLIF(TRIM(sa.packing_number::text), '') AS packing_number
   FROM ims_stock_adjustment sa
   WHERE sa.is_deleted = false
-    AND sa.item_code ILIKE $1
+    AND (sa.item_code ILIKE $1 OR sa.job_card_no ILIKE $3)
 ),
 journey_boxes AS (
   SELECT b.box_uid, TRIM(b.packing_number::text) AS packing_number, b.box_no_uid
@@ -146,9 +154,9 @@ export function appendJourneySql(opts) {
 }
 
 /**
- * Box list journey — match packing no / box sticker no / item code across full DB (no date window).
+ * Box list journey — match packing no / box sticker no / item code / job card across full DB (no date window).
  * Packing/box use prefix; item_code is exact only (so HN006 does not match HN006TW / HN006Y).
- * Item code is resolved via joined dailyprod / stock_adjustment (same joins as findBoxes).
+ * Job card uses contains. Item / job card resolved via joined dailyprod / stock_adjustment.
  * @returns next param index after pushing journey bind values
  */
 export function appendBoxJourneyCondition(conditions, values, journey, startIndex) {
@@ -156,7 +164,8 @@ export function appendBoxJourneyCondition(conditions, values, journey, startInde
   if (!j) return startIndex;
   const exactIdx = startIndex;
   const prefixIdx = startIndex + 1;
-  values.push(j, `${j}%`);
+  const containsIdx = startIndex + 2;
+  values.push(j, `${j}%`, `%${j}%`);
   conditions.push(`(
     b.box_no_uid = $${exactIdx}
     OR b.box_no_uid ILIKE $${prefixIdx}
@@ -165,6 +174,8 @@ export function appendBoxJourneyCondition(conditions, values, journey, startInde
     OR b.packing_number ILIKE $${prefixIdx}
     OR TRIM(dp.item_code::text) ILIKE $${exactIdx}
     OR TRIM(sa.item_code::text) ILIKE $${exactIdx}
+    OR COALESCE(dp.job_card_no, '') ILIKE $${containsIdx}
+    OR COALESCE(sa.job_card_no, '') ILIKE $${containsIdx}
   )`);
-  return startIndex + 2;
+  return startIndex + 3;
 }

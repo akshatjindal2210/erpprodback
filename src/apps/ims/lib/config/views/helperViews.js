@@ -74,6 +74,9 @@ function fieldsForLedgers(mod, act) {
   if (mod === "stock_adjustment" && act === VIEW) return [...ledgerPicker];
   if (mod === "stock_adjustment" && isForm(act)) return [...ledgerModal];
 
+  if (mod === "rm_stock_adjustment" && act === VIEW) return [...ledgerPicker];
+  if (mod === "rm_stock_adjustment" && isForm(act)) return [...ledgerModal];
+
   if (mod === "out_entry" && act === VIEW) return [...ledgerPicker];
   if (mod === "out_entry" && isForm(act)) return [...ledgerModal];
 

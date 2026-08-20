@@ -1,6 +1,7 @@
 import { findInwards, findInward, insertInward, updateInward, softDeleteInward } from "../models/inventoryInward.model.js";
-import { findCoilByUid, updateCoilsAfterInward, clearCoilsForInward, findCoils } from "../../coil/models/coil.model.js";
-import { findInProcessRequests, IPR_REQUEST_TYPE, IPR_DOWNSTREAM } from "../../in-process-request/models/inProcessRequest.model.js";
+import { findCoilByUid, updateCoilsAfterInward, syncInwardRegisterCoils, clearCoilsForInward, findCoils } from "../../coil/models/coil.model.js";
+import { groupRegisterCoilsIntoLocations, loadInwardRegisterPayload, buildInwardRegisterLogDetails } from "../utils/inwardRegister.js";
+import { findInProcessRequests, IPR_DOWNSTREAM } from "../../in-process-request/models/inProcessRequest.model.js";
 import { findPackingAreaByMrn } from "../utils/list/packingAreaList.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
@@ -57,27 +58,9 @@ function uniqueCoilUidsFromLocations(locations) {
   return [...set];
 }
 
-/** Group flat coil rows into `locations[]` for the edit modal (IMS inward analog). */
+/** @deprecated use groupRegisterCoilsIntoLocations from inwardRegister.js */
 function groupCoilsIntoLocations(coils) {
-  const map = {};
-  for (const coil of coils || []) {
-    const lid = coil.location_id != null ? Number(coil.location_id) : null;
-    if (!lid) continue;
-    if (!map[lid]) {
-      const locName =
-        String(coil.location_no || "").trim() ||
-        `RM-${coil.rack_no || ""}${String(coil.row_no || "").toUpperCase()}`.trim() ||
-        String(lid);
-      map[lid] = {
-        location_id: lid,
-        name: locName,
-        location_no: locName,
-        coils: [],
-      };
-    }
-    map[lid].coils.push(coil);
-  }
-  return Object.values(map);
+  return groupRegisterCoilsIntoLocations(coils);
 }
 
 async function resolveCoilsForInward(uids, { editInUid = null } = {}) {
@@ -88,12 +71,23 @@ async function resolveCoilsForInward(uids, { editInUid = null } = {}) {
       return { error: `Coil ${uid} was not found.` };
     }
     const status = String(coil.status || "active").toLowerCase();
-    if (status !== "active") {
+    const coilInUid = coil.in_uid != null ? Number(coil.in_uid) : null;
+    const belongsToEditInward = editInUid != null && coilInUid === Number(editInUid);
+
+    if (status !== "active" && !belongsToEditInward) {
+      if (status === "rejected") {
+        const rejectRef = coil.rm_uid != null ? `REJECT-${coil.rm_uid}` : null;
+        return {
+          error: rejectRef
+            ? `Coil ${uid} is held in RM Rejection (${rejectRef}). Send it from Store Out, not Store In.`
+            : `Coil ${uid} is held in RM Rejection. Send it from Store Out, not Store In.`,
+        };
+      }
       return { error: `Coil ${uid} is not available. Its current status is ${status}.` };
     }
-    const coilInUid = coil.in_uid != null ? Number(coil.in_uid) : null;
+    // Store In is allowed with or without QC pass — QC only gates Issue / Total Stock.
     if (coil.location_id) {
-      if (editInUid == null || coilInUid !== Number(editInUid)) {
+      if (!belongsToEditInward && (editInUid == null || coilInUid !== Number(editInUid))) {
         return {
           error: editInUid
             ? `Coil ${uid} is already stored on another store-in entry.`
@@ -152,8 +146,8 @@ export const getPendingStoreInList = async (req, res) => {
       order: "DESC",
     });
     const result = await findInProcessRequests({
+      pendingStoreInQueue: true,
       filters: {
-        request_type: IPR_REQUEST_TYPE.STORE_IN,
         approved: true,
         downstream: IPR_DOWNSTREAM.PENDING_STORE_IN,
       },
@@ -194,10 +188,12 @@ export const getCoilAreaList = async (req, res) => {
       order: "DESC",
     });
     const mrn_uid = req.body?.mrn_uid != null ? String(req.body.mrn_uid).trim() : "";
+    const source = req.body?.source != null ? String(req.body.source).trim() : "";
     const result = await findCoils({
       filters: {
         coil_area: true,
         ...(mrn_uid ? { mrn_uid } : {}),
+        ...(source ? { source } : {}),
       },
       search: sanitizeSearch(search),
       page,
@@ -217,14 +213,17 @@ export const getInwardById = async (req, res) => {
     if (!id) return res.status(400).json({ success: false, message: "A valid store-in entry ID is required." });
     const data = await findInward(id);
     if (!data) return res.status(404).json({ success: false, message: "Store-in entry not found." });
-    const coils = await findCoils({ filters: { in_uid: id }, limit: 5000, sortBy: "coil_uid", order: "ASC" });
-    const coilRows = Array.isArray(coils?.data) ? coils.data : [];
+
+    const register = await loadInwardRegisterPayload(id, {
+      expectedCoilCount: Number(data.coil_count) || 0,
+    });
     return res.json({
       success: true,
       data: {
         ...data,
-        coils: coilRows,
-        locations: groupCoilsIntoLocations(coilRows),
+        coils: register.coils,
+        locations: register.locations,
+        history_locations: register.history_locations || [],
       },
     });
   } catch (err) {
@@ -273,15 +272,21 @@ export const createInward = async (req, res) => {
       locations.map((loc) => updateCoilsAfterInward(row.in_uid, loc.location_id, loc.coils, user))
     );
 
-    // Verify coils linked — surface DB miss early
+    // Verify every coil is linked with a rack location — rollback on partial write
     const linked = await findCoils({ filters: { in_uid: row.in_uid }, limit: 5000 });
-    const linkedCount = linked?.data?.length || 0;
-    if (linkedCount !== uids.length) {
+    const linkedRows = linked?.data || [];
+    const linkedActiveWithLoc = linkedRows.filter(
+      (c) =>
+        String(c.status || "active").toLowerCase() === "active" &&
+        Number(c.in_uid) === Number(row.in_uid) &&
+        c.location_id != null
+    ).length;
+    if (linkedActiveWithLoc !== uids.length) {
       await clearCoilsForInward(row.in_uid, user);
       await softDeleteInward(row.in_uid, user);
       return res.status(500).json({
         success: false,
-        message: `Could not complete the Store In. Only ${linkedCount} of ${uids.length} coils were linked, so the entry was rolled back.`,
+        message: `Could not complete the Store In. Only ${linkedActiveWithLoc} of ${uids.length} coils were linked with a location, so the entry was rolled back.`,
       });
     }
 
@@ -298,20 +303,16 @@ export const createInward = async (req, res) => {
       source_id: String(row.in_uid),
       user_name: user,
       user_id: req.user?.id,
-      rows: resolved,
+      rows: linked.data || [],
       details: {
         in_uid: row.in_uid,
-        location_count: locations.length,
-        locations: locations.map((l) => ({
-          location_id: l.location_id,
-          coil_count: l.coils.length,
-        })),
-        coil_count: resolved.length,
+        ...buildInwardRegisterLogDetails(locations, linked.data || []),
       },
     });
 
     const data = await findInward(row.in_uid);
     const coilRows = linked.data || [];
+    const locationsOut = groupCoilsIntoLocations(coilRows);
     log(req, "create", String(row.in_uid), {
       in_uid: row.in_uid,
       mrn_no: meta.mrn_no ?? null,
@@ -329,7 +330,7 @@ export const createInward = async (req, res) => {
       data: {
         ...data,
         coils: coilRows,
-        locations: groupCoilsIntoLocations(coilRows),
+        locations: locationsOut,
       },
       message: "Store In created successfully.",
     });
@@ -390,20 +391,22 @@ export const updateInwardCtrl = async (req, res) => {
       });
       await updateInward(id, approvalFields);
       const data = await findInward(id);
-      const coils = await findCoils({ filters: { in_uid: id }, limit: 5000 });
-      const coilRows = coils.data || [];
+      const register = await loadInwardRegisterPayload(id, {
+        expectedCoilCount: Number(data?.coil_count) || 0,
+      });
       log(req, approvalFields.approved ? "approve" : "unapprove", String(id), {
         in_uid: id,
         approved: approvalFields.approved === true,
-        coil_count: coilRows.length,
+        coil_count: register.coils.length,
         remarks,
       }, data);
       return res.json({
         success: true,
         data: {
           ...data,
-          coils: coilRows,
-          locations: groupCoilsIntoLocations(coilRows),
+          coils: register.coils,
+          locations: register.locations,
+          history_locations: register.history_locations || [],
         },
         message: approvalFields.approved ? "Store In authorized successfully." : "Store In set to pending.",
       });
@@ -428,17 +431,20 @@ export const updateInwardCtrl = async (req, res) => {
       const { resolved, error } = await resolveCoilsForInward(uids, { editInUid: id });
       if (error) return res.status(400).json({ success: false, message: error });
 
-      await clearCoilsForInward(id, user);
-      await Promise.all(
-        locations.map((loc) => updateCoilsAfterInward(id, loc.location_id, loc.coils, user))
-      );
+      await syncInwardRegisterCoils(id, locations, user);
 
       const linkedAfter = await findCoils({ filters: { in_uid: id }, limit: 5000 });
-      const linkedCount = linkedAfter?.data?.length || 0;
-      if (linkedCount !== uids.length) {
+      const linkedRows = linkedAfter?.data || [];
+      const linkedActiveWithLoc = linkedRows.filter(
+        (c) =>
+          String(c.status || "active").toLowerCase() === "active" &&
+          Number(c.in_uid) === id &&
+          c.location_id != null
+      ).length;
+      if (linkedActiveWithLoc !== uids.length) {
         return res.status(500).json({
           success: false,
-          message: `Could not update the Store In. Only ${linkedCount} of ${uids.length} coils were linked, so please reopen the entry and try again.`,
+          message: `Could not update the Store In. Only ${linkedActiveWithLoc} of ${uids.length} coils were saved with a location. Please reopen and try again.`,
         });
       }
 
@@ -451,8 +457,13 @@ export const updateInwardCtrl = async (req, res) => {
         // IMS: edit keeps / re-asserts authorized
         approved: true,
         approved_by: existing.approved_by || user,
-        approved_at: existing.approved_at || new Date(),
       };
+      // Keep original approve clock; only stamp when first authorizing.
+      if (existing.approved_at) {
+        /* leave approved_at unchanged */
+      } else {
+        fields.approved_at = new Date();
+      }
 
       if (normalizedApproved === false) {
         applyApprovalWorkflow({
@@ -472,16 +483,11 @@ export const updateInwardCtrl = async (req, res) => {
         source_id: String(id),
         user_name: user,
         user_id: req.user?.id,
-        rows: resolved,
+        rows: linkedAfter?.data || resolved,
         details: {
           in_uid: id,
-          location_count: locations.length,
-          locations: locations.map((l) => ({
-            location_id: l.location_id,
-            coil_count: l.coils.length,
-          })),
-          coil_count: resolved.length,
           action: "update",
+          ...buildInwardRegisterLogDetails(locations, linkedAfter?.data || resolved),
         },
       });
     } else {
@@ -493,13 +499,14 @@ export const updateInwardCtrl = async (req, res) => {
     }
 
     const data = await findInward(id);
-    const coils = await findCoils({ filters: { in_uid: id }, limit: 5000 });
-    const coilRows = coils.data || [];
+    const register = await loadInwardRegisterPayload(id, {
+      expectedCoilCount: Number(data?.coil_count) || 0,
+    });
     log(req, hasLocationsBody && locations.length ? "update" : "update_remarks", String(id), {
       in_uid: id,
       location_count: locations.length,
-      coil_count: coilRows.length,
-      coil_no_uids: coilRows.map((c) => c.coil_no_uid),
+      coil_count: register.coils.length,
+      coil_no_uids: register.coils.map((c) => c.coil_no_uid),
       approved: data?.approved === true,
       remarks,
     }, data);
@@ -507,8 +514,9 @@ export const updateInwardCtrl = async (req, res) => {
       success: true,
       data: {
         ...data,
-        coils: coilRows,
-        locations: groupCoilsIntoLocations(coilRows),
+        coils: register.coils,
+        locations: register.locations,
+        history_locations: register.history_locations || [],
       },
       message: "Store In updated successfully.",
     });

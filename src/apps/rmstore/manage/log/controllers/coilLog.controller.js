@@ -5,6 +5,7 @@ import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/q
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { COIL_TX_TYPE_LABELS } from "../../../lib/constants/coilTransactionTypes.js";
 import { hydrateCoilTransactionStickerEntries } from "../../../lib/utils/transactions/coilTransactionDetails.js";
+import { isSuperAdminUser } from "../../../lib/utils/rmstoreSpecialPermissions.js";
 
 export const listCoilTransactionLogs = async (req, res) => {
   try {
@@ -12,6 +13,7 @@ export const listCoilTransactionLogs = async (req, res) => {
       sortBy: "created_at",
       order: "DESC",
     });
+    const userIdFilter = isSuperAdminUser(req.user) ? null : req.user?.id;
     const result = await findCoilTransactions({
       filters: sanitizeFilters(filters || {}, [
         "from_date", "to_date", "fromDate", "toDate",
@@ -22,6 +24,7 @@ export const listCoilTransactionLogs = async (req, res) => {
       page: isExport === "true" ? 1 : page,
       limit: isExport === "true" ? 100000 : (limit || 100),
       permission: req.permission,
+      user_id: userIdFilter,
     });
 
     const rows = result.data || [];
@@ -70,11 +73,13 @@ export const listCoilDownloadLog = async (req, res) => {
       sortBy: "downloaded_at",
       order: "DESC",
     });
+    const userIdFilter = isSuperAdminUser(req.user) ? null : req.user?.id;
     const result = await listCoilDownloadLogs({
       filters: sanitizeFilters(filters || {}, ["from_date", "to_date", "journey", "download_type"]),
       search: sanitizeSearch(search),
       page,
       limit: limit || 100,
+      user_id: userIdFilter,
     });
     return res.json({ success: true, ...result });
   } catch (err) {

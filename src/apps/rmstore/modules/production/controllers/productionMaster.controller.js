@@ -1,83 +1,63 @@
-import { findProductions, findProduction, findProductionDuplicate, insertProduction, updateProductions, deleteProductions } from "../models/productionMaster.model.js";
-import { logRmstoreActivity } from "../../../lib/utils/activity/logRmstoreActivity.js";
-import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
+import { findProductions, findProduction, insertProduction, updateProductions, deleteProductions } from "../models/productionMaster.model.js";
+import { resolveProductionSnapshot } from "../utils/erpItems.js";
+import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
-import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
-import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
-import { resolveProductionSnapshot } from "../utils/erpItems.js";
+import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 
-const CFG = getCrudModuleConfig("rm_production_master");
+const FILTER_FIELDS = ["production_id", "item_dcode", "approved", "from_date", "to_date"];
 const MODULE = "rm_production_master";
+const log = createRmstoreActivityLogger(MODULE);
 
-function uniqueViolationMessage(err) {
-  const constraint = err?.constraint || "";
-  if (constraint === "rmstore_master_production_pkey") {
-    return "Could not save production mapping: database ID is out of sync. Restart the backend and try again.";
+function parseRmItems(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
   }
-  if (constraint === "rmstore_master_production_item_rm_unique_active") {
-    return "A mapping for this production item and RM item already exists.";
-  }
-  if (err?.code === "23505") {
-    return "Could not save because a duplicate production mapping exists.";
-  }
-  return err?.message || "Could not save production mapping.";
+  return [];
 }
 
-const log = (req, action, entity_id, details, record = null) =>
-  logRmstoreActivity(req, {
-    action,
-    entity: MODULE,
-    entity_id,
-    details,
-    record,
-  }).catch(() => {});
-
-function parsePositiveDcode(value, label) {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) {
-    return { error: `${label} is required.` };
-  }
-  return { value: n };
+function rmItemsChanged(existingItems, nextItems) {
+  const a = parseRmItems(existingItems)
+    .map((r) => Number(r?.rm_item_dcode))
+    .filter(Number.isFinite)
+    .sort((x, y) => x - y);
+  const b = (nextItems || [])
+    .map((r) => Number(r?.rm_item_dcode))
+    .filter(Number.isFinite)
+    .sort((x, y) => x - y);
+  if (a.length !== b.length) return true;
+  return a.some((v, i) => v !== b[i]);
 }
 
 export const getProductions = async (req, res) => {
   try {
-    const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, {
+    const { page, limit, filters, sortBy, order, search } = extractListParams(req.body || {}, {
       sortBy: "production_id",
       order: "DESC",
     });
-
-    // Codes/desc live on the row — no ERP round-trip on list.
-    const result = await findProductions({
-      filters: sanitizeFilters(filters, CFG.filterFields),
+    const resData = await findProductions({
+      filters: sanitizeFilters(filters, FILTER_FIELDS),
       search: sanitizeSearch(search),
       sort: { by: sortBy, order },
       page,
       limit,
-      fields: CFG.listFields,
-      permission: req.permission,
     });
-
-    return res.json({ success: true, ...result });
+    return res.json({ success: true, ...resData });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
 };
 
 export const getProductionById = async (req, res) => {
   try {
-    const id = parsePositiveIntId(req.body?.production_id ?? req.body?.id);
-    if (!id) {
-      return res.status(400).json({ success: false, message: "A valid production mapping ID is required." });
-    }
-
-    const data = await findProduction({ production_id: id });
-    if (!data) {
-      return res.status(404).json({ success: false, message: "Production mapping not found." });
-    }
-
-    return res.json({ success: true, data });
+    const data = await findProduction({ production_id: req.body.production_id || req.body.id });
+    return data ? res.json({ success: true, data }) : res.status(404).json({ success: false, message: "Production mapping not found." });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -85,148 +65,80 @@ export const getProductionById = async (req, res) => {
 
 export const createProduction = async (req, res) => {
   try {
-    const { item_dcode, rm_item_dcode, approved } = req.body;
+    const { item_dcode, rm_items, approved } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
 
-    const prod = parsePositiveDcode(item_dcode, "Production item");
-    if (prod.error) return res.status(400).json({ success: false, message: prod.error });
-
-    const rm = parsePositiveDcode(rm_item_dcode, "RM item");
-    if (rm.error) return res.status(400).json({ success: false, message: rm.error });
-
-    const duplicate = await findProductionDuplicate({
-      item_dcode: prod.value,
-      rm_item_dcode: rm.value,
-    });
-    if (duplicate) {
-      return res.status(409).json({
-        success: false,
-        message: "A mapping for this production item and RM item already exists.",
-      });
+    if (!item_dcode || !Array.isArray(rm_items) || !rm_items.length) {
+      return res.status(400).json({ success: false, message: "A production item and at least one RM item are required." });
     }
 
-    const snapshot = await resolveProductionSnapshot(prod.value, rm.value);
+    const existing = await findProduction({ item_dcode });
+    if (existing) return res.status(409).json({ success: false, message: "A mapping already exists for this production item." });
 
-    const row = await insertProduction({
-      item_dcode: snapshot.item_dcode ?? prod.value,
-      item_code: snapshot.item_code,
-      item_desc: snapshot.item_desc,
-      rm_item_dcode: snapshot.rm_item_dcode ?? rm.value,
-      rm_item_code: snapshot.rm_item_code,
-      rm_item_desc: snapshot.rm_item_desc,
-      created_by: auditUserName(req),
-    });
+    const snap = await resolveProductionSnapshot(item_dcode, rm_items);
+    const fields = { ...snap, created_by: auditUserName(req) };
 
-    if (normalizedApproved === true) {
-      const approvalFields = {};
+    if (normalizedApproved !== undefined) {
       applyApprovalWorkflow({
         req,
-        fields: approvalFields,
-        incomingApproved: true,
+        fields,
+        incomingApproved: normalizedApproved,
         hasBusinessChanges: false,
         auditAsName: true,
       });
-      await updateProductions(approvalFields, { production_id: row.production_id });
     }
 
-    const data = await findProduction({ production_id: row.production_id });
-
-    await log(req, "create", row.production_id, {
-      item_dcode: prod.value,
-      rm_item_dcode: rm.value,
-    }, row);
-
+    const data = await insertProduction(fields);
+    const authorized = fields.approved === true;
+    log(req, "create", String(data?.production_id || ""), {
+      production_id: data?.production_id,
+      item_dcode: data?.item_dcode,
+      item_code: data?.item_code,
+      approved: data?.approved === true,
+    }, data);
     return res.status(201).json({
       success: true,
-      data: data ?? row,
-      message: "Production mapping created successfully.",
+      data,
+      toast_type: "success",
+      message: authorized
+        ? "Item RM mapping created and authorized."
+        : "Item RM mapping created. Pending authorization.",
     });
   } catch (err) {
-    if (err?.code === "23505") {
-      return res.status(409).json({ success: false, message: uniqueViolationMessage(err) });
-    }
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
 };
 
 export const updateProduction = async (req, res) => {
   try {
-    const id = parsePositiveIntId(req.body?.production_id ?? req.body?.id);
-    const { item_dcode, rm_item_dcode, approved } = req.body;
+    const id = req.body.production_id || req.body.id;
+    const { item_dcode, rm_items, approved } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
 
-    if (!id) {
-      return res.status(400).json({ success: false, message: "A valid production mapping ID is required." });
-    }
-
     const existing = await findProduction({ production_id: id });
-    if (!existing) {
-      return res.status(404).json({ success: false, message: "Production mapping not found." });
-    }
+    if (!existing) return res.status(404).json({ success: false, message: "Production mapping not found." });
 
-    // Edit-day window only when the user has edit permission (not authorize-only).
-    const editDaysLimit = Number(req.permission?.can_edit_days) || 0;
-    if (req.user.type !== "super_admin" && !!req.permission?.can_edit && editDaysLimit > 0) {
-      const createdAt = new Date(existing.created_at);
-      const diffDays = Math.ceil(Math.abs(Date.now() - createdAt) / (1000 * 60 * 60 * 24));
-      if (diffDays > editDaysLimit) {
-        return res.status(403).json({
-          success: false,
-          message: `Edit time limit exceeded. You can only edit records from the last ${editDaysLimit} days.`,
-        });
+    const nextItemDcode = item_dcode != null && item_dcode !== "" ? Number(item_dcode) : Number(existing.item_dcode);
+    const nextRmItems = Array.isArray(rm_items) ? rm_items : parseRmItems(existing.rm_items);
+
+    if (Number(nextItemDcode) !== Number(existing.item_dcode)) {
+      const duplicate = await findProduction({ item_dcode: nextItemDcode });
+      if (duplicate && Number(duplicate.production_id) !== Number(id)) {
+        return res.status(409).json({ success: false, message: "A mapping already exists for this production item." });
       }
     }
 
-    const hasBusinessChanges = item_dcode !== undefined || rm_item_dcode !== undefined;
+    const snap = await resolveProductionSnapshot(nextItemDcode, nextRmItems);
 
-    if (!hasBusinessChanges && normalizedApproved === undefined) {
-      return res.status(400).json({ success: false, message: "There are no fields to update." });
-    }
-
-    let nextItem = Number(existing.item_dcode);
-    let nextRm = Number(existing.rm_item_dcode);
-
-    if (item_dcode !== undefined) {
-      const parsed = parsePositiveDcode(item_dcode, "Production item");
-      if (parsed.error) return res.status(400).json({ success: false, message: parsed.error });
-      nextItem = parsed.value;
-    }
-    if (rm_item_dcode !== undefined) {
-      const parsed = parsePositiveDcode(rm_item_dcode, "RM item");
-      if (parsed.error) return res.status(400).json({ success: false, message: parsed.error });
-      nextRm = parsed.value;
-    }
-
-    if (hasBusinessChanges) {
-      const duplicate = await findProductionDuplicate({
-        item_dcode: nextItem,
-        rm_item_dcode: nextRm,
-        excludeProductionId: id,
-      });
-      if (duplicate) {
-        return res.status(409).json({
-          success: false,
-          message: "A mapping for this production item and RM item already exists.",
-        });
-      }
-    }
+    const hasBusinessChanges =
+      Number(nextItemDcode) !== Number(existing.item_dcode) ||
+      rmItemsChanged(existing.rm_items, snap.rm_items);
 
     const fields = {
-      ...(item_dcode !== undefined && { item_dcode: nextItem }),
-      ...(rm_item_dcode !== undefined && { rm_item_dcode: nextRm }),
+      ...snap,
+      updated_by: auditUserName(req),
+      updated_at: new Date(),
     };
-
-    if (hasBusinessChanges) {
-      fields.updated_by = auditUserName(req);
-      fields.updated_at = new Date();
-      const snapshot = await resolveProductionSnapshot(nextItem, nextRm);
-      fields.item_dcode = snapshot.item_dcode ?? nextItem;
-      fields.item_code = snapshot.item_code;
-      fields.item_desc = snapshot.item_desc;
-      fields.rm_item_dcode = snapshot.rm_item_dcode ?? nextRm;
-      fields.rm_item_code = snapshot.rm_item_code;
-      fields.rm_item_desc = snapshot.rm_item_desc;
-    }
 
     applyApprovalWorkflow({
       req,
@@ -236,42 +148,50 @@ export const updateProduction = async (req, res) => {
       auditAsName: true,
     });
 
-    await updateProductions(fields, { production_id: id });
-    await log(req, "update", id, { updated_fields: fields });
-
-    const data = await findProduction({ production_id: id });
-
+    const data = await updateProductions(fields, id);
+    const authorized = fields.approved === true;
+    log(req, "update", String(id), {
+      production_id: id,
+      approved: data?.approved === true,
+      old_values: {
+        item_dcode: existing?.item_dcode ?? null,
+        item_code: existing?.item_code ?? null,
+        rm_items: parseRmItems(existing?.rm_items),
+        approved: existing?.approved === true,
+      },
+      new_values: {
+        item_dcode: data?.item_dcode ?? null,
+        item_code: data?.item_code ?? null,
+        rm_items: parseRmItems(data?.rm_items),
+        approved: data?.approved === true,
+      },
+    }, data);
     return res.json({
       success: true,
       data,
-      message: "Production mapping updated successfully.",
+      toast_type: "success",
+      message: authorized
+        ? "Item RM mapping updated and authorized."
+        : hasBusinessChanges
+          ? "Item RM mapping updated. Pending re-authorization."
+          : "Item RM mapping set to pending.",
     });
   } catch (err) {
-    if (err?.code === "23505") {
-      return res.status(409).json({ success: false, message: uniqueViolationMessage(err) });
-    }
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
 };
 
 export const deleteProduction = async (req, res) => {
   try {
-    const id = parsePositiveIntId(req.body?.production_id ?? req.body?.id);
-    if (!id) {
-      return res.status(400).json({ success: false, message: "A valid production mapping ID is required." });
-    }
-
+    const id = req.body.production_id || req.body.id;
     const existing = await findProduction({ production_id: id });
-    if (!existing) {
-      return res.status(404).json({ success: false, message: "Production mapping not found." });
-    }
-
-    await deleteProductions({ production_id: id }, { deleted_by: auditUserName(req) });
-    await log(req, "delete", id, {
-      item_dcode: existing.item_dcode,
-      rm_item_dcode: existing.rm_item_dcode,
+    if (!existing) return res.status(404).json({ success: false, message: "Production mapping not found." });
+    await deleteProductions(id, auditUserName(req));
+    log(req, "delete", String(id), {
+      production_id: id,
+      item_dcode: existing?.item_dcode ?? null,
+      item_code: existing?.item_code ?? null,
     }, existing);
-
     return res.json({ success: true, message: "Production mapping deleted successfully." });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

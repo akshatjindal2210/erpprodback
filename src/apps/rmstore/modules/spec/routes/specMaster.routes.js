@@ -1,5 +1,5 @@
 import express from "express";
-import { getSpecs, getSpecById, createSpec, updateSpec, deleteSpec } from "../controllers/specMaster.controller.js";
+import { getSpecs, getSpecById, createSpec, updateSpec, deleteSpec, getSpecHeaderValuesViews } from "../controllers/specMaster.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
 
@@ -11,5 +11,6 @@ router.post("/get", authenticate, accessControl(MODULE, "view"), getSpecById);
 router.post("/create", authenticate, accessControl(MODULE, "add"), createSpec);
 router.post("/update", authenticate, accessControl(MODULE, ["edit", "authorize"]), updateSpec);
 router.post("/delete", authenticate, accessControl(MODULE, "delete"), deleteSpec);
+router.post("/header-helper", authenticate, accessControl(MODULE, "view"), getSpecHeaderValuesViews);
 
 export default router;

@@ -14,6 +14,7 @@ export async function findCoilTransactions(options = {}) {
     page = 1,
     limit = 100,
     permission = {},
+    user_id = null,
   } = options;
 
   const values = [];
@@ -26,6 +27,10 @@ export async function findCoilTransactions(options = {}) {
 
   if (!journeyMode && permission?.can_view_days > 0) {
     conditions.push(`tb.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+  }
+  if (user_id != null) {
+    values.push(Number(user_id));
+    conditions.push(`tb.user_id = $${i++}`);
   }
 
   if (journeyMode) {

@@ -1,5 +1,4 @@
 import dbQuery from "../../../../../../config/db/db.js";
-import { patchTableSchema, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
 export async function createRmStoreOutEntryTable() {
@@ -11,12 +10,15 @@ export async function createRmStoreOutEntryTable() {
       pjobcardno       VARCHAR(80),
       qc_reject_uid    INTEGER,
       mrn_refs         TEXT,
+      mrn_uids         TEXT,
       heat_nos         TEXT,
       item_codes       TEXT,
+      item_descs       TEXT,
       qtys             TEXT,
       total_qty        NUMERIC DEFAULT 0,
       coil_count       INTEGER DEFAULT 0,
       location_refs    TEXT,
+      reason           VARCHAR(200),
       remarks          TEXT,
       approved         BOOLEAN DEFAULT false,
       approved_by      TEXT,

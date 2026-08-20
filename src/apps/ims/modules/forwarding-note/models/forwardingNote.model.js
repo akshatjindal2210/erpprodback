@@ -634,7 +634,7 @@ export const findAllForwardedReservesByItemAndPacking = async (exclude_fuid = nu
          FROM ims_out_entry oe
          WHERE oe.fuid = f.fuid
            AND oe.is_deleted = false
-           AND COALESCE(oe.scan_complete, false) = true
+           AND COALESCE(oe.approved, false) = true
        )
      GROUP BY fi.item_dcode::int, TRIM(fi.packing_number::text)`,
     [exclude, Boolean(approvedOnly)]
@@ -670,7 +670,7 @@ export const findForwardedQtyByItemAndPacking = async (item_dcode, exclude_fuid 
          FROM ims_out_entry oe
          WHERE oe.fuid = f.fuid
            AND oe.is_deleted = false
-           AND COALESCE(oe.scan_complete, false) = true
+           AND COALESCE(oe.approved, false) = true
        )
      GROUP BY TRIM(fi.packing_number::text)`,
     [dcode, exclude, Boolean(approvedOnly)]

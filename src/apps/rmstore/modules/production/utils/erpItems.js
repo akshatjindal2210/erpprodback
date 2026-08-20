@@ -1,44 +1,36 @@
 import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
 
-/** Normalize ERP item rows from `prdprimitem` or `item` (+ type rm). */
-export function mapErpItemRecord(r = {}) {
-  return {
-    itemdcode: r.ItemDcode ?? r.Itemdcode ?? r.itemdcode ?? r.item_dcode,
-    item_code: r.Item_Code ?? r.item_code ?? r.ItemCode ?? r.itemcode ?? null,
-    itemdesc: r.ItemDesc ?? r.Itemdesc ?? r.itemdesc ?? r.item_desc ?? r.primItemDesc ?? null,
-    grpname: r.Grpname ?? r.grpname ?? null,
-  };
-}
-
-/** Normalize ERP production-run job cards from `prdrunjc`. */
-export function mapPrdRunJcRecord(r = {}) {
-  const pjobcardno = String(r.pjobcardno ?? r.Pjobcardno ?? r.pJobCardNo ?? "").trim();
-  const itemdcode = r.itemdcode ?? r.ItemDcode ?? r.Itemdcode ?? r.item_dcode ?? null;
-  return {
-    pjobcardno,
-    pldt: r.pldt ?? r.Pldt ?? r.pl_dt ?? null,
-    item_code: r.item_code ?? r.Item_Code ?? r.ItemCode ?? null,
-    itemdcode,
-    planqty: Number(r.planqty ?? r.PlanQty ?? r.plan_qty ?? 0) || 0,
-    itemdesc: r.itemdesc ?? r.ItemDesc ?? r.Itemdesc ?? r.item_desc ?? null,
-    macname: r.macname ?? r.MacName ?? r.mac_name ?? null,
-  };
-}
-
-export async function loadMappedItems(requestedData, filter = null) {
-  const records = await fetchFromIMS(requestedData, filter);
-  return (records || [])
-    .map(mapErpItemRecord)
-    .filter((r) => r.itemdcode != null && String(r.itemdcode).trim() !== "");
+// 1. Data Loaders & Mappers
+export async function loadMappedItems(reqData, filter) {
+  const rows = (await fetchFromIMS(reqData, filter)) || [];
+  return rows
+    .map((r) => ({
+      itemdcode: r.ItemDcode ?? r.itemdcode ?? r.item_dcode,
+      item_code: r.Item_Code ?? r.item_code ?? r.itemcode ?? null,
+      itemdesc: r.ItemDesc ?? r.itemdesc ?? r.item_desc ?? null,
+      grpname: r.Grpname ?? r.grpname ?? null,
+    }))
+    .filter((r) => r.itemdcode);
 }
 
 export async function loadMappedPrdRunJc() {
-  const records = await fetchFromIMS("prdrunjc");
-  return (records || [])
-    .map(mapPrdRunJcRecord)
+  const rows = (await fetchFromIMS("prdrunjc")) || [];
+  return rows
+    .map((r) => ({
+      pjobcardno: String(r.pjobcardno ?? r.Pjobcardno ?? r.PJobCardNo ?? "").trim(),
+      pldt: r.pldt ?? r.Pldt ?? r.PLDt ?? null,
+      item_code: r.item_code ?? r.Item_Code ?? r.itemcode ?? r.ItemCode ?? null,
+      itemdcode: r.itemdcode ?? r.ItemDcode ?? r.item_dcode ?? r.ItemDCode ?? null,
+      planqty: Number(r.planqty ?? r.PlanQty ?? r.plan_qty ?? r.Planqty ?? 0) || 0,
+      itemdesc: r.itemdesc ?? r.ItemDesc ?? r.item_desc ?? r.Item_Desc ?? null,
+      macname: r.macname ?? r.MacName ?? r.mac_name ?? r.machine ?? r.Machine ?? r.MachineName ?? null,
+      part_weight: Number(r.part_weight ?? r.partweight ?? r.PartWeight ?? r.PartWt ?? r.partwt ?? r.pwt ?? 0) || 0,
+      rm_weight: Number(r.rm_weight ?? r.rmweight ?? r.RMWeight ?? r.RmWt ?? r.rmwt ?? r.rm_wt ?? 0) || 0,
+    }))
     .filter((r) => r.pjobcardno);
 }
 
+// 2. Picker Formatters
 export function toPickerRow(item) {
   return {
     id: item.itemdcode,
@@ -49,25 +41,33 @@ export function toPickerRow(item) {
 }
 
 export function toPrdRunJcPickerRow(row) {
+  const pjobcardno = row.pjobcardno;
+  const item_code = row.item_code ? String(row.item_code).trim() : "";
+  const itemdesc = row.itemdesc ? String(row.itemdesc).trim() : "";
+  const macname = row.macname ? String(row.macname).trim() : "";
+  const label = item_code ? `${pjobcardno} (${item_code})` : pjobcardno;
   return {
-    id: row.pjobcardno,
-    pjobcardno: row.pjobcardno,
+    id: pjobcardno,
+    pjobcardno,
     pldt: row.pldt,
     item_code: row.item_code,
     itemdcode: row.itemdcode,
     planqty: row.planqty,
     itemdesc: row.itemdesc,
     macname: row.macname,
-    label: row.pjobcardno,
-    sub: [row.macname, row.item_code, row.itemdesc].filter(Boolean).join(" · "),
+    part_weight: row.part_weight,
+    rm_weight: row.rm_weight,
+    label,
+    sub: [itemdesc, macname].filter(Boolean).join(" | "),
   };
 }
 
+// 3. Search & Pagination Helpers
 export function filterItemsBySearch(rows, search) {
   const q = String(search || "").trim().toLowerCase();
   if (!q) return rows;
-  return rows.filter((row) =>
-    [row.item_code, row.itemdesc, row.grpname].some((v) =>
+  return rows.filter((r) =>
+    [r.item_code, r.itemdesc, r.grpname, r.itemdcode].some((v) =>
       String(v ?? "").toLowerCase().includes(q)
     )
   );
@@ -76,8 +76,8 @@ export function filterItemsBySearch(rows, search) {
 export function filterPrdRunJcBySearch(rows, search) {
   const q = String(search || "").trim().toLowerCase();
   if (!q) return rows;
-  return rows.filter((row) =>
-    [row.pjobcardno, row.item_code, row.itemdesc, row.macname, row.itemdcode].some((v) =>
+  return rows.filter((r) =>
+    [r.pjobcardno, r.item_code, r.itemdesc, r.macname, r.itemdcode].some((v) =>
       String(v ?? "").toLowerCase().includes(q)
     )
   );
@@ -95,22 +95,39 @@ export function slicePage(rows, page = 1, limit = 1000) {
   };
 }
 
-/** Resolve denormalized code/desc from ERP for DB storage (write path only). */
-export async function resolveProductionSnapshot(item_dcode, rm_item_dcode) {
+// 4. DB Snapshot Resolver
+export async function resolveProductionSnapshot(item_dcode, rm_items = []) {
   const [prodRows, rmRows] = await Promise.all([
     loadMappedItems("prdprimitem"),
     loadMappedItems("item", { type: "rm" }),
   ]);
 
   const prod = prodRows.find((r) => String(r.itemdcode) === String(item_dcode));
-  const rm = rmRows.find((r) => String(r.itemdcode) === String(rm_item_dcode));
+
+  const mappedRm = rm_items
+    .map((rm) => {
+      const dcode = rm?.rm_item_dcode ?? rm?.itemdcode ?? rm;
+      const found = rmRows.find((r) => String(r.itemdcode) === String(dcode));
+      const rm_item_dcode = Number(dcode);
+      if (!Number.isFinite(rm_item_dcode) || rm_item_dcode <= 0) return null;
+      return {
+        rm_item_dcode,
+        rm_item_code: found?.item_code || rm?.rm_item_code || "",
+        rm_item_desc: found?.itemdesc || rm?.rm_item_desc || "",
+      };
+    })
+    .filter(Boolean);
+
+  if (!mappedRm.length) {
+    const err = new Error("At least one valid RM item is required.");
+    err.statusCode = 400;
+    throw err;
+  }
 
   return {
-    item_dcode: prod?.itemdcode != null ? Number(prod.itemdcode) : Number(item_dcode) || null,
-    item_code: prod?.item_code ?? null,
-    item_desc: prod?.itemdesc ?? null,
-    rm_item_dcode: rm?.itemdcode != null ? Number(rm.itemdcode) : Number(rm_item_dcode) || null,
-    rm_item_code: rm?.item_code ?? null,
-    rm_item_desc: rm?.itemdesc ?? null,
+    item_dcode: Number(item_dcode),
+    item_code: prod?.item_code || "",
+    item_desc: prod?.itemdesc || "",
+    rm_items: mappedRm,
   };
 }

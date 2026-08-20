@@ -32,3 +32,15 @@ export function isRmRejectionOutEntry(entryType) {
 export function isJobCardOutEntry(entryType) {
   return normalizeOutEntryType(entryType) === OUT_ENTRY_TYPE.JOB_CARD;
 }
+
+/** MRN store out — stock leaves inventory (sale, return, etc.). */
+export function isMrnStoreOutEntry(entryType) {
+  return normalizeOutEntryType(entryType) === OUT_ENTRY_TYPE.STORE_OUT;
+}
+
+export const STORE_OUT_REASON_MAX_LEN = 200;
+
+export function normalizeStoreOutReason(raw) {
+  const text = String(raw ?? "").trim();
+  return text ? text.slice(0, STORE_OUT_REASON_MAX_LEN) : null;
+}

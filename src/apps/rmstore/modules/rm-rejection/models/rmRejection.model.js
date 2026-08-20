@@ -1,10 +1,39 @@
 ﻿import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
 
 const TABLE = T.REJECTION;
 const OUT_TABLE = T.OUT_ENTRY;
 const COIL_TABLE = T.COIL_TABLE;
 const SCANNED_COIL_TABLE = T.OUT_ENTRY_SCANNED_COIL;
+
+/** True when an authorized RM Rejection Store Out exists for this register row. */
+export const rejectionStoreOutApprovedSql = (qAlias = "q") => `EXISTS (
+  SELECT 1 FROM ${OUT_TABLE} ox
+  WHERE ox.is_deleted = false
+    AND COALESCE(ox.approved, false) = true
+    AND LOWER(COALESCE(ox.entry_type, 'store_out')) = 'rm_rejection'
+    AND (
+      ox.qc_reject_uid = ${qAlias}.qc_reject_uid
+      OR (${qAlias}.out_uid IS NOT NULL AND ox.out_uid = ${qAlias}.out_uid)
+    )
+)`;
+
+export async function hasApprovedRejectionStoreOut(qc_reject_uid) {
+  const id = Number(qc_reject_uid);
+  if (!Number.isFinite(id) || id <= 0) return false;
+  const [row] = await dbQuery(
+    `SELECT 1 AS ok
+     FROM ${OUT_TABLE} ox
+     WHERE ox.is_deleted = false
+       AND ox.qc_reject_uid = $1
+       AND COALESCE(ox.approved, false) = true
+       AND LOWER(COALESCE(ox.entry_type, 'store_out')) = 'rm_rejection'
+     LIMIT 1`,
+    [id]
+  );
+  return Boolean(row);
+}
 
 export async function attachRejectionCoils(rows = []) {
   if (!rows.length) return rows;
@@ -15,39 +44,46 @@ export async function attachRejectionCoils(rows = []) {
   const coilByReject = new Map();
   if (rejectIds.length) {
     const coilRows = await dbQuery(
-      `SELECT qc_reject_uid, coil_no_uid, qty, heat_no, item_code, ipr_uid, qc_check_uid
-       FROM ${COIL_TABLE}
-       WHERE is_deleted = false AND qc_reject_uid = ANY($1::int[])
-       ORDER BY coil_no_uid ASC`,
+      `SELECT c.rm_uid, c.coil_no_uid, c.qty, c.mrn_uid, m.heat_no AS heat_no, m.item_code AS item_code, m.item_desc AS item_desc, c.ipr_uid, c.qc_uid
+       FROM ${COIL_TABLE} c
+       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       WHERE c.is_deleted = false AND c.rm_uid = ANY($1::int[])
+       ORDER BY c.coil_no_uid ASC`,
       [rejectIds]
     );
     for (const c of coilRows || []) {
-      const id = Number(c.qc_reject_uid);
+      const id = Number(c.rm_uid);
       if (!coilByReject.has(id)) coilByReject.set(id, []);
       coilByReject.get(id).push({
         coil_no_uid: c.coil_no_uid,
         qty: c.qty,
+        mrn_uid: c.mrn_uid || null,
         heat_no: c.heat_no,
         item_code: c.item_code,
+        item_desc: c.item_desc || null,
         ipr_uid: c.ipr_uid ?? null,
-        qc_check_uid: c.qc_check_uid ?? null,
+        qc_uid: c.qc_uid ?? null,
       });
     }
   }
 
-  const uidsByOut = new Map();
+  const coilsByOut = new Map();
   if (outIds.length) {
     const scannedRows = await dbQuery(
-      `SELECT out_uid, coil_no_uid
-       FROM ${SCANNED_COIL_TABLE}
-       WHERE out_uid = ANY($1::int[])
-       ORDER BY coil_no_uid ASC`,
+      `SELECT s.out_uid, s.coil_no_uid, c.mrn_uid
+       FROM ${SCANNED_COIL_TABLE} s
+       LEFT JOIN ${COIL_TABLE} c ON c.coil_no_uid = s.coil_no_uid AND c.is_deleted = false
+       WHERE s.out_uid = ANY($1::int[])
+       ORDER BY s.coil_no_uid ASC`,
       [outIds]
     );
     for (const s of scannedRows || []) {
       const id = Number(s.out_uid);
-      if (!uidsByOut.has(id)) uidsByOut.set(id, []);
-      uidsByOut.get(id).push(String(s.coil_no_uid || "").trim());
+      if (!coilsByOut.has(id)) coilsByOut.set(id, []);
+      coilsByOut.get(id).push({
+        coil_no_uid: String(s.coil_no_uid || "").trim(),
+        mrn_uid: s.mrn_uid || null,
+      });
     }
   }
 
@@ -56,12 +92,11 @@ export async function attachRejectionCoils(rows = []) {
     const outId = Number(row.out_uid);
     let coils = coilByReject.get(rejectId) || [];
     if (!coils.length) {
-      const scanned = (uidsByOut.get(outId) || []).filter(Boolean);
-      coils = scanned.map((uid) => ({ coil_no_uid: uid }));
+      coils = (coilsByOut.get(outId) || []).filter((c) => c.coil_no_uid);
     }
     const uids = coils.map((c) => String(c?.coil_no_uid || "").trim()).filter(Boolean);
     const coilIpr = coils.find((c) => c.ipr_uid != null)?.ipr_uid ?? null;
-    const coilQc = coils.find((c) => c.qc_check_uid != null)?.qc_check_uid ?? null;
+    const coilQc = coils.find((c) => c.qc_uid != null)?.qc_uid ?? null;
     const ipr_uid = row.ipr_uid ?? coilIpr ?? null;
     const qc_check_uid = row.qc_check_uid ?? coilQc ?? null;
     let rejection_origin = null;
@@ -79,6 +114,14 @@ export async function attachRejectionCoils(rows = []) {
     } else {
       rejection_origin_label = "Manual";
     }
+    const coilMrnUids = [
+      ...new Set(coils.map((c) => String(c?.mrn_uid || "").trim()).filter(Boolean)),
+    ];
+    const coilItemDescs = [
+      ...new Set(coils.map((c) => String(c?.item_desc || "").trim()).filter(Boolean)),
+    ];
+    const mrn_uid = row.mrn_uid || row.mrn_uids || (coilMrnUids.length ? coilMrnUids.join(" | ") : null);
+    const item_descs = row.item_descs || (coilItemDescs.length ? coilItemDescs.join(" | ") : null);
     return {
       ...row,
       ipr_uid,
@@ -86,6 +129,10 @@ export async function attachRejectionCoils(rows = []) {
       rejection_origin,
       rejection_origin_label,
       coils,
+      mrn_uid,
+      mrn_uids: row.mrn_uids || mrn_uid,
+      item_descs,
+      item_desc: row.item_desc || item_descs,
       coil_no_uid: uids.length === 1 ? uids[0] : uids.length > 1 ? uids.join(", ") : null,
       coil_count: Math.max(Number(row.coil_count) || 0, uids.length),
     };
@@ -122,6 +169,7 @@ export const findQcRejections = async (options = {}) => {
       COALESCE(q.mrn_refs,'') ILIKE $${idx} OR
       COALESCE(q.heat_nos,'') ILIKE $${idx} OR
       COALESCE(q.item_codes,'') ILIKE $${idx} OR
+      COALESCE(q.item_descs,'') ILIKE $${idx} OR
       COALESCE(q.reason,'') ILIKE $${idx} OR
       COALESCE(q.remarks,'') ILIKE $${idx}
     )`);
@@ -138,7 +186,8 @@ export const findQcRejections = async (options = {}) => {
     `SELECT q.*,
             q.created_by AS created_by_name,
             q.approved_by AS approved_by_name,
-            COALESCE(o.approved, false) AS store_out_approved,
+            q.updated_by AS updated_by_name,
+            ${rejectionStoreOutApprovedSql("q")} AS store_out_approved,
             o.scan_complete,
             EXISTS (
               SELECT 1 FROM ${OUT_TABLE} ox
@@ -168,7 +217,8 @@ export const findQcRejection = async (qc_reject_uid) => {
     `SELECT q.*,
             q.created_by AS created_by_name,
             q.approved_by AS approved_by_name,
-            COALESCE(o.approved, false) AS store_out_approved,
+            q.updated_by AS updated_by_name,
+            ${rejectionStoreOutApprovedSql("q")} AS store_out_approved,
             o.scan_complete,
             EXISTS (
               SELECT 1 FROM ${OUT_TABLE} ox
@@ -190,16 +240,16 @@ export const findQcRejection = async (qc_reject_uid) => {
 export const insertQcRejection = async (data) => {
   const {
     ipr_uid,
-    mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count, reason, remarks, created_by,
+    mrn_refs, mrn_uids, heat_nos, item_codes, item_descs, qtys, total_qty, coil_count, reason, remarks, created_by,
   } = data;
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE}
-     (ipr_uid, mrn_refs, heat_nos, item_codes, qtys, total_qty, coil_count, reason, remarks, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     (ipr_uid, mrn_refs, mrn_uids, heat_nos, item_codes, item_descs, qtys, total_qty, coil_count, reason, remarks, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      RETURNING *`,
     [
       ipr_uid ?? null,
-      mrn_refs ?? null, heat_nos ?? null, item_codes ?? null, qtys ?? null,
+      mrn_refs ?? null, mrn_uids ?? null, heat_nos ?? null, item_codes ?? null, item_descs ?? null, qtys ?? null,
       total_qty ?? 0, coil_count ?? 0, reason ?? null, remarks ?? null, created_by,
     ]
   );
@@ -207,29 +257,18 @@ export const insertQcRejection = async (data) => {
 };
 
 export const updateQcRejection = async (qc_reject_uid, fields = {}) => {
-  const allowed = [
-    "remarks",
-    "reason",
-    "out_uid",
-    "bill_no",
-    "approved",
-    "approved_by",
-    "approved_at",
-    "updated_by",
-    "updated_at",
-  ];
+  const allowed = ["remarks", "reason", "out_uid", "bill_no", "mrn_refs", "mrn_uids", "qtys", "total_qty", "coil_count", "item_codes", "item_descs", "heat_nos", "approved", "approved_by", "approved_at", "updated_by", "updated_at"];
   const safe = {};
   for (const k of allowed) {
     if (fields[k] !== undefined) safe[k] = fields[k];
   }
   const keys = Object.keys(safe);
   if (!keys.length) return findQcRejection(qc_reject_uid);
-  const values = Object.values(safe);
+  const { setParts, values, nextIndex } = buildNaiveTimestampUpdateParts(safe);
   values.push(Number(qc_reject_uid));
-  const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(", ");
   const [row] = await dbQuery(
-    `UPDATE ${TABLE} SET ${setClause}
-     WHERE qc_reject_uid = $${keys.length + 1} AND is_deleted = false
+    `UPDATE ${TABLE} SET ${setParts.join(", ")}
+     WHERE qc_reject_uid = $${nextIndex} AND is_deleted = false
      RETURNING *`,
     values
   );
@@ -246,17 +285,16 @@ export const softDeleteQcRejection = async (qc_reject_uid, deleted_by) => {
 };
 
 /**
- * All incomplete rejection register rows (no bill_no yet) — single source for RM Rejection Pending.
- * Stage: awaiting_authorization | awaiting_store_out | awaiting_bill
+ * Incomplete rejection register rows (no bill_no yet) — single source for RM Rejection Pending.
+ * Stage: awaiting_store_out | awaiting_bill
+ * Register approval is skipped; Store Out scan/authorize is the gate.
  */
 function classifyIncompleteRejection(row) {
-  const approved = row.approved === true || row.approved === "t";
   const storeOutApproved =
     row.out_uid != null &&
     (row.store_out_approved === true || row.store_out_approved === "t");
   if (storeOutApproved) return "awaiting_bill";
-  if (approved) return "awaiting_store_out";
-  return "awaiting_authorization";
+  return "awaiting_store_out";
 }
 
 function mapIncompleteRejectionRow(row) {
@@ -272,10 +310,14 @@ function mapIncompleteRejectionRow(row) {
     store_out_approved: row.store_out_approved,
     mrn_no: row.mrn_refs,
     mrn_refs: row.mrn_refs,
+    mrn_uid: row.mrn_uids || row.mrn_uid || null,
+    mrn_uids: row.mrn_uids || row.mrn_uid || null,
     heat_no: row.heat_nos,
     heat_nos: row.heat_nos,
     item_code: row.item_codes,
     item_codes: row.item_codes,
+    item_desc: row.item_descs || row.item_desc || null,
+    item_descs: row.item_descs || row.item_desc || null,
     qty: row.total_qty,
     total_qty: row.total_qty,
     coil_count: row.coil_count,
@@ -286,18 +328,12 @@ function mapIncompleteRejectionRow(row) {
     approved_by: row.approved_by,
     approved_by_name: row.approved_by_name,
     approved_at: row.approved_at,
-    inspected_by:
-      pending_source === "awaiting_authorization" ? row.created_by : row.approved_by || row.created_by,
-    inspected_by_name:
-      pending_source === "awaiting_authorization"
-        ? row.created_by_name
-        : row.approved_by_name || row.created_by_name,
+    inspected_by: row.approved_by || row.created_by,
+    inspected_by_name: row.approved_by_name || row.created_by_name,
     inspected_at:
       pending_source === "awaiting_bill"
-        ? row.store_out_approved_at || row.approved_at
-        : pending_source === "awaiting_store_out"
-          ? row.out_created_at || row.approved_at
-          : row.created_at,
+        ? row.store_out_approved_at || row.approved_at || row.created_at
+        : row.out_created_at || row.approved_at || row.created_at,
     created_at: row.created_at,
     created_by_name: row.created_by_name,
   };
@@ -320,13 +356,14 @@ export const findIncompleteRejectionRegisters = async (options = {}) => {
       COALESCE(q.mrn_refs,'') ILIKE $${idx} OR
       COALESCE(q.heat_nos,'') ILIKE $${idx} OR
       COALESCE(q.item_codes,'') ILIKE $${idx} OR
+      COALESCE(q.item_descs,'') ILIKE $${idx} OR
       COALESCE(q.reason,'') ILIKE $${idx} OR
       COALESCE(q.remarks,'') ILIKE $${idx} OR
       q.qc_reject_uid::text ILIKE $${idx} OR
       COALESCE(q.out_uid::text,'') ILIKE $${idx} OR
       EXISTS (
         SELECT 1 FROM ${COIL_TABLE} c
-        WHERE c.is_deleted = false AND c.qc_reject_uid = q.qc_reject_uid
+        WHERE c.is_deleted = false AND c.rm_uid = q.qc_reject_uid
           AND COALESCE(c.coil_no_uid,'') ILIKE $${idx}
       ) OR
       EXISTS (
@@ -351,7 +388,7 @@ export const findIncompleteRejectionRegisters = async (options = {}) => {
     `SELECT q.*,
             q.created_by AS created_by_name,
             q.approved_by AS approved_by_name,
-            COALESCE(o.approved, false) AS store_out_approved,
+            ${rejectionStoreOutApprovedSql("q")} AS store_out_approved,
             o.scan_complete,
             o.created_at AS out_created_at,
             o.approved_at AS store_out_approved_at

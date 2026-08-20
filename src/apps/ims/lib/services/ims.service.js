@@ -252,3 +252,80 @@ export async function fetchPackRowsForFinancialYearDoc(financialYear, docNo) {
     softMessage: true
   };
 }
+
+/**
+ * MRN ERP date column for IMS `mrn_rm` filter.
+ * Shape: `m.mrndt >= '2Apr2020' and m.mrndt <= '6Apr2026'`
+ */
+export const IMS_MRN_MRNDT_COL = "m.mrndt";
+
+/** Parse list filter date (`YYYY-MM-DD` / ISO / Date) → local calendar Date, or null. */
+function coerceImsFilterDate(input, { endOfDay = false } = {}) {
+  if (input == null || input === "") return null;
+  if (input instanceof Date && !Number.isNaN(input.getTime())) {
+    const d = new Date(input.getTime());
+    d.setHours(endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0);
+    return d;
+  }
+  const s = String(input).trim();
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) {
+    const d = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+    if (Number.isNaN(d.getTime())) return null;
+    d.setHours(endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0);
+    return d;
+  }
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+/**
+ * Build IMS filter for `mrn_rm` when a date range is applied.
+ * No dates → null (payload is only `{ requestedData: "mrn_rm" }`).
+ */
+export function buildImsMrnRmDateFilter(fromInput, toInput) {
+  const from = coerceImsFilterDate(fromInput, { endOfDay: false });
+  const to = coerceImsFilterDate(toInput, { endOfDay: true });
+  if (!from && !to) return null;
+  const parts = [];
+  if (from) parts.push(`${IMS_MRN_MRNDT_COL} >= '${formatImsPackDocdtToken(from)}'`);
+  if (to) parts.push(`${IMS_MRN_MRNDT_COL} <= '${formatImsPackDocdtToken(to)}'`);
+  return parts.join(" and ");
+}
+
+/** IMS `mrn_rm` for FY — ERP gets `m.mrndt` filter; optional MRN no / UID matched in-app. */
+export async function fetchMrnRowsForFinancialYear(financialYear, options = {}) {
+  const fy = String(financialYear ?? "").trim();
+  if (!fy) return { success: false, records: [], message: "Financial year is required." };
+
+  const key = String(options.search ?? options.mrn_no ?? options.uid ?? "").trim();
+  const { from, to } = parseIndianFinancialYearBounds(fy);
+  const filter = buildImsMrnRmDateFilter(from, to);
+
+  const json = await fetchImsDataRaw("mrn_rm", filter);
+  if (!json?.success) {
+    return { success: false, records: [], message: json?.message || "IMS API failed", filter };
+  }
+
+  let records = Array.isArray(json.records) ? json.records : [];
+  if (key) {
+    records = records.filter((r) => {
+      const uid = String(r.uid ?? "").trim();
+      const mrnno = String(r.mrnno ?? r.mrn_no ?? "").trim();
+      return uid === key || mrnno === key;
+    });
+  }
+
+  if (!records.length) {
+    return {
+      success: false,
+      records: [],
+      message: key ? `No MRN was found in FY ${fy} for "${key}".` : `No MRN rows were found in IMS for FY ${fy}.`,
+      filter,
+      softMessage: true,
+    };
+  }
+
+  return { success: true, records, message: "MRN data loaded.", filter };
+}

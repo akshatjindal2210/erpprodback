@@ -7,26 +7,14 @@ export async function createRmStoreCoilTable() {
       coil_uid         SERIAL PRIMARY KEY,
       coil_no_uid      VARCHAR(120) NOT NULL,
       mrn_uid          VARCHAR(100) REFERENCES ${T.MRN}(uid),
-      mrn_no           INTEGER,
-      serial_no        INTEGER,
-      heat_no          VARCHAR(100),
-      item_dcode       INTEGER,
-      item_code        VARCHAR(100),
-      item_desc        TEXT,
-      acc_code         INTEGER,
-      acc_name         TEXT,
       qty              NUMERIC,
-      coil_index       INTEGER,
-      total_coils      INTEGER,
-      remarks          TEXT,
       location_id      INTEGER REFERENCES ${T.MASTER_LOCATION}(location_id),
       in_uid           INTEGER,
-      qc_reject_uid    INTEGER,
-      qc_check_uid     INTEGER,
-      qc_check_status  VARCHAR(24),
+      rm_uid           INTEGER,
+      qc_uid           INTEGER,
       out_uid          INTEGER,
       sa_id            INTEGER,
-      sa_entry_type    VARCHAR(16),
+      sa_entry_type    VARCHAR(50),
       ipr_uid          INTEGER,
       status           VARCHAR(24) DEFAULT 'active',
       download_count   INTEGER DEFAULT 0,
@@ -44,12 +32,10 @@ export async function createRmStoreCoilTable() {
       WHERE is_deleted = false;
 
     CREATE INDEX IF NOT EXISTS rmstore_coil_mrn_uid_idx ON ${T.COIL_TABLE}(mrn_uid);
-    CREATE INDEX IF NOT EXISTS rmstore_coil_heat_no_idx ON ${T.COIL_TABLE}(mrn_uid, heat_no);
     CREATE INDEX IF NOT EXISTS rmstore_coil_location_id_idx ON ${T.COIL_TABLE}(location_id);
     CREATE INDEX IF NOT EXISTS rmstore_coil_in_uid_idx ON ${T.COIL_TABLE}(in_uid);
-    CREATE INDEX IF NOT EXISTS rmstore_coil_qc_reject_uid_idx ON ${T.COIL_TABLE}(qc_reject_uid);
-    CREATE INDEX IF NOT EXISTS rmstore_coil_qc_check_uid_idx ON ${T.COIL_TABLE}(qc_check_uid);
-    CREATE INDEX IF NOT EXISTS rmstore_coil_qc_check_status_idx ON ${T.COIL_TABLE}(qc_check_status);
+    CREATE INDEX IF NOT EXISTS rmstore_coil_rm_uid_idx ON ${T.COIL_TABLE}(rm_uid);
+    CREATE INDEX IF NOT EXISTS rmstore_coil_qc_uid_idx ON ${T.COIL_TABLE}(qc_uid);
     CREATE INDEX IF NOT EXISTS rmstore_coil_out_uid_idx ON ${T.COIL_TABLE}(out_uid);
     CREATE INDEX IF NOT EXISTS rmstore_coil_status_idx ON ${T.COIL_TABLE}(status);
     CREATE INDEX IF NOT EXISTS rmstore_coil_area_idx ON ${T.COIL_TABLE}(is_deleted, location_id) WHERE is_deleted = false AND location_id IS NULL;

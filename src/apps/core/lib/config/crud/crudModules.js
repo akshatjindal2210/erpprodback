@@ -49,14 +49,14 @@ export const CRUD_MODULES = {
     idField: "production_id",
     listFields: [
       "pm.production_id", "pm.item_dcode", "pm.item_code", "pm.item_desc",
-      "pm.rm_item_dcode", "pm.rm_item_code", "pm.rm_item_desc",
+      "pm.rm_items",
       "pm.approved", "pm.approved_by", "pm.approved_at",
       "pm.created_at", "pm.updated_at", "pm.deleted_at",
       "pm.created_by AS created_by_name", "pm.updated_by AS updated_by_name",
       "pm.deleted_by AS deleted_by_name", "pm.approved_by AS approved_by_name",
     ],
-    filterFields: ["production_id", "item_dcode", "rm_item_dcode", "approved", "from_date", "to_date"],
-    searchFields: ["item_code", "item_desc", "rm_item_code", "rm_item_desc"]
+    filterFields: ["production_id", "item_dcode", "approved", "from_date", "to_date"],
+    searchFields: ["item_code", "item_desc"]
   },
   rm_spec_master: {
     idField: "item_dcode",

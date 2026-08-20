@@ -1,13 +1,17 @@
-import { findMrnByUid, insertMrn, setMrnStickerGenerated, updateMrnDocs, saveMrnStickerDraft } from "../models/mrn.model.js";
+import { findMrnByUid, insertMrn, setMrnStickerGenerated, updateMrnDocs, updateMrnStickerMeta, saveMrnStickerDraft } from "../models/mrn.model.js";
+import { resolveMrnForSticker } from "../utils/resolveMrnForSticker.js";
 import { formatCoilNoUid, countCoilsForMrn, insertBulkCoils, findCoils, softDeleteCoilsByCoilNoUids } from "../../coil/models/coil.model.js";
+import { computeMrnQtyBudget } from "../../stock-adjustment/utils/mrnQtyBudget.js";
 import { softDeleteQcChecksByCoilNoUids } from "../../qc-check/models/qcCheck.model.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
-import { getBoxNoUidPrefix, getMrnCoilQtyEditable, getMrnCoilQtyAutoCalc, getMrnStickerMode, getMrnStickerRequireSpec } from "../../../../core/configuration/models/appConfig.model.js";
-import { findSpecsByItem } from "../../spec/models/specMaster.model.js";
+import { getBoxNoUidPrefix, getMrnCoilQtyEditable, getMrnCoilQtyAutoCalc, getMrnStickerMode } from "../../../../core/configuration/models/appConfig.model.js";
+import { MRN_STICKER_REQUIRE_SPEC } from "../../../lib/config/app.config.js";
+import { findSpecItemDetail } from "../../spec/models/specMaster.model.js";
 import { logRmstoreActivity } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
+export { splitQtyAcrossCoils, equalSplitQtyAcrossCoils } from "../../../lib/utils/coilQtySplit.js";
 
 const MODULE = "rm_mrn_portal";
 const QTY_EPS = 0.001;
@@ -63,41 +67,17 @@ function round3(n) {
   return Math.round(v);
 }
 
-/**
- * Uneven integer split — total balanced; middle coils tend higher than ends.
- * Used when App Config "Auto-split coil quantities" is Enabled.
- */
-export function splitQtyAcrossCoils(totalQty, coilCount) {
-  const n = Math.max(1, Number(coilCount) || 1);
-  const total = round3(totalQty);
-  if (n === 1) return [total];
-
-  const base = Math.floor(total / n);
-  const maxDelta = Math.max(1, Math.floor(base * 0.12));
-  const qtys = [];
-  let allocated = 0;
-  for (let i = 0; i < n - 1; i++) {
-    const t = n === 2 ? 0 : i / (n - 2);
-    const wave = Math.round(Math.sin(t * Math.PI) * maxDelta);
-    const q = Math.max(0, base + wave);
-    qtys.push(q);
-    allocated += q;
+function parseDraftObj(raw) {
+  if (!raw) return null;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
   }
-  qtys.push(Math.max(0, total - allocated));
-  return qtys;
-}
-
-/**
- * Equal integer split — as even as possible; remainder (+1) on first coils.
- * Used when Auto-split is Disabled and qty fields are locked.
- */
-export function equalSplitQtyAcrossCoils(totalQty, coilCount) {
-  const n = Math.max(1, Number(coilCount) || 1);
-  const total = round3(totalQty);
-  if (n === 1) return [total];
-  const base = Math.floor(total / n);
-  const rem = total - base * n;
-  return Array.from({ length: n }, (_, i) => base + (i < rem ? 1 : 0));
+  return typeof raw === "object" ? raw : null;
 }
 
 /** Resolve MRN row: existing uid, or create from ERP payload at Generate time. */
@@ -128,9 +108,16 @@ export const getMrnDetail = async (req, res) => {
   try {
     const uid = String(req.body?.uid ?? req.body?.mrn_uid ?? "").trim();
     if (!uid) return res.status(400).json({ success: false, message: "MRN UID is required." });
-    const mrn = await findMrnByUid(uid);
+    const resolved = await resolveMrnForSticker(uid, { allowErp: true });
+    const mrn = resolved.mrn;
+    const mrn_uid = resolved.mrn_uid || uid;
     if (!mrn) return res.status(404).json({ success: false, message: "MRN not found." });
-    const coils = await findCoils({ filters: { mrn_uid: uid }, limit: 5000, sortBy: "coil_index", order: "ASC" });
+    const coils = await findCoils({
+      filters: { mrn_uid, source: "MRN PORTAL" },
+      limit: 5000,
+      sortBy: "coil_index",
+      order: "ASC",
+    });
     const [qty_editable, qty_auto_calc, sticker_mode] = await Promise.all([
       getMrnCoilQtyEditable(),
       getMrnCoilQtyAutoCalc(),
@@ -144,8 +131,8 @@ export const getMrnDetail = async (req, res) => {
         datec: mrn.internal_create_date ?? null,
         coils: coils.data || [],
         sticker_generated: !!mrn.sticker_generated,
-        sticker_draft: mrn.sticker_draft ?? null,
-        has_sticker_draft: !!(mrn.sticker_draft && typeof mrn.sticker_draft === "object" && Object.keys(mrn.sticker_draft).length),
+        sticker_draft: parseDraftObj(mrn.sticker_draft) ?? mrn.sticker_draft ?? null,
+        has_sticker_draft: !!parseDraftObj(mrn.sticker_draft),
         coil_count: (coils.data || []).length,
         qty_editable,
         qty_auto_calc,
@@ -186,19 +173,34 @@ export const generateMrnStickers = async (req, res) => {
       });
     }
 
-    if (await getMrnStickerRequireSpec()) {
+    const preBudget = await computeMrnQtyBudget(uid, { receiptQty: mrn.it_recp_qty });
+    if (preBudget.remaining_qty <= QTY_EPS) {
+      return res.status(400).json({
+        success: false,
+        message: `MRN receipt qty (${preBudget.receipt_qty} KG) is fully allocated — reduce or remove existing coils / stock adjustments before generating stickers.`,
+      });
+    }
+
+    // Permanent product rule — see MRN_STICKER_REQUIRE_SPEC in rmstore app.config.
+    if (MRN_STICKER_REQUIRE_SPEC) {
       const itemDcode = Number(mrn.item_dcode);
       if (!Number.isFinite(itemDcode) || itemDcode <= 0) {
         return res.status(400).json({
           success: false,
-          message: "Cannot generate stickers because the RM item is missing on this MRN. Add it in RM Spec Master, or turn off Require RM Spec in App Config.",
+          message: "Cannot generate stickers because the RM item is missing on this MRN. Add the item and create RM Spec Master first.",
         });
       }
-      const specs = await findSpecsByItem(itemDcode);
-      if (!specs.length) {
+      const specDetail = await findSpecItemDetail(itemDcode);
+      if (!specDetail) {
         return res.status(400).json({
           success: false,
-          message: `Cannot generate stickers because no RM Spec Master exists for item ${mrn.item_code || itemDcode}. Create the specifications first, or turn off Require RM Spec in App Config.`,
+          message: `Cannot generate stickers because no RM Spec Master exists for item ${mrn.item_desc || mrn.item_code}. Create the specifications first.`,
+        });
+      }
+      if (specDetail.approved !== true) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot generate stickers because RM specifications for item ${mrn.item_desc || mrn.item_code} exist but are not authorized. Approve all spec lines first.`,
         });
       }
     }
@@ -260,6 +262,20 @@ export const generateMrnStickers = async (req, res) => {
         message: `The coil quantities add up to ${sumQtys} but must equal the total of ${total_qty}. Adjust the quantities so the total matches.`,
       });
     }
+    if (coil_qtys.some((q) => !Number.isFinite(Number(q)) || Number(q) < 1)) {
+      return res.status(400).json({
+        success: false,
+        message: "Each coil quantity must be at least 1. Zero quantity coils are not allowed.",
+      });
+    }
+
+    const postBudget = await computeMrnQtyBudget(uid, { receiptQty: originalQty });
+    if (total_qty > postBudget.remaining_qty + QTY_EPS) {
+      return res.status(400).json({
+        success: false,
+        message: `Total qty (${total_qty} KG) exceeds remaining MRN receipt (${postBudget.remaining_qty} of ${postBudget.receipt_qty} KG).`,
+      });
+    }
 
     const remarks = req.body?.remarks != null ? String(req.body.remarks).trim() : null;
     const user = auditUserName(req);
@@ -286,8 +302,6 @@ export const generateMrnStickers = async (req, res) => {
         acc_code: mrn.acc_code,
         acc_name: mrn.acc_name,
         qty: round3(coil_qtys[i - 1]),
-        coil_index: i,
-        total_coils: coil_count,
         remarks,
         created_by: user,
       });
@@ -296,6 +310,7 @@ export const generateMrnStickers = async (req, res) => {
     let created = [];
     try {
       created = await insertBulkCoils(rows);
+      await updateMrnStickerMeta(uid, { heat_no, remarks });
       await setMrnStickerGenerated(uid, { user, at: generateAt, sticker_mode: stickerMode });
     } catch (err) {
       if (created.length) {
@@ -403,6 +418,10 @@ export const saveMrnStickerDraftCtrl = async (req, res) => {
 
     const user = auditUserName(req);
     const saved = await saveMrnStickerDraft(uid, { draft, user, at: new Date().toISOString() });
+    await updateMrnStickerMeta(uid, {
+      heat_no: draft.heat_no || null,
+      remarks: draft.remarks || "",
+    });
 
     const docMerge = await mergeMrnDocUploads(req, uid, { requireBoth: false });
     if (docMerge.error) {
@@ -441,6 +460,7 @@ export const saveMrnStickerDraftCtrl = async (req, res) => {
         rmtc_file_path: finalMrn?.rmtc_file_path ?? null,
         rmtc_file_name: finalMrn?.rmtc_file_name ?? null,
       },
+      toast_type: "success",
       message: "Sticker draft saved successfully.",
     });
   } catch (err) {
@@ -454,7 +474,7 @@ export const getMrnCoils = async (req, res) => {
     if (!uid) return res.status(400).json({ success: false, message: "MRN UID is required." });
     const heat_no = req.body?.heat_no != null ? String(req.body.heat_no).trim() : "";
     const result = await findCoils({
-      filters: { mrn_uid: uid, ...(heat_no ? { heat_no } : {}) },
+      filters: { mrn_uid: uid, source: "MRN PORTAL", ...(heat_no ? { heat_no } : {}) },
       limit: 5000,
       sortBy: "coil_uid",
       order: "ASC",
@@ -470,7 +490,8 @@ async function mergeMrnDocUploads(req, uid, { requireBoth = false } = {}) {
   const key = String(uid || "").trim();
   if (!key) return { error: { status: 400, message: "MRN UID is required." } };
 
-  const mrn = await findMrnByUid(key);
+  const resolved = await resolveMrnForSticker(key);
+  const mrn = resolved.mrn;
   if (!mrn) return { error: { status: 404, message: "MRN not found." } };
 
   const tcFile = req.files?.tc?.[0] || null;

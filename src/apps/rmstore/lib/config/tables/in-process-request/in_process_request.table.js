@@ -1,6 +1,5 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
-
 /**
  * In-process Request — one table for every request type:
  *   request_type = 'rejection' → approved rows queue for Store Out
@@ -26,6 +25,7 @@ export async function createRmStoreInProcessRequestTable() {
       previous_coils    JSONB NOT NULL DEFAULT '[]'::jsonb,
       proposed_coils    JSONB NOT NULL DEFAULT '[]'::jsonb,
       scanned_coil_uids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      attachments       JSONB DEFAULT '[]'::jsonb,
       downstream        VARCHAR(30),
       approved          BOOLEAN DEFAULT false,
       approved_by       TEXT,

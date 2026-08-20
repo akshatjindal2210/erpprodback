@@ -1,14 +1,20 @@
-import { findAllActiveMrnByUid, findGeneratedMrns, findMrnByUid, insertMrn, resetMrnStickerGenerated } from "../models/mrn.model.js";
-import { countStoreInCoilsForMrn, softDeleteCoilsByMrn, findCoils } from "../../coil/models/coil.model.js";
-import { softDeleteQcChecksByMrn } from "../../qc-check/models/qcCheck.model.js";
-import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
+import { findAllActiveMrnByUid, findGeneratedMrns, findMrnByLookup, findMrnByUid, insertMrn, hardDeleteMrnByUid } from "../models/mrn.model.js";
+import { countStoreInCoilsForMrn, countSaCoilsByMrnUid, hardDeleteCoilsByMrn, findCoils } from "../../coil/models/coil.model.js";
+import { hardDeleteQcChecksByMrn } from "../../qc-check/models/qcCheck.model.js";
+import { computeMrnQtyBudget } from "../../stock-adjustment/utils/mrnQtyBudget.js";
+import { roundSaQty } from "../../stock-adjustment/utils/stockAdjustmentQty.js";
+import { fetchFromIMS, fetchMrnRowsForFinancialYear, buildImsMrnRmDateFilter, parseIndianFinancialYearBounds } from "../../../../ims/lib/services/ims.service.js";
+import { getCurrentIndianFinancialYearLabel } from "../../../../core/lib/utils/date/indianFinancialYear.js";
+import { isSaLotGateEntryType, isSaAddLikeEntryType, saEntryTypeNeedsFinancialYear } from "../../stock-adjustment/utils/stockAdjustmentEntryTypes.js";
 import { logRmstoreActivity } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { extractListParams } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
+import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { getMrnCoilQtyEditable, getMrnCoilQtyAutoCalc, getMrnStickerMode } from "../../../../core/configuration/models/appConfig.model.js";
+import { fetchErpMrnByKey } from "../utils/resolveMrnForSticker.js";
 
 const MODULE = "rm_mrn_portal";
 
@@ -17,10 +23,17 @@ const log = (req, action, entity_id, details, record = null) =>
 
 /** Map ERP `mrn_rm` row → normalized shape. */
 export function mapErpMrnRecord(r = {}) {
+  const mrn_no = r.mrnno ?? r.mrn_no ?? null;
+  const serial_no = r.itsrno ?? r.serial_no ?? null;
+  const uidRaw = r.uid != null ? String(r.uid).trim() : "";
+  const uid =
+    uidRaw ||
+    (mrn_no != null && serial_no != null ? `${mrn_no}_${serial_no}` : null);
+
   return {
-    uid: r.uid != null ? String(r.uid) : null,
-    mrn_no: r.mrnno ?? r.mrn_no ?? null,
-    serial_no: r.itsrno ?? r.serial_no ?? null,
+    uid,
+    mrn_no,
+    serial_no,
     mrn_dt: r.mrndt ?? r.mrn_dt ?? null,
     bill_no: r.billno ?? r.bill_no ?? null,
     bill_dt: r.billdt ?? r.bill_dt ?? null,
@@ -31,6 +44,7 @@ export function mapErpMrnRecord(r = {}) {
     item_desc: r.itemdesc ?? r.item_desc ?? null,
     it_recp_qty: r.itrecpqty ?? r.it_recp_qty ?? null,
     it_lot_no: r.itLotNo ?? r.itlotno ?? r.it_lot_no ?? null,
+    heat_no: r.heat_no ?? r.itLotNo ?? r.itlotno ?? r.it_lot_no ?? null,
     it_unit: r.itunit ?? r.it_unit ?? null,
     fyid: r.fyid ?? null,
     totalqty: r.totalqty ?? null,
@@ -65,6 +79,24 @@ function slicePage(rows, page = 1, limit = 1000) {
     limit: safeLimit,
     totalPages: Math.ceil(rows.length / safeLimit) || 1,
   };
+}
+
+/**
+ * ERP `mrn_rm`:
+ * - no dates / no FY → `{ requestedData: "mrn_rm" }`
+ * - from/to dates → filter `m.mrndt >= '…' and m.mrndt <= '…'`
+ * - financial_year → same mrndt filter for Indian FY bounds (Stock Adjustment)
+ */
+async function fetchErpMrnRecords({ financial_year, lookup_key, from_date, to_date } = {}) {
+  const fy = String(financial_year ?? "").trim();
+  if (fy) {
+    const ims = await fetchMrnRowsForFinancialYear(fy, { search: lookup_key });
+    if (ims.success) return (ims.records || []).map(mapErpMrnRecord).filter((r) => r.uid);
+    return [];
+  }
+  const filter = buildImsMrnRmDateFilter(from_date, to_date);
+  const raw = await fetchFromIMS("mrn_rm", filter);
+  return (raw || []).map(mapErpMrnRecord).filter((r) => r.uid);
 }
 
 function inDateRange(row, from_date, to_date) {
@@ -246,6 +278,7 @@ export const getMrnList = async (req, res) => {
     const q = sanitizeSearch(search);
     const from_date = filters?.from_date || null;
     const to_date = filters?.to_date || null;
+    const financial_year = String(filters?.financial_year ?? filters?.financialYear ?? "").trim() || null;
 
     if (status === "generated") {
       const result = await findGeneratedMrns({ search: q, page, limit, from_date, to_date });
@@ -273,7 +306,7 @@ export const getMrnList = async (req, res) => {
 
     if (status === "comparison") {
       const [erpRecords, dbMap, qty_editable, qty_auto_calc, sticker_mode] = await Promise.all([
-        fetchFromIMS("mrn_rm"),
+        fetchErpMrnRecords({ financial_year, from_date, to_date }),
         findAllActiveMrnByUid(),
         getMrnCoilQtyEditable(),
         getMrnCoilQtyAutoCalc(),
@@ -351,7 +384,7 @@ export const getMrnList = async (req, res) => {
     }
 
     const [erpRecords, dbMap] = await Promise.all([
-      fetchFromIMS("mrn_rm"),
+      fetchErpMrnRecords({ financial_year, lookup_key: q || undefined, from_date, to_date }),
       findAllActiveMrnByUid(),
     ]);
 
@@ -495,14 +528,27 @@ export const deleteGeneratedMrn = async (req, res) => {
       });
     }
 
+    const saCoilCount = await countSaCoilsByMrnUid(uid);
+    if (saCoilCount > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete this MRN because ${saCoilCount} Stock Adjustment coil(s) still reference it.`,
+      });
+    }
+
     const deletedBy = auditUserName(req);
-    // Read the coils before the soft-delete so the transaction log can name them.
-    const removedCoils = await findCoils({ filters: { mrn_uid: uid }, limit: 5000 });
-    await softDeleteQcChecksByMrn(uid, deletedBy);
-    const deletedCoilCount = await softDeleteCoilsByMrn(uid, deletedBy);
-    // Keep MRN row (no is_deleted) — only clear sticker flag so packing can regenerate (IMS-style).
-    // Soft-deleted coils still FK to uid, so hard-deleting MRN would fail.
-    await resetMrnStickerGenerated(uid);
+    // Read portal coils before delete so the transaction log can name them.
+    const removedCoils = await findCoils({ filters: { mrn_uid: uid, source: "MRN PORTAL" }, limit: 5000 });
+    const deletedQcCount = await hardDeleteQcChecksByMrn(uid);
+    const deletedCoilCount = await hardDeleteCoilsByMrn(uid);
+
+    const mrnDeleted = await hardDeleteMrnByUid(uid);
+    if (!mrnDeleted) {
+      return res.status(500).json({
+        success: false,
+        message: "Coils were removed but the MRN record could not be deleted.",
+      });
+    }
 
     logCoilTransactionSafe({
       transaction_type: COIL_TX_TYPES.STICKER_DELETE,
@@ -517,17 +563,474 @@ export const deleteGeneratedMrn = async (req, res) => {
         heat_no: removedCoils.data?.[0]?.heat_no ?? null,
         item_code: existing.item_code ?? null,
         coil_count: deletedCoilCount,
+        qc_check_count: deletedQcCount,
+        mrn_row_deleted: true,
+        permanent_delete: true,
       },
     });
 
-    await log(req, "delete", uid, { uid, deleted_coil_count: deletedCoilCount }, existing);
+    await log(req, "delete", uid, {
+      uid,
+      deleted_coil_count: deletedCoilCount,
+      deleted_qc_count: deletedQcCount,
+      mrn_row_deleted: true,
+      permanent_delete: true,
+    }, existing);
 
     return res.json({
       success: true,
-      message: `Removed ${deletedCoilCount} coil sticker(s). You can generate them again when ready.`,
+      message: `Permanently deleted MRN, ${deletedCoilCount} coil sticker(s), and related QC data. You can create stickers again from ERP when ready.`,
       deleted_coil_count: deletedCoilCount,
+      deleted_qc_count: deletedQcCount,
+      mrn_row_deleted: true,
     });
   } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+function decorateErpMrnPickerRow(row) {
+  const desc = String(row?.item_desc || "").trim() || "—";
+  const code = String(row?.item_code || "").trim() || "—";
+  const lotNo = String(row?.it_lot_no ?? row?.heat_no ?? "").trim() || "—";
+  const billNo = String(row?.bill_no ?? "").trim() || "—";
+  const fy =
+    row?.financial_year != null && String(row.financial_year).trim() !== ""
+      ? String(row.financial_year).trim()
+      : deriveFinancialYearFromMrnRow(row);
+  return {
+    ...row,
+    id: row.uid,
+    label: `${desc} (${code})`,
+    sub: `Lot ${lotNo} · Bill ${billNo} · MRN ${row.mrn_no ?? "—"} · ${row.uid}`,
+    picker_lot_no: lotNo,
+    picker_bill_no: billNo,
+    picker_bill_dt: row?.bill_dt ?? row?.mrn_dt ?? null,
+    financial_year: fy,
+  };
+}
+
+function normalizeLotSearchKey(raw) {
+  return String(raw ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+}
+
+function deriveFinancialYearFromMrnRow(row) {
+  const dt = row?.mrn_dt ?? row?.bill_dt ?? null;
+  if (dt == null || String(dt).trim() === "") return null;
+  const parsed = new Date(dt);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return getCurrentIndianFinancialYearLabel(parsed);
+}
+
+/** Lot / heat search on ERP rows — exact match first, then partial. */
+function filterMrnByLotSearch(rows, lotKey) {
+  const k = normalizeLotSearchKey(lotKey);
+  if (!k) return [];
+  const normalized = (rows || []).map((row) => ({
+    row,
+    lot: normalizeLotSearchKey(row?.it_lot_no ?? row?.heat_no ?? ""),
+  }));
+  const exact = normalized.filter((x) => x.lot === k).map((x) => x.row);
+  if (exact.length) return exact;
+  return normalized.filter((x) => x.lot && (x.lot.includes(k) || k.includes(x.lot))).map((x) => x.row);
+}
+
+/** Exact UID first; `{mrn_no}_{serial_no}`; otherwise all rows with the same MRN number. */
+function filterMrnByAdjustmentSearch(rows, key) {
+  const k = String(key || "").trim();
+  if (!k) return [];
+  const uidHits = (rows || []).filter((r) => String(r.uid ?? "").trim() === k);
+  if (uidHits.length) return uidHits;
+
+  const composite = k.match(/^(\d+)_(\d+)$/);
+  if (composite) {
+    const byComposite = (rows || []).filter(
+      (r) =>
+        String(r.mrn_no ?? "").trim() === composite[1] &&
+        String(r.serial_no ?? "").trim() === composite[2]
+    );
+    if (byComposite.length) return byComposite;
+  }
+
+  return (rows || []).filter((r) => String(r.mrn_no ?? "").trim() === k);
+}
+
+function sortMrnSearchRows(a, b) {
+  const sa = Number(a?.serial_no ?? 0);
+  const sb = Number(b?.serial_no ?? 0);
+  if (sa !== sb) return sa - sb;
+  return String(a?.uid ?? "").localeCompare(String(b?.uid ?? ""));
+}
+
+async function fetchMrnRowsForAdjustmentSearch(financial_year, { entry_type = "" } = {}) {
+  if (String(financial_year || "").trim()) {
+    const ims = await fetchMrnRowsForFinancialYear(financial_year, {});
+    if (!ims.success) {
+      return { success: false, rows: [], message: ims.message, filter: ims.filter ?? null };
+    }
+    return {
+      success: true,
+      rows: (ims.records || []).map(mapErpMrnRecord).filter((r) => r.uid),
+      filter: ims.filter ?? null,
+    };
+  }
+
+  const raw = await fetchFromIMS("mrn_rm");
+  const imsRows = (raw || []).map(mapErpMrnRecord).filter((r) => r.uid);
+  const imsUidSet = new Set(imsRows.map((r) => String(r.uid)));
+  const dbMap = await findAllActiveMrnByUid();
+  const byUid = new Map();
+  for (const row of imsRows) byUid.set(String(row.uid), row);
+
+  const isMinus = String(entry_type || "").trim().toLowerCase() === "minus";
+
+  for (const [uid, saved] of dbMap) {
+    if (isMinus) {
+      // Minus: merge all local MRNs (portal + SA) — MRN Portal list filters stay separate.
+      const mapped = mapErpMrnRecord({ ...saved, uid });
+      if (byUid.has(uid)) {
+        const erp = byUid.get(uid);
+        byUid.set(uid, {
+          ...erp,
+          ...mapped,
+          uid,
+          it_recp_qty: erp?.it_recp_qty ?? mapped.it_recp_qty,
+          mrn_no: erp?.mrn_no ?? mapped.mrn_no,
+          heat_no: erp?.heat_no ?? mapped.heat_no,
+        });
+      } else {
+        byUid.set(uid, mapped);
+      }
+      continue;
+    }
+
+    if (!isDbStickerGenerated(saved) && !imsUidSet.has(uid)) continue;
+    const mapped = mapErpMrnRecord({ ...saved, uid });
+    if (byUid.has(uid)) {
+      const erp = byUid.get(uid);
+      byUid.set(uid, { ...erp, ...mapped, uid, it_recp_qty: erp?.it_recp_qty ?? mapped.it_recp_qty });
+    } else if (isDbStickerGenerated(saved)) {
+      byUid.set(uid, mapped);
+    }
+  }
+
+  return { success: true, rows: [...byUid.values()], filter: null };
+}
+
+async function attachMrnAdjustmentSummary(row, excludeAdjustmentId = null) {
+  if (!row?.uid) return row;
+  const receiptQty = roundSaQty(row.it_recp_qty);
+  const budget = await computeMrnQtyBudget(row.uid, { receiptQty, excludeAdjustmentId });
+  return {
+    ...row,
+    it_recp_qty: budget.receipt_qty,
+    coil_used_qty: budget.coil_used_qty,
+    pending_sa_add_qty: budget.pending_sa_add_qty,
+    prior_add_qty: budget.prior_add_qty,
+    remaining_qty: budget.remaining_qty,
+  };
+}
+
+/** FY-scoped unique Lot / Heat numbers for Stock Adjustment Old gate (dropdown suggestions). */
+export const listErpLotsForFinancialYear = async (req, res) => {
+  try {
+    const financial_year = String(req.body?.financial_year ?? req.body?.financialYear ?? "").trim();
+    if (!financial_year) {
+      return res.status(400).json({ success: false, message: "Financial year is required." });
+    }
+
+    const q = sanitizeSearch(req.body?.search ?? req.body?.lot_no ?? req.body?.lotNo ?? "");
+    let from;
+    let to;
+    try {
+      ({ from, to } = parseIndianFinancialYearBounds(financial_year));
+    } catch (err) {
+      return res.status(400).json({ success: false, message: err.message });
+    }
+
+    const filter = buildImsMrnRmDateFilter(from, to);
+    const raw = await fetchFromIMS("mrn_rm", filter);
+    const rows = (raw || []).map(mapErpMrnRecord).filter((r) => r.uid);
+
+    const byLot = new Map();
+    for (const row of rows) {
+      const lot = String(row?.it_lot_no ?? row?.heat_no ?? "")
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
+      if (!lot) continue;
+      const prev = byLot.get(lot);
+      if (prev) {
+        prev.mrn_count += 1;
+        continue;
+      }
+      byLot.set(lot, {
+        lot_no: lot,
+        mrn_count: 1,
+        sample_uid: row.uid,
+        item_code: row.item_code ?? null,
+        item_desc: row.item_desc ?? null,
+      });
+    }
+
+    let data = [...byLot.values()].sort((a, b) => a.lot_no.localeCompare(b.lot_no));
+    if (q) {
+      const term = normalizeLotSearchKey(q);
+      data = data.filter((row) => row.lot_no.includes(term));
+    }
+
+    return res.json({
+      success: true,
+      data,
+      total: data.length,
+      financial_year,
+      filter,
+    });
+  } catch (err) {
+    console.error("[rmstore/mrn/erp-lots]", err?.message || err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** FY-scoped ERP MRN list for Stock Adjustment dropdown — label: itemdesc (itemcode). */
+export const listErpMrnsForFinancialYear = async (req, res) => {
+  try {
+    const financial_year = String(req.body?.financial_year ?? req.body?.financialYear ?? "").trim();
+    if (!financial_year) {
+      return res.status(400).json({ success: false, message: "Financial year is required." });
+    }
+
+    const { page, limit, search } = extractListParams(req.body, {
+      sortBy: "mrn_no",
+      order: "DESC",
+    });
+    const q = sanitizeSearch(search);
+    let from;
+    let to;
+    try {
+      ({ from, to } = parseIndianFinancialYearBounds(financial_year));
+    } catch (err) {
+      return res.status(400).json({ success: false, message: err.message });
+    }
+    const filter = buildImsMrnRmDateFilter(from, to);
+    const raw = await fetchFromIMS("mrn_rm", filter);
+    let rows = (raw || []).map(mapErpMrnRecord).filter((r) => r.uid);
+
+    if (q) {
+      rows = rows.filter((r) => matchesSearch(r, q));
+    }
+
+    rows.sort((a, b) => {
+      const da = a.mrn_dt ? new Date(a.mrn_dt).getTime() : 0;
+      const db = b.mrn_dt ? new Date(b.mrn_dt).getTime() : 0;
+      if (db !== da) return db - da;
+      return Number(b.mrn_no || 0) - Number(a.mrn_no || 0);
+    });
+
+    const out = slicePage(rows, page, limit || rows.length || 1000);
+    return res.json({
+      success: true,
+      ...out,
+      data: (out.data || []).map(decorateErpMrnPickerRow),
+    });
+  } catch (err) {
+    console.error("[rmstore/mrn/erp-list]", err?.message || err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * Stock Adjustment MRN search — returns all FY-scoped matches for MRN no / UID.
+ * One match → frontend auto-opens; multiple → UID picker dropdown.
+ */
+export const searchAdjustmentMrns = async (req, res) => {
+  try {
+    const financial_year = String(req.body?.financial_year ?? req.body?.financialYear ?? "").trim();
+    const search_mode = String(req.body?.search_mode ?? req.body?.searchMode ?? "").trim().toLowerCase();
+    const lot_no = String(
+      req.body?.lot_no ?? req.body?.it_lot_no ?? req.body?.itLotNo ?? req.body?.heat_no ?? ""
+    ).trim();
+    const key = String(req.body?.mrn_no ?? req.body?.uid ?? req.body?.search ?? req.body?.mrn_uid ?? "").trim();
+    const entry_type = String(req.body?.entry_type ?? req.body?.entryType ?? "").trim().toLowerCase();
+
+    const isLotSearch = isSaLotGateEntryType(entry_type) || search_mode === "lot";
+    const needsFy = saEntryTypeNeedsFinancialYear(entry_type);
+
+    if (needsFy && !financial_year) {
+      return res.status(400).json({ success: false, message: "Financial year is required." });
+    }
+
+    const lookupKey = isLotSearch ? lot_no || key : key;
+    if (!lookupKey) {
+      return res.status(400).json({
+        success: false,
+        message: isLotSearch ? "Lot / Heat number is required." : "MRN number or UID is required.",
+      });
+    }
+
+    let filter = null;
+    let candidateRows = [];
+    try {
+      const loaded = await fetchMrnRowsForAdjustmentSearch(needsFy ? financial_year : "", {
+        entry_type,
+      });
+      if (!loaded.success) {
+        return res.status(404).json({
+          success: false,
+          message: loaded.message || "No MRN data found.",
+          data: [],
+          filter: loaded.filter ?? null,
+        });
+      }
+      candidateRows = loaded.rows;
+      filter = loaded.filter ?? null;
+    } catch (err) {
+      return res.status(400).json({ success: false, message: err.message });
+    }
+
+    let hits = (isLotSearch ? filterMrnByLotSearch(candidateRows, lookupKey) : filterMrnByAdjustmentSearch(candidateRows, lookupKey)).sort(
+      sortMrnSearchRows
+    );
+    if (!hits.length && entry_type === "minus") {
+      const local = await findMrnByLookup(lookupKey);
+      if (local) {
+        hits = [mapErpMrnRecord({ ...local, uid: local.uid })];
+      } else {
+        const erp = await fetchErpMrnByKey(lookupKey);
+        if (erp?.uid) {
+          hits = [erp];
+        }
+      }
+    }
+    if (!hits.length) {
+      const scope = needsFy && financial_year ? ` in FY ${financial_year}` : "";
+      return res.status(404).json({
+        success: false,
+        message: `No MRN was found${scope} for "${lookupKey}".`,
+        data: [],
+        filter,
+      });
+    }
+
+    const dbMap = await findAllActiveMrnByUid();
+    const [qty_editable, qty_auto_calc, sticker_mode] = await Promise.all([
+      getMrnCoilQtyEditable(),
+      getMrnCoilQtyAutoCalc(),
+      getMrnStickerMode(),
+    ]);
+    const excludeAdjustmentId = parsePositiveIntId(req.body?.exclude_adjustment_id ?? req.body?.adjustment_id);
+    const enrichAdd = isSaAddLikeEntryType(entry_type) || !!financial_year;
+
+    const data = await Promise.all(
+      hits.map(async (hit) => {
+        const saved = dbMap.get(String(hit.uid));
+        const base = {
+          ...hit,
+          ...(saved && isDbStickerGenerated(saved) ? saved : {}),
+          uid: hit.uid,
+          id: hit.uid,
+          status: saved && isDbStickerGenerated(saved) ? "generated" : "pending",
+          sticker_generated: !!(saved && isDbStickerGenerated(saved)),
+          qty_editable,
+          qty_auto_calc,
+          sticker_mode: saved?.sticker_mode || sticker_mode,
+          financial_year: (deriveFinancialYearFromMrnRow(hit) ?? financial_year) || null,
+        };
+        const row = enrichAdd ? await attachMrnAdjustmentSummary(base, excludeAdjustmentId) : base;
+        return decorateErpMrnPickerRow(row);
+      })
+    );
+
+    return res.json({
+      success: true,
+      data,
+      total: data.length,
+      multiple: data.length > 1,
+      filter,
+      search_mode: isLotSearch ? "lot" : "mrn",
+      message:
+        data.length === 1
+          ? isLotSearch
+            ? "Lot loaded."
+            : "MRN loaded."
+          : `${data.length} matches found — select one.`,
+    });
+  } catch (err) {
+    console.error("[rmstore/mrn/erp-search]", err?.message || err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** ERP lookup — FY `m.mrndt` filter + MRN no / UID (Stock Adjustment gate). */
+export const lookupErpMrn = async (req, res) => {
+  try {
+    const financial_year = String(req.body?.financial_year ?? req.body?.financialYear ?? "").trim();
+    const key = String(req.body?.mrn_no ?? req.body?.uid ?? req.body?.search ?? req.body?.mrn_uid ?? "").trim();
+    if (!financial_year) {
+      return res.status(400).json({ success: false, message: "Financial year is required." });
+    }
+    if (!key) {
+      return res.status(400).json({ success: false, message: "MRN number or UID is required." });
+    }
+
+    const ims = await fetchMrnRowsForFinancialYear(financial_year, { search: key });
+    if (!ims.success || !ims.records?.length) {
+      return res.status(404).json({
+        success: false,
+        message: ims.message || `No MRN was found in FY ${financial_year}.`,
+        filter: ims.filter ?? null,
+      });
+    }
+
+    const rows = (ims.records || []).map(mapErpMrnRecord).filter((r) => r.uid);
+    const hit =
+      rows.find((r) => String(r.uid).trim() === key) ||
+      rows.find((r) => String(r.mrn_no ?? "").trim() === key) ||
+      rows[0];
+
+    if (!hit?.uid) {
+      return res.status(404).json({
+        success: false,
+        message: `No MRN was found in FY ${financial_year}.`,
+        filter: ims.filter ?? null,
+      });
+    }
+
+    const dbMap = await findAllActiveMrnByUid();
+    const saved = dbMap.get(String(hit.uid));
+    const [qty_editable, qty_auto_calc, sticker_mode] = await Promise.all([
+      getMrnCoilQtyEditable(),
+      getMrnCoilQtyAutoCalc(),
+      getMrnStickerMode(),
+    ]);
+
+    const excludeAdjustmentId = parsePositiveIntId(req.body?.exclude_adjustment_id ?? req.body?.adjustment_id);
+    const withSummary = await attachMrnAdjustmentSummary(
+      {
+        ...hit,
+        ...(saved && isDbStickerGenerated(saved) ? saved : {}),
+        uid: hit.uid,
+        id: hit.uid,
+        status: saved && isDbStickerGenerated(saved) ? "generated" : "pending",
+        sticker_generated: !!(saved && isDbStickerGenerated(saved)),
+        qty_editable,
+        qty_auto_calc,
+        sticker_mode: saved?.sticker_mode || sticker_mode,
+      },
+      excludeAdjustmentId
+    );
+
+    return res.json({
+      success: true,
+      data: decorateErpMrnPickerRow(withSummary),
+      filter: ims.filter ?? null,
+      message: "MRN loaded from ERP.",
+    });
+  } catch (err) {
+    console.error("[rmstore/mrn/erp-lookup]", err?.message || err);
     return res.status(500).json({ success: false, message: err.message });
   }
 };

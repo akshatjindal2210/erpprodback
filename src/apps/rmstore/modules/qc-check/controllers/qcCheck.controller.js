@@ -1,5 +1,7 @@
 import { findQcChecks, findQcCheck, findQcCheckItems, findPendingQcCheckByCoil, findPendingCoilsForQc, findLiveQcCheckByCoil, insertQcCheck, replaceQcCheckItems, updateQcCheck, softDeleteQcCheck } from "../models/qcCheck.model.js";
-import { findCoilByUid, linkCoilsToQcCheck, clearCoilQcLink, clearCoilsForQcReject, markCoilsQcFailPending } from "../../coil/models/coil.model.js";
+import { findCoilByUid, linkCoilsToQcCheck, clearCoilQcLink, clearCoilsForQcReject, markCoilsQcFailPending, markCoilsQcPassed, findCoilUidsByQcCheck, findCoilsByQcCheckUid } from "../../coil/models/coil.model.js";
+import { findMrnByUid } from "../../mrn/models/mrn.model.js";
+import { isCoilEligibleForQc, QC_ONLY_MRN_COIL_MESSAGE } from "../../../lib/utils/coilQcEligibility.js";
 import { findSpecItemDetail } from "../../spec/models/specMaster.model.js";
 import { softDeleteQcRejection } from "../../rm-rejection/models/rmRejection.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -15,11 +17,111 @@ const MODULE = "rm_qc_check";
 const log = createRmstoreActivityLogger(MODULE);
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
 
+const BATCH_COIL_INDEPENDENT_QC_MSG = "This MRN is batch-wise. Scan the batch QC sticker and submit QC for the whole batch — individual coils cannot be checked independently.";
+
+/** Always store public upload path in `document_note` (never bare original filename alone). */
+function resolveQcDocumentNote(uploaded, inputNote, priorNote) {
+  if (uploaded?.path) return String(uploaded.path).trim();
+  for (const candidate of [inputNote, priorNote]) {
+    let s = String(candidate || "").trim().replace(/\\/g, "/");
+    if (!s) continue;
+    s = s.replace(/^\/+/, "");
+    if (s.startsWith("uploads/")) return s;
+    if (s.startsWith("rmstore/")) return `uploads/${s}`;
+    // Legacy: filename-only rows still resolve under QC uploads folder in the report loader.
+    if (/^[\w.\-]+\.(pdf|png|jpe?g|webp|gif)$/i.test(s)) return `uploads/rmstore/qc/${s}`;
+  }
+  return null;
+}
+
+/**
+ * Header `coil_no_uid` is VARCHAR(120) — store one primary UID only.
+ * Full batch list lives on coil rows via `linkCoilsToQcCheck` (STRING_AGG on read).
+ */
+function primaryCoilUidForQcHeader(targetCoilUids = [], fallback = "") {
+  const fromList = (targetCoilUids || []).map((u) => String(u || "").trim()).filter(Boolean);
+  if (fromList.length) return fromList[0];
+  const fromFallback = String(fallback || "").split(",").map((s) => s.trim()).filter(Boolean);
+  return fromFallback[0] || "";
+}
+
+function parseTruthyFlag(v) {
+  return v === true || v === "true" || v === "1" || v === 1;
+}
+
+/**
+ * Batch sticker_mode MRNs must QC as a whole.
+ * Independent single-coil prepare/submit is blocked.
+ * Allowed: multi-coil payload, explicit is_batch_qc (incl. 1-coil batch), or existing check id.
+ */
+async function assertBatchMrnAllowsCoilQc(coil, batchUids = [], opts = {}) {
+  const mrnUid = coil?.mrn_uid;
+  if (!mrnUid) return;
+  const mrn = await findMrnByUid(mrnUid);
+  const mode = String(mrn?.sticker_mode || "coil").toLowerCase();
+  if (mode !== "batch") return;
+  if (opts.isBatchQc === true) return;
+  if (opts.existingCheckId) return;
+  if (Array.isArray(batchUids) && batchUids.length > 1) return;
+  const err = new Error(BATCH_COIL_INDEPENDENT_QC_MSG);
+  err.status = 400;
+  throw err;
+}
+
+function isSuperAdminUser(req) {
+  return String(req.user?.type || req.user?.role || "").toLowerCase() === "super_admin";
+}
+
+function hasQcPerm(req, action) {
+  if (isSuperAdminUser(req)) return true;
+  return req.permission?.[`can_${action}`] === true;
+}
+
+/** pass | fail from evaluated spec lines; null if any line is incomplete. */
+function computeOverallFromEvaluated(evaluated = []) {
+  if (!evaluated.length) return null;
+  if (evaluated.some((e) => !e.result)) return null;
+  return evaluated.some((e) => e.result === "fail") ? "fail" : "pass";
+}
+
+/** Backend decides overall result; only Super Admin may override via body.overall_result. */
+function resolveOverallResult(evaluated, { bodyOverride, isSuperAdmin, anyFail }) {
+  const computed =
+    anyFail === true ? "fail" : anyFail === false ? "pass" : computeOverallFromEvaluated(evaluated);
+  if (!computed) return null;
+  if (isSuperAdmin) {
+    const raw = String(bodyOverride || "").trim().toLowerCase();
+    if (raw === "pass" || raw === "fail") return raw;
+  }
+  return computed;
+}
+
+function normalizeOverallResult(stored, status) {
+  const raw = String(stored || "").trim().toLowerCase();
+  if (raw === "pass" || raw === "fail") return raw;
+  const st = String(status || "").trim().toLowerCase();
+  if (st === "passed") return "pass";
+  if (st === "failed") return "fail";
+  return null;
+}
+
 async function buildCheckDetail(qc_check_uid) {
   const data = await findQcCheck(qc_check_uid);
   if (!data) return null;
-  const items = await findQcCheckItems(qc_check_uid);
-  return { ...data, items };
+  data.overall_result = normalizeOverallResult(data.overall_result, data.status);
+  const [items, coilRows] = await Promise.all([
+    findQcCheckItems(qc_check_uid),
+    findCoilsByQcCheckUid(qc_check_uid),
+  ]);
+  const coils = (coilRows || []).map((c) => ({
+    coil_no_uid: c.coil_no_uid,
+    heat_no: c.heat_no,
+    item_code: c.item_code,
+    item_desc: c.item_desc,
+    qty: c.qty,
+    mrn_uid: c.mrn_uid,
+  }));
+  return { ...data, items, coils };
 }
 
 function buildChecklistFromSpecs(approvedSpecs = []) {
@@ -29,6 +131,9 @@ function buildChecklistFromSpecs(approvedSpecs = []) {
     type: s.type,
     spec_name: s.spec_name,
     print_val: s.print_val,
+    inspection_method: s.inspection_method
+      ? String(s.inspection_method).trim().toUpperCase()
+      : null,
     spec_type: s.spec_type,
     min_value: s.min_value,
     max_value: s.max_value,
@@ -41,13 +146,13 @@ function buildChecklistFromSpecs(approvedSpecs = []) {
         ? [
             ...String(s.correct_option || "")
               .split(",")
-              .map((x) => x.trim())
+              .map((x) => x.trim().toUpperCase())
               .filter(Boolean),
             ...String(s.incorrect_option || "")
               .split(",")
-              .map((x) => x.trim())
+              .map((x) => x.trim().toUpperCase())
               .filter(Boolean),
-          ].filter((v, i, arr) => arr.findIndex((t) => t.toLowerCase() === v.toLowerCase()) === i)
+          ].filter((v, i, arr) => arr.indexOf(v) === i)
         : [],
   }));
 }
@@ -80,7 +185,7 @@ async function loadApprovedSpecs(item_dcode, item_code) {
 /**
  * List QC queue.
  * status=pending → work queue (virtual / draft / awaiting_approval) until Approve.
- * Register (all|passed|failed) → only authorized rows (approved = true).
+ * Register (all|passed|failed) → submitted rows; passed/failed require approved_at.
  */
 export const getQcChecks = async (req, res) => {
   try {
@@ -88,24 +193,11 @@ export const getQcChecks = async (req, res) => {
       sortBy: "qc_check_uid",
       order: "DESC",
     });
-    const safeFilters = sanitizeFilters(filters || {}, [
-      "status",
-      "from_date",
-      "to_date",
-      "mrn_uid",
-      "coil_no_uid",
-      "expand_coils",
-      "coil_level",
-    ]);
+    const safeFilters = sanitizeFilters(filters || {}, ["status", "from_date", "to_date", "mrn_uid", "coil_no_uid", "expand_coils", "coil_level"]);
     const status = String(safeFilters.status || "pending").trim().toLowerCase();
 
     if (status === "pending") {
-      const result = await findPendingCoilsForQc({
-        filters: safeFilters,
-        search: sanitizeSearch(search),
-        page,
-        limit,
-      });
+      const result = await findPendingCoilsForQc({ filters: safeFilters, search: sanitizeSearch(search), page, limit});
       return res.json({ success: true, ...result });
     }
 
@@ -150,12 +242,29 @@ export const prepareQcCheck = async (req, res) => {
   try {
     let check = null;
     const id = parsePositiveIntId(req.body?.qc_check_uid ?? req.body?.id);
-    const coilUid = String(req.body?.coil_no_uid || "").trim();
+    let coilUid = String(req.body?.coil_no_uid || "").trim();
+    const isBatchQc = parseTruthyFlag(req.body?.is_batch_qc);
+    let batchUids = [];
+    if (coilUid.includes(",")) {
+      batchUids = coilUid.split(",").map((s) => s.trim()).filter(Boolean);
+      coilUid = batchUids[0] || "";
+    }
 
     if (id) {
       check = await findQcCheck(id);
       if (!check) return res.status(404).json({ success: false, message: "QC check not found." });
     } else if (coilUid) {
+      const coilForMode = await findCoilByUid(coilUid);
+      if (coilForMode) {
+        try {
+          await assertBatchMrnAllowsCoilQc(coilForMode, batchUids, { isBatchQc });
+        } catch (e) {
+          if (e?.status === 400) {
+            return res.status(400).json({ success: false, message: e.message });
+          }
+          throw e;
+        }
+      }
       check = await findPendingQcCheckByCoil(coilUid);
       if (!check) {
         const live = await findLiveQcCheckByCoil(coilUid);
@@ -173,9 +282,12 @@ export const prepareQcCheck = async (req, res) => {
             },
           });
         }
-        const coil = await findCoilByUid(coilUid);
+        const coil = coilForMode || (await findCoilByUid(coilUid));
         if (!coil) {
           return res.status(404).json({ success: false, message: `Coil ${coilUid} was not found.` });
+        }
+        if (!isCoilEligibleForQc(coil)) {
+          return res.status(400).json({ success: false, message: QC_ONLY_MRN_COIL_MESSAGE });
         }
         const coilStatus = String(coil.status || "active").toLowerCase();
         if (coilStatus !== "active") {
@@ -187,20 +299,26 @@ export const prepareQcCheck = async (req, res) => {
         // Virtual pending — no QC row in DB yet
         check = {
           qc_check_uid: null,
-          coil_no_uid: coil.coil_no_uid,
+          coil_no_uid: coil.coil_no_uid, // Reference only the first coil in header
           mrn_uid: coil.mrn_uid,
           mrn_no: coil.mrn_no,
           heat_no: coil.heat_no,
           item_dcode: coil.item_dcode,
           item_code: coil.item_code,
           item_desc: coil.item_desc,
-          qty: coil.qty,
+          qty: batchUids.length > 0 ? null : coil.qty,
           status: "pending",
           is_virtual_pending: true,
+          _coil_no_uid_orig: req.body.coil_no_uid, // Keep original for frontend if needed
         };
       }
     } else {
       return res.status(400).json({ success: false, message: "A QC check ID or Coil UID is required." });
+    }
+
+    const resData = { ...check };
+    if (batchUids.length > 0) {
+      resData.coil_no_uid = req.body.coil_no_uid; // Send back the full list to frontend
     }
 
     const status = String(check.status || "").toLowerCase();
@@ -249,9 +367,12 @@ export const prepareQcCheck = async (req, res) => {
     return res.json({
       success: true,
       data: {
-        ...check,
+        ...resData,
         items: savedItems,
         checklist,
+        overall_result:
+          normalizeOverallResult(check.overall_result, check.status) ||
+          computeOverallFromEvaluated(savedItems),
         approval_status: specDetail.approval_status,
         read_only: false,
         is_edit: forEdit && editableSubmitted,
@@ -278,13 +399,20 @@ export const prepareQcCheck = async (req, res) => {
 export const submitQcCheck = async (req, res) => {
   try {
     const id = parsePositiveIntId(req.body?.qc_check_uid ?? req.body?.id);
-    const coilUid = String(req.body?.coil_no_uid || "").trim();
+    let coilUid = String(req.body?.coil_no_uid || "").trim();
     const user = auditUserName(req);
     const isDraft =
       req.body?.is_draft === true ||
       req.body?.is_draft === "true" ||
       req.body?.is_draft === "1" ||
       req.body?.is_draft === 1;
+    const isBatchQc = parseTruthyFlag(req.body?.is_batch_qc);
+
+    let batchUids = [];
+    if (coilUid.includes(",")) {
+      batchUids = coilUid.split(",").map((s) => s.trim()).filter(Boolean);
+      coilUid = batchUids[0] || "";
+    }
 
     let check = null;
     let isEditSubmit = false;
@@ -316,6 +444,9 @@ export const submitQcCheck = async (req, res) => {
         if (!coil) {
           return res.status(400).json({ success: false, message: `Coil ${coilUid} was not found.` });
         }
+        if (!isCoilEligibleForQc(coil)) {
+          return res.status(400).json({ success: false, message: QC_ONLY_MRN_COIL_MESSAGE });
+        }
         const coilStatus = String(coil.status || "active").toLowerCase();
         if (coilStatus !== "active") {
           return res.status(400).json({
@@ -325,14 +456,14 @@ export const submitQcCheck = async (req, res) => {
         }
         check = {
           qc_check_uid: null,
-          coil_no_uid: coil.coil_no_uid,
+          coil_no_uid: coil.coil_no_uid, // Reference only first coil
           mrn_uid: coil.mrn_uid,
           mrn_no: coil.mrn_no,
           heat_no: coil.heat_no,
           item_dcode: coil.item_dcode,
           item_code: coil.item_code,
           item_desc: coil.item_desc,
-          qty: coil.qty,
+          qty: batchUids.length > 0 ? null : coil.qty,
           status: "pending",
           _coil: coil,
         };
@@ -344,11 +475,57 @@ export const submitQcCheck = async (req, res) => {
       });
     }
 
-    const coil = check._coil || (await findCoilByUid(check.coil_no_uid));
-    if (!coil) {
-      return res.status(400).json({ success: false, message: `Coil ${check.coil_no_uid} was not found.` });
+    if (isEditSubmit) {
+      if (!hasQcPerm(req, "edit")) {
+        return res.status(403).json({ success: false, message: "You do not have permission to edit this QC check." });
+      }
+    } else if (!hasQcPerm(req, "add")) {
+      const liveSt = String(check.status || "").toLowerCase();
+      const canContinueDraft = hasQcPerm(req, "edit") && check.qc_check_uid && (liveSt === "draft" || liveSt === "pending");
+      if (!canContinueDraft) {
+        return res.status(403).json({ success: false, message: "You do not have permission to submit a QC check." });
+      }
     }
 
+    const primaryUid = String(check.coil_no_uid || "").split(",")[0]?.trim();
+    const primaryCoil = check._coil || (await findCoilByUid(primaryUid));
+    if (!primaryCoil) {
+      return res.status(400).json({ success: false, message: `Primary coil ${primaryUid} was not found.` });
+    }
+    if (!isCoilEligibleForQc(primaryCoil)) {
+      return res.status(400).json({ success: false, message: QC_ONLY_MRN_COIL_MESSAGE });
+    }
+
+    // Whole batch (comma list) or single coil; also recover UIDs from check / linked coils
+    const fromCheck = String(check.coil_no_uid || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    let targetCoilUids =
+      batchUids.length > 1
+        ? batchUids
+        : fromCheck.length > 1
+          ? fromCheck
+          : batchUids.length === 1
+            ? batchUids
+            : [primaryCoil.coil_no_uid];
+    if (targetCoilUids.length <= 1 && check.qc_check_uid) {
+      const linked = await findCoilUidsByQcCheck(check.qc_check_uid);
+      if (Array.isArray(linked) && linked.length > 1) {
+        targetCoilUids = linked.map((u) => String(u).trim()).filter(Boolean);
+      }
+    }
+    try {
+      await assertBatchMrnAllowsCoilQc(primaryCoil, targetCoilUids, {
+        isBatchQc,
+        existingCheckId: check.qc_check_uid || id || null,
+      });
+    } catch (e) {
+      if (e?.status === 400) {
+        return res.status(400).json({ success: false, message: e.message });
+      }
+      throw e;
+    }
     const inspectorName = user;
 
     const { approvedSpecs } = await loadApprovedSpecs(check.item_dcode, check.item_code);
@@ -392,16 +569,16 @@ export const submitQcCheck = async (req, res) => {
     for (const spec of approvedSpecs) {
       const input = bySpecId.get(Number(spec.spec_id)) || {};
       const prior = priorBySpec.get(Number(spec.spec_id)) || {};
-      const actual_value = input.actual_value != null ? String(input.actual_value).trim() : "";
+      let actual_value = input.actual_value != null ? String(input.actual_value).trim() : "";
+      if (actual_value && String(spec.spec_type || "").toLowerCase() === "dropdown") {
+        actual_value = actual_value.toUpperCase();
+      }
       const uploaded = fileBySpecId.get(Number(spec.spec_id));
-      const document_note = uploaded
-        ? uploaded.name
-        : input.document_note != null
-          ? String(input.document_note).trim()
-          : prior.document_note
-            ? String(prior.document_note).trim()
-            : "";
-      const document_path = uploaded?.path || (prior.document_note?.startsWith?.("uploads/") ? prior.document_note : null);
+      const document_note = resolveQcDocumentNote(
+        uploaded,
+        input.document_note,
+        prior.document_note,
+      );
 
       if (!actual_value) anyEmpty = true;
 
@@ -414,7 +591,7 @@ export const submitQcCheck = async (req, res) => {
         if (result === "fail") anyFail = true;
       }
 
-      if (!isDraft && spec.document_required === true && !document_note && !document_path) {
+      if (!isDraft && spec.document_required === true && !document_note) {
         return res.status(400).json({
           success: false,
           message: `A document upload is required for specification ${spec.spec_name || spec.spec_id}.`,
@@ -427,6 +604,9 @@ export const submitQcCheck = async (req, res) => {
         type: spec.type,
         spec_name: spec.spec_name,
         print_val: spec.print_val,
+        inspection_method: spec.inspection_method
+          ? String(spec.inspection_method).trim().toUpperCase()
+          : null,
         spec_type: spec.spec_type,
         min_value: spec.min_value,
         max_value: spec.max_value,
@@ -434,7 +614,7 @@ export const submitQcCheck = async (req, res) => {
         incorrect_option: spec.incorrect_option,
         document_required: spec.document_required === true,
         actual_value: actual_value || null,
-        document_note: document_path || document_note || null,
+        document_note,
         result,
         eval_message: message || null,
       });
@@ -451,18 +631,27 @@ export const submitQcCheck = async (req, res) => {
           message: "Drafts are not allowed when editing from the Register. Update the values and submit.",
         });
       }
+      if (
+        req.body?.overall_result != null &&
+        String(req.body.overall_result).trim() !== "" &&
+        !isSuperAdminUser(req)
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Only Super Admin can change the overall QC result.",
+        });
+      }
+      const draftOverall = resolveOverallResult(evaluated, {
+        bodyOverride: req.body?.overall_result,
+        isSuperAdmin: isSuperAdminUser(req),
+        anyFail: anyEmpty ? undefined : anyFail,
+      });
       let checkId = check.qc_check_uid;
       if (!checkId) {
         const created = await insertQcCheck(
           {
-            coil_no_uid: check.coil_no_uid,
+            coil_no_uid: primaryCoilUidForQcHeader(targetCoilUids, check.coil_no_uid),
             mrn_uid: check.mrn_uid,
-            mrn_no: check.mrn_no,
-            heat_no: check.heat_no,
-            item_dcode: check.item_dcode,
-            item_code: check.item_code,
-            item_desc: check.item_desc,
-            qty: check.qty,
             status: "draft",
           },
           user
@@ -474,22 +663,25 @@ export const submitQcCheck = async (req, res) => {
       }
 
       await replaceQcCheckItems(checkId, evaluated);
-      await linkCoilsToQcCheck(checkId, [check.coil_no_uid], "draft", user);
+      await linkCoilsToQcCheck(checkId, targetCoilUids, "draft", user);
       await updateQcCheck(checkId, {
         status: "draft",
+        overall_result: draftOverall,
+        approved: false,
         failure_reason: failure_reason || null,
         remarks,
         inspected_by: inspectorName,
-        inspected_at: new Date().toISOString(),
+        inspected_at: new Date(),
         updated_by: user,
-        updated_at: new Date().toISOString(),
+        updated_at: new Date(),
       });
 
       const data = await buildCheckDetail(checkId);
       return res.json({
         success: true,
         data,
-        message: "QC draft saved. Submit it once all specification values are filled in.",
+        toast_type: "success",
+        message: "QC check saved as draft successfully.",
       });
     }
 
@@ -515,8 +707,24 @@ export const submitQcCheck = async (req, res) => {
     }
     if (!anyFail) failure_reason = "";
 
+    if (
+      req.body?.overall_result != null &&
+      String(req.body.overall_result).trim() !== "" &&
+      !isSuperAdminUser(req)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Only Super Admin can change the overall QC result.",
+      });
+    }
+
+    const storedOverall = resolveOverallResult(evaluated, {
+      bodyOverride: req.body?.overall_result,
+      isSuperAdmin: isSuperAdminUser(req),
+      anyFail,
+    });
+
     // Final submit always → awaiting_approval (stays in Pending until Approve).
-    // Pass/fail is decided only on Approve → Register (passed | failed).
     const overallStatus = "awaiting_approval";
     const prevStatus = String(check.status || "").toLowerCase();
 
@@ -524,14 +732,8 @@ export const submitQcCheck = async (req, res) => {
     if (!checkId) {
       const created = await insertQcCheck(
         {
-          coil_no_uid: check.coil_no_uid,
+          coil_no_uid: primaryCoilUidForQcHeader(targetCoilUids, check.coil_no_uid),
           mrn_uid: check.mrn_uid,
-          mrn_no: check.mrn_no,
-          heat_no: check.heat_no,
-          item_dcode: check.item_dcode,
-          item_code: check.item_code,
-          item_desc: check.item_desc,
-          qty: check.qty,
           status: "pending",
         },
         user
@@ -555,59 +757,64 @@ export const submitQcCheck = async (req, res) => {
       qc_reject_uid = null;
     }
 
-    await linkCoilsToQcCheck(checkId, [check.coil_no_uid], "awaiting_approval", user);
+    await linkCoilsToQcCheck(checkId, targetCoilUids, "awaiting_approval", user);
 
     await updateQcCheck(checkId, {
       status: overallStatus,
+      overall_result: storedOverall,
+      approved: false,
       failure_reason: failure_reason || null,
       remarks,
       inspected_by: inspectorName,
-      inspected_at: new Date().toISOString(),
+      inspected_at: new Date(),
       qc_reject_uid,
-      approved: false,
       approved_by: null,
       approved_at: null,
       updated_by: user,
-      updated_at: new Date().toISOString(),
+      updated_at: new Date(),
     });
 
     logCoilTransactionSafe({
-      transaction_type: anyFail ? COIL_TX_TYPES.QC_CHECK_FAIL : COIL_TX_TYPES.QC_CHECK_PASS,
+      transaction_type: storedOverall === "fail" ? COIL_TX_TYPES.QC_CHECK_FAIL : COIL_TX_TYPES.QC_CHECK_PASS,
       source_module: "qc_check",
       source_id: String(checkId),
       user_name: inspectorName,
       user_id: req.user?.id,
-      rows: [coil],
+      rows: [primaryCoil], // Log against primary coil for simplicity
       details: {
         qc_check_uid: checkId,
         status: overallStatus,
         failure_reason: failure_reason || null,
         qc_reject_uid: null,
         is_edit: isEditSubmit,
-        has_mismatch: anyFail,
+        has_mismatch: storedOverall === "fail",
+        overall_result: storedOverall,
         failed_specs: evaluated.filter((e) => e.result === "fail").map((e) => e.spec_name),
+        batch_count: targetCoilUids.length,
       },
     });
 
     const data = await buildCheckDetail(checkId);
     log(req, isEditSubmit ? "resubmit" : "submit", String(checkId), {
       qc_check_uid: checkId,
-      coil_no_uid: coil.coil_no_uid,
-      mrn_no: coil.mrn_no ?? null,
-      item_code: coil.item_code ?? null,
+      coil_no_uid: primaryCoil.coil_no_uid,
+      mrn_no: primaryCoil.mrn_no ?? null,
+      item_code: primaryCoil.item_code ?? null,
       status: overallStatus,
       failure_reason: failure_reason || null,
-      has_mismatch: anyFail,
+      has_mismatch: storedOverall === "fail",
+      overall_result: storedOverall,
       failed_specs: evaluated.filter((e) => e.result === "fail").map((e) => e.spec_name),
+      batch_count: targetCoilUids.length,
     }, data);
     return res.json({
       success: true,
       data,
       message: isEditSubmit
         ? "QC check updated and is awaiting approval."
-        : anyFail
+        : storedOverall === "fail"
           ? "QC check submitted with mismatches and is awaiting approval."
-          : "QC check submitted and is awaiting approval.",
+          : `QC check submitted for ${targetCoilUids.length} coils and is awaiting approval.`,
     });
   } catch (err) {
     const code = err.statusCode || 500;
@@ -635,10 +842,17 @@ export const approveQcCheck = async (req, res) => {
     }
 
     const user = auditUserName(req);
-    const coil = await findCoilByUid(check.coil_no_uid);
+    
+    // In batch checks, coil_no_uid might be a comma-separated list
+    let primaryUid = String(check.coil_no_uid || "").split(",")[0]?.trim();
+    const coil = await findCoilByUid(primaryUid);
     if (!coil) {
-      return res.status(400).json({ success: false, message: `Coil ${check.coil_no_uid} was not found.` });
+      return res.status(400).json({ success: false, message: `Primary coil ${primaryUid} was not found.` });
     }
+
+    // Find all coils linked to this check (important for batch-wise approval)
+    const finalCoilUids = await findCoilUidsByQcCheck(id);
+    const coilList = finalCoilUids.length > 0 ? finalCoilUids : [primaryUid];
 
     const { approvedSpecs } = await loadApprovedSpecs(check.item_dcode, check.item_code);
 
@@ -680,18 +894,17 @@ export const approveQcCheck = async (req, res) => {
     for (const spec of approvedSpecs) {
       const prior = priorBySpec.get(Number(spec.spec_id)) || {};
       const input = usePriorOnly ? prior : bySpecId.get(Number(spec.spec_id)) || {};
-      const actual_value =
+      let actual_value =
         input.actual_value != null ? String(input.actual_value).trim() : String(prior.actual_value || "").trim();
+      if (actual_value && String(spec.spec_type || "").toLowerCase() === "dropdown") {
+        actual_value = actual_value.toUpperCase();
+      }
       const uploaded = fileBySpecId.get(Number(spec.spec_id));
-      const document_note = uploaded
-        ? uploaded.name
-        : input.document_note != null
-          ? String(input.document_note).trim()
-          : prior.document_note
-            ? String(prior.document_note).trim()
-            : "";
-      const document_path =
-        uploaded?.path || (String(prior.document_note || "").startsWith("uploads/") ? prior.document_note : null);
+      const document_note = resolveQcDocumentNote(
+        uploaded,
+        input.document_note,
+        prior.document_note,
+      );
 
       if (!actual_value) anyEmpty = true;
 
@@ -704,7 +917,7 @@ export const approveQcCheck = async (req, res) => {
         if (result === "fail") anyFail = true;
       }
 
-      if (spec.document_required === true && !document_note && !document_path) {
+      if (spec.document_required === true && !document_note) {
         return res.status(400).json({
           success: false,
           message: `A document upload is required for specification ${spec.spec_name || spec.spec_id}.`,
@@ -717,6 +930,9 @@ export const approveQcCheck = async (req, res) => {
         type: spec.type,
         spec_name: spec.spec_name,
         print_val: spec.print_val,
+        inspection_method: spec.inspection_method
+          ? String(spec.inspection_method).trim().toUpperCase()
+          : null,
         spec_type: spec.spec_type,
         min_value: spec.min_value,
         max_value: spec.max_value,
@@ -724,7 +940,7 @@ export const approveQcCheck = async (req, res) => {
         incorrect_option: spec.incorrect_option,
         document_required: spec.document_required === true,
         actual_value: actual_value || null,
-        document_note: document_path || document_note || null,
+        document_note,
         result,
         eval_message: message || null,
       });
@@ -758,54 +974,57 @@ export const approveQcCheck = async (req, res) => {
     }
     if (!anyFail) failure_reason = "";
 
-    // Super Admin may override overall Pass / Fail on Approve.
-    const isSuperAdmin =
-      String(req.user?.type || req.user?.role || "").toLowerCase() === "super_admin";
-    const overrideRaw = String(req.body?.overall_result || "").trim().toLowerCase();
-    let forceFail = anyFail;
-    if (isSuperAdmin && (overrideRaw === "pass" || overrideRaw === "fail")) {
-      forceFail = overrideRaw === "fail";
-      if (forceFail && !failure_reason) {
-        failure_reason = anyFail
-          ? failure_reason
-          : "Forced fail by Super Admin";
-      }
-      if (!forceFail) failure_reason = "";
+    if (
+      req.body?.overall_result != null &&
+      String(req.body.overall_result).trim() !== "" &&
+      !isSuperAdminUser(req)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Only Super Admin can change the overall QC result.",
+      });
     }
+
+    const overallResult = resolveOverallResult(evaluated, {
+      bodyOverride: req.body?.overall_result,
+      isSuperAdmin: isSuperAdminUser(req),
+      anyFail,
+    });
+    const forceFail = overallResult === "fail";
+    if (forceFail && !failure_reason) {
+      failure_reason = anyFail
+        ? failure_reason
+        : "Marked as failed by Super Admin";
+    }
+    if (!forceFail) failure_reason = "";
 
     await replaceQcCheckItems(id, evaluated);
 
     const overallStatus = forceFail ? "failed" : "passed";
 
     if (forceFail) {
-      await markCoilsQcFailPending(id, [check.coil_no_uid], user);
+      await markCoilsQcFailPending(id, coilList, user);
       await updateQcCheck(id, {
         status: "failed",
+        overall_result: overallResult,
+        approved: true,
         failure_reason: failure_reason || null,
         remarks,
-        inspected_by: user,
-        inspected_at: new Date().toISOString(),
-        approved: true,
         approved_by: user,
-        approved_at: new Date().toISOString(),
+        approved_at: new Date(),
         qc_reject_uid: null,
-        updated_by: user,
-        updated_at: new Date().toISOString(),
       });
     } else {
-      await linkCoilsToQcCheck(id, [check.coil_no_uid], "passed", user);
+      await markCoilsQcPassed(id, coilList, user);
       await updateQcCheck(id, {
         status: "passed",
+        overall_result: overallResult,
+        approved: true,
         failure_reason: null,
         remarks,
-        inspected_by: user,
-        inspected_at: new Date().toISOString(),
-        approved: true,
         approved_by: user,
-        approved_at: new Date().toISOString(),
+        approved_at: new Date(),
         qc_reject_uid: null,
-        updated_by: user,
-        updated_at: new Date().toISOString(),
       });
     }
 
@@ -821,8 +1040,8 @@ export const approveQcCheck = async (req, res) => {
         status: overallStatus,
         failure_reason: failure_reason || null,
         approved: true,
-        overall_result: overallStatus,
-        overall_override: isSuperAdmin && (overrideRaw === "pass" || overrideRaw === "fail") ? overrideRaw : null,
+        overall_result: overallResult,
+        batch_count: coilList.length,
       },
     });
 
@@ -835,14 +1054,15 @@ export const approveQcCheck = async (req, res) => {
       status: overallStatus,
       failure_reason: failure_reason || null,
       approved: true,
-      overall_override: isSuperAdmin && (overrideRaw === "pass" || overrideRaw === "fail") ? overrideRaw : null,
+      overall_result: overallResult,
+      batch_count: coilList.length,
     }, data);
     return res.json({
       success: true,
       data,
       message: forceFail
-        ? "QC check approved as failed and now appears in Rejection Pending."
-        : "QC check approved. The coil is now counted in inventory.",
+        ? `QC check approved as failed for ${coilList.length} coils and now appears in Rejection Pending.`
+        : `QC check approved for ${coilList.length} coils. They are now counted in inventory.`,
     });
   } catch (err) {
     const code = err.statusCode || 500;
@@ -872,12 +1092,19 @@ export const reopenQcCheck = async (req, res) => {
 
     const user = auditUserName(req);
 
+    // Find all coils linked to this check
+    const finalCoilUids = await findCoilUidsByQcCheck(id);
+    let coilList = finalCoilUids;
+    if (!coilList.length) {
+      coilList = String(check.coil_no_uid || "").split(",").map(s => s.trim()).filter(Boolean);
+    }
+
     // Failed checks may be linked to QC Rejection — restore coil + soft-delete rejection
     if (status === "failed" && check.qc_reject_uid) {
       await clearCoilsForQcReject(check.qc_reject_uid, user);
       await softDeleteQcRejection(check.qc_reject_uid, user);
     } else {
-      await clearCoilQcLink([check.coil_no_uid], user);
+      await clearCoilQcLink(coilList, user);
     }
 
     await softDeleteQcCheck(id, user);
@@ -887,11 +1114,12 @@ export const reopenQcCheck = async (req, res) => {
       coil_no_uid: check.coil_no_uid,
       previous_status: status,
       qc_reject_uid: check.qc_reject_uid ?? null,
+      batch_count: coilList.length,
     }, check);
 
     return res.json({
       success: true,
-      message: "QC check reopened. The coil is back in Pending for re-inspection.",
+      message: `QC check reopened for ${coilList.length} coils. They are back in Pending for re-inspection.`,
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -919,18 +1147,27 @@ export const deleteQcCheck = async (req, res) => {
     }
 
     const user = auditUserName(req);
+
+    // Find all coils linked to this check
+    const finalCoilUids = await findCoilUidsByQcCheck(id);
+    let coilList = finalCoilUids;
+    if (!coilList.length) {
+      coilList = String(check.coil_no_uid || "").split(",").map(s => s.trim()).filter(Boolean);
+    }
+
     await softDeleteQcCheck(id, user);
-    await clearCoilQcLink([check.coil_no_uid], user);
+    await clearCoilQcLink(coilList, user);
 
     log(req, "delete", String(id), {
       qc_check_uid: id,
       coil_no_uid: check.coil_no_uid,
       previous_status: status,
+      batch_count: coilList.length,
     }, check);
 
     return res.json({
       success: true,
-      message: "QC check deleted successfully. The coil has returned to Pending.",
+      message: `QC check deleted successfully for ${coilList.length} coils. They have returned to Pending.`,
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

@@ -14,7 +14,7 @@ export const initDB = async () => {
     await initCoreDB();
     await initImsDB();
     await initTaskDB();
-    // await initRmStoreDB();
+    await initRmStoreDB();
     await initDashboardDB();
 
     console.log("✅ All Tables Ready");

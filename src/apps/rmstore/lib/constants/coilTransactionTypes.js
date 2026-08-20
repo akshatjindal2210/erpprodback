@@ -26,7 +26,7 @@ export const COIL_TX_TYPE_LABELS = {
   [COIL_TX_TYPES.STICKER_DELETE]: "Stickers — Remove",
   [COIL_TX_TYPES.INWARD_LINK]: "Store In — Add",
   [COIL_TX_TYPES.INWARD_UNLINK]: "Store In — Remove",
-  [COIL_TX_TYPES.STORE_OUT]: "Store Out — Dispatched",
+  [COIL_TX_TYPES.STORE_OUT]: "Store Out — Shop Floor",
   [COIL_TX_TYPES.STORE_OUT_REVERT]: "Store Out — Return",
   [COIL_TX_TYPES.QC_CHECK_PASS]: "QC Check — Pass",
   [COIL_TX_TYPES.QC_CHECK_FAIL]: "QC Check — Fail",
@@ -36,7 +36,7 @@ export const COIL_TX_TYPE_LABELS = {
   [COIL_TX_TYPES.STOCK_ADJUSTMENT_MINUS]: "Adjustment — Remove",
   [COIL_TX_TYPES.STOCK_ADJUSTMENT_ADD_REVERT]: "Adjustment — Remove",
   [COIL_TX_TYPES.STOCK_ADJUSTMENT_MINUS_REVERT]: "Adjustment — Add",
-  [COIL_TX_TYPES.CONSUME]: "Consume — Remove",
-  [COIL_TX_TYPES.CONSUME_REVERT]: "Consume — Add",
+  [COIL_TX_TYPES.CONSUME]: "IPR — Consumed",
+  [COIL_TX_TYPES.CONSUME_REVERT]: "IPR — Consume Reverted",
   [COIL_TX_TYPES.STICKER_DOWNLOAD]: "Stickers — Download",
 };

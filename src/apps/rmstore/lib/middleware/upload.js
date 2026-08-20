@@ -71,3 +71,19 @@ export const rmQcDocUpload = multer({
   limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter,
 });
+
+/** Generic IPR attachments — `{UPLOAD_PATH}/uploads/rmstore/ipr`. */
+const iprStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    const dir = path.join(RM_UPLOAD_ROOT, "ipr");
+    ensureDir(dir);
+    cb(null, dir);
+  },
+  filename: makeFilename("ipr"),
+});
+
+export const rmIprUpload = multer({
+  storage: iprStorage,
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter,
+});

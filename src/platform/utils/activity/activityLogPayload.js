@@ -209,6 +209,29 @@ function formatObjectRef(obj) {
   return null;
 }
 
+function formatObjectSummary(obj, maxPairs = 8) {
+  if (!isPlainObject(obj)) return null;
+  const parts = [];
+  for (const [key, value] of Object.entries(obj)) {
+    const lower = String(key).toLowerCase();
+    if (SENSITIVE_KEYS.has(lower) || SKIP_KEYS.has(lower)) continue;
+    if (value == null || value === "") continue;
+    if (Array.isArray(value)) {
+      if (!value.length) continue;
+      parts.push(`${key}: [${value.length}]`);
+    } else if (isPlainObject(value)) {
+      const ref = formatObjectRef(value);
+      if (ref) parts.push(`${key}: ${ref}`);
+      else parts.push(`${key}: {...}`);
+    } else {
+      const text = String(value).trim();
+      if (text) parts.push(`${key}: ${text}`);
+    }
+    if (parts.length >= maxPairs) break;
+  }
+  return parts.length ? parts.join(", ") : null;
+}
+
 function formatValue(value) {
   if (value === true) return "Yes";
   if (value === false) return "No";
@@ -226,7 +249,7 @@ function formatValue(value) {
     if (parts.length) return parts.join(", ");
     return `${value.length} item(s)`;
   }
-  if (typeof value === "object") return formatObjectRef(value);
+  if (typeof value === "object") return formatObjectRef(value) || formatObjectSummary(value);
   return String(value);
 }
 

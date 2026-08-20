@@ -1,6 +1,6 @@
-import { findQcRejections, findQcRejection, findIncompleteRejectionRegisters, insertQcRejection, updateQcRejection, softDeleteQcRejection, attachRejectionCoils } from "../models/rmRejection.model.js";
+import { findQcRejections, findQcRejection, findIncompleteRejectionRegisters, insertQcRejection, updateQcRejection, softDeleteQcRejection, attachRejectionCoils, hasApprovedRejectionStoreOut } from "../models/rmRejection.model.js";
 import { findInProcessRequest, findInProcessRejectionsPendingRejection, normalizeRequestType, IPR_DOWNSTREAM, IPR_REQUEST_TYPE } from "../../in-process-request/models/inProcessRequest.model.js";
-import { findCoilByUid, linkCoilsToRejectionRegister, revertCoilsFromRejectionRegister, findCoils, updateCoilsAfterQcReject } from "../../coil/models/coil.model.js";
+import { findCoilByUid, findCoilUidsByQcCheck, linkCoilsToRejectionRegister, revertCoilsFromRejectionRegister, findCoils, updateCoilsAfterQcReject } from "../../coil/models/coil.model.js";
 import { findQcCheck, findFailedQcChecksPendingRejection, reopenQcChecksForRejection, linkFailedQcChecksToRejection } from "../../qc-check/models/qcCheck.model.js";
 import { findOutEntry, findOutEntries, buildOutEntryCoilSummary } from "../../out-entry/models/outEntry.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -15,6 +15,23 @@ import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
 const MODULE = "rm_rejection";
 const log = createRmstoreActivityLogger(MODULE);
 
+async function resolveCoilsForQcCheck(check) {
+  const qcCheckUid = Number(check?.qc_check_uid);
+  let coilUidList = Number.isFinite(qcCheckUid) ? await findCoilUidsByQcCheck(qcCheckUid) : [];
+  if (!coilUidList.length) {
+    coilUidList = String(check?.coil_no_uid || "")
+      .split(/[,|]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  const resolved = [];
+  for (const uid of coilUidList) {
+    const coil = await findCoilByUid(uid);
+    if (coil) resolved.push(coil);
+  }
+  return { coilUidList, resolved };
+}
+
 async function findActiveStoreOutForRejection(rejection) {
   const id = Number(rejection?.qc_reject_uid);
   if (!Number.isFinite(id)) return null;
@@ -23,8 +40,52 @@ async function findActiveStoreOutForRejection(rejection) {
     const row = await findOutEntry(outId);
     if (row) return row;
   }
-  const linked = await findOutEntries({ filters: { qc_reject_uid: id }, limit: 1 });
+  const linked = await findOutEntries({ filters: { rm_uid: id }, limit: 1 });
   return linked.data?.[0] ?? null;
+}
+
+/** Save remarks + authorize register for Store Out Pending (no out_entry, no coil pre-fill). */
+async function finalizeRejectionRegisterForStoreOutQueue({ rejectionId, user, remarks, req }) {
+  const rejectId = Number(rejectionId);
+  let rejection = await findQcRejection(rejectId);
+  if (!rejection) {
+    const err = new Error("QC rejection record not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  const existingOut = await findActiveStoreOutForRejection(rejection);
+  if (existingOut?.approved === true) {
+    return { rejection, outEntry: existingOut, out_uid: existingOut.out_uid };
+  }
+  if (existingOut && existingOut.approved !== true) {
+    const err = new Error(`Store Out #${existingOut.out_uid} is already in progress for this rejection.`);
+    err.status = 400;
+    throw err;
+  }
+
+  const rejectionFields = {
+    updated_by: user,
+    updated_at: new Date(),
+    out_uid: null,
+  };
+  if (remarks !== undefined) {
+    rejectionFields.remarks = remarks != null ? String(remarks).trim() || null : null;
+  }
+  if (rejection.approved !== true && req) {
+    applyApprovalWorkflow({
+      req,
+      fields: rejectionFields,
+      incomingApproved: true,
+      hasBusinessChanges: false,
+      auditAsName: true,
+    });
+  }
+
+  await updateQcRejection(rejectId, rejectionFields);
+  rejection = await findQcRejection(rejectId);
+
+  return { rejection, outEntry: null, out_uid: null };
 }
 
 async function loadPendingRejectionQueue({ search, page = 1, limit = 5000 } = {}) {
@@ -160,20 +221,18 @@ export const createQcRejection = async (req, res) => {
       resolved.push(coil);
     }
 
-    const mrnRefs = [...new Set(resolved.map((c) => c.mrn_no).filter((v) => v != null))].join(" | ");
-    const heatNos = [...new Set(resolved.map((c) => c.heat_no).filter(Boolean))].join(" | ");
-    const itemCodes = [...new Set(resolved.map((c) => c.item_code).filter(Boolean))].join(" | ");
-    const total_qty = resolved.reduce((s, c) => s + (Number(c.qty) || 0), 0);
-    const qtys = resolved.map((c) => c.qty ?? "").join(",");
+    const summary = buildOutEntryCoilSummary(resolved);
     const user = auditUserName(req);
 
     const row = await insertQcRejection({
-      mrn_refs: mrnRefs || null,
-      heat_nos: heatNos || null,
-      item_codes: itemCodes || null,
-      qtys,
-      total_qty,
-      coil_count: resolved.length,
+      mrn_refs: summary.mrn_refs,
+      mrn_uids: summary.mrn_uids,
+      heat_nos: summary.heat_nos,
+      item_codes: summary.item_codes,
+      item_descs: summary.item_descs,
+      qtys: summary.qtys,
+      total_qty: summary.total_qty,
+      coil_count: summary.coil_count,
       reason,
       remarks,
       created_by: user,
@@ -201,7 +260,7 @@ export const createQcRejection = async (req, res) => {
     });
 
     const data = await findQcRejection(row.qc_reject_uid);
-    const coils = await findCoils({ filters: { qc_reject_uid: row.qc_reject_uid }, limit: 5000 });
+    const coils = await findCoils({ filters: { rm_uid: row.qc_reject_uid }, limit: 5000 });
     log(req, "create", String(row.qc_reject_uid), {
       qc_reject_uid: row.qc_reject_uid,
       reason,
@@ -256,25 +315,28 @@ export const registerQcRejectionFromCheck = async (req, res) => {
     const normalizedApproved = normalizeApprovedInput(req.body?.approved);
     const user = auditUserName(req);
 
-    const coil = await findCoilByUid(check.coil_no_uid);
-    if (!coil) {
-      return res.status(400).json({ success: false, message: `Coil ${check.coil_no_uid} was not found.` });
+    const { coilUidList, resolved } = await resolveCoilsForQcCheck(check);
+    if (!resolved.length) {
+      return res.status(400).json({ success: false, message: "No coils were found for this QC check." });
     }
+    const summary = buildOutEntryCoilSummary(resolved);
 
     const row = await insertQcRejection({
-      mrn_refs: check.mrn_no != null ? String(check.mrn_no) : null,
-      heat_nos: check.heat_no || null,
-      item_codes: check.item_code || null,
-      qtys: String(check.qty ?? ""),
-      total_qty: check.qty ?? 0,
-      coil_count: 1,
+      mrn_refs: summary.mrn_refs || (check.mrn_no != null ? String(check.mrn_no) : null),
+      mrn_uids: summary.mrn_uids || check.mrn_uid || null,
+      heat_nos: summary.heat_nos || check.heat_no || null,
+      item_codes: summary.item_codes || check.item_code || null,
+      item_descs: summary.item_descs || check.item_desc || null,
+      qtys: summary.qtys,
+      total_qty: summary.total_qty,
+      coil_count: summary.coil_count,
       reason,
       remarks,
       created_by: user,
     });
 
-    await updateCoilsAfterQcReject(row.qc_reject_uid, [check.coil_no_uid], user);
-    await linkFailedQcChecksToRejection(row.qc_reject_uid, [check.coil_no_uid], user);
+    await updateCoilsAfterQcReject(row.qc_reject_uid, coilUidList, user);
+    await linkFailedQcChecksToRejection(row.qc_reject_uid, coilUidList, user);
 
     if (normalizedApproved === true) {
       const fields = {};
@@ -290,15 +352,22 @@ export const registerQcRejectionFromCheck = async (req, res) => {
       source_id: String(row.qc_reject_uid),
       user_name: user,
       user_id: req.user?.id,
-      rows: [coil],
+      rows: resolved,
       details: { qc_reject_uid: row.qc_reject_uid, qc_check_uid: id, reason, from_qc_check: true },
     });
 
     const data = await findQcRejection(row.qc_reject_uid);
-    const coils = await findCoils({ filters: { qc_reject_uid: row.qc_reject_uid }, limit: 5000 });
+    const coils = await findCoils({ filters: { rm_uid: row.qc_reject_uid }, limit: 5000 });
+    log(req, "create_from_qc_check", String(row.qc_reject_uid), {
+      qc_reject_uid: row.qc_reject_uid,
+      qc_check_uid: id,
+      coil_count: resolved.length,
+      reason,
+    }, data);
     return res.status(201).json({
       success: true,
       data: { ...data, coils: coils.data },
+      toast_type: "success",
       message: "Moved to the Rejection Register successfully.",
     });
   } catch (err) {
@@ -307,7 +376,7 @@ export const registerQcRejectionFromCheck = async (req, res) => {
 };
 
 /**
- * Pending failed QC → Rejection Register + Store Out (type RM Rejection).
+ * Pending failed QC → Rejection Register → Store Out Pending (scan/authorize there).
  * body: { qc_check_uid, reason?, remarks?, approved? }
  */
 export const generateStoreOutFromQcCheck = async (req, res) => {
@@ -342,44 +411,50 @@ export const generateStoreOutFromQcCheck = async (req, res) => {
         : check.remarks || `RM Rejection from QC Check #${id}`;
     const user = auditUserName(req);
 
-    const coil = await findCoilByUid(check.coil_no_uid);
-    if (!coil) {
-      return res.status(400).json({ success: false, message: `Coil ${check.coil_no_uid} was not found.` });
+    const { coilUidList, resolved } = await resolveCoilsForQcCheck(check);
+    if (!resolved.length) {
+      return res.status(400).json({ success: false, message: "No coils were found for this QC check." });
     }
-    const coilStatus = String(coil.status || "active").toLowerCase();
-    const qcFailHeld =
-      coilStatus === "rejected" &&
-      !coil.qc_reject_uid &&
-      !coil.out_uid &&
-      (String(coil.qc_check_status || "").toLowerCase() === "failed" ||
-        Number(coil.qc_check_uid) === id);
-    if (coilStatus !== "active" && !qcFailHeld) {
-      return res.status(400).json({
-        success: false,
-        message: `Coil ${check.coil_no_uid} is not available. Its current status is ${coilStatus}.`,
-      });
+    for (const coil of resolved) {
+      const uid = coil.coil_no_uid;
+      const coilStatus = String(coil.status || "active").toLowerCase();
+      const qcFailHeld =
+        coilStatus === "rejected" &&
+        !coil.rm_uid &&
+        !coil.out_uid &&
+        (String(coil.qc_check_status || "").toLowerCase() === "failed" ||
+          Number(coil.qc_uid) === id);
+      if (coilStatus !== "active" && !qcFailHeld) {
+        return res.status(400).json({
+          success: false,
+          message: `Coil ${uid} is not available. Its current status is ${coilStatus}.`,
+        });
+      }
+      if (coil.out_uid) {
+        return res.status(400).json({
+          success: false,
+          message: `Coil ${uid} is already linked to Store Out #${coil.out_uid}.`,
+        });
+      }
     }
-    if (coil.out_uid) {
-      return res.status(400).json({
-        success: false,
-        message: `This coil is already linked to Store Out #${coil.out_uid}.`,
-      });
-    }
+    const summary = buildOutEntryCoilSummary(resolved);
 
     const rejection = await insertQcRejection({
-      mrn_refs: check.mrn_no != null ? String(check.mrn_no) : null,
-      heat_nos: check.heat_no || null,
-      item_codes: check.item_code || null,
-      qtys: String(check.qty ?? ""),
-      total_qty: check.qty ?? 0,
-      coil_count: 1,
+      mrn_refs: summary.mrn_refs || (check.mrn_no != null ? String(check.mrn_no) : null),
+      mrn_uids: summary.mrn_uids || check.mrn_uid || null,
+      heat_nos: summary.heat_nos || check.heat_no || null,
+      item_codes: summary.item_codes || check.item_code || null,
+      item_descs: summary.item_descs || check.item_desc || null,
+      qtys: summary.qtys,
+      total_qty: summary.total_qty,
+      coil_count: summary.coil_count,
       reason,
       remarks,
       created_by: user,
     });
 
-    await linkCoilsToRejectionRegister(rejection.qc_reject_uid, [check.coil_no_uid], user);
-    await linkFailedQcChecksToRejection(rejection.qc_reject_uid, [check.coil_no_uid], user);
+    await linkCoilsToRejectionRegister(rejection.qc_reject_uid, coilUidList, user);
+    await linkFailedQcChecksToRejection(rejection.qc_reject_uid, coilUidList, user);
 
     logCoilTransactionSafe({
       transaction_type: COIL_TX_TYPES.QC_REJECT,
@@ -387,7 +462,7 @@ export const generateStoreOutFromQcCheck = async (req, res) => {
       source_id: String(rejection.qc_reject_uid),
       user_name: user,
       user_id: req.user?.id,
-      rows: [coil],
+      rows: resolved,
       details: {
         qc_reject_uid: rejection.qc_reject_uid,
         qc_check_uid: id,
@@ -398,15 +473,31 @@ export const generateStoreOutFromQcCheck = async (req, res) => {
     });
 
     const rejectionData = await findQcRejection(rejection.qc_reject_uid);
-    const registerCoils = await findCoils({ filters: { qc_reject_uid: rejection.qc_reject_uid }, limit: 5000 });
+    const registerCoils = await findCoils({ filters: { rm_uid: rejection.qc_reject_uid }, limit: 5000 });
+
+    const { outEntry, out_uid } = await finalizeRejectionRegisterForStoreOutQueue({
+      rejectionId: rejection.qc_reject_uid,
+      user,
+      remarks,
+      req,
+    });
+
+    log(req, "generate_store_out", String(rejection.qc_reject_uid), {
+      qc_reject_uid: rejection.qc_reject_uid,
+      qc_check_uid: id,
+      coil_count: coilUidList.length,
+      register_approved: true,
+    }, rejectionData);
 
     return res.status(201).json({
       success: true,
       data: {
-        rejection: rejectionData,
+        rejection: await findQcRejection(rejection.qc_reject_uid),
         coils: registerCoils.data || [],
+        out_entry: outEntry,
+        out_uid,
       },
-      message: "Saved to RM Rejection register. Authorize it to queue Store Out.",
+      message: "Queued in Store Out Pending. Scan coils there, then authorize.",
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -414,7 +505,7 @@ export const generateStoreOutFromQcCheck = async (req, res) => {
 };
 
 /**
- * Approved in-process rejection → Rejection Register + Store Out (type RM Rejection).
+ * Approved in-process rejection → Rejection Register → Store Out Pending (scan/authorize there).
  * body: { ipr_uid, reason?, remarks?, approved? }
  */
 export const generateStoreOutFromInProcessRequest = async (req, res) => {
@@ -463,7 +554,7 @@ export const generateStoreOutFromInProcessRequest = async (req, res) => {
         return res.status(400).json({ success: false, message: `Coil ${uid} was not found.` });
       }
       const status = String(coil.status || "active").toLowerCase();
-      if (status === "rejected" && Number(coil.ipr_uid) === id && !coil.qc_reject_uid) {
+      if (status === "rejected" && Number(coil.ipr_uid) === id && !coil.rm_uid) {
         resolved.push(coil);
         continue;
       }
@@ -480,8 +571,10 @@ export const generateStoreOutFromInProcessRequest = async (req, res) => {
     const rejection = await insertQcRejection({
       ipr_uid: id,
       mrn_refs: summary.mrn_refs,
+      mrn_uids: summary.mrn_uids,
       heat_nos: summary.heat_nos,
       item_codes: summary.item_codes,
+      item_descs: summary.item_descs,
       qtys: summary.qtys,
       total_qty: summary.total_qty,
       coil_count: summary.coil_count,
@@ -511,16 +604,32 @@ export const generateStoreOutFromInProcessRequest = async (req, res) => {
     });
 
     const rejectionData = await findQcRejection(rejection.qc_reject_uid);
-    const registerCoils = await findCoils({ filters: { qc_reject_uid: rejection.qc_reject_uid }, limit: 5000 });
+    const registerCoils = await findCoils({ filters: { rm_uid: rejection.qc_reject_uid }, limit: 5000 });
+
+    const { outEntry, out_uid } = await finalizeRejectionRegisterForStoreOutQueue({
+      rejectionId: rejection.qc_reject_uid,
+      user,
+      remarks,
+      req,
+    });
+
+    log(req, "generate_store_out_ipr", String(rejection.qc_reject_uid), {
+      qc_reject_uid: rejection.qc_reject_uid,
+      ipr_uid: id,
+      coil_count: coilUids.length,
+      register_approved: true,
+    }, rejectionData);
 
     return res.status(201).json({
       success: true,
       data: {
-        rejection: rejectionData,
+        rejection: await findQcRejection(rejection.qc_reject_uid),
         coils: registerCoils.data || [],
         ipr_uid: id,
+        out_entry: outEntry,
+        out_uid,
       },
-      message: "Saved to RM Rejection register. Authorize it to queue Store Out.",
+      message: "Queued in Store Out Pending. Scan coils there, then authorize.",
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -554,7 +663,7 @@ export const approveRejectionRegister = async (req, res) => {
         existing = await updateQcRejection(id, {
           out_uid: null,
           updated_by: user,
-          updated_at: new Date().toISOString(),
+          updated_at: new Date(),
         });
       }
     }
@@ -565,14 +674,11 @@ export const approveRejectionRegister = async (req, res) => {
       existing = await updateQcRejection(id, {
         remarks,
         updated_by: user,
-        updated_at: new Date().toISOString(),
+        updated_at: new Date(),
       });
     }
 
-    const rejectionFields = {
-      updated_by: user,
-      updated_at: new Date().toISOString(),
-    };
+    const rejectionFields = {};
     if (existing.approved !== true) {
       applyApprovalWorkflow({
         req,
@@ -631,11 +737,11 @@ export const deleteQcRejection = async (req, res) => {
       await updateQcRejection(id, {
         out_uid: null,
         updated_by: user,
-        updated_at: new Date().toISOString(),
+        updated_at: new Date(),
       });
     }
 
-    const coils = await findCoils({ filters: { qc_reject_uid: id }, limit: 5000 });
+    const coils = await findCoils({ filters: { rm_uid: id }, limit: 5000 });
     await revertCoilsFromRejectionRegister(id, user);
     if (!existing.ipr_uid) {
       await reopenQcChecksForRejection(id, user);
@@ -651,6 +757,11 @@ export const deleteQcRejection = async (req, res) => {
       rows: coils.data || [],
       details: { qc_reject_uid: id, coil_count: coils.data?.length || 0, returned_to_pending: true },
     });
+    log(req, "delete", String(id), {
+      qc_reject_uid: id,
+      coil_count: coils.data?.length || 0,
+      reason: existing.reason ?? null,
+    }, existing);
 
     return res.json({
       success: true,
@@ -663,6 +774,7 @@ export const deleteQcRejection = async (req, res) => {
 
 /**
  * Save bill number(s) on an authorized QC rejection (same idea as IMS Forwarding Note).
+ * Allowed after Store Out is authorized; may be updated any number of times.
  * body: { qc_reject_uid, bill_no } — bill_no null/"" clears.
  */
 export const updateQcRejectionBill = async (req, res) => {
@@ -672,26 +784,31 @@ export const updateQcRejectionBill = async (req, res) => {
 
     const existing = await findQcRejection(id);
     if (!existing) return res.status(404).json({ success: false, message: "QC rejection record not found." });
-    if (!existing.approved) {
+    const storeOutApproved = await hasApprovedRejectionStoreOut(id);
+    if (!storeOutApproved) {
       return res.status(400).json({
         success: false,
-        message: "Authorize the RM Rejection register before saving a bill number.",
+        message: "Complete Store Out authorization before saving a bill number.",
       });
-    }
-    if (existing.out_uid) {
-      const outEntry = await findOutEntry(existing.out_uid);
-      if (!outEntry?.approved) {
-        return res.status(400).json({
-          success: false,
-          message: "Complete Store Out authorization before saving a bill number.",
-        });
-      }
     }
 
     const bill_no =
       req.body?.bill_no === null || req.body?.bill_no === undefined
         ? null
         : String(req.body.bill_no).trim() || null;
+
+    const previous =
+      existing.bill_no === null || existing.bill_no === undefined
+        ? null
+        : String(existing.bill_no).trim() || null;
+
+    if (previous === bill_no) {
+      return res.json({
+        success: true,
+        data: existing,
+        message: "No change",
+      });
+    }
 
     const user = auditUserName(req);
     await updateQcRejection(id, {
@@ -701,11 +818,16 @@ export const updateQcRejectionBill = async (req, res) => {
     });
 
     const data = await findQcRejection(id);
+    log(req, "update_bill", String(id), {
+      qc_reject_uid: id,
+      old_values: { bill_no: previous },
+      new_values: { bill_no },
+    }, data);
     return res.json({
       success: true,
       data,
       message: data?.bill_no
-        ? "Bill saved. RM Rejection is complete."
+        ? "Bill number(s) saved successfully."
         : "Bill number cleared successfully.",
     });
   } catch (err) {

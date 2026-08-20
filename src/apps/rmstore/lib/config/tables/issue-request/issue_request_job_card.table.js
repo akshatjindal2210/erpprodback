@@ -1,4 +1,5 @@
 import dbQuery from "../../../../../../config/db/db.js";
+import { patchTableSchema, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
 /** One row per job card — FG/RM mapping, qty, and assigned coils (JSONB). */
@@ -19,6 +20,8 @@ export async function createRmStoreIssueRequestJobCardTable() {
       production_id    INTEGER,
       planqty          NUMERIC DEFAULT 0,
       issue_qty        NUMERIC DEFAULT 0,
+      part_weight      NUMERIC DEFAULT 0,
+      rm_weight        NUMERIC DEFAULT 0,
       coil_count       INTEGER DEFAULT 0,
       coils            JSONB NOT NULL DEFAULT '[]'::jsonb,
       is_deleted       BOOLEAN DEFAULT false,

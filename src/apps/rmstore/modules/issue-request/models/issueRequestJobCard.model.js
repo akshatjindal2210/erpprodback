@@ -35,17 +35,28 @@ export function jobCardRowToApi(row) {
     production_id: row.production_id ?? null,
     planqty: row.planqty ?? 0,
     issue_qty: row.issue_qty ?? 0,
+    part_weight: row.part_weight ?? 0,
+    rm_weight: row.rm_weight ?? 0,
     coils,
   };
 }
 
 function normalizeCoilPayload(raw) {
   return normalizeJsonArray(raw)
-    .map((c) => ({
-      coil_no_uid: String(c?.coil_no_uid || "").trim(),
-      qty: c?.qty ?? 0,
-    }))
-    .filter((c) => c.coil_no_uid);
+    .map((c) => {
+      const coil_no_uid = String(c?.coil_no_uid || "").trim();
+      if (!coil_no_uid) return null;
+      const qty = Number(c?.qty);
+      const mrn_uid = c?.mrn_uid != null && String(c.mrn_uid).trim() !== "" ? String(c.mrn_uid).trim() : null;
+      const mrn_no = c?.mrn_no != null && String(c.mrn_no).trim() !== "" ? c.mrn_no : null;
+      return {
+        coil_no_uid,
+        qty: Number.isFinite(qty) ? qty : 0,
+        ...(mrn_uid ? { mrn_uid } : {}),
+        ...(mrn_no != null ? { mrn_no } : {}),
+      };
+    })
+    .filter(Boolean);
 }
 
 function jobCardPayloadToRow(issue_uid, raw, userName) {
@@ -64,6 +75,8 @@ function jobCardPayloadToRow(issue_uid, raw, userName) {
     production_id: raw?.production_id ?? null,
     planqty: Number(raw?.planqty ?? raw?.plan_qty ?? 0) || 0,
     issue_qty: Number(raw?.issue_qty ?? 0) || 0,
+    part_weight: Number(raw?.part_weight ?? 0) || 0,
+    rm_weight: Number(raw?.rm_weight ?? 0) || 0,
     coil_count: coils.length,
     coils: JSON.stringify(coils),
     created_by: userName ?? null,
@@ -113,8 +126,8 @@ export const insertIssueRequestJobCard = async (data, { client = null } = {}) =>
     `INSERT INTO ${TABLE}
      (issue_uid, pjobcardno, pldt, macname, item_dcode, item_code, item_desc,
       rm_item_dcode, rm_item_code, rm_item_desc, production_id,
-      planqty, issue_qty, coil_count, coils, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16)
+      planqty, issue_qty, part_weight, rm_weight, coil_count, coils, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18)
      RETURNING *`,
     [
       data.issue_uid,
@@ -130,6 +143,8 @@ export const insertIssueRequestJobCard = async (data, { client = null } = {}) =>
       data.production_id,
       data.planqty,
       data.issue_qty,
+      data.part_weight,
+      data.rm_weight,
       data.coil_count,
       data.coils,
       data.created_by,

@@ -178,7 +178,9 @@ export const findBoxes = async (options = {}) => {
       b.in_uid::TEXT ILIKE $${searchIndex} OR
       b.out_uid::TEXT ILIKE $${searchIndex} OR
       lm.rack_no::TEXT ILIKE $${searchIndex} OR
-      lm.location_no::TEXT ILIKE $${searchIndex}
+      lm.location_no::TEXT ILIKE $${searchIndex} OR
+      dp.job_card_no::TEXT ILIKE $${searchIndex} OR
+      sa.job_card_no::TEXT ILIKE $${searchIndex}
     )`;
 
     if (isSearchNumeric) {

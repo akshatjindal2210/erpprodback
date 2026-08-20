@@ -1,513 +1,548 @@
 /**
- * RM Coil sticker print design — separate from IMS box stickers.
- * Visual layout is portrait (100mm × 150mm) as used by RM MRN stickers.
+ * RM coil + QC sticker (85×65 mm). One layout for both; only title / QR payload differ.
+ *
+ * Flow: mrn.routes → coilStickerPrint.controller → buildStickerDocs (here) → HTML
+ * Change size → RM_STICKER_*_MM. Change fields/order → LAYOUT.rows / bottomLeft.
+ * Change QR / caption under QR → LAYOUT.qr
  */
+import fs from "fs";
+import path from "path";
 import QRCode from "qrcode";
-import { findSpecItemDetail } from "../../modules/spec/models/specMaster.model.js";
+import { findSpecItemDetail, findSpecItemDetailByItemCode, findSpecItemDetailByItemDesc } from "../../modules/spec/models/specMaster.model.js";
 
-const STICKER_WIDTH_MM = 100;
-const STICKER_HEIGHT_MM = 150;
-const STICKER_SIZE_MM = `${STICKER_WIDTH_MM}mm ${STICKER_HEIGHT_MM}mm`;
+export const RM_STICKER_WIDTH_MM = 65;
+export const RM_STICKER_HEIGHT_MM = 85;
 
-const escapeHtmlText = (s) =>
+export function rmStickerSize() {
+  return { width_mm: RM_STICKER_WIDTH_MM, height_mm: RM_STICKER_HEIGHT_MM };
+}
+
+const EMPTY = "—";
+const W = RM_STICKER_WIDTH_MM;
+const H = RM_STICKER_HEIGHT_MM;
+
+/**
+ * Edit LAYOUT to change sticker design.
+ * - rows / bottomLeft → fields & order
+ * - qr → QR size + text under QR (bigger/smaller = change these numbers only)
+ */
+const LAYOUT = {
+  rows: [
+    { kind: "header" },
+    {
+      kind: "field",
+      label: "Condition",
+      key: "condition",
+      cls: "st-condition",
+    },
+    {
+      kind: "split",
+      left: { label: "Grade", key: "grade", cls: "st-condition" },
+      right: { label: "Size", key: "size" },
+    },
+    { kind: "field", label: "Heat No", key: "lotNo" },
+    { kind: "field", label: "Vendor", key: "vendor", wrap: true },
+    { kind: "field", label: "Item", key: "itemCode" },
+    { kind: "field", label: "Item Description", key: "itemDesc", wrap: true },
+    { kind: "bottom" },
+    { kind: "footer" },
+  ],
+  bottomLeft: [
+    { label: "MRN UID", key: "mrnUid" },
+    { label: "MRN Date", key: "mrnDate" },
+    { label: "Coil No", key: "coilNo" },
+    { label: "Wt.(Kg)", key: "qty" },
+  ],
+  /** Bottom metadata — no border. align: "left" | "center" | "right" */
+  meta: {
+    align: "left",
+  },
+  /** QR block — change numbers here only. */
+  qr: {
+    sizeMm: 22,
+    captionFontPx: 5.5,
+    captionMaxHeightMm: 3.5,
+    captionGapMm: 0.25,
+  },
+};
+
+// ── helpers ───────────────────────────────────────────────────────────────
+
+const esc = (s) =>
   String(s ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 
-const sanitizePrintFilenamePart = (s) =>
-  String(s ?? "")
-    .trim()
-    .replace(/[\\/:*?"<>|]/g, "-");
-
-const DUMMY_STICKER_VALUES = Object.freeze({
-  item_code: "PD-04",
-  top_date: "A-3-Jan-23",
-  grade: "MIX GRADE (SHORT COIL) F4",
-  base_size: "5.50 mm",
-  finish_size: "2.38 mm",
-  condition: "HRP COAT",
-  next_process: "FAD",
-  next_department: "BY PASS",
-  work_order_no: "IF227-0003",
-  customer: "FINE WIRE",
-  operator_code: "1853",
-  operator_name: "RAM GOPAL",
-  lot_no: "BA-27 ONLY",
-  right_panel_code: "BW/LC/25",
-  coil_no_uid: "26_3701_1_01_01",
-  qr_fallback_uid: "26_3701_1_01_01",
-  qty: 525,
-  unit: "KGS",
-});
-
-function withDummy(value, fallback) {
-  const s = value == null ? "" : String(value).trim();
-  return s ? s : fallback;
-}
-
-/** Preview uses layout placeholders; real prints show "—" when a field is missing. */
-function displayField(value, fallback, { preview = false } = {}) {
-  const s = value == null ? "" : String(value).trim();
-  if (s && s !== "—") return s;
-  return preview ? fallback : "—";
-}
-
-const formatStickerTopDate = (v) => {
-  if (v == null || String(v).trim() === "") return "--";
-  const d = new Date(v);
-  if (!Number.isNaN(d.getTime())) {
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    return `${d.getDate()}-${months[d.getMonth()]}-${String(d.getFullYear()).slice(-2)}`;
-  }
-  const s = String(v).trim();
-  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);
-  if (m) {
-    const day = Number(m[1]);
-    const mon = Number(m[2]);
-    const year = m[3];
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    return `${day}-${months[Math.max(0, Math.min(11, mon - 1))]}-${year.slice(-2)}`;
-  }
-  return s;
+const text = (v) => {
+  const s = v == null ? "" : String(v).trim();
+  return s && s !== EMPTY ? s : "";
 };
 
-/** Map MRN + coil (or preview sample) → print-row fields used by the design.
- *  Preview (no real coil uid / sa) may fill dummy layout placeholders.
- *  Real coils (MRN or Stock Adjustment) use live fields; missing → "—".
- */
-export function mapCoilToStickerPrintRow(coil = {}, mrn = {}, opts = {}) {
-  const hasRealCoil =
-    Boolean(coil.coil_uid) ||
-    Boolean(coil.sa_id) ||
-    Boolean(String(coil.coil_no_uid || "").trim());
-  const fillDummy = opts.fillDummy === true || (!hasRealCoil && opts.fillDummy !== false);
-  const blank = (val, dummy) => {
-    const s = val == null ? "" : String(val).trim();
+const show = (v) => text(v) || EMPTY;
+
+const first = (...vals) => {
+  for (const v of vals) {
+    const s = text(v);
     if (s) return s;
-    return fillDummy ? dummy : "—";
-  };
+  }
+  return EMPTY;
+};
 
+function fmtTs(v) {
+  const d = v == null || String(v).trim() === "" ? new Date() : new Date(v);
+  if (Number.isNaN(d.getTime())) return EMPTY;
+  const p = (n) => String(n).padStart(2, "0");
+  const h24 = d.getHours();
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(h24 % 12 || 12)}:${p(d.getMinutes())} ${h24 >= 12 ? "PM" : "AM"}`;
+}
+
+function fmtDate(v) {
+  const d = v == null || String(v).trim() === "" ? null : new Date(v);
+  if (!d || Number.isNaN(d.getTime())) return EMPTY;
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`;
+}
+
+function coilIndex(uid) {
+  const last = String(uid || "")
+    .split("_")
+    .filter(Boolean)
+    .pop();
+  const n = Number(last);
+  return Number.isFinite(n) && n > 0 ? String(n) : EMPTY;
+}
+
+let logoB64 = null;
+try {
+  const p = path.join(process.cwd(), "logo.png");
+  if (fs.existsSync(p))
+    logoB64 = `data:image/png;base64,${fs.readFileSync(p).toString("base64")}`;
+} catch (e) {
+  console.error("Error reading logo.png:", e);
+}
+
+// ── data mapping ──────────────────────────────────────────────────────────
+
+export function mapCoilToStickerPrintRow(coil = {}, mrn = {}) {
   const qty = Number(coil.qty ?? 0);
-  const unit =
-    String(coil.it_unit ?? mrn.it_unit ?? "").trim() ||
-    (fillDummy ? DUMMY_STICKER_VALUES.unit : "KG");
-
-  const saLabel =
-    coil.sa_id != null ? `SA-${coil.sa_id}` : "";
-  const packing =
-    String(coil.mrn_no ?? mrn.mrn_no ?? "").trim() ||
-    saLabel ||
-    blank(null, DUMMY_STICKER_VALUES.right_panel_code);
-
+  const packing = first(
+    coil.mrn_no,
+    mrn.mrn_no,
+    coil.sa_id != null ? `SA-${coil.sa_id}` : "",
+  );
+  const unit = first(coil.it_unit, mrn.it_unit, "KG");
   return {
-    acc_name: blank(coil.acc_name ?? mrn.acc_name, DUMMY_STICKER_VALUES.customer),
-    item_code: blank(coil.item_code ?? mrn.item_code, DUMMY_STICKER_VALUES.item_code),
-    itemdesc: blank(coil.item_desc ?? mrn.item_desc, DUMMY_STICKER_VALUES.grade),
-    qty: Number.isFinite(qty) && qty > 0 ? Math.round(qty) : fillDummy ? DUMMY_STICKER_VALUES.qty : 0,
-    unit,
+    acc_name: first(coil.acc_name ?? mrn.acc_name),
+    item_code: first(coil.item_code ?? mrn.item_code),
+    itemdesc: first(coil.item_desc ?? mrn.item_desc),
+    qty: Number.isFinite(qty) && qty > 0 ? Math.round(qty) : 0,
+    unit: unit === EMPTY ? "KG" : unit,
+    mrn_no: packing,
+    mrn_uid: first(coil.mrn_uid ?? mrn.uid ?? mrn.mrn_uid),
     packing_number: packing,
     doc_dt: coil.mrn_dt ?? mrn.mrn_dt ?? coil.created_at ?? null,
-    job_no: blank(coil.heat_no || mrn.it_lot_no, DUMMY_STICKER_VALUES.qr_fallback_uid),
-    party_rate_cust_code: null,
-    coil_no_uid: blank(coil.coil_no_uid, DUMMY_STICKER_VALUES.coil_no_uid),
+    coil_no_uid: first(coil.coil_no_uid),
     coil_uid: coil.coil_uid ?? null,
-    lot_no: blank(coil.it_lot_no ?? mrn.it_lot_no ?? coil.heat_no, DUMMY_STICKER_VALUES.lot_no),
-    grade: blank(coil.grade ?? mrn.grade ?? coil.item_desc ?? mrn.item_desc, DUMMY_STICKER_VALUES.grade),
-    base_size: blank(coil.base_size ?? mrn.base_size, DUMMY_STICKER_VALUES.base_size),
-    finish_size: blank(coil.finish_size ?? mrn.finish_size, DUMMY_STICKER_VALUES.finish_size),
-    condition: blank(coil.condition ?? mrn.condition, DUMMY_STICKER_VALUES.condition),
-    next_process: blank(coil.next_process ?? mrn.next_process, DUMMY_STICKER_VALUES.next_process),
-    next_department: blank(coil.next_department ?? mrn.next_department, DUMMY_STICKER_VALUES.next_department),
-    work_order_no: blank(coil.work_order_no ?? mrn.work_order_no, DUMMY_STICKER_VALUES.work_order_no),
-    operator_code: blank(coil.operator_code ?? mrn.operator_code, DUMMY_STICKER_VALUES.operator_code),
-    operator_name: blank(coil.operator_name ?? mrn.operator_name, DUMMY_STICKER_VALUES.operator_name),
-    box_no_uid: coil.coil_no_uid || "",
+    lot_no: first(coil.it_lot_no ?? mrn.it_lot_no ?? coil.heat_no),
+    grade: first(coil.grade ?? mrn.grade),
+    base_size: first(coil.base_size ?? mrn.base_size),
+    finish_size: first(coil.finish_size ?? mrn.finish_size),
+    condition: first(coil.condition ?? mrn.condition),
+    next_process: first(coil.next_process ?? mrn.next_process),
+    next_department: first(coil.next_department ?? mrn.next_department),
+    work_order_no: first(coil.work_order_no ?? mrn.work_order_no),
+    operator_code: first(coil.operator_code ?? mrn.operator_code),
+    operator_name: first(coil.operator_name ?? mrn.operator_name),
+    box_no_uid: text(coil.coil_no_uid) || "",
     box_uid: coil.coil_uid ?? null,
+    created_by: first(
+      coil.created_by ??
+        coil.created_by_name ??
+        mrn.created_by_name ??
+        mrn.created_by,
+    ),
+    created_at: coil.created_at ?? mrn.created_at ?? null,
+    total_coils: Number.isFinite(Number(coil.total_coils))
+      ? Number(coil.total_coils)
+      : null,
   };
 }
 
-/** RM Spec Master → sticker fields (print time only; nothing saved on coil). */
-export async function loadSpecStickerFields(item_dcode) {
-  const item = Number(item_dcode);
-  if (!Number.isFinite(item) || item <= 0) return {};
+function specFieldKey(nameRaw) {
+  const n = String(nameRaw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\./g, "")
+    .replace(/\s+/g, " ");
+  if (!n) return null;
+  if (n.includes("finish size") || n === "finish") return "finish_size";
+  if (n.includes("base size") || n === "size") return "base_size";
+  if (n.includes("next proc")) return "next_process";
+  if (n.includes("next dep")) return "next_department";
+  if (n.includes("wo no") || n.includes("work order")) return "work_order_no";
+  if (n.includes("op code") || n.includes("operator code"))
+    return "operator_code";
+  if (n.includes("op name") || n.includes("operator name"))
+    return "operator_name";
+  if (n.includes("condition")) return "condition";
+  if (n.includes("grade")) return "grade";
+  return null;
+}
 
-  const detail = await findSpecItemDetail(item);
+export async function loadSpecStickerFields(item_dcode, item_code = null, item_desc = null) {
+  const id = Number(item_dcode);
+  let detail = Number.isFinite(id) && id > 0 ? await findSpecItemDetail(id) : null;
+  if (!detail && item_code)
+    detail = await findSpecItemDetailByItemCode(item_code);
+  if (!detail && item_desc)
+    detail = await findSpecItemDetailByItemDesc(item_desc);
+  if (!detail && item_code && item_code !== item_desc)
+    detail = await findSpecItemDetailByItemDesc(item_code);
   if (!detail) return {};
 
   const out = {};
-  if (detail.grade) out.grade = String(detail.grade).trim();
-  if (detail.condition) out.condition = String(detail.condition).trim();
-  if (detail.size) out.base_size = String(detail.size).trim();
-
-  for (const line of detail.specs || []) {
-    const val = String(line.print_val || "").trim();
-    const name = String(line.spec_name || "").trim().toLowerCase();
-    if (!val || !name) continue;
-    if (name.includes("finish")) out.finish_size = val;
-    else if (name.includes("next proc")) out.next_process = val;
-    else if (name.includes("next dep")) out.next_department = val;
-    else if (name.includes("work order") || name === "wo no") out.work_order_no = val;
-    else if (name.includes("op name") || name.includes("operator name")) out.operator_name = val;
-    else if (name.includes("op code") || name.includes("operator code")) out.operator_code = val;
-    else if (name.includes("base size")) out.base_size = val;
-    else if (name.includes("grade")) out.grade = val;
-    else if (name.includes("condition")) out.condition = val;
+  for (const [k, src] of [
+    ["grade", detail.grade],
+    ["condition", detail.condition],
+    ["base_size", detail.size],
+    ["condition_color", detail.condition_color],
+    ["grade_color", detail.grade_color],
+  ]) {
+    const v = text(src);
+    if (v) out[k] = v;
   }
-
+  for (const line of detail.specs || []) {
+    const val = text(line.print_val);
+    const field = specFieldKey(line.spec_name);
+    if (val && field) out[field] = val;
+  }
   return out;
 }
 
-/** Coil + MRN + optional spec snapshot → print row (pass `spec` in bulk to skip re-fetch). */
+export async function resolveSpecStickerFields(coil = {}, mrn = {}) {
+  return loadSpecStickerFields(
+    coil.item_dcode ?? mrn.item_dcode ?? null,
+    coil.item_code ?? mrn.item_code ?? null,
+    coil.item_desc ?? mrn.item_desc ?? null,
+  );
+}
+
 export function buildCoilStickerPrintRow(coil = {}, mrn = {}, opts = {}) {
   const spec = opts.spec || {};
-  const { isQc = false, ...mapOpts } = opts;
+  const mapped = mapCoilToStickerPrintRow(
+    { ...spec, ...coil },
+    { ...spec, ...mrn },
+  );
   return {
-    ...mapCoilToStickerPrintRow({ ...spec, ...coil }, { ...spec, ...mrn }, mapOpts),
-    ...(isQc ? { is_qc: true, sticker_kind: "qc" } : {}),
+    ...mapped,
+    created_by: first(opts.created_by, mapped.created_by),
+    created_at: opts.created_at ?? mapped.created_at ?? new Date(),
+    ...(opts.isQc ? { is_qc: true, sticker_kind: "qc" } : {}),
   };
 }
 
 export function buildCoilStickerPrintDocumentTitle(mrnNo) {
-  const pn = sanitizePrintFilenamePart(mrnNo);
+  const pn = String(mrnNo ?? "")
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, "-");
   return pn ? `MRN No. ${pn}` : "MRN Coil Stickers";
 }
 
-export function buildCoilStickerPreviewDocument(cardHtml) {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Sticker preview</title>
-<style>
-  html, body {
-    margin: 0;
-    padding: 0;
-    width: ${STICKER_WIDTH_MM}mm;
-    height: ${STICKER_HEIGHT_MM}mm;
-    overflow: hidden;
-    background: #edecec45;
-    box-sizing: border-box;
-  }
-  body {
-    display: block;
-    line-height: 1.2;
-  }
-  body > div {
-    width: ${STICKER_WIDTH_MM}mm;
-    height: ${STICKER_HEIGHT_MM}mm;
-    box-sizing: border-box;
-  }
-  #html-content-holder{
-    display:grid;
-    grid-template-rows: 7mm 16mm 12mm 12mm 12mm 12mm 12mm minmax(0,1fr);
-  }
-  #html-content-holder *{ box-sizing:border-box; color:#000; }
-  .st-row{ display:flex; min-height:0; }
-  .st-box{ border:0.3px solid #000; border-top:none; }
-  .st-box.first{ border-top:0.3px solid #000; }
-  .st-col6{ width:50%; min-width:0; padding:0.8mm 1.4mm; }
-  .st-col6.l{ border-right:0.3px solid #000; }
-  .st-col12{ width:100%; min-width:0; padding:0.8mm 1.4mm; }
-  .st-label{ font-size:8px; margin:0; line-height:1; font-weight:500; }
-  .st-val{
-    display:block;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:clip;
-    line-height:1;
-  }
-  .st-head{ font-size:5.2mm; font-weight:900; margin-top:0.8mm; }
-  .st-h2{ font-size:4.3mm; font-weight:700; margin-top:0.8mm; }
-  .st-mid{ font-size:4.8mm; font-weight:700; margin-top:0.6mm; }
-  .st-small{ font-size:3.5mm; font-weight:700; margin-top:0.6mm; }
-  .st-bottom{
-    display:flex;
-    min-height:0;
-  }
-  .st-left{
-    width:50%;
-    border-right:0.3px solid #000;
-    display:grid;
-    grid-template-rows: 20mm 18mm minmax(0,1fr);
-    min-height:0;
-  }
-  .st-left-cell{ padding:0.8mm 1.4mm; min-height:0; overflow:hidden; }
-  .st-left-cell + .st-left-cell{ border-top:0.3px solid #000; }
-  .st-right{
-    width:50%;
-    padding:0.8mm 1.4mm;
-    display:flex;
-    flex-direction:column;
-    min-height:0;
-  }
-  .st-rtop{ font-size:3.8mm; font-weight:600; line-height:1; min-height:4.2mm; }
-  .st-qr-wrap{
-    flex:1;
-    display:flex;
-    align-items:flex-start;
-    justify-content:center;
-    padding-top:1mm;
-    overflow:hidden;
-  }
-</style>
-</head>
-<body>
-${cardHtml}
-</body>
-</html>`;
+// ── CSS / HTML ────────────────────────────────────────────────────────────
+
+const CSS = `
+#html-content-holder.rm-sticker{
+  display:grid;
+  grid-template-rows:5.4mm 7.5mm 7.5mm 7.5mm 7.5mm 7.5mm 7.5mm 29.2mm 4.2mm;
+  height:${H}mm;max-height:${H}mm;padding:0.8mm;margin:0 auto;border:none;box-sizing:border-box;
+}
+#html-content-holder.rm-sticker *{box-sizing:border-box;font-family:Arial,Helvetica,sans-serif}
+.rm-sticker .st-row{display:flex;align-items:stretch;min-height:0;max-height:100%;overflow:hidden;width:100%}
+.rm-sticker .st-row.st-footer{overflow:visible;max-height:none;align-items:center}
+.rm-sticker .st-box{border-left:.4px solid #000;border-right:.4px solid #000;border-bottom:.4px solid #000;border-top:none;overflow:hidden;width:100%;min-height:0;background:#fff}
+.rm-sticker .st-box.first{border-top:.4px solid #000}
+
+/* —— label (small/grey) vs value (large/black) —— */
+.rm-sticker .st-label{
+  display:block;margin:0;padding:0;
+  font-size:5.75px;line-height:1.05;font-weight:500;
+  text-transform:uppercase;letter-spacing:.03em;color:#555;
+}
+.rm-sticker .st-val,.rm-sticker .st-val-wrap,.rm-sticker .st-condition,.rm-sticker .st-mid,.rm-sticker .st-ts{
+  display:block;margin:0;padding:0;color:#000;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.rm-sticker .st-val,.rm-sticker .st-val-wrap{
+  font-size:2.15mm;font-weight:800;line-height:1.1;margin-top:.4mm;
+}
+.rm-sticker .st-condition{font-size:2.35mm;font-weight:900;line-height:1.1;margin-top:.4mm}
+.rm-sticker .st-mid{font-size:2.05mm;font-weight:800;line-height:1.1;margin-top:.3mm}
+.rm-sticker .st-ts{font-size:1.7mm;font-weight:700;line-height:1.05;margin-top:0}
+
+/* —— field rows (label above value) —— */
+.rm-field,.rm-half-field{
+  display:flex;flex-direction:column;justify-content:center;
+  padding:.45mm 1.2mm;min-width:0;width:100%;height:100%;
+}
+.rm-sticker .st-col6{width:50%;min-width:0;overflow:hidden;display:flex;flex-direction:column}
+.rm-sticker .st-col6.l{border-right:.4px solid #000}
+
+/* —— header —— */
+.rm-header{align-items:center;padding:0;overflow:hidden}
+.rm-logo,.rm-header-spacer{width:12mm;flex-shrink:0;height:100%}
+.rm-logo{display:flex;align-items:center;justify-content:center;padding:.15mm}
+.rm-logo img{max-width:10.5mm;max-height:4mm;object-fit:contain;filter:grayscale(1) brightness(0)}
+.rm-logo-fallback{font-weight:900;font-size:2.6mm;line-height:1;color:#000}
+.rm-title{
+  flex:1;display:flex;align-items:center;justify-content:center;
+  font-size:2.9mm;font-weight:900;letter-spacing:.05em;text-transform:uppercase;
+  color:#000;line-height:1;min-width:0;height:100%;padding:0 .3mm;
+  overflow:hidden;white-space:nowrap;
 }
 
-export function buildCoilStickerPrintDocument(cards = [], { mrn_no } = {}) {
-  const title = escapeHtmlText(buildCoilStickerPrintDocumentTitle(mrn_no));
-  return `
-    <html>
-      <head>
-        <title>${title}</title>
-        <style>
-          @page { margin: 0; size: ${STICKER_SIZE_MM}; }
-          body { margin: 0; padding: 0; font-family: Arial, sans-serif; background: #edecec45; }
-          .sticker-wrap { display: flex; flex-direction: column; align-items: center; width: 100%; }
-          .sticker-card {
-            page-break-inside: avoid;
-            page-break-after: always;
-            width: ${STICKER_WIDTH_MM}mm;
-            height: ${STICKER_HEIGHT_MM}mm;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-sizing: border-box;
-          }
-          #html-content-holder{
-            display:grid;
-            grid-template-rows: 7mm 16mm 12mm 12mm 12mm 12mm 12mm minmax(0,1fr);
-          }
-          #html-content-holder *{ box-sizing:border-box; color:#000; }
-          .st-row{ display:flex; min-height:0; }
-          .st-box{ border:0.3px solid #000; border-top:none; }
-          .st-box.first{ border-top:0.3px solid #000; }
-          .st-col6{ width:50%; min-width:0; padding:0.8mm 1.4mm; }
-          .st-col6.l{ border-right:0.3px solid #000; }
-          .st-col12{ width:100%; min-width:0; padding:0.8mm 1.4mm; }
-          .st-label{ font-size:8px; margin:0; line-height:1; font-weight:500; }
-          .st-val{
-            display:block;
-            white-space:nowrap;
-            overflow:hidden;
-            text-overflow:clip;
-            line-height:1;
-          }
-          .st-head{ font-size:5.2mm; font-weight:900; margin-top:0.8mm; }
-          .st-h2{ font-size:4.3mm; font-weight:700; margin-top:0.8mm; }
-          .st-mid{ font-size:4.8mm; font-weight:700; margin-top:0.6mm; }
-          .st-small{ font-size:3.5mm; font-weight:700; margin-top:0.6mm; }
-          .st-bottom{
-            display:flex;
-            min-height:0;
-          }
-          .st-left{
-            width:50%;
-            border-right:0.3px solid #000;
-            display:grid;
-            grid-template-rows: 20mm 18mm minmax(0,1fr);
-            min-height:0;
-          }
-          .st-left-cell{ padding:0.8mm 1.4mm; min-height:0; overflow:hidden; }
-          .st-left-cell + .st-left-cell{ border-top:0.3px solid #000; }
-          .st-right{
-            width:50%;
-            padding:0.8mm 1.4mm;
-            display:flex;
-            flex-direction:column;
-            min-height:0;
-          }
-          .st-rtop{ font-size:3.8mm; font-weight:600; line-height:1; min-height:4.2mm; }
-          .st-qr-wrap{
-            flex:1;
-            display:flex;
-            align-items:flex-start;
-            justify-content:center;
-            padding-top:1mm;
-            overflow:hidden;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="sticker-wrap">
-          ${cards.map((c) => `<div class="sticker-card">${c}</div>`).join("")}
-        </div>
-      </body>
-    </html>
-  `;
+/* —— bottom: compact stacked cells + QR —— */
+.rm-sticker .st-bottom{display:flex;height:100%;width:100%;min-height:0}
+.rm-sticker .st-left{
+  width:50%;border-right:.4px solid #000;
+  display:grid;grid-template-rows:repeat(${LAYOUT.bottomLeft.length},1fr);
+  min-height:0;
+}
+.rm-sticker .st-left-cell{
+  min-height:0;overflow:hidden;
+  display:flex;flex-direction:column;justify-content:center;
+  padding:.35mm 1.1mm;gap:0;
+}
+.rm-sticker .st-left-cell + .st-left-cell{border-top:.4px solid #000}
+.rm-sticker .st-left-cell .st-label{font-size:5.5px}
+.rm-sticker .st-left-cell .st-val{margin-top:.25mm}
+
+.rm-sticker .st-right{
+  width:50%;padding:.3mm;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:0;gap:.2mm;
+}
+.rm-sticker .st-qr-wrap{
+  flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  width:100%;overflow:hidden;
+}
+.rm-sticker .st-qr-wrap img{
+  display:block;width:${LAYOUT.qr.sizeMm}mm;height:${LAYOUT.qr.sizeMm}mm;object-fit:contain;
+}
+.rm-sticker .st-qr-uid{
+  font-size:${LAYOUT.qr.captionFontPx}px;font-weight:700;font-family:monospace;
+  line-height:1.5;word-break:break-all;text-align:center;color:#000;
+  margin:0;max-width:100%;overflow:hidden;max-height:${LAYOUT.qr.captionMaxHeightMm}mm;flex-shrink:0;
 }
 
-/**
- * Coil sticker card HTML — same visual structure as IMS box sticker.
- * Change labels/layout here only (does not affect IMS).
- */
-async function buildStickerCardHtmlBase(row, { preview = false } = {}) {
-  const disp = (value, fallback) => displayField(value, fallback, { preview });
+/* —— footer metadata (no border; align via LAYOUT.meta.align) —— */
+.rm-sticker .st-footer{
+  border:none !important;
+  background:transparent;
+  display:flex;align-items:center;gap:2mm;
+  padding:.25mm .5mm .2mm;width:100%;min-height:0;
+  overflow:visible;max-height:none;
+}
+.rm-sticker .st-footer.st-meta-left{justify-content:flex-start}
+.rm-sticker .st-footer.st-meta-center{justify-content:center}
+.rm-sticker .st-footer.st-meta-right{justify-content:flex-end}
+.rm-sticker .st-footer .st-meta-item{
+  display:inline-flex;flex-direction:row;align-items:center;gap:.35mm;
+  min-width:0;max-width:100%;overflow:visible;line-height:1.15;
+}
+.rm-sticker .st-footer .st-label{
+  display:inline;text-transform:none;font-size:4.75px;font-weight:500;
+  flex-shrink:0;color:#666;letter-spacing:0;line-height:1.15;
+}
+.rm-sticker .st-footer .st-val,
+.rm-sticker .st-footer .st-ts{
+  display:inline;flex:0 1 auto;min-width:0;margin-top:0;
+  font-size:1.4mm;font-weight:700;line-height:1.15;color:#111;
+  overflow:visible;text-overflow:clip;
+}
+`;
 
-  const uid = disp(row.coil_no_uid || row.box_no_uid, DUMMY_STICKER_VALUES.coil_no_uid);
-  const isQc = row.is_qc === true || String(row.sticker_kind || "").toLowerCase() === "qc";
-  // QC stickers encode QC|{uid} so inspect gate rejects plain coil / MRN / user scans
-  const qrFallback = preview ? DUMMY_STICKER_VALUES.qr_fallback_uid : "";
-  const qrPayload = isQc
-    ? `QC|${uid || String(row.coil_uid || qrFallback)}`
-    : (uid || String(row.coil_uid || qrFallback));
+function cell(label, value, { wrap = false, cls = "" } = {}) {
+  const vCls = ["st-val", wrap ? "st-val-wrap" : "", cls]
+    .filter(Boolean)
+    .join(" ");
+  return `<span class="st-label">${label}</span><span class="${vCls}">${value}</span>`;
+}
+
+function buildCardHtml(f) {
+  const logo = logoB64 ? `<img src="${logoB64}" alt="" />` : `<div class="rm-logo-fallback">JFL</div>`;
+  const qrMm = LAYOUT.qr.sizeMm;
+  const qr = f.qrUrl
+    ? `<img src="${f.qrUrl}" alt="${esc(f.uid)}" />`
+    : `<div style="width:${qrMm}mm;height:${qrMm}mm;border:1px solid #000;display:flex;align-items:center;justify-content:center;font-size:7px;">QR N/A</div>`;
+
+  const html = LAYOUT.rows
+    .map((row, i) => {
+      const firstCls = i === 0 ? " first" : "";
+      if (row.kind === "header") {
+        return `<div class="st-row st-box${firstCls} rm-header"><div class="rm-logo">${logo}</div><div class="rm-title">${f.title}</div><div class="rm-header-spacer" aria-hidden="true"></div></div>`;
+      }
+      if (row.kind === "field") {
+        return `<div class="st-row st-box${firstCls} rm-field">${cell(row.label, f[row.key], row)}</div>`;
+      }
+      if (row.kind === "split") {
+        return `<div class="st-row st-box${firstCls} st-split">
+          <div class="st-col6 l rm-half-field">${cell(row.left.label, f[row.left.key], row.left)}</div>
+          <div class="st-col6 rm-half-field">${cell(row.right.label, f[row.right.key], row.right)}</div>
+        </div>`;
+      }
+      if (row.kind === "bottom") {
+        const left = LAYOUT.bottomLeft
+          .map(
+            (c) =>
+              `<div class="st-left-cell">${cell(c.label, f[c.key], { cls: "st-mid" })}</div>`,
+          )
+          .join("");
+        return `<div class="st-row st-box${firstCls} st-bottom">
+          <div class="st-left">${left}</div>
+          <div class="st-right"><div class="st-qr-wrap">${qr}</div><div class="st-qr-uid">${esc(f.uid)}</div></div>
+        </div>`;
+      }
+      // if (row.kind === "footer") {
+      //   const alignRaw = String(LAYOUT.meta?.align || "left").toLowerCase();
+      //   const align =
+      //     alignRaw === "center" || alignRaw === "right" ? alignRaw : "left";
+      //   return `<div class="st-row st-footer st-meta-${align}">
+      //     <span class="st-meta-item"><span class="st-label">Created By:</span><span class="st-val st-ts">${f.createdBy}</span></span>
+      //     <span class="st-meta-item"><span class="st-label">Timestamp:</span><span class="st-val st-ts">${f.timestamp}</span></span>
+      //   </div>`;
+      // }
+      if (row.kind === "footer") {
+        const alignRaw = String(LAYOUT.meta?.align || "left").toLowerCase();
+        const align = alignRaw === "center" || alignRaw === "right" ? alignRaw : "left";
+        return `<div class="st-row st-footer st-meta-${align}">
+        <span class="st-meta-item">  
+          <span class="st-val st-ts">${f.createdBy}</span> 
+          <span class="st-label st-ts">||</span>
+          <span class="st-val st-ts">${f.timestamp}</span>
+          </span>
+        </div>`;
+      }
+      return "";
+    })
+    .join("");
+
+  return `<div id="html-content-holder" class="rm-sticker" style="background:#fff;width:${W}mm;height:${H}mm;max-height:${H}mm;border:none;overflow:hidden;box-sizing:border-box;">${html}</div>`;
+}
+
+async function buildCard(row) {
+  const isQc =
+    row.is_qc === true || String(row.sticker_kind || "").toLowerCase() === "qc";
+  const uid = text(row.coil_no_uid || row.box_no_uid || row.coil_uid);
+  const qrPayload = isQc ? (uid ? `QC|${uid}` : "") : uid;
 
   let qrUrl = "";
   try {
     if (qrPayload) {
       qrUrl = await QRCode.toDataURL(qrPayload, {
-        width: 240,
+        width: 320,
         margin: 0,
         color: { dark: "#000000", light: "#ffffff" },
       });
     }
   } catch {
-    qrUrl = "";
+    /* QR N/A */
   }
 
-  const accName = escapeHtmlText(disp(row.acc_name, DUMMY_STICKER_VALUES.customer));
-  const itemCode = escapeHtmlText(disp(row.item_code, DUMMY_STICKER_VALUES.item_code));
-  const lotNo = escapeHtmlText(disp(row.lot_no, DUMMY_STICKER_VALUES.lot_no));
-  const rightTopCode = escapeHtmlText(disp(row.packing_number, DUMMY_STICKER_VALUES.right_panel_code));
-  const safeQty = Number(row.qty);
-  const qtyValue =
-    Number.isFinite(safeQty) && safeQty > 0
-      ? Math.round(safeQty).toLocaleString()
-      : preview
-        ? DUMMY_STICKER_VALUES.qty
-        : "0";
-  const qtyUnit = disp(row.unit, DUMMY_STICKER_VALUES.unit);
-  const qtyText = `${qtyValue}${qtyUnit && qtyUnit !== "—" ? ` ${qtyUnit}` : ""}`;
-  const grade = escapeHtmlText(disp(row.grade || row.itemdesc, DUMMY_STICKER_VALUES.grade));
-  const baseSize = escapeHtmlText(disp(row.base_size, DUMMY_STICKER_VALUES.base_size));
-  const finishSize = escapeHtmlText(disp(row.finish_size, DUMMY_STICKER_VALUES.finish_size));
-  const condition = escapeHtmlText(disp(row.condition, DUMMY_STICKER_VALUES.condition));
-  const nextProcess = escapeHtmlText(disp(row.next_process, DUMMY_STICKER_VALUES.next_process));
-  const nextDepartment = escapeHtmlText(disp(row.next_department, DUMMY_STICKER_VALUES.next_department));
-  const workOrderNo = escapeHtmlText(disp(row.work_order_no, DUMMY_STICKER_VALUES.work_order_no));
-  const operatorCode = escapeHtmlText(disp(row.operator_code, DUMMY_STICKER_VALUES.operator_code));
-  const operatorName = escapeHtmlText(disp(row.operator_name, DUMMY_STICKER_VALUES.operator_name));
-  const computedTopDate = formatStickerTopDate(row.doc_dt);
-  const topDate = escapeHtmlText(
-    disp(computedTopDate === "--" ? "" : computedTopDate, DUMMY_STICKER_VALUES.top_date)
-  );
-  const bannerText = isQc ? (preview ? "QC PREVIEW" : "QC STICKER") : "";
-  const qcBanner = isQc
-    ? preview
-      ? `<div style="width:100%;box-sizing:border-box;background:#b45309;color:#fff;text-align:center;padding:1.8mm 2mm;font-size:4.4mm;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;line-height:1.1;border-bottom:1px solid #000;">${bannerText}</div>`
-      : `<div style="width:100%;box-sizing:border-box;background:#111;color:#fff;text-align:center;padding:1.6mm 2mm;font-size:4.2mm;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;line-height:1.1;border-bottom:1px solid #000;">${bannerText}</div>`
-    : "";
+  const qtyN = Number(row.qty);
+  const qty =
+    Number.isFinite(qtyN) && qtyN > 0
+      ? `${Math.round(qtyN).toLocaleString()}${text(row.unit) ? ` ${text(row.unit)}` : ""}`
+      : EMPTY;
+  const coilNo =
+    isQc && Number(row.total_coils) > 0
+      ? String(row.total_coils)
+      : coilIndex(uid);
 
-  return `
-  <div id="html-content-holder" style="background-color:#edecec45;width:${STICKER_WIDTH_MM}mm;height:${STICKER_HEIGHT_MM}mm;border:1px solid #000;box-sizing:border-box;font-family:Arial,sans-serif;color:#000;overflow:hidden;">
-      ${qcBanner}
-      <div class="st-row st-box first">
-        <div class="st-col6 l">
-          <span class="st-val st-small">${itemCode}</span>
-        </div>
-        <div class="st-col6">
-          <span class="st-val st-small">${topDate}</span>
-        </div>
-      </div>
-      <div class="st-row st-box">
-        <div class="st-col12">
-          <p class="st-label">Grade</p>
-          <span class="st-val st-head">${grade}</span>
-        </div>
-      </div>
-      <div class="st-row st-box">
-        <div class="st-col6 l">
-          <p class="st-label">Base Size</p>
-          <span class="st-val st-h2">${baseSize}</span>
-        </div>
-        <div class="st-col6">
-          <p class="st-label">Finish Size</p>
-          <span class="st-val st-h2">${finishSize}</span>
-        </div>
-      </div>
-      <div class="st-row st-box">
-        <div class="st-col12">
-          <p class="st-label">Condition</p>
-          <span class="st-val st-h2">${condition}</span>
-        </div>
-      </div>
-      <div class="st-row st-box">
-        <div class="st-col6 l">
-          <p class="st-label">Next Proc.</p>
-          <span class="st-val st-mid">${nextProcess}</span>
-        </div>
-        <div class="st-col6">
-          <p class="st-label">Next Dep.</p>
-          <span class="st-val st-mid">${nextDepartment}</span>
-        </div>
-      </div>
-      <div class="st-row st-box">
-        <div class="st-col6 l">
-          <p class="st-label">Wo No</p>
-          <span class="st-val st-mid">${workOrderNo}</span>
-        </div>
-        <div class="st-col6">
-          <p class="st-label">Customer</p>
-          <span class="st-val st-mid">${accName}</span>
-        </div>
-      </div>
-      <div class="st-row st-box">
-        <div class="st-col6 l">
-          <p class="st-label">Op. Code</p>
-          <span class="st-val st-mid">${operatorCode}</span>
-        </div>
-        <div class="st-col6">
-          <p class="st-label">Op. Name</p>
-          <span class="st-val st-mid">${operatorName}</span>
-        </div>
-      </div>
-      <div class="st-row st-box st-bottom">
-        <div class="st-left">
-          <div class="st-left-cell">
-            <p class="st-label">Lot No</p>
-            <span class="st-val st-mid">${lotNo}</span>
-          </div>
-          <div class="st-left-cell">
-            <p class="st-label">Coil No</p>
-            <span class="st-val st-small">${escapeHtmlText(disp(uid, DUMMY_STICKER_VALUES.coil_no_uid))}</span>
-          </div>
-          <div class="st-left-cell">
-            <p class="st-label">Wt.(Kg)</p>
-            <span class="st-val st-mid">${escapeHtmlText(qtyText)}</span>
-          </div>
-        </div>
-        <div class="st-right">
-          <div class="st-val st-rtop">${rightTopCode}</div>
-          <div class="st-qr-wrap">
-          ${qrUrl
-            ? `<img src="${qrUrl}" alt="${escapeHtmlText(uid || DUMMY_STICKER_VALUES.qr_fallback_uid)}" width="118" height="118" style="display:block;" />`
-            : `<div style="width:118px;height:118px;border:1px solid #000;display:flex;align-items:center;justify-content:center;">QR N/A</div>`
-          }
-          </div>
-        </div>
-      </div>
-  </div>
-  `;
+  return buildCardHtml({
+    title: isQc ? "QC Sticker" : "Coil Sticker",
+    condition: esc(show(row.condition)),
+    grade: esc(show(row.grade)),
+    size: esc(show(text(row.base_size) || row.finish_size)),
+    lotNo: esc(show(row.lot_no)),
+    mrnDate: esc(fmtDate(row.doc_dt)),
+    vendor: esc(show(row.acc_name)),
+    itemCode: esc(show(row.item_code)),
+    itemDesc: esc(show(row.itemdesc)),
+    coilNo: esc(coilNo),
+    qty: esc(qty),
+    mrnUid: esc(show(row.mrn_uid)),
+    uid: uid || EMPTY,
+    qrUrl,
+    createdBy: esc(show(row.created_by)),
+    timestamp: esc(fmtTs(row.created_at)),
+  });
 }
 
-/**
- * Preview card HTML.
- * Keep this separate from the print sticker builder so preview can diverge safely.
- */
 export async function buildCoilStickerPreviewCardHtml(row) {
-  return buildStickerCardHtmlBase(row, { preview: true });
+  return buildCard(row);
+}
+
+export async function buildCoilStickerCardHtml(row) {
+  return buildCard(row);
+}
+
+export function buildCoilStickerPreviewDocument(cardHtml) {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/><title>Sticker preview</title>
+<style>html,body{margin:0;padding:0;width:${W}mm;height:${H}mm;overflow:hidden;background:#edecec45;box-sizing:border-box}body{display:block;line-height:1.2}body>div{width:${W}mm;height:${H}mm;box-sizing:border-box}${CSS}</style>
+</head><body>${cardHtml}</body></html>`;
+}
+
+export function buildCoilStickerPrintDocument(cards = [], { mrn_no } = {}) {
+  const title = esc(buildCoilStickerPrintDocumentTitle(mrn_no));
+  return `<html><head><title>${title}</title><style>
+@page{margin:0;size:${W}mm ${H}mm}
+html,body{margin:0;padding:0;width:${W}mm;font-family:Arial,sans-serif;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.sticker-wrap{margin:0;padding:0;width:${W}mm}
+.sticker-card{page-break-inside:avoid;break-inside:avoid;width:${W}mm;height:${H}mm;max-height:${H}mm;overflow:hidden;box-sizing:border-box}
+.sticker-card:not(:last-child){page-break-after:always;break-after:page}
+.sticker-card:last-child{page-break-after:avoid;break-after:avoid}
+${CSS}</style></head><body><div class="sticker-wrap">${cards.map((c) => `<div class="sticker-card">${c}</div>`).join("")}</div></body></html>`;
+}
+
+/** Print window title — QC vs coil. */
+export function buildStickerPrintTitle(mrnNo, { isQc = false, batch = false } = {}) {
+  const base = buildCoilStickerPrintDocumentTitle(mrnNo);
+  if (!isQc) return base;
+  if (batch) return mrnNo ? `MRN No. ${String(mrnNo).trim()} — Batch QC` : "Batch QC Sticker";
+  return mrnNo ? `MRN No. ${String(mrnNo).trim()} — QC` : "QC Sticker";
 }
 
 /**
- * Printable sticker card HTML.
- * Keep this separate from the preview builder so print changes do not affect preview.
+ * One pipeline: coil + mrn → HTML.
+ * Controllers should call this instead of wiring spec/row/card/doc themselves.
  */
-export async function buildCoilStickerCardHtml(row) {
-  return buildStickerCardHtmlBase(row, { preview: false });
+export async function buildStickerDocs(coils, mrn = {}, { isQc = false, createdBy, preview = false } = {}) {
+  const list = Array.isArray(coils) ? coils : [coils];
+  if (!list.length) throw new Error("No coils to print.");
+
+  const spec = await resolveSpecStickerFields(list[0], mrn || {});
+  const cards = [];
+  for (const coil of list) {
+    const row = buildCoilStickerPrintRow(coil, mrn || {}, {
+      isQc,
+      spec,
+      created_by: coil.created_by || createdBy,
+    });
+    cards.push(await buildCard(row));
+  }
+
+  const mrnNo = list[0].mrn_no ?? mrn?.mrn_no;
+  const html = preview
+    ? buildCoilStickerPreviewDocument(cards[0])
+    : buildCoilStickerPrintDocument(cards, { mrn_no: mrnNo });
+
+  return {
+    html,
+    print_title: buildStickerPrintTitle(mrnNo, { isQc }),
+    total: cards.length,
+    mrn_no: mrnNo,
+    is_qc: !!isQc,
+  };
 }

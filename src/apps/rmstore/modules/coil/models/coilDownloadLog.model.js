@@ -24,6 +24,7 @@ function mapDownloadRow(row) {
   const coilUid = d.coil_no_uid ?? (Array.isArray(d.coil_no_uids) ? d.coil_no_uids[0] : null) ?? null;
   const stickerCount = Number(d.sticker_count) || (isBulk ? 0 : 1) || 1;
   const mrn = row.mrn_no ?? null;
+  const mrnUid = d.mrn_uid ?? null;
   const downloadedBy = row.user_name ?? null;
   const downloadedAt = row.created_at;
   const source = d.download_source ?? row.source_module ?? null;
@@ -31,6 +32,7 @@ function mapDownloadRow(row) {
   return {
     log_id: row.id,
     coil_no_uid: coilUid,
+    mrn_uid: mrnUid,
     mrn_no: mrn,
     packing_number: mrn != null ? String(mrn) : null,
     heat_no: d.heat_no ?? null,
@@ -55,10 +57,12 @@ function mapDownloadRow(row) {
 /** Sticker download row → coil_transaction (type=sticker_download). */
 export async function insertCoilDownloadLog({
   coil_no_uid = null,
+  mrn_uid = null,
   mrn_no = null,
   heat_no = null,
   item_code = null,
   acc_name = null,
+  downloaded_by_id = null,
   downloaded_by,
   download_type = "single",
   sticker_count = 1,
@@ -68,6 +72,7 @@ export async function insertCoilDownloadLog({
   const isBulk = type === "bulk" || type === "bulk_qc";
   const uid = isBulk ? null : textOrNull(coil_no_uid, 120);
   const mrn = textOrNull(mrn_no, 50);
+  const mrnUid = textOrNull(mrn_uid, 100);
 
   if (!isBulk && !uid && type !== "batch_qc") {
     throw new Error("Coil UID is required for a single or QC sticker download.");
@@ -83,12 +88,15 @@ export async function insertCoilDownloadLog({
     source_module: textOrNull(download_source, 48) || "sticker",
     source_id: uid || mrn,
     mrn_no: mrn,
+    user_id:
+      downloaded_by_id != null && downloaded_by_id !== "" ? Number(downloaded_by_id) : null,
     user_name: downloaded_by ?? "unknown",
     details: {
       download_type: type,
       sticker_count: isBulk || type === "batch_qc" ? count : 1,
       coil_no_uid: uid,
       coil_no_uids: uid ? [uid] : [],
+      mrn_uid: mrnUid,
       heat_no: textOrNull(heat_no, 100),
       item_code: textOrNull(item_code, 100),
       acc_name: textOrNull(acc_name),
@@ -98,6 +106,7 @@ export async function insertCoilDownloadLog({
 
   return {
     coil_no_uid: uid,
+    mrn_uid: mrnUid,
     mrn_no: mrn,
     heat_no: textOrNull(heat_no, 100),
     item_code: textOrNull(item_code, 100),
@@ -110,11 +119,15 @@ export async function insertCoilDownloadLog({
 }
 
 export async function listCoilDownloadLogs(options = {}) {
-  const { filters = {}, search, page = 1, limit = 100 } = options;
+  const { filters = {}, search, page = 1, limit = 100, user_id = null } = options;
   const values = [];
   let i = 1;
   const conditions = [`l.transaction_type = $${i++}`];
   values.push(COIL_TX_TYPES.STICKER_DOWNLOAD);
+  if (user_id != null) {
+    conditions.push(`l.user_id = $${i++}`);
+    values.push(Number(user_id));
+  }
 
   let cte = "";
   const journeyMode = hasCoilJourneyFilter(filters);
@@ -147,6 +160,7 @@ export async function listCoilDownloadLogs(options = {}) {
     const idx = i++;
     conditions.push(`(
       COALESCE(l.mrn_no,'') ILIKE $${idx} OR
+      COALESCE(l.details->>'mrn_uid','') ILIKE $${idx} OR
       COALESCE(l.user_name,'') ILIKE $${idx} OR
       COALESCE(l.source_module,'') ILIKE $${idx} OR
       COALESCE(l.details->>'coil_no_uid','') ILIKE $${idx} OR

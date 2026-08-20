@@ -191,25 +191,14 @@ export async function getMrnCoilQtyAutoCalc() {
   }
 }
 
-/** MRN sticker mode: `coil` (per coil) or `batch` (one QC sticker for the batch). Default `coil`. */
+/** MRN sticker mode: `coil` (per coil) or `batch` (one QC sticker for the batch). Default `batch`. */
 export async function getMrnStickerMode() {
   try {
     const raw = await getAppConfigValue(APP_CONFIG_KEYS.MRN_STICKER_MODE);
     const mode = String(raw || "").trim().toLowerCase();
-    if (mode === "batch") return "batch";
-    return "coil";
+    if (mode === "coil") return "coil";
+    return "batch";
   } catch {
-    return "coil";
-  }
-}
-
-/** When true, block MRN sticker generate if item missing or has no RM Spec Master. Default false. */
-export async function getMrnStickerRequireSpec() {
-  try {
-    const raw = await getAppConfigValue(APP_CONFIG_KEYS.MRN_STICKER_REQUIRE_SPEC);
-    if (raw == null || String(raw).trim() === "") return false;
-    return String(raw).trim().toLowerCase() === "true";
-  } catch {
-    return false;
+    return "batch";
   }
 }

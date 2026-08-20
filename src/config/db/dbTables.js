@@ -90,7 +90,8 @@ export const DB_TABLES = {
   rmstore: [
     "rmstore_master_location",
     "rmstore_master_production",
-    "rmstore_master_spec",
+    "rmstore_spec_master",
+    "rmstore_spec_detail",
     "rmstore_mrn",
     "rmstore_coil_table",
     "rmstore_inventory_inwards",

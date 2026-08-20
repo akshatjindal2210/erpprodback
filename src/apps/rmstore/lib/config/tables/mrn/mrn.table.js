@@ -1,5 +1,6 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
+import { patchCol, patchTableSchema } from "../../../../../../config/db/ensureDbColumns.js";
 
 export async function createRmStoreMrnTable() {
   await dbQuery(`
@@ -15,6 +16,8 @@ export async function createRmStoreMrnTable() {
       item_dcode               INTEGER,
       item_code                VARCHAR(100),
       item_desc                TEXT,
+      heat_no                  VARCHAR(100),
+      remarks                  TEXT,
       it_recp_qty              NUMERIC,
       it_lot_no                VARCHAR(100),
       it_unit                  VARCHAR(50),

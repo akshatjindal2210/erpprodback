@@ -11,11 +11,12 @@ export function evaluateSpecLine(spec, actualRaw) {
   }
 
   if (specType === "dropdown") {
+    const actualUpper = actualText.toUpperCase();
     const correct = String(spec?.correct_option || "")
       .split(",")
-      .map((s) => s.trim())
+      .map((s) => s.trim().toUpperCase())
       .filter(Boolean);
-    const match = correct.some((opt) => opt.toLowerCase() === actualText.toLowerCase());
+    const match = correct.some((opt) => opt === actualUpper);
     return match
       ? { result: "pass" }
       : { result: "fail", message: `Expected one of: ${correct.join(", ") || "—"}` };
@@ -62,11 +63,13 @@ export function formatExpected(spec) {
     return `${Number(spec?.min_value) || 0} – ${Number(spec?.max_value) || 0}`;
   }
   if (specType === "dropdown") {
-    return String(spec?.correct_option || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .join(" | ") || "—";
+    return (
+      String(spec?.correct_option || "")
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean)
+        .join(" | ") || "—"
+    );
   }
   return "—";
 }

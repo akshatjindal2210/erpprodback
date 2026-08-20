@@ -1,6 +1,6 @@
 {
   "name": "backend",
-  "version": "2.4.31",
+  "version": "3.4.32",
   "description": "",
   "main": "app.js",
   "scripts": {
@@ -13,6 +13,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.80",
     "bcryptjs": "^3.0.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
@@ -23,6 +24,7 @@
     "multer": "^2.1.1",
     "node-cron": "^4.2.1",
     "node-fetch": "^3.3.2",
+    "pdfjs-dist": "^5.4.296",
     "pg": "^8.20.0",
     "qrcode": "^1.5.4",
     "read-excel-file": "^9.3.5",

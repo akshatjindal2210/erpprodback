@@ -7,13 +7,8 @@ export async function createRmStoreQcCheckTable() {
       qc_check_uid     SERIAL PRIMARY KEY,
       coil_no_uid      VARCHAR(120) NOT NULL,
       mrn_uid          VARCHAR(100),
-      mrn_no           INTEGER,
-      heat_no          VARCHAR(100),
-      item_dcode       INTEGER,
-      item_code        VARCHAR(100),
-      item_desc        TEXT,
-      qty              NUMERIC DEFAULT 0,
       status           VARCHAR(24) DEFAULT 'pending',
+      overall_result   VARCHAR(8),
       failure_reason   TEXT,
       remarks          TEXT,
       items            JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -40,6 +35,8 @@ export async function createRmStoreQcCheckTable() {
       ON ${T.QC_CHECK}(mrn_uid) WHERE is_deleted = false;
     CREATE INDEX IF NOT EXISTS rmstore_qc_check_approved_idx
       ON ${T.QC_CHECK}(approved) WHERE is_deleted = false;
+    CREATE INDEX IF NOT EXISTS rmstore_qc_check_approved_at_idx
+      ON ${T.QC_CHECK}(approved_at) WHERE is_deleted = false AND approved_at IS NOT NULL;
     CREATE INDEX IF NOT EXISTS rmstore_qc_check_qc_reject_uid_idx
       ON ${T.QC_CHECK}(qc_reject_uid) WHERE is_deleted = false;
     CREATE INDEX IF NOT EXISTS rmstore_qc_check_created_at_idx

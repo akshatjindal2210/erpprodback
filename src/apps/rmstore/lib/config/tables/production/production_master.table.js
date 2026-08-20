@@ -8,9 +8,7 @@ export async function createRmStoreProductionMasterTable() {
       item_dcode      INTEGER NOT NULL,
       item_code       VARCHAR(100),
       item_desc       TEXT,
-      rm_item_dcode   INTEGER NOT NULL,
-      rm_item_code    VARCHAR(100),
-      rm_item_desc    TEXT,
+      rm_items        JSONB DEFAULT '[]'::jsonb,
       approved        BOOLEAN DEFAULT false,
       approved_by     TEXT,
       approved_at     TIMESTAMP,
@@ -23,8 +21,6 @@ export async function createRmStoreProductionMasterTable() {
       updated_at      TIMESTAMP
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS rmstore_master_production_item_rm_unique_active
-      ON ${T.MASTER_PRODUCTION} (item_dcode, rm_item_dcode)
-      WHERE is_deleted = false;
+    CREATE UNIQUE INDEX IF NOT EXISTS rmstore_master_production_item_rm_unique_active ON ${T.MASTER_PRODUCTION} (item_dcode) WHERE is_deleted = false;
   `);
 }

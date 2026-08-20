@@ -2,7 +2,8 @@ import dbQuery from "../../../../../config/db/db.js";
 import { DASHBOARD_CONFIG_TABLE } from "../../../lib/config/tables/dashboard/dashboardConfig.table.js";
 import { buildDashboardDocument, normalizeUserIds, parseDashboardDocument } from "../../../lib/utils/schema/dashboardJsonSchema.js";
 
-export async function listDashboardConfigs(appKey, pageKey, { includeDraft = true } = {}) {  const rows = await dbQuery(
+export async function listDashboardConfigs(appKey, pageKey, { includeDraft = true } = {}) {  
+  const rows = await dbQuery(
     `SELECT * FROM ${DASHBOARD_CONFIG_TABLE}
       WHERE dashboard_json->'meta'->>'appKey' = $1
         AND dashboard_json->'meta'->>'pageKey' = $2
@@ -14,12 +15,7 @@ export async function listDashboardConfigs(appKey, pageKey, { includeDraft = tru
   return rows;
 }
 
-export async function getDashboardConfigByKey(
-  appKey,
-  pageKey,
-  dashboardKey,
-  { publishedOnly = false } = {},
-) {
+export async function getDashboardConfigByKey( appKey, pageKey, dashboardKey, { publishedOnly = false } = {} ) {
   const rows = await dbQuery(
     `SELECT * FROM ${DASHBOARD_CONFIG_TABLE}
       WHERE dashboard_json->'meta'->>'appKey' = $1

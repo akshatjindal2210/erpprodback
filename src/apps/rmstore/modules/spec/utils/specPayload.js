@@ -14,8 +14,23 @@ function splitCsv(text) {
     .filter(Boolean);
 }
 
+/** Dropdown options are always stored in CAPS. */
+function splitCsvUpper(text) {
+  return splitCsv(text).map((s) => s.toUpperCase());
+}
+
 function joinCsv(parts) {
   return (parts || []).map((s) => String(s).trim()).filter(Boolean).join(", ");
+}
+
+function joinCsvUpper(parts) {
+  return joinCsv((parts || []).map((s) => String(s).trim().toUpperCase()).filter(Boolean));
+}
+
+/** Condition / grade / size / color header fields — stored in CAPS. */
+function upperHeaderValue(v) {
+  const s = v != null ? String(v).trim() : "";
+  return s ? s.toUpperCase() : null;
 }
 
 function numOrNull(v) {
@@ -60,15 +75,15 @@ export function hydrateCriteriaFromLegacy(spec_type, row = {}) {
           if (typeof o === "string" ? true : Boolean(o?.is_correct)) correct.push(label);
           else incorrect.push(label);
         }
-        correct_option = joinCsv(correct);
-        incorrect_option = joinCsv(incorrect);
+        correct_option = joinCsvUpper(correct);
+        incorrect_option = joinCsvUpper(incorrect);
       }
     }
     return {
       min_value: 0,
       max_value: 0,
-      correct_option: correct_option || null,
-      incorrect_option: incorrect_option || null,
+      correct_option: correct_option ? joinCsvUpper(splitCsv(correct_option)) : null,
+      incorrect_option: incorrect_option ? joinCsvUpper(splitCsv(incorrect_option)) : null,
     };
   }
 
@@ -144,6 +159,15 @@ export function normalizeSpecLine(body = {}, { requireItem = true } = {}) {
   if (!spec_name) return { error: "Specification name is required." };
   if (!ALLOWED_SPEC_TYPES.has(spec_type)) return { error: "The selected specification type is invalid." };
 
+  const print_val = body.print_val != null && String(body.print_val).trim() ? String(body.print_val).trim() : null;
+  if (!print_val) return { error: "Print is required." };
+
+  const inspection_method =
+    body.inspection_method != null && String(body.inspection_method).trim()
+      ? String(body.inspection_method).trim()
+      : null;
+  if (!inspection_method) return { error: "Inspection method is required." };
+
   const lineTypeRaw = body.type != null ? String(body.type).trim() : "";
   const lineType = lineTypeRaw || "RM";
   if (!ALLOWED_LINE_TYPES.has(lineType)) return { error: "The selected type is invalid." };
@@ -156,30 +180,22 @@ export function normalizeSpecLine(body = {}, { requireItem = true } = {}) {
   let incorrect_option = null;
 
   if (spec_type === "dropdown") {
-    const correctRaw =
-      body.correct_option != null && String(body.correct_option).trim()
-        ? String(body.correct_option).trim()
-        : fromLegacy.correct_option || "";
-    const incorrectRaw =
-      body.incorrect_option != null && String(body.incorrect_option).trim()
-        ? String(body.incorrect_option).trim()
-        : fromLegacy.incorrect_option || "";
+    const correctRaw = body.correct_option != null && String(body.correct_option).trim() ? String(body.correct_option).trim() : fromLegacy.correct_option || "";
+    const incorrectRaw = body.incorrect_option != null && String(body.incorrect_option).trim() ? String(body.incorrect_option).trim() : fromLegacy.incorrect_option || "";
 
-    const correctParts = splitCsv(correctRaw);
-    const incorrectParts = splitCsv(incorrectRaw);
+    const correctParts = splitCsvUpper(correctRaw);
+    const incorrectParts = splitCsvUpper(incorrectRaw);
     if (!correctParts.length) return { error: "Enter at least one correct option." };
     if (!incorrectParts.length) return { error: "Enter at least one incorrect option." };
 
-    const correctLower = correctParts.map((s) => s.toLowerCase());
-    const incorrectLower = incorrectParts.map((s) => s.toLowerCase());
-    if (new Set(correctLower).size !== correctParts.length) {
+    if (new Set(correctParts).size !== correctParts.length) {
       return { error: "Correct options must be unique." };
     }
-    if (new Set(incorrectLower).size !== incorrectParts.length) {
+    if (new Set(incorrectParts).size !== incorrectParts.length) {
       return { error: "Incorrect options must be unique." };
     }
-    const incorrectSet = new Set(incorrectLower);
-    const overlap = correctParts.find((c) => incorrectSet.has(c.toLowerCase()));
+    const incorrectSet = new Set(incorrectParts);
+    const overlap = correctParts.find((c) => incorrectSet.has(c));
     if (overlap) {
       return { error: `"${overlap}" cannot be both a correct and an incorrect option.` };
     }
@@ -198,38 +214,23 @@ export function normalizeSpecLine(body = {}, { requireItem = true } = {}) {
     min_value = minFinal;
     max_value = maxFinal;
   } else if (spec_type === "min") {
-    const n =
-      numOrNull(body.min_value) ??
-      numOrNull(body.detail_value) ??
-      numOrNull(body.spec_details) ??
-      fromLegacy.min_value;
+    const n = numOrNull(body.min_value) ?? numOrNull(body.detail_value) ?? numOrNull(body.spec_details) ?? fromLegacy.min_value;
     const err = assertNonNegative(n, "min value");
     if (err) return { error: err };
     min_value = n;
   } else if (spec_type === "max") {
-    const n =
-      numOrNull(body.max_value) ??
-      numOrNull(body.detail_value) ??
-      numOrNull(body.spec_details) ??
-      fromLegacy.max_value;
+    const n = numOrNull(body.max_value) ?? numOrNull(body.detail_value) ?? numOrNull(body.spec_details) ?? fromLegacy.max_value;
     const err = assertNonNegative(n, "max value");
     if (err) return { error: err };
     max_value = n;
   }
 
-  const spec_id =
-    body.spec_id != null && Number.isFinite(Number(body.spec_id))
-      ? Number(body.spec_id)
-      : null;
-
-  const condition =
-    body.condition != null && String(body.condition).trim()
-      ? String(body.condition).trim()
-      : null;
-  const grade =
-    body.grade != null && String(body.grade).trim() ? String(body.grade).trim() : null;
-  const size =
-    body.size != null && String(body.size).trim() ? String(body.size).trim() : null;
+  const spec_id = body.spec_id != null && Number.isFinite(Number(body.spec_id)) ? Number(body.spec_id) : null;
+  const condition = upperHeaderValue(body.condition);
+  const grade = upperHeaderValue(body.grade);
+  const size = upperHeaderValue(body.size);
+  const condition_color = upperHeaderValue(body.condition_color);
+  const grade_color = upperHeaderValue(body.grade_color);
 
   return {
     ...(item_dcode != null ? { item_dcode } : {}),
@@ -239,9 +240,12 @@ export function normalizeSpecLine(body = {}, { requireItem = true } = {}) {
     condition,
     grade,
     size,
+    condition_color,
+    grade_color,
     spec_name,
     remarks: body.remarks != null && String(body.remarks).trim() ? String(body.remarks).trim() : null,
-    print_val: body.print_val != null && String(body.print_val).trim() ? String(body.print_val).trim() : null,
+    print_val,
+    inspection_method,
     spec_type,
     min_value,
     max_value,
@@ -261,14 +265,11 @@ export function normalizeItemSpecsPayload(body = {}) {
     return { error: "RM item is required." };
   }
 
-  const condition =
-    body.condition != null && String(body.condition).trim()
-      ? String(body.condition).trim()
-      : null;
-  const grade =
-    body.grade != null && String(body.grade).trim() ? String(body.grade).trim() : null;
-  const size =
-    body.size != null && String(body.size).trim() ? String(body.size).trim() : null;
+  const condition = upperHeaderValue(body.condition);
+  const grade = upperHeaderValue(body.grade);
+  const size = upperHeaderValue(body.size);
+  let condition_color = upperHeaderValue(body.condition_color);
+  let grade_color = upperHeaderValue(body.grade_color);
 
   if (!condition) return { error: "Condition is required." };
   if (!grade) return { error: "Grade is required." };
@@ -290,6 +291,8 @@ export function normalizeItemSpecsPayload(body = {}) {
         condition,
         grade,
         size,
+        condition_color,
+        grade_color,
       },
       { requireItem: true }
     );
@@ -304,5 +307,5 @@ export function normalizeItemSpecsPayload(body = {}) {
   }
 
   specs.sort((a, b) => a.sno - b.sno);
-  return { item_dcode: item, condition, grade, size, specs };
+  return { item_dcode: item, condition, grade, size, condition_color, grade_color, specs };
 }

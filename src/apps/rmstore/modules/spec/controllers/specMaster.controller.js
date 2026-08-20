@@ -1,4 +1,4 @@
-import { findSpecItems, findSpecItemDetail, findSpecsByItem, syncItemSpecs, deleteSpecsByItem, setItemApproval } from "../models/specMaster.model.js";
+import { findSpecItems, findSpecItemDetail, syncItemSpecs, deleteSpecsByItem, setItemApproval, findSpecHeaderValues } from "../models/specMaster.model.js";
 import { logRmstoreActivity } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -84,8 +84,8 @@ export const createSpec = async (req, res) => {
       return res.status(400).json({ success: false, message: normalized.error });
     }
 
-    const existing = await findSpecsByItem(normalized.item_dcode);
-    if (existing.length) {
+    const existing = await findSpecItemDetail(normalized.item_dcode);
+    if (existing) {
       return res.status(409).json({
         success: false,
         message: "Specifications already exist for this RM item. Use Edit to change them.",
@@ -115,7 +115,10 @@ export const createSpec = async (req, res) => {
     return res.status(201).json({
       success: true,
       data,
-      message: "RM spec created successfully.",
+      toast_type: "success",
+      message: approval.approved
+        ? "RM spec created and authorized."
+        : "RM spec created. Pending authorization.",
     });
   } catch (err) {
     console.error("[rmstore/spec/create]", err?.message || err);
@@ -152,8 +155,8 @@ export const updateSpec = async (req, res) => {
 
     const itemChanged = sourceItemDcode !== targetItemDcode;
     if (itemChanged) {
-      const targetExisting = await findSpecsByItem(targetItemDcode);
-      if (targetExisting.length) {
+      const targetExisting = await findSpecItemDetail(targetItemDcode);
+      if (targetExisting) {
         return res.status(409).json({
           success: false,
           message: "Specifications already exist for this RM item. Choose another item, or edit the existing record.",
@@ -203,8 +206,9 @@ export const updateSpec = async (req, res) => {
       return res.json({
         success: true,
         data,
+        toast_type: "success",
         message: approvalFields.approved
-          ? "All specification lines authorized successfully."
+          ? "All specification lines authorized."
           : "All specification lines set to pending.",
       });
     }
@@ -215,13 +219,15 @@ export const updateSpec = async (req, res) => {
       condition: req.body.condition,
       grade: req.body.grade,
       size: req.body.size,
+      condition_color: req.body.condition_color,
+      grade_color: req.body.grade_color,
     });
     if (normalized.error) {
       return res.status(400).json({ success: false, message: normalized.error });
     }
 
     const itemSnap = await resolveRmItemSnapshot(targetItemDcode);
-    // Approve with edits → authorize; plain edit → pending re-approval
+    // Approve with edits → authorize; plain edit → pending re-authorization
     const approveWithSpecs = normalizedApproved === true;
     const approval = approveWithSpecs
       ? buildApprovalState(req, true, false)
@@ -248,9 +254,10 @@ export const updateSpec = async (req, res) => {
     return res.json({
       success: true,
       data,
+      toast_type: "success",
       message: approval.approved
-        ? "RM spec updated and all lines authorized."
-        : "RM spec updated. All lines are pending re-approval.",
+        ? "RM spec updated and authorized."
+        : "RM spec updated. Pending re-authorization.",
     });
   } catch (err) {
     if (err?.code === "23505") {
@@ -263,7 +270,7 @@ export const updateSpec = async (req, res) => {
   }
 };
 
-/** Soft-delete all lines for an RM item. */
+/** Permanently delete the spec master and all of its lines. */
 export const deleteSpec = async (req, res) => {
   try {
     const itemDcode = parsePositiveIntId(req.body?.item_dcode ?? req.body?.id);
@@ -273,7 +280,7 @@ export const deleteSpec = async (req, res) => {
     const existing = await findSpecItemDetail(itemDcode);
     if (!existing) return res.status(404).json({ success: false, message: "RM spec record not found." });
 
-    await deleteSpecsByItem(itemDcode, { deleted_by: auditUserName(req) });
+    await deleteSpecsByItem(itemDcode);
     await log(
       req,
       "delete",
@@ -282,6 +289,23 @@ export const deleteSpec = async (req, res) => {
       existing
     );
     return res.json({ success: true, message: "RM spec deleted successfully." });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** Distinct condition / grade / size values for typeable suggest fields. */
+export const getSpecHeaderValuesViews = async (req, res) => {
+  try {
+    const field = String(req.body?.field ?? "").trim().toLowerCase();
+    if (!["condition", "grade", "size", "condition_color", "grade_color"].includes(field)) {
+      return res.status(400).json({
+        success: false,
+        message: "Field must be condition, grade, size, condition_color, or grade_color.",
+      });
+    }
+    const rows = await findSpecHeaderValues({field, search: sanitizeSearch(req.body?.search)});
+    return res.json({ success: true, data: rows, total: rows.length });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

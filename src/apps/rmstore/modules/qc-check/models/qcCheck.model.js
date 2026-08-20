@@ -1,7 +1,45 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { COIL_QC_JOIN, COIL_QC_NOT_FINAL_COND } from "../../../lib/utils/coilQcStatusSql.js";
+import { qcPendingMrnCoilSql } from "../../../lib/utils/mrnPortalCoilSql.js";
+import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
 
 const TABLE = T.QC_CHECK;
+
+const QC_MRN_JOIN = `LEFT JOIN ${T.MRN} m ON m.uid = q.mrn_uid`;
+
+/** MRN display fields (item/qty come from join / coil aggregate). */
+const QC_ENRICH_SELECT = `
+  m.mrn_no,
+  m.heat_no,
+  m.item_dcode,
+  m.item_code,
+  m.item_desc`;
+
+const QC_APPROVED_COND = `q.approved = true`;
+
+const QC_QTY_AGG_JOIN = `LEFT JOIN LATERAL (
+       SELECT
+         STRING_AGG(c.coil_no_uid, ', ' ORDER BY c.created_at ASC, c.coil_no_uid ASC) AS coil_no_uid,
+         COUNT(*)::int AS coil_count,
+         SUM(COALESCE(c.qty, 0)) AS total_qty
+       FROM ${T.COIL_TABLE} c
+       WHERE c.qc_uid = q.qc_check_uid
+         AND c.is_deleted = false
+     ) qc_agg ON true`;
+
+function qcSearchSql(idx) {
+  return `(
+      COALESCE(q.coil_no_uid,'') ILIKE $${idx} OR
+      COALESCE(q.mrn_uid,'') ILIKE $${idx} OR
+      COALESCE(m.heat_no,'') ILIKE $${idx} OR
+      COALESCE(m.item_code,'') ILIKE $${idx} OR
+      COALESCE(m.item_desc,'') ILIKE $${idx} OR
+      COALESCE(q.failure_reason,'') ILIKE $${idx} OR
+      COALESCE(q.remarks,'') ILIKE $${idx} OR
+      m.mrn_no::text ILIKE $${idx}
+    )`;
+}
 
 function normalizeItems(raw) {
   if (Array.isArray(raw)) return raw;
@@ -16,6 +54,74 @@ function normalizeItems(raw) {
   return [];
 }
 
+function ownInspectionMethod(it) {
+  const v = it?.inspection_method != null ? String(it.inspection_method).trim() : "";
+  return v || "";
+}
+
+async function lookupInspectionMethodsBySpecId(specIds = []) {
+  const ids = [...new Set((specIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0))];
+  if (!ids.length) return new Map();
+  const rows = await dbQuery(
+    `SELECT spec_id, inspection_method
+     FROM ${T.SPEC_DETAIL}
+     WHERE spec_id = ANY($1::int[])`,
+    [ids]
+  );
+  const map = new Map();
+  for (const r of rows || []) {
+    const v = r.inspection_method != null ? String(r.inspection_method).trim() : "";
+    if (v) map.set(Number(r.spec_id), v);
+  }
+  return map;
+}
+
+async function withInspectionMethods(items = []) {
+  const list = Array.isArray(items) ? items : [];
+  const missingIds = list
+    .filter((it) => !ownInspectionMethod(it))
+    .map((it) => it?.spec_id);
+  const byId = await lookupInspectionMethodsBySpecId(missingIds);
+
+  const stillMissingNames = [
+    ...new Set(
+      list
+        .filter(
+          (it) =>
+            !ownInspectionMethod(it) &&
+            !byId.get(Number(it?.spec_id)) &&
+            String(it?.spec_name || "").trim(),
+        )
+        .map((it) => String(it.spec_name).trim().toLowerCase()),
+    ),
+  ];
+  const byName = new Map();
+  if (stillMissingNames.length) {
+    const rows = await dbQuery(
+      `SELECT spec_name, inspection_method
+       FROM ${T.SPEC_DETAIL}
+       WHERE inspection_method IS NOT NULL
+         AND TRIM(inspection_method) <> ''
+         AND LOWER(TRIM(spec_name)) = ANY($1::text[])`,
+      [stillMissingNames],
+    );
+    for (const r of rows || []) {
+      const key = String(r.spec_name || "").trim().toLowerCase();
+      const v = String(r.inspection_method || "").trim();
+      if (key && v && !byName.has(key)) byName.set(key, v);
+    }
+  }
+
+  return list.map((it) => ({
+    ...it,
+    inspection_method:
+      ownInspectionMethod(it) ||
+      byId.get(Number(it?.spec_id)) ||
+      byName.get(String(it?.spec_name || "").trim().toLowerCase()) ||
+      null,
+  }));
+}
+
 export const findQcChecks = async (options = {}) => {
   const { filters = {}, search, page = 1, limit = 100 } = options;
   const values = [];
@@ -26,16 +132,15 @@ export const findQcChecks = async (options = {}) => {
     values.push(String(filters.status).trim().toLowerCase());
     conditions.push(`LOWER(q.status) = $${i++}`);
   } else if (filters.status === "all" || filters.exclude_pending === true) {
-    // Register — only authorized outcomes (passed / failed)
-    conditions.push(`LOWER(q.status) IN ('passed', 'failed')`);
+    // Register — include everything that has been submitted for approval
+    conditions.push(`LOWER(q.status) IN ('passed', 'failed', 'awaiting_approval')`);
   }
 
-  // Register list: only rows authorized via Approve (approved = true)
+  // Register list: only rows that have been approved (passed/failed)
   if (filters.approved === true || filters.approved === "true" || filters.register === true) {
-    conditions.push(`q.approved = true`);
-  } else if (filters.status === "all" || filters.exclude_pending === true ||
-    ["passed", "failed"].includes(String(filters.status || "").trim().toLowerCase())) {
-    conditions.push(`q.approved = true`);
+    conditions.push(QC_APPROVED_COND);
+  } else if (["passed", "failed"].includes(String(filters.status || "").trim().toLowerCase())) {
+    conditions.push(QC_APPROVED_COND);
   }
   if (filters.from_date) {
     values.push(filters.from_date);
@@ -51,27 +156,29 @@ export const findQcChecks = async (options = {}) => {
   }
   if (filters.coil_no_uid != null && String(filters.coil_no_uid).trim() !== "") {
     values.push(String(filters.coil_no_uid).trim());
-    conditions.push(`q.coil_no_uid = $${i++}`);
+    conditions.push(`(
+      q.coil_no_uid = $${i} OR 
+      EXISTS (
+        SELECT 1 FROM ${T.COIL_TABLE} c 
+        WHERE c.qc_uid = q.qc_check_uid 
+          AND c.coil_no_uid = $${i++}
+          AND c.is_deleted = false
+      )
+    )`);
   }
 
   if (search) {
     const term = `%${search}%`;
     values.push(term);
     const idx = i++;
-    conditions.push(`(
-      COALESCE(q.coil_no_uid,'') ILIKE $${idx} OR
-      COALESCE(q.mrn_uid,'') ILIKE $${idx} OR
-      COALESCE(q.heat_no,'') ILIKE $${idx} OR
-      COALESCE(q.item_code,'') ILIKE $${idx} OR
-      COALESCE(q.item_desc,'') ILIKE $${idx} OR
-      COALESCE(q.failure_reason,'') ILIKE $${idx} OR
-      COALESCE(q.remarks,'') ILIKE $${idx} OR
-      q.mrn_no::text ILIKE $${idx}
-    )`);
+    conditions.push(qcSearchSql(idx));
   }
 
   const where = `WHERE ${conditions.join(" AND ")}`;
-  const countRes = await dbQuery(`SELECT COUNT(*) AS count FROM ${TABLE} q ${where}`, values);
+  const countRes = await dbQuery(
+    `SELECT COUNT(*) AS count FROM ${TABLE} q ${QC_MRN_JOIN} ${where}`,
+    values
+  );
   const total = Number(countRes[0]?.count || 0);
   const safePage = Math.max(1, Number(page) || 1);
   const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 100));
@@ -79,17 +186,39 @@ export const findQcChecks = async (options = {}) => {
 
   const rows = await dbQuery(
     `SELECT q.*,
+            ${QC_ENRICH_SELECT},
             q.created_by AS created_by_name,
             q.inspected_by AS inspected_by_name,
-            q.approved_by AS approved_by_name
+            q.approved_by AS approved_by_name,
+            q.updated_by AS updated_by_name,
+            COALESCE(qc_agg.coil_no_uid, q.coil_no_uid) AS coil_no_uid,
+            COALESCE(qc_agg.coil_count, 1) AS coil_count,
+            COALESCE(qc_agg.total_qty, 0) AS qty
      FROM ${TABLE} q
+     ${QC_MRN_JOIN}
+     ${QC_QTY_AGG_JOIN}
      ${where}
      ORDER BY q.qc_check_uid DESC
      LIMIT $${i++} OFFSET $${i}`,
     [...values, safeLimit, offset]
   );
 
-  return { data: rows, total, page: safePage, limit: safeLimit, totalPages: Math.ceil(total / safeLimit) };
+  const missingIds = [];
+  for (const row of rows || []) {
+    for (const it of normalizeItems(row.items)) {
+      if (!ownInspectionMethod(it) && it?.spec_id != null) missingIds.push(it.spec_id);
+    }
+  }
+  const methodMap = await lookupInspectionMethodsBySpecId(missingIds);
+  const data = (rows || []).map((row) => ({
+    ...row,
+    items: normalizeItems(row.items).map((it) => ({
+      ...it,
+      inspection_method: ownInspectionMethod(it) || methodMap.get(Number(it?.spec_id)) || null,
+    })),
+  }));
+
+  return { data, total, page: safePage, limit: safeLimit, totalPages: Math.ceil(total / safeLimit) };
 };
 
 export const findQcCheck = async (qc_check_uid) => {
@@ -97,10 +226,17 @@ export const findQcCheck = async (qc_check_uid) => {
   if (!Number.isFinite(id)) return null;
   const [row] = await dbQuery(
     `SELECT q.*,
+            ${QC_ENRICH_SELECT},
             q.created_by AS created_by_name,
             q.inspected_by AS inspected_by_name,
-            q.approved_by AS approved_by_name
+            q.approved_by AS approved_by_name,
+            q.updated_by AS updated_by_name,
+            COALESCE(qc_agg.coil_no_uid, q.coil_no_uid) AS coil_no_uid,
+            COALESCE(qc_agg.coil_count, 1) AS coil_count,
+            COALESCE(qc_agg.total_qty, 0) AS qty
      FROM ${TABLE} q
+     ${QC_MRN_JOIN}
+     ${QC_QTY_AGG_JOIN}
      WHERE q.qc_check_uid = $1 AND q.is_deleted = false
      LIMIT 1`,
     [id]
@@ -111,26 +247,73 @@ export const findQcCheck = async (qc_check_uid) => {
 export const findPendingQcCheckByCoil = async (coil_no_uid) => {
   const uid = String(coil_no_uid || "").trim();
   if (!uid) return null;
+
   const [row] = await dbQuery(
     `SELECT q.*,
+            ${QC_ENRICH_SELECT},
             q.created_by AS created_by_name,
             q.inspected_by AS inspected_by_name,
-            q.approved_by AS approved_by_name
+            q.approved_by AS approved_by_name,
+            q.updated_by AS updated_by_name,
+            COALESCE(qc_agg.coil_no_uid, q.coil_no_uid) AS coil_no_uid,
+            COALESCE(qc_agg.coil_count, 1) AS coil_count,
+            COALESCE(qc_agg.total_qty, 0) AS qty
      FROM ${TABLE} q
-     WHERE q.coil_no_uid = $1
+     ${QC_MRN_JOIN}
+     JOIN ${T.COIL_TABLE} c ON c.qc_uid = q.qc_check_uid
+     LEFT JOIN LATERAL (
+       SELECT 
+         STRING_AGG(c2.coil_no_uid, ', ' ORDER BY c2.created_at ASC, c2.coil_no_uid ASC) AS coil_no_uid,
+         COUNT(*)::int AS coil_count,
+         SUM(COALESCE(c2.qty, 0)) AS total_qty
+       FROM ${T.COIL_TABLE} c2
+       WHERE c2.qc_uid = q.qc_check_uid
+         AND c2.is_deleted = false
+     ) qc_agg ON true
+     WHERE c.coil_no_uid = $1
        AND q.is_deleted = false
-       AND LOWER(q.status) IN ('pending', 'draft')
+       AND LOWER(q.status) IN ('pending', 'draft', 'awaiting_approval')
      ORDER BY q.qc_check_uid DESC
      LIMIT 1`,
     [uid]
   );
-  return row ?? null;
+  if (row) return row;
+
+  // Fallback for primary coil reference
+  const [fallback] = await dbQuery(
+    `SELECT q.*,
+            ${QC_ENRICH_SELECT},
+            q.created_by AS created_by_name,
+            q.inspected_by AS inspected_by_name,
+            q.approved_by AS approved_by_name,
+            q.updated_by AS updated_by_name,
+            COALESCE(qc_agg.coil_no_uid, q.coil_no_uid) AS coil_no_uid,
+            COALESCE(qc_agg.coil_count, 1) AS coil_count,
+            COALESCE(qc_agg.total_qty, 0) AS qty
+     FROM ${TABLE} q
+     ${QC_MRN_JOIN}
+     LEFT JOIN LATERAL (
+       SELECT 
+         STRING_AGG(c2.coil_no_uid, ', ' ORDER BY c2.created_at ASC, c2.coil_no_uid ASC) AS coil_no_uid,
+         COUNT(*)::int AS coil_count,
+         SUM(COALESCE(c2.qty, 0)) AS total_qty
+       FROM ${T.COIL_TABLE} c2
+       WHERE c2.qc_uid = q.qc_check_uid
+         AND c2.is_deleted = false
+     ) qc_agg ON true
+     WHERE q.coil_no_uid = $1
+       AND q.is_deleted = false
+       AND LOWER(q.status) IN ('pending', 'draft', 'awaiting_approval')
+     ORDER BY q.qc_check_uid DESC
+     LIMIT 1`,
+    [uid]
+  );
+  return fallback ?? null;
 };
 
 /**
- * Coils that need QC — stickered active coils without authorized QC yet.
- * Register = approved = true (passed | failed after Authorize).
- * Pending = virtual / draft / awaiting_approval.
+ * Coils waiting for QC — inspection queue only.
+ * Independent of Store In / Unassigned (no location_id filter here).
  */
 export const findPendingCoilsForQc = async (options = {}) => {
   const { filters = {}, search, page = 1, limit = 100 } = options;
@@ -139,14 +322,8 @@ export const findPendingCoilsForQc = async (options = {}) => {
   const conditions = [
     "c.is_deleted = false",
     `COALESCE(c.status, 'active') = 'active'`,
-    `NULLIF(TRIM(c.mrn_uid::text), '') IS NOT NULL`,
-    // Independent of rack/location — QC starts as soon as stickers exist
-    `NOT EXISTS (
-       SELECT 1 FROM ${TABLE} q
-       WHERE q.coil_no_uid = c.coil_no_uid
-         AND q.is_deleted = false
-         AND q.approved = true
-     )`,
+    qcPendingMrnCoilSql("c", "m"),
+    COIL_QC_NOT_FINAL_COND,
   ];
 
   // Optional date filter only when caller sends it (Pending tab usually omits — like Unapproved list)
@@ -174,10 +351,10 @@ export const findPendingCoilsForQc = async (options = {}) => {
     conditions.push(`(
       COALESCE(c.coil_no_uid,'') ILIKE $${idx} OR
       COALESCE(c.mrn_uid,'') ILIKE $${idx} OR
-      COALESCE(c.heat_no,'') ILIKE $${idx} OR
-      COALESCE(c.item_code,'') ILIKE $${idx} OR
-      COALESCE(c.item_desc,'') ILIKE $${idx} OR
-      c.mrn_no::text ILIKE $${idx}
+      COALESCE(m.heat_no,'') ILIKE $${idx} OR
+      COALESCE(m.item_code,'') ILIKE $${idx} OR
+      COALESCE(m.item_desc,'') ILIKE $${idx} OR
+      m.mrn_no::text ILIKE $${idx}
     )`);
   }
 
@@ -196,7 +373,8 @@ export const findPendingCoilsForQc = async (options = {}) => {
     const countRes = await dbQuery(
       `SELECT COUNT(*)::int AS count
        FROM ${T.COIL_TABLE} c
-       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       INNER JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       ${COIL_QC_JOIN}
        ${where}`,
       values
     );
@@ -206,14 +384,13 @@ export const findPendingCoilsForQc = async (options = {}) => {
           qpend.qc_check_uid,
           c.coil_no_uid,
           c.mrn_uid,
-          c.mrn_no,
-          c.heat_no,
-          c.item_dcode,
-          c.item_code,
-          c.item_desc,
+        m.mrn_no,
+        m.heat_no,
+        m.item_dcode,
+        m.item_code,
+        m.item_desc,
           c.qty,
-          COALESCE(NULLIF(LOWER(TRIM(m.sticker_mode)), ''), 'coil')::varchar AS sticker_mode,
-          COALESCE(qpend.status, 'pending')::varchar AS status,
+          COALESCE(NULLIF(LOWER(TRIM(m.sticker_mode)), ''), 'coil')::varchar AS sticker_mode,          COALESCE(qpend.status, 'pending')::varchar AS status,
           qpend.failure_reason,
           qpend.remarks,
           qpend.inspected_by,
@@ -229,13 +406,14 @@ export const findPendingCoilsForQc = async (options = {}) => {
           NULL::text AS approved_by_name,
           (qpend.qc_check_uid IS NULL) AS is_virtual_pending,
           1::int AS coil_count,
-          false AS is_batch_pending
+          (COALESCE(NULLIF(LOWER(TRIM(m.sticker_mode)), ''), 'coil') = 'batch') AS is_batch_pending
        FROM ${T.COIL_TABLE} c
-       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       INNER JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       ${COIL_QC_JOIN}
        LEFT JOIN LATERAL (
          SELECT q.qc_check_uid, q.status, q.failure_reason, q.remarks, q.inspected_by, q.inspected_at
          FROM ${TABLE} q
-         WHERE q.coil_no_uid = c.coil_no_uid
+         WHERE (q.coil_no_uid = c.coil_no_uid OR q.qc_check_uid = c.qc_uid)
            AND q.is_deleted = false
            AND LOWER(q.status) IN ('pending', 'draft', 'awaiting_approval')
          ORDER BY q.qc_check_uid DESC
@@ -260,7 +438,8 @@ export const findPendingCoilsForQc = async (options = {}) => {
          c.mrn_uid,
          COALESCE(NULLIF(LOWER(TRIM(m.sticker_mode)), ''), 'coil') AS sticker_mode
        FROM ${T.COIL_TABLE} c
-       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       INNER JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       ${COIL_QC_JOIN}
        ${where}
      )
      SELECT COUNT(*)::int AS count FROM (
@@ -278,11 +457,11 @@ export const findPendingCoilsForQc = async (options = {}) => {
          qpend.qc_check_uid,
          c.coil_no_uid,
          c.mrn_uid,
-         c.mrn_no,
-         c.heat_no,
-         c.item_dcode,
-         c.item_code,
-         c.item_desc,
+         m.mrn_no,
+         m.heat_no,
+         m.item_dcode,
+         m.item_code,
+         m.item_desc,
          c.qty,
          COALESCE(NULLIF(LOWER(TRIM(m.sticker_mode)), ''), 'coil') AS sticker_mode,
          COALESCE(qpend.status, 'pending')::varchar AS status,
@@ -294,11 +473,12 @@ export const findPendingCoilsForQc = async (options = {}) => {
          c.created_at,
          (qpend.qc_check_uid IS NULL) AS is_virtual_pending
        FROM ${T.COIL_TABLE} c
-       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       INNER JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       ${COIL_QC_JOIN}
        LEFT JOIN LATERAL (
          SELECT q.qc_check_uid, q.status, q.failure_reason, q.remarks, q.inspected_by, q.inspected_at
          FROM ${TABLE} q
-         WHERE q.coil_no_uid = c.coil_no_uid
+         WHERE (q.coil_no_uid = c.coil_no_uid OR q.qc_check_uid = c.qc_uid)
            AND q.is_deleted = false
            AND LOWER(q.status) IN ('pending', 'draft', 'awaiting_approval')
          ORDER BY q.qc_check_uid DESC
@@ -333,7 +513,7 @@ export const findPendingCoilsForQc = async (options = {}) => {
      ),
      batch_rows AS (
        SELECT
-         NULL::int AS qc_check_uid,
+         (ARRAY_AGG(qc_check_uid ORDER BY qc_check_uid DESC NULLS LAST))[1] AS qc_check_uid,
          STRING_AGG(coil_no_uid, ', ' ORDER BY created_at ASC, coil_no_uid ASC)::varchar AS coil_no_uid,
          mrn_uid,
          MAX(mrn_no) AS mrn_no,
@@ -348,13 +528,13 @@ export const findPendingCoilsForQc = async (options = {}) => {
            WHEN BOOL_OR(LOWER(status) = 'draft') THEN 'draft'
            ELSE 'pending'
          END::varchar AS status,
-         NULL::text AS failure_reason,
-         NULL::text AS remarks,
-         NULL::text AS inspected_by,
-         NULL::timestamp AS inspected_at,
+         (ARRAY_AGG(failure_reason ORDER BY qc_check_uid DESC NULLS LAST))[1] AS failure_reason,
+         (ARRAY_AGG(remarks ORDER BY qc_check_uid DESC NULLS LAST))[1] AS remarks,
+         (ARRAY_AGG(inspected_by ORDER BY qc_check_uid DESC NULLS LAST))[1] AS inspected_by,
+         (ARRAY_AGG(inspected_at ORDER BY qc_check_uid DESC NULLS LAST))[1] AS inspected_at,
          (ARRAY_AGG(created_by ORDER BY created_at ASC))[1] AS created_by,
          MIN(created_at) AS created_at,
-         true AS is_virtual_pending,
+         BOOL_AND(qc_check_uid IS NULL) AS is_virtual_pending,
          COUNT(*)::int AS coil_count,
          true AS is_batch_pending
        FROM pending
@@ -405,20 +585,16 @@ export const findPendingCoilsForQc = async (options = {}) => {
 
 /** Insert QC header at inspect submit time (not on sticker generate). */
 export const insertQcCheck = async (fields = {}, created_by = null) => {
+  // Header stores one coil UID only (VARCHAR(120)); batch coils link via qc_check_uid.
+  const primaryUid = String(fields.coil_no_uid || "").split(",").map((s) => s.trim()).filter(Boolean)[0] || "";
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE}
-     (coil_no_uid, mrn_uid, mrn_no, heat_no, item_dcode, item_code, item_desc, qty, status, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     (coil_no_uid, mrn_uid, status, created_by)
+     VALUES ($1,$2,$3,$4)
      RETURNING *`,
     [
-      String(fields.coil_no_uid || "").trim(),
+      primaryUid,
       fields.mrn_uid ?? null,
-      fields.mrn_no ?? null,
-      fields.heat_no ?? null,
-      fields.item_dcode ?? null,
-      fields.item_code ?? null,
-      fields.item_desc ?? null,
-      fields.qty ?? 0,
       fields.status || "pending",
       created_by ?? null,
     ]
@@ -430,21 +606,62 @@ export const insertQcCheck = async (fields = {}, created_by = null) => {
 export const findLiveQcCheckByCoil = async (coil_no_uid) => {
   const uid = String(coil_no_uid || "").trim();
   if (!uid) return null;
+
   const [row] = await dbQuery(
-    `SELECT q.*
+    `SELECT q.*,
+            ${QC_ENRICH_SELECT},
+            COALESCE(qc_agg.coil_no_uid, q.coil_no_uid) AS coil_no_uid,
+            COALESCE(qc_agg.coil_count, 1) AS coil_count,
+            COALESCE(qc_agg.total_qty, 0) AS qty
      FROM ${TABLE} q
+     ${QC_MRN_JOIN}
+     JOIN ${T.COIL_TABLE} c ON c.qc_uid = q.qc_check_uid
+     LEFT JOIN LATERAL (
+       SELECT 
+         STRING_AGG(c2.coil_no_uid, ', ' ORDER BY c2.created_at ASC, c2.coil_no_uid ASC) AS coil_no_uid,
+         COUNT(*)::int AS coil_count,
+         SUM(COALESCE(c2.qty, 0)) AS total_qty
+       FROM ${T.COIL_TABLE} c2
+       WHERE c2.qc_uid = q.qc_check_uid
+         AND c2.is_deleted = false
+     ) qc_agg ON true
+     WHERE c.coil_no_uid = $1 AND q.is_deleted = false
+     ORDER BY q.qc_check_uid DESC
+     LIMIT 1`,
+    [uid]
+  );
+  if (row) return row;
+
+  // Fallback for primary coil reference
+  const [fallback] = await dbQuery(
+    `SELECT q.*,
+            ${QC_ENRICH_SELECT},
+            COALESCE(qc_agg.coil_no_uid, q.coil_no_uid) AS coil_no_uid,
+            COALESCE(qc_agg.coil_count, 1) AS coil_count,
+            COALESCE(qc_agg.total_qty, 0) AS qty
+     FROM ${TABLE} q
+     ${QC_MRN_JOIN}
+     LEFT JOIN LATERAL (
+       SELECT 
+         STRING_AGG(c2.coil_no_uid, ', ' ORDER BY c2.created_at ASC, c2.coil_no_uid ASC) AS coil_no_uid,
+         COUNT(*)::int AS coil_count,
+         SUM(COALESCE(c2.qty, 0)) AS total_qty
+       FROM ${T.COIL_TABLE} c2
+       WHERE c2.qc_uid = q.qc_check_uid
+         AND c2.is_deleted = false
+     ) qc_agg ON true
      WHERE q.coil_no_uid = $1 AND q.is_deleted = false
      ORDER BY q.qc_check_uid DESC
      LIMIT 1`,
     [uid]
   );
-  return row ?? null;
+  return fallback ?? null;
 };
 
 export const findQcCheckItems = async (qc_check_uid) => {
   const row = await findQcCheck(qc_check_uid);
   if (!row) return [];
-  const items = normalizeItems(row.items);
+  const items = await withInspectionMethods(normalizeItems(row.items));
   return items
     .map((it, idx) => ({
       ...it,
@@ -463,6 +680,9 @@ export const replaceQcCheckItems = async (qc_check_uid, items = []) => {
     type: it.type ?? null,
     spec_name: it.spec_name ?? null,
     print_val: it.print_val ?? null,
+    inspection_method: it.inspection_method != null && String(it.inspection_method).trim()
+      ? String(it.inspection_method).trim()
+      : null,
     spec_type: it.spec_type ?? null,
     min_value: it.min_value ?? 0,
     max_value: it.max_value ?? 0,
@@ -485,7 +705,7 @@ export const replaceQcCheckItems = async (qc_check_uid, items = []) => {
 
 export const updateQcCheck = async (qc_check_uid, fields = {}) => {
   const allowed = [
-    "status", "failure_reason", "remarks", "inspected_by", "inspected_at",
+    "status", "overall_result", "failure_reason", "remarks", "inspected_by", "inspected_at",
     "approved", "approved_by", "approved_at",
     "qc_reject_uid", "updated_by", "updated_at",
   ];
@@ -495,12 +715,12 @@ export const updateQcCheck = async (qc_check_uid, fields = {}) => {
   }
   const keys = Object.keys(safe);
   if (!keys.length) return findQcCheck(qc_check_uid);
-  const values = Object.values(safe);
+
+  const { setParts, values, nextIndex } = buildNaiveTimestampUpdateParts(safe);
   values.push(Number(qc_check_uid));
-  const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(", ");
   const [row] = await dbQuery(
-    `UPDATE ${TABLE} SET ${setClause}
-     WHERE qc_check_uid = $${keys.length + 1} AND is_deleted = false
+    `UPDATE ${TABLE} SET ${setParts.join(", ")}
+     WHERE qc_check_uid = $${nextIndex} AND is_deleted = false
      RETURNING *`,
     values
   );
@@ -529,6 +749,19 @@ export const softDeleteQcChecksByMrn = async (mrn_uid, deleted_by = null) => {
      WHERE mrn_uid = $1 AND is_deleted = false
      RETURNING qc_check_uid`,
     [uid, deleted_by]
+  );
+  return Array.isArray(rows) ? rows.length : 0;
+};
+
+/** Permanently remove QC checks for an MRN (cancel stickers / full reset). */
+export const hardDeleteQcChecksByMrn = async (mrn_uid) => {
+  const uid = String(mrn_uid || "").trim();
+  if (!uid) return 0;
+  const rows = await dbQuery(
+    `DELETE FROM ${TABLE}
+     WHERE mrn_uid = $1
+     RETURNING qc_check_uid`,
+    [uid]
   );
   return Array.isArray(rows) ? rows.length : 0;
 };
@@ -601,14 +834,14 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
   const conditions = [
     "q.is_deleted = false",
     "LOWER(q.status) = 'failed'",
-    "q.approved = true",
+    QC_APPROVED_COND,
     "q.qc_reject_uid IS NULL",
     `NOT EXISTS (
        SELECT 1 FROM ${T.COIL_TABLE} c
-       WHERE c.coil_no_uid = q.coil_no_uid
+       WHERE c.qc_uid = q.qc_check_uid
          AND c.is_deleted = false
          AND (
-           c.qc_reject_uid IS NOT NULL
+           c.rm_uid IS NOT NULL
            OR c.out_uid IS NOT NULL
            OR LOWER(COALESCE(c.status, 'active')) IN ('out', 'consumed')
          )
@@ -622,17 +855,20 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
     conditions.push(`(
       COALESCE(q.coil_no_uid,'') ILIKE $${idx} OR
       COALESCE(q.mrn_uid,'') ILIKE $${idx} OR
-      COALESCE(q.heat_no,'') ILIKE $${idx} OR
-      COALESCE(q.item_code,'') ILIKE $${idx} OR
-      COALESCE(q.item_desc,'') ILIKE $${idx} OR
+      COALESCE(m.heat_no,'') ILIKE $${idx} OR
+      COALESCE(m.item_code,'') ILIKE $${idx} OR
+      COALESCE(m.item_desc,'') ILIKE $${idx} OR
       COALESCE(q.failure_reason,'') ILIKE $${idx} OR
-      q.mrn_no::text ILIKE $${idx} OR
+      m.mrn_no::text ILIKE $${idx} OR
       q.qc_check_uid::text ILIKE $${idx}
     )`);
   }
 
   const where = `WHERE ${conditions.join(" AND ")}`;
-  const countRes = await dbQuery(`SELECT COUNT(*) AS count FROM ${TABLE} q ${where}`, values);
+  const countRes = await dbQuery(
+    `SELECT COUNT(*) AS count FROM ${TABLE} q ${QC_MRN_JOIN} ${where}`,
+    values
+  );
   const total = Number(countRes[0]?.count || 0);
   const safePage = Math.max(1, Number(page) || 1);
   const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 100));
@@ -640,14 +876,15 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
 
   const rows = await dbQuery(
     `SELECT q.qc_check_uid,
-            q.coil_no_uid,
+            COALESCE(qc_agg.coil_no_uid, q.coil_no_uid) AS coil_no_uid,
+            COALESCE(qc_agg.coil_count, 1) AS coil_count,
+            COALESCE(qc_agg.total_qty, 0) AS qty,
             q.mrn_uid,
-            q.mrn_no,
-            q.heat_no,
-            q.item_dcode,
-            q.item_code,
-            q.item_desc,
-            q.qty,
+            m.mrn_no,
+            m.heat_no,
+            m.item_dcode,
+            m.item_code,
+            m.item_desc,
             q.status,
             q.failure_reason,
             q.remarks,
@@ -660,6 +897,16 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
             q.inspected_by AS inspected_by_name,
             TRUE AS is_virtual_pending
      FROM ${TABLE} q
+     ${QC_MRN_JOIN}
+     LEFT JOIN LATERAL (
+       SELECT
+         STRING_AGG(c.coil_no_uid, ', ' ORDER BY c.created_at ASC, c.coil_no_uid ASC) AS coil_no_uid,
+         COUNT(*)::int AS coil_count,
+         SUM(COALESCE(c.qty, 0)) AS total_qty
+       FROM ${T.COIL_TABLE} c
+       WHERE c.qc_uid = q.qc_check_uid
+         AND c.is_deleted = false
+     ) qc_agg ON true
      ${where}
      ORDER BY q.qc_check_uid DESC
      LIMIT $${i++} OFFSET $${i}`,
@@ -670,14 +917,15 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
     ...r,
     pending_source: "qc_check",
     pending_type: "qc_fail",
-    // Rejection Pending list shape (no qc_reject_uid in DB yet)
     qc_reject_uid: null,
     mrn_refs: r.mrn_no != null ? String(r.mrn_no) : null,
     heat_nos: r.heat_no || null,
     item_codes: r.item_code || null,
+    item_desc: r.item_desc || null,
+    item_descs: r.item_desc || null,
     reason: r.failure_reason || null,
     total_qty: r.qty ?? 0,
-    coil_count: 1,
+    coil_count: Number(r.coil_count) || 1,
     approved: false,
   }));
 

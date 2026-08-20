@@ -1,5 +1,6 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
 
 const TABLE = T.IN_PROCESS_REQUEST;
 const REJECTION_TABLE = T.REJECTION;
@@ -8,6 +9,7 @@ export const IPR_REQUEST_TYPE = {
   REJECTION: "rejection",
   STORE_IN: "store_in",
   CONSUME: "consume",
+  TRANSFER: "transfer",
 };
 
 export const IPR_DOWNSTREAM = {
@@ -15,6 +17,7 @@ export const IPR_DOWNSTREAM = {
   PENDING_STORE_OUT: "pending_store_out",
   PENDING_STORE_IN: "pending_store_in",
   CONSUMED: "consumed",
+  TRANSFER_PENDING: "transfer_pending",
   STORE_IN_DONE: "store_in_done",
   STORE_OUT_DONE: "store_out_done",
 };
@@ -37,8 +40,95 @@ export function resolveDownstream(requestType, approved) {
   const type = normalizeRequestType(requestType);
   if (type === IPR_REQUEST_TYPE.STORE_IN) return IPR_DOWNSTREAM.PENDING_STORE_IN;
   if (type === IPR_REQUEST_TYPE.CONSUME) return IPR_DOWNSTREAM.CONSUMED;
+  if (type === IPR_REQUEST_TYPE.TRANSFER) return IPR_DOWNSTREAM.TRANSFER_PENDING;
   return IPR_DOWNSTREAM.PENDING_STORE_OUT;
 }
+
+/** After consume is applied — balance stays on the same row until Store In receive. */
+export function resolveConsumeDownstream(coils = []) {
+  const balance = normalizeCoils(coils).reduce((s, c) => s + num(c.remaining_qty), 0);
+  return balance > 0 ? IPR_DOWNSTREAM.PENDING_STORE_IN : IPR_DOWNSTREAM.CONSUMED;
+}
+
+/** Links an auto-queued store-in row back to its source consume IPR. */
+export const AUTO_STORE_IN_FROM_CONSUME_PREFIX = "AUTO_FROM_CONSUME:";
+
+export const AUTO_CONSUME_FROM_STORE_IN_PREFIX = "AUTO_FROM_STORE_IN:";
+
+export function autoConsumeFromStoreInRemarks(storeInIprUid) {
+  return `${AUTO_CONSUME_FROM_STORE_IN_PREFIX}${Number(storeInIprUid)}`;
+}
+
+export function autoStoreInFromConsumeRemarks(consumeIprUid) {
+  return `${AUTO_STORE_IN_FROM_CONSUME_PREFIX}${Number(consumeIprUid)}`;
+}
+
+/** Parse source consume IPR id from auto-queued store-in remarks. */
+export function parseConsumeIprUidFromAutoStoreInRemarks(remarks) {
+  const s = String(remarks || "");
+  if (!s.startsWith(AUTO_STORE_IN_FROM_CONSUME_PREFIX)) return null;
+  const id = Number(s.slice(AUTO_STORE_IN_FROM_CONSUME_PREFIX.length));
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+/** Pending store-in auto-created after partial consume (not yet received). */
+export const findPendingAutoStoreInForConsume = async (consumeIprUid) => {
+  const id = Number(consumeIprUid);
+  if (!Number.isFinite(id)) return null;
+  const [row] = await dbQuery(
+    `SELECT ${SELECT_COLS}
+     FROM ${TABLE} r
+     WHERE r.is_deleted = false
+       AND r.request_type = '${IPR_REQUEST_TYPE.STORE_IN}'
+       AND r.approved = true
+       AND r.downstream = '${IPR_DOWNSTREAM.PENDING_STORE_IN}'
+       AND r.remarks = $1
+     ORDER BY r.ipr_uid DESC
+     LIMIT 1`,
+    [autoStoreInFromConsumeRemarks(id)]
+  );
+  return row ? summarizeRow(row) : null;
+};
+
+const PENDING_STORE_IN_COIL_EXISTS = `EXISTS (
+  SELECT 1
+  FROM jsonb_array_elements(r.coils) elem
+  WHERE lower(elem->>'coil_no_uid') = $1
+)`;
+
+/** Pending store-in queue row that already includes this coil (consume balance or manual store-in). */
+export const findPendingStoreInForCoil = async (coilUid) => {
+  const uid = String(coilUid || "").trim().toLowerCase();
+  if (!uid) return null;
+
+  const [consumeRow] = await dbQuery(
+    `SELECT ${SELECT_COLS}
+     FROM ${TABLE} r
+     WHERE r.is_deleted = false
+       AND r.request_type = '${IPR_REQUEST_TYPE.CONSUME}'
+       AND r.approved = true
+       AND r.downstream = '${IPR_DOWNSTREAM.PENDING_STORE_IN}'
+       AND ${PENDING_STORE_IN_COIL_EXISTS}
+     ORDER BY r.ipr_uid DESC
+     LIMIT 1`,
+    [uid]
+  );
+  if (consumeRow) return summarizeRow(consumeRow);
+
+  const [storeInRow] = await dbQuery(
+    `SELECT ${SELECT_COLS}
+     FROM ${TABLE} r
+     WHERE r.is_deleted = false
+       AND r.request_type = '${IPR_REQUEST_TYPE.STORE_IN}'
+       AND r.approved = true
+       AND r.downstream = '${IPR_DOWNSTREAM.PENDING_STORE_IN}'
+       AND ${PENDING_STORE_IN_COIL_EXISTS}
+     ORDER BY r.ipr_uid DESC
+     LIMIT 1`,
+    [uid]
+  );
+  return storeInRow ? summarizeRow(storeInRow) : null;
+};
 
 function jsonArray(raw) {
   if (Array.isArray(raw)) return raw;
@@ -95,6 +185,8 @@ export function normalizeCoils(coils) {
         status: str(c.status),
         source: str(c.source),
         is_seed_scan: Boolean(c.is_seed_scan),
+        store_in_qty: c.store_in_qty != null ? num(c.store_in_qty) : null,
+        balance_in_store_in: c.balance_in_store_in === true,
       };
     });
 }
@@ -126,6 +218,7 @@ export function summarizeRow(row) {
 
   const scannedRaw = jsonArray(row.scanned_coil_uids);
   const scanned_coil_uids = scannedRaw.length ? scannedRaw : coils.map((c) => c.coil_no_uid);
+  const attachments = jsonArray(row.attachments);
 
   const previous_qty = previous_coils.reduce((s, c) => s + num(c.original_qty ?? c.qty), 0);
   const isStoreIn = request_type === IPR_REQUEST_TYPE.STORE_IN;
@@ -156,15 +249,26 @@ export function summarizeRow(row) {
   let mrn_label = null;
   if (lot_label) {
     mrn_label = lot_label;
-  } else if (resolved_mrn_no != null) {
-    mrn_label = String(resolved_mrn_no);
   } else {
-    mrn_label = uniqueJoin(mrnNos) || str(row.mrn_uid);
+    mrn_label = str(row.mrn_uid);
   }
 
   const heat_label = resolved_heat_no || uniqueJoin(heatNos);
 
   const firstCoilUid = coils[0]?.coil_no_uid || str(row.seed_coil_uid);
+
+  const balanceQty = isConsume
+    ? coils.reduce((s, c) => s + num(c.remaining_qty), 0)
+    : isStoreIn
+      ? total_qty
+      : 0;
+
+  let balance_status = null;
+  if (isRejection) {
+    balance_status = "Rejected";
+  } else if (isConsume) {
+    balance_status = balanceQty > 0 ? "Balance" : "Full";
+  }
 
   return {
     ...row,
@@ -174,21 +278,19 @@ export function summarizeRow(row) {
     previous_coils,
     proposed_coils,
     scanned_coil_uids,
+    attachments,
     coil_count: isStoreIn && proposed_coils.length ? proposed_coils.length : coils.length,
     previous_coil_count: previous_coils.length,
-    total_qty,
+    total_qty: isConsume ? previous_qty : total_qty,
     previous_qty,
     // Consume is whole-coil, so everything scanned counts as used.
     consumed_qty: isStoreIn
       ? Math.max(0, previous_qty - total_qty)
       : isConsume
-        ? total_qty
+        ? coils.reduce((s, c) => s + num(c.consumed_qty ?? c.qty), 0)
         : 0,
-    balance_qty: isConsume
-      ? coils.reduce((s, c) => s + num(c.remaining_qty), 0)
-      : isStoreIn
-        ? total_qty
-        : 0,
+    balance_qty: balanceQty,
+    balance_status,
     item_code: resolved_item_code,
     item_desc: resolved_item_desc,
     mrn_no: resolved_mrn_no,
@@ -206,10 +308,35 @@ export function summarizeRow(row) {
 }
 
 export const findInProcessRequests = async (options = {}) => {
-  const { filters = {}, search, page = 1, limit = 100 } = options;
+  const {
+    filters = {},
+    search,
+    page = 1,
+    limit = 100,
+    includeAutoStoreInFromConsume = false,
+    pendingStoreInQueue = false,
+  } = options;
   const values = [];
   let i = 1;
   const conditions = ["r.is_deleted = false"];
+  if (pendingStoreInQueue) {
+    conditions.push(`(
+      (
+        r.request_type = '${IPR_REQUEST_TYPE.CONSUME}'
+        AND r.approved = true
+        AND r.downstream = '${IPR_DOWNSTREAM.PENDING_STORE_IN}'
+      )
+      OR (
+        r.request_type = '${IPR_REQUEST_TYPE.STORE_IN}'
+        AND r.approved = true
+        AND r.downstream = '${IPR_DOWNSTREAM.PENDING_STORE_IN}'
+      )
+    )`);
+  } else if (!includeAutoStoreInFromConsume) {
+    conditions.push(
+      `NOT (r.request_type = '${IPR_REQUEST_TYPE.STORE_IN}' AND COALESCE(r.remarks, '') LIKE '${AUTO_STORE_IN_FROM_CONSUME_PREFIX}%')`
+    );
+  }
 
   if (filters.request_type && filters.request_type !== "all") {
     values.push(normalizeRequestType(filters.request_type));
@@ -248,6 +375,7 @@ export const findInProcessRequests = async (options = {}) => {
       COALESCE(r.created_by,'') ILIKE $${idx} OR
       COALESCE(r.coils::text,'') ILIKE $${idx} OR
       COALESCE(r.proposed_coils::text,'') ILIKE $${idx} OR
+      COALESCE(r.attachments::text,'') ILIKE $${idx} OR
       r.ipr_uid::text ILIKE $${idx}
     )`);
   }
@@ -322,9 +450,9 @@ const WRITABLE = [
   "lot_no", "mrn_uid", "mrn_no", "heat_no", "item_code", "item_desc",
   "seed_coil_uid", "coils", "previous_coils", "proposed_coils", "scanned_coil_uids",
   "downstream", "approved", "approved_by", "approved_at",
-  "created_by", "updated_by", "updated_at",
+  "created_by", "updated_by", "updated_at", "attachments",
 ];
-const JSON_COLS = new Set(["coils", "previous_coils", "proposed_coils", "scanned_coil_uids"]);
+const JSON_COLS = new Set(["coils", "previous_coils", "proposed_coils", "scanned_coil_uids", "attachments"]);
 
 export const insertInProcessRequest = async (data = {}) => {
   const cols = [];
@@ -352,20 +480,20 @@ export const updateInProcessRequest = async (ipr_uid, fields = {}) => {
   const id = Number(ipr_uid);
   if (!Number.isFinite(id)) return null;
 
-  const sets = [];
-  const values = [];
-  let i = 1;
+  const safe = {};
   for (const key of WRITABLE) {
     if (fields[key] === undefined) continue;
-    sets.push(JSON_COLS.has(key) ? `${key} = $${i++}::jsonb` : `${key} = $${i++}`);
-    values.push(JSON_COLS.has(key) ? JSON.stringify(fields[key] || []) : fields[key]);
+    safe[key] = fields[key];
   }
-  if (!sets.length) return findInProcessRequest(id);
+  if (!Object.keys(safe).length) return findInProcessRequest(id);
 
+  const { setParts, values, nextIndex } = buildNaiveTimestampUpdateParts(safe, {
+    jsonKeys: JSON_COLS,
+  });
   values.push(id);
   const [row] = await dbQuery(
-    `UPDATE ${TABLE} SET ${sets.join(", ")}
-     WHERE ipr_uid = $${i} AND is_deleted = false
+    `UPDATE ${TABLE} SET ${setParts.join(", ")}
+     WHERE ipr_uid = $${nextIndex} AND is_deleted = false
      RETURNING *`,
     values
   );
@@ -428,15 +556,21 @@ export const findInProcessRejectionsPendingRejection = async (options = {}) => {
   const data = (rows || []).map((raw) => {
     const row = summarizeRow(raw);
     const coils = row?.coils || [];
+    const mrnUidSet = new Set();
     const mrnSet = new Set();
     const heatSet = new Set();
     const itemSet = new Set();
+    const itemDescSet = new Set();
     for (const c of coils) {
+      if (c.mrn_uid) mrnUidSet.add(String(c.mrn_uid));
       if (c.mrn_no != null) mrnSet.add(String(c.mrn_no));
       if (c.heat_no) heatSet.add(c.heat_no);
       if (c.item_code) itemSet.add(c.item_code);
+      if (c.item_desc) itemDescSet.add(c.item_desc);
     }
     const first = coils[0] || {};
+    const mrn_uid = [...mrnUidSet].join(" | ") || row.mrn_uid || first.mrn_uid || null;
+    const item_descs = [...itemDescSet].join(" | ") || row.item_desc || first.item_desc || null;
     return {
       ipr_uid: row.ipr_uid,
       pending_source: "in_process",
@@ -445,11 +579,15 @@ export const findInProcessRejectionsPendingRejection = async (options = {}) => {
       qc_reject_uid: null,
       qc_check_uid: null,
       coil_no_uid: coils.length === 1 ? first.coil_no_uid : null,
+      mrn_uid,
+      mrn_uids: mrn_uid,
       mrn_no: row.mrn_no ?? first.mrn_no ?? null,
       mrn_refs: [...mrnSet].join(" | ") || (row.lot_no != null ? String(row.lot_no) : null),
       heat_nos: [...heatSet].join(" | ") || row.heat_no || first.heat_no || null,
       item_code: row.item_code || first.item_code || null,
       item_codes: [...itemSet].join(" | ") || row.item_code || first.item_code || null,
+      item_desc: item_descs,
+      item_descs,
       qty: row.total_qty ?? 0,
       total_qty: row.total_qty ?? 0,
       coil_count: row.coil_count ?? coils.length,

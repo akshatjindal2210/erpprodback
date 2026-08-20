@@ -7,7 +7,7 @@ export function hasCoilJourneyFilter(filters = {}) {
 }
 
 /**
- * Coil list journey — match MRN / coil sticker no / item code across full DB (no date window).
+ * Coil list journey — match MRN / coil / item / job card / machine across full DB (no date window).
  * @returns next param index after pushing journey bind values
  */
 export function appendCoilJourneyCondition(conditions, values, journey, startIndex) {
@@ -15,18 +15,21 @@ export function appendCoilJourneyCondition(conditions, values, journey, startInd
   if (!j) return startIndex;
   const exactIdx = startIndex;
   const prefixIdx = startIndex + 1;
-  values.push(j, `${j}%`);
+  const containsIdx = startIndex + 2;
+  values.push(j, `${j}%`, `%${j}%`);
   conditions.push(`(
     c.coil_no_uid = $${exactIdx}
     OR c.coil_no_uid ILIKE $${prefixIdx}
     OR c.coil_uid::text = $${exactIdx}
     OR TRIM(COALESCE(c.mrn_uid, '')) = $${exactIdx}
     OR COALESCE(c.mrn_uid, '') ILIKE $${prefixIdx}
-    OR c.mrn_no::text = $${exactIdx}
-    OR TRIM(COALESCE(c.heat_no, '')) ILIKE $${exactIdx}
-    OR TRIM(COALESCE(c.item_code, '')) ILIKE $${exactIdx}
+    OR m.mrn_no::text = $${exactIdx}
+    OR TRIM(COALESCE(m.heat_no, '')) ILIKE $${exactIdx}
+    OR TRIM(COALESCE(m.item_code, '')) ILIKE $${exactIdx}
+    OR COALESCE(jc.pjobcardno, '') ILIKE $${containsIdx}
+    OR COALESCE(jc.macname, '') ILIKE $${containsIdx}
   )`);
-  return startIndex + 2;
+  return startIndex + 3;
 }
 
 function pushJourneyParams(journey, values) {
@@ -38,15 +41,16 @@ function pushJourneyParams(journey, values) {
 
 const JOURNEY_COILS_CTE = (exactIdx, prefixIdx) => `
 journey_coils AS (
-  SELECT c.coil_no_uid, TRIM(c.mrn_no::text) AS mrn_no
+  SELECT c.coil_no_uid, TRIM(m.mrn_no::text) AS mrn_no
   FROM ${T.COIL_TABLE} c
+  LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
   WHERE COALESCE(c.is_deleted, false) = false
     AND (
       c.coil_no_uid = $${exactIdx}
       OR c.coil_no_uid ILIKE $${prefixIdx}
       OR c.coil_uid::text = $${exactIdx}
-      OR TRIM(c.mrn_no::text) = $${exactIdx}
-      OR c.mrn_no::text ILIKE $${prefixIdx}
+      OR TRIM(m.mrn_no::text) = $${exactIdx}
+      OR m.mrn_no::text ILIKE $${prefixIdx}
       OR TRIM(COALESCE(c.mrn_uid, '')) = $${exactIdx}
       OR COALESCE(c.mrn_uid, '') ILIKE $${prefixIdx}
     )

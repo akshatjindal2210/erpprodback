@@ -36,15 +36,32 @@ function applyRuntimeFilters(rawSql, filters = {}) {
     .replace(/\{\{\s*fyuid\s*\}\}/gi, Number.isFinite(fyuid) ? String(fyuid) : "NULL");
 }
 
+/** Build a user-facing message from Postgres / driver errors (include detail + hint). */
+function formatQueryEngineError(error, sourceLabel = "Database") {
+  const message = String(error?.message || "Query failed.").trim();
+  const detail = String(error?.detail || "").trim();
+  const hint = String(error?.hint || "").trim();
+  const code = String(error?.code || "").trim();
+  const parts = [`${sourceLabel}: ${message}`];
+  if (detail) parts.push(`Detail: ${detail}`);
+  if (hint) parts.push(`Hint: ${hint}`);
+  if (code) parts.push(`Code: ${code}`);
+  return parts.join(" ");
+}
+
 async function runPostgresReadOnlyQuery(rawSql) {
   const safeSql = toSafeLimitedSql(rawSql);
 
-  return withTransaction(async (client) => {
-    await client.query(`SET LOCAL statement_timeout = ${QUERY_TIMEOUT_MS}`);
-    await client.query("SET TRANSACTION READ ONLY");
-    const result = await client.query(safeSql);
-    return result.rows || [];
-  });
+  try {
+    return await withTransaction(async (client) => {
+      await client.query(`SET LOCAL statement_timeout = ${QUERY_TIMEOUT_MS}`);
+      await client.query("SET TRANSACTION READ ONLY");
+      const result = await client.query(safeSql);
+      return result.rows || [];
+    });
+  } catch (error) {
+    throw new Error(formatQueryEngineError(error, "PostgreSQL"));
+  }
 }
 
 async function runExternalMssqlReadOnlyQuery(rawSql, filters = {}, source = "erp_mssql") {
@@ -52,7 +69,9 @@ async function runExternalMssqlReadOnlyQuery(rawSql, filters = {}, source = "erp
   const erpRequest = buildExternalMssqlPayload(resolvedSql, source);
   const response = await fetchImsDataRaw(erpRequest.requestedData, erpRequest.filter);
   if (!response?.success) {
-    throw new Error(response?.message || "External SQL Server query failed.");
+    const label = source === "hrms_mssql" ? "HRMS SQL Server" : "ERP SQL Server";
+    const detail = String(response?.message || response?.error || "External SQL Server query failed.").trim();
+    throw new Error(`${label}: ${detail}`);
   }
   return {
     rows: Array.isArray(response?.records) ? response.records : [],

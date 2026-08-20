@@ -2,25 +2,32 @@ import { extractListParams } from "../../../../core/lib/utils/query/queryHelper.
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { filterItemsBySearch, filterPrdRunJcBySearch, loadMappedItems, loadMappedPrdRunJc, slicePage, toPickerRow, toPrdRunJcPickerRow } from "../utils/erpItems.js";
 
-async function handleItemHelper(req, res, { requestedData, filter = null }) {
+// Common Generic Runner
+async function fetchAndPaginate(req, res, loader, filterFn, mapper, idKey) {
   try {
-    const { id } = req.body || {};
+    const { id, ids } = req.body || {};
     const { page, limit, search } = extractListParams(req.body || {});
+    const rows = await loader();
 
-    const rows = await loadMappedItems(requestedData, filter);
-
+    // 1. Single ID
     if (id != null && id !== "") {
-      const item = rows.find((r) => String(r.itemdcode) === String(id));
-      if (!item) return res.json({ success: true, data: null });
-      return res.json({ success: true, data: toPickerRow(item) });
+      const match = rows.find(r => String(r[idKey]) === String(id));
+      return res.json({ success: true, data: match ? mapper(match) : null });
     }
 
-    const filtered = filterItemsBySearch(rows, sanitizeSearch(search));
-    const out = slicePage(filtered, page || 1, limit || filtered.length || 1000);
+    // 2. Multiple IDs
+    if (Array.isArray(ids) && ids.length) {
+      const set = new Set(ids.map(String));
+      return res.json({ success: true, data: rows.filter(r => set.has(String(r[idKey]))).map(mapper) });
+    }
+
+    // 3. Search & Pagination
+    const filtered = filterFn(rows, sanitizeSearch(search));
+    const out = slicePage(filtered, page, limit);
 
     return res.json({
       success: true,
-      data: out.data.map(toPickerRow),
+      data: out.data.map(mapper),
       total: out.total,
       page: out.page,
       limit: out.limit,
@@ -30,39 +37,12 @@ async function handleItemHelper(req, res, { requestedData, filter = null }) {
   }
 }
 
-/** Production items — ERP `prdprimitem`. */
+// Exported Handlers
 export const getProductionItemsViews = (req, res) =>
-  handleItemHelper(req, res, { requestedData: "prdprimitem" });
+  fetchAndPaginate(req, res, () => loadMappedItems("prdprimitem"), filterItemsBySearch, toPickerRow, "itemdcode");
 
-/** RM items — ERP `item` with filter `{ type: "rm" }`. */
 export const getRmItemsViews = (req, res) =>
-  handleItemHelper(req, res, { requestedData: "item", filter: { type: "rm" } });
+  fetchAndPaginate(req, res, () => loadMappedItems("item", { type: "rm" }), filterItemsBySearch, toPickerRow, "itemdcode");
 
-/** Production-run job cards — ERP `prdrunjc`. */
-export const getPrdRunJcViews = async (req, res) => {
-  try {
-    const { id } = req.body || {};
-    const { page, limit, search } = extractListParams(req.body || {});
-
-    const rows = await loadMappedPrdRunJc();
-
-    if (id != null && id !== "") {
-      const row = rows.find((r) => String(r.pjobcardno) === String(id));
-      if (!row) return res.json({ success: true, data: null });
-      return res.json({ success: true, data: toPrdRunJcPickerRow(row) });
-    }
-
-    const filtered = filterPrdRunJcBySearch(rows, sanitizeSearch(search));
-    const out = slicePage(filtered, page || 1, limit || filtered.length || 1000);
-
-    return res.json({
-      success: true,
-      data: out.data.map(toPrdRunJcPickerRow),
-      total: out.total,
-      page: out.page,
-      limit: out.limit,
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-};
+export const getPrdRunJcViews = (req, res) =>
+  fetchAndPaginate(req, res, loadMappedPrdRunJc, filterPrdRunJcBySearch, toPrdRunJcPickerRow, "pjobcardno");

@@ -1,10 +1,15 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 
+import { SA_ADD_LIKE_ENTRY_TYPES_SQL } from "../utils/stockAdjustmentEntryTypes.js";
+import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
+
 const TABLE = T.STOCK_ADJUSTMENT;
 
 const ALLOWED_UPDATE = [
   "entry_type",
+  "financial_year",
+  "it_lot_no",
   "item_dcode",
   "item_code",
   "item_desc",
@@ -13,13 +18,22 @@ const ALLOWED_UPDATE = [
   "acc_name",
   "mrn_uid",
   "mrn_no",
+  "serial_no",
+  "mrn_dt",
+  "bill_no",
+  "bill_dt",
   "qty",
   "unit",
   "per_coil_qty",
+  "coil_qtys",
   "coil_count_impact",
   "removed_coil_uids",
   "remarks",
   "doc_dt",
+  "tc_file_path",
+  "tc_file_name",
+  "rmtc_file_path",
+  "rmtc_file_name",
   "approved",
   "approved_by",
   "approved_at",
@@ -30,9 +44,26 @@ const ALLOWED_UPDATE = [
   "deleted_at",
 ];
 
+/** JSONB columns — must be JSON.stringify + ::jsonb (not raw JS arrays). */
+const JSONB_COLS = new Set(["coil_qtys"]);
+
+function prepJsonbValue(value) {
+  if (value == null) return null;
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+}
+
+function sqlPlaceholder(key, index) {
+  return JSONB_COLS.has(key) ? `$${index}::jsonb` : `$${index}`;
+}
+
+function prepFieldValue(key, value) {
+  return JSONB_COLS.has(key) ? prepJsonbValue(value) : value;
+}
+
 function assertFields(obj, whitelist, label) {
   for (const key of Object.keys(obj || {})) {
-    if (!whitelist.includes(key)) throw new Error(`Invalid ${label}: "${key}"`);
+    if (!whitelist.includes(key)) throw new Error(`Unknown ${label}: ${key}`);
   }
 }
 
@@ -69,6 +100,8 @@ export async function findAdjustments({ filters = {}, search, page = 1, limit = 
       COALESCE(s.item_code,'') ILIKE $${idx} OR
       COALESCE(s.item_desc,'') ILIKE $${idx} OR
       COALESCE(s.heat_no,'') ILIKE $${idx} OR
+      COALESCE(s.it_lot_no,'') ILIKE $${idx} OR
+      COALESCE(s.financial_year,'') ILIKE $${idx} OR
       COALESCE(s.remarks,'') ILIKE $${idx} OR
       COALESCE(s.entry_type,'') ILIKE $${idx} OR
       s.adjustment_id::text ILIKE $${idx}
@@ -113,8 +146,8 @@ export async function findAdjustmentById(id) {
 
 export async function insertAdjustment(data) {
   const keys = Object.keys(data);
-  const values = Object.values(data);
-  const placeholders = keys.map((_, idx) => `$${idx + 1}`).join(", ");
+  const values = keys.map((k) => prepFieldValue(k, data[k]));
+  const placeholders = keys.map((k, idx) => sqlPlaceholder(k, idx + 1)).join(", ");
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE} (${keys.join(", ")})
      VALUES (${placeholders})
@@ -127,22 +160,23 @@ export async function insertAdjustment(data) {
 export async function updateAdjustment(fields = {}, filters = {}) {
   assertFields(fields, ALLOWED_UPDATE, "update field");
   const fieldKeys = Object.keys(filters);
-  if (!Object.keys(fields).length) throw new Error("No changes were provided to update.");
-  if (!fieldKeys.length) throw new Error("No filters provided");
+  if (!Object.keys(fields).length) throw new Error("Nothing to update.");
+  if (!fieldKeys.length) throw new Error("Update needs a filter.");
 
-  const setClause = Object.keys(fields)
-    .map((k, idx) => `${k} = $${idx + 1}`)
-    .join(", ");
+  const { setParts, values, nextIndex } = buildNaiveTimestampUpdateParts(fields, {
+    jsonKeys: JSONB_COLS,
+    nowKeys: ["updated_at", "approved_at", "deleted_at"],
+  });
   const whereClause = fieldKeys
-    .map((k, idx) => `${k} = $${Object.keys(fields).length + idx + 1}`)
+    .map((k, idx) => `${k} = $${nextIndex + idx}`)
     .join(" AND ");
 
   const [row] = await dbQuery(
     `UPDATE ${TABLE}
-     SET ${setClause}
+     SET ${setParts.join(", ")}
      WHERE ${whereClause} AND is_deleted = false
      RETURNING *`,
-    [...Object.values(fields), ...Object.values(filters)]
+    [...values, ...Object.values(filters)]
   );
   return row ?? null;
 }
@@ -158,4 +192,51 @@ export async function softDeleteAdjustment(id, userName) {
     },
     { adjustment_id: Number(id) }
   );
+}
+
+/** Sum Add (+) qty already booked on an MRN (approved + pending), excluding one adjustment when editing. */
+export async function sumPriorAddQtyForMrn(mrn_uid, excludeAdjustmentId = null) {
+  const uid = String(mrn_uid || "").trim();
+  if (!uid) return 0;
+  const values = [uid];
+  let exclude = "";
+  const excludeId = Number(excludeAdjustmentId);
+  if (Number.isFinite(excludeId) && excludeId > 0) {
+    values.push(excludeId);
+    exclude = ` AND s.adjustment_id <> $2`;
+  }
+  const [row] = await dbQuery(
+    `SELECT COALESCE(SUM(s.qty), 0)::float AS total
+     FROM ${TABLE} s
+     WHERE s.is_deleted = false
+       AND LOWER(s.entry_type) IN ${SA_ADD_LIKE_ENTRY_TYPES_SQL}
+       AND TRIM(s.mrn_uid) = $1
+       ${exclude}`,
+    values
+  );
+  return Number(row?.total || 0);
+}
+
+/** Pending Add (+) qty on an MRN — not yet converted to coils (exclude when editing that row). */
+export async function sumPendingAddQtyForMrn(mrn_uid, excludeAdjustmentId = null) {
+  const uid = String(mrn_uid || "").trim();
+  if (!uid) return 0;
+  const values = [uid];
+  let exclude = "";
+  const excludeId = Number(excludeAdjustmentId);
+  if (Number.isFinite(excludeId) && excludeId > 0) {
+    values.push(excludeId);
+    exclude = ` AND s.adjustment_id <> $2`;
+  }
+  const [row] = await dbQuery(
+    `SELECT COALESCE(SUM(s.qty), 0)::float AS total
+     FROM ${TABLE} s
+     WHERE s.is_deleted = false
+       AND LOWER(s.entry_type) IN ${SA_ADD_LIKE_ENTRY_TYPES_SQL}
+       AND COALESCE(s.approved, false) = false
+       AND TRIM(s.mrn_uid) = $1
+       ${exclude}`,
+    values
+  );
+  return Number(row?.total || 0);
 }

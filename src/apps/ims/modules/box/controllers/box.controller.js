@@ -40,6 +40,8 @@ const BOX_STORE_LIST_FIELDS = [
   "sa.item_code AS sa_item_code",
   "sa.item_desc AS sa_item_desc",
   "fnm.acc_code AS forward_acc_code",
+  "COALESCE(NULLIF(TRIM(sa.job_card_no::text), ''), NULLIF(TRIM(dp.job_card_no::text), '')) AS job_card_no",
+  "COALESCE(sa.doc_dt, dp.doc_dt) AS doc_dt",
 ];
 
 const BOX_AUDIT_RESPONSE_KEYS = new Set([
