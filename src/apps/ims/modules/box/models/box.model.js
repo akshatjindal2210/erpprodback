@@ -361,6 +361,22 @@ export function matchBoxRowByAnyScanCodes(rows, scanCodes = []) {
   return null;
 }
 
+/**
+ * Match printed / typed box_no_uid:
+ * - exact (trim)
+ * - case-insensitive
+ * - underscore-suffix when year/prefix omitted (`30818_5_1` → `2026_30818_5_1`)
+ * Use `right(...)= '_'||search` — do not use LIKE `_` (Postgres single-char wildcard).
+ */
+const SQL_BOX_NO_UID_MATCH = `(
+  trim(b.box_no_uid::text) = trim($1::text)
+  OR lower(trim(b.box_no_uid::text)) = lower(trim($1::text))
+  OR (
+    length(trim(b.box_no_uid::text)) > length(trim($1::text))
+    AND right(trim(b.box_no_uid::text), length(trim($1::text)) + 1) = ('_' || trim($1::text))
+  )
+)`;
+
 /** Single round-trip lookup by numeric box_uid and/or box_no_uid (QR scan hot path). */
 export const findBoxByUidOrNoUid = async (id) => {
   const val = id != null ? String(id).trim() : "";
@@ -371,9 +387,17 @@ export const findBoxByUidOrNoUid = async (id) => {
      FROM ims_box_table b
      WHERE b.is_deleted = false
        AND (
-         b.box_no_uid = $1::text
-         OR ($2::boolean AND b.box_uid::text = $1::text)
+         ${SQL_BOX_NO_UID_MATCH}
+         OR ($2::boolean AND b.box_uid::text = trim($1::text))
        )
+     ORDER BY
+       CASE
+         WHEN trim(b.box_no_uid::text) = trim($1::text) THEN 0
+         WHEN lower(trim(b.box_no_uid::text)) = lower(trim($1::text)) THEN 1
+         WHEN ($2::boolean AND b.box_uid::text = trim($1::text)) THEN 2
+         ELSE 3
+       END,
+       b.box_uid DESC
      LIMIT 1`,
     [val, tryUid]
   );
@@ -1847,6 +1871,53 @@ export const updateStockAdjustmentAddBoxesQtyTx = async (client, { adjustmentId,
   });
 };
 
+/** Single-box qty change for stock adjustment entry_type = update (approve / revert). */
+export const updateBoxQtyForStockAdjustmentTx = async (
+  client,
+  { boxUid, qty, adjustmentId, userId, userName = null, details = {} }
+) => {
+  const uid = Number(boxUid);
+  const nextQty = parseInt(String(qty ?? ""), 10);
+  if (!Number.isFinite(uid) || uid < 1) {
+    const err = new Error("Valid box required for qty update.");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!Number.isFinite(nextQty) || nextQty < 0) {
+    const err = new Error("Box quantity cannot be negative.");
+    err.statusCode = 400;
+    throw err;
+  }
+  const auditBy = userName ?? null;
+  const { rows } = await client.query(
+    `UPDATE ims_box_table
+     SET qty = $2::integer,
+         updated_by = $3,
+         updated_at = NOW()
+     WHERE box_uid = $1::integer
+       AND is_deleted = false
+     RETURNING box_uid, box_no_uid, packing_number, qty, is_loose`,
+    [uid, nextQty, auditBy]
+  );
+  if (!rows?.length) {
+    const err = new Error("Box not found or was deleted.");
+    err.statusCode = 404;
+    throw err;
+  }
+  await logBoxTransaction({
+    client,
+    transaction_type: BOX_TX_TYPES.SA_QTY_UPDATE,
+    source_module: "stock_adjustment",
+    source_id: adjustmentId != null ? String(adjustmentId) : null,
+    packing_number: singlePackingFromRows(rows),
+    user_id: userId,
+    user_name: auditBy,
+    rows,
+    details: { entry_type: "update", adjustment_id: adjustmentId, ...details },
+  });
+  return rows[0];
+};
+
 /**
  * Permanently remove all boxes created by an add adjustment, including `stock_out`
  * rows left after a minus (box_no_uid contains `_SA{adjustmentId}_`).
@@ -2258,7 +2329,15 @@ export const findBoxDetailed = async ({ box_uid, box_no_uid } = {}) => {
   if (noUid) {
     const rows = await dbQuery(
       `${FIND_BOX_DETAILED_SELECT}
-       WHERE b.box_no_uid = $1::text
+       WHERE b.is_deleted = false
+         AND ${SQL_BOX_NO_UID_MATCH}
+       ORDER BY
+         CASE
+           WHEN trim(b.box_no_uid::text) = trim($1::text) THEN 0
+           WHEN lower(trim(b.box_no_uid::text)) = lower(trim($1::text)) THEN 1
+           ELSE 2
+         END,
+         b.box_uid DESC
        LIMIT 1`,
       [noUid]
     );
@@ -2298,10 +2377,19 @@ export const findBoxDetailedByUidOrNoUid = async (id) => {
   const tryUid = /^\d+$/.test(val);
   const rows = await dbQuery(
     `${FIND_BOX_DETAILED_SELECT}
-     WHERE (
-       b.box_no_uid = $1::text
-       OR ($2::boolean AND b.box_uid::text = $1::text)
-     )
+     WHERE b.is_deleted = false
+       AND (
+         ${SQL_BOX_NO_UID_MATCH}
+         OR ($2::boolean AND b.box_uid::text = trim($1::text))
+       )
+     ORDER BY
+       CASE
+         WHEN trim(b.box_no_uid::text) = trim($1::text) THEN 0
+         WHEN lower(trim(b.box_no_uid::text)) = lower(trim($1::text)) THEN 1
+         WHEN ($2::boolean AND b.box_uid::text = trim($1::text)) THEN 2
+         ELSE 3
+       END,
+       b.box_uid DESC
      LIMIT 1`,
     [val, tryUid]
   );

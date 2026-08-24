@@ -7,12 +7,13 @@ import { executeReadOnlyWidgetQuery } from "../../../lib/utils/query/queryExecut
 import { HybridQueryEngine, resolveHybridPgSql } from "../../../lib/utils/query/hybridQueryEngine.js";
 import { validateErpMssqlWidgetQuery, resolveErpMssqlSqlFromRequest, resolveErpMssqlRuntimeFilters, isErpMssqlDirectRequest, parseErpMssqlDirectRequest, isExternalMssqlSource, resolveExternalMssqlConfig, validateExternalMssqlWidgetQuery } from "../../../lib/utils/mssql/erpMssqlQuery.js";
 import { validateSelectSql } from "../../../lib/utils/query/sqlGenerator.js";
-import { isConfiguredWidgetQuery } from "../../../lib/utils/query/widgetQuery.js";
+import { isConfiguredWidgetQuery, DASHBOARD_QUERY_TIMEOUT_MS } from "../../../lib/utils/query/widgetQuery.js";
+import { normalizeUrlRequestOptions, validateJsonUrl } from "../../../lib/utils/query/urlJsonQuery.js";
 import { fetchImsDataRaw } from "../../../../ims/lib/services/ims.service.js";
 import { clearImsMetaForResponse } from "../../../../ims/lib/utils/erp-api/lookup/imsMeta.js";
 
 const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings", "rmstore"]);
-const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql", "hybrid"]);
+const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql", "hybrid", "url_json"]);
 const ALLOWED_AUDIENCE_SCOPES = new Set(["global", "users"]);
 const APP_TABLE_PREFIX = {
   ims: ["ims_"],
@@ -140,6 +141,37 @@ function normalizeDashboardJson(raw = {}) {
   return { ...doc, widgets };
 }
 
+function validateUrlWidgetsForPublish(widgets = []) {
+  widgets.forEach((widget, idx) => {
+    const stored = widgetToStoredJson(widget, idx);
+    const dataSource = String(stored.dataSource || "").toLowerCase();
+    const isHybrid = stored.chart_config?.is_hybrid === true || dataSource === "hybrid";
+    const hybridSource = String(stored.chart_config?.hybrid_external_source || "").toLowerCase();
+
+    if (isHybrid && hybridSource === "url_json") {
+      const hybridUrl = String(stored.chart_config?.hybrid_url || "").trim();
+      if (!hybridUrl) throw new Error("Hybrid widgets with URL source require an API URL.");
+      validateJsonUrl(hybridUrl);
+      normalizeUrlRequestOptions({
+        method: stored.chart_config?.hybrid_url_method,
+        body: stored.chart_config?.hybrid_url_body,
+      });
+      if (stored.query) resolveHybridPgSql(stored.query, {});
+      return;
+    }
+
+    if (dataSource !== "url_json") return;
+    if (!new Set(["kpi", "table", "graph"]).has(String(stored.rawType || "").toLowerCase())) return;
+
+    validateJsonUrl(stored.query);
+    normalizeUrlRequestOptions({
+      method: stored.chart_config?.url_method,
+      body: stored.chart_config?.url_body,
+      excludedColumns: stored.chart_config?.url_excluded_columns,
+    });
+  });
+}
+
 async function getWidgetsForBuilder(appKey, pageKey, dashboardKey = "default") {
   const storedWidgets = await getDashboardWidgetsFromConfig(appKey, pageKey, dashboardKey);
   return storedWidgets.map((widget, idx) => widgetToRuntimeRow(widget, idx));
@@ -211,10 +243,11 @@ function normalizeTargetUserIds(rawValue) {
 function normalizeWidgetFilters(rawFilters = {}) {
   const fromDate = rawFilters?.fromDate ? String(rawFilters.fromDate).trim() : "";
   const toDate = rawFilters?.toDate ? String(rawFilters.toDate).trim() : "";
-  const userIdRaw = rawFilters?.userId;
-  const userId = userIdRaw !== undefined && userIdRaw !== null && String(userIdRaw).trim() !== ""
-    ? Number(userIdRaw)
-    : null;
+  const username = String(rawFilters?.username ?? rawFilters?.user_name ?? "").trim();
+  const name = String(rawFilters?.name ?? rawFilters?.userName ?? "").trim();
+  const userIdRaw = rawFilters?.userId ?? rawFilters?.user_id ?? rawFilters?.userid;
+  const userIdNum = Number(userIdRaw);
+  const userId = Number.isInteger(userIdNum) && userIdNum > 0 ? userIdNum : null;
   const fyuidRaw = rawFilters?.fyuid ?? rawFilters?.fy_uid ?? rawFilters?.fin_year_id;
   const fyuid = fyuidRaw !== undefined && fyuidRaw !== null && String(fyuidRaw).trim() !== ""
     ? Number(fyuidRaw)
@@ -222,7 +255,9 @@ function normalizeWidgetFilters(rawFilters = {}) {
   return {
     fromDate,
     toDate,
-    userId: Number.isInteger(userId) && userId > 0 ? userId : null,
+    userId,
+    username: username || null,
+    name: name || username || null,
     fyuid: Number.isInteger(fyuid) && fyuid > 0 ? fyuid : null,
   };
 }
@@ -232,12 +267,33 @@ function isSuperAdminUser(user) {
   return userType === "super_admin" || userType === "super admin";
 }
 
+function loggedInDashboardUserFilter(user) {
+  const selfId = Number(user?.id);
+  const username = String(user?.username || user?.email || "").trim() || null;
+  const name = String(user?.name || "").trim() || null;
+  return {
+    userId: Number.isInteger(selfId) && selfId > 0 ? selfId : null,
+    username,
+    name: name || username,
+  };
+}
+
 function resolveWidgetFiltersForUser(req, rawFilters = {}) {
   const normalized = normalizeWidgetFilters(rawFilters);
   if (isSuperAdminUser(req.user)) {
-    return normalized;
+    return {
+      ...normalized,
+      matchAllUsers: !normalized.userId && !normalized.username,
+    };
   }
-  return { ...normalized, userId: null };
+  const self = loggedInDashboardUserFilter(req.user);
+  return {
+    ...normalized,
+    matchAllUsers: false,
+    userId: self.userId,
+    username: self.username,
+    name: self.name,
+  };
 }
 
 
@@ -260,12 +316,33 @@ function sanitizeWidgetBody(body = {}) {
 
   if (isHybridWidget || type === "hybrid") {
     if (!isDraft) {
-      const hybridMssql = String(body.chart_config?.hybrid_mssql_query || "").trim();
-      if (!hybridMssql) {
-        throw new Error("Hybrid widgets require an external MSSQL query.");
+      if (String(hybridExternalSource).toLowerCase() === "url_json") {
+        const hybridUrl = String(body.chart_config?.hybrid_url || "").trim();
+        if (!hybridUrl) {
+          throw new Error("Hybrid widgets with URL source require an API URL.");
+        }
+        validateJsonUrl(hybridUrl);
+        normalizeUrlRequestOptions({
+          method: body.chart_config?.hybrid_url_method,
+          body: body.chart_config?.hybrid_url_body,
+        });
+      } else {
+        const hybridMssql = String(body.chart_config?.hybrid_mssql_query || "").trim();
+        if (!hybridMssql) {
+          throw new Error("Hybrid widgets require an external MSSQL query.");
+        }
+        validateExternalMssqlWidgetQuery(hybridMssql, hybridExternalSource);
       }
-      validateExternalMssqlWidgetQuery(hybridMssql, hybridExternalSource);
       if (query) resolveHybridPgSql(query, {});
+    }
+  } else if (dbSource === "url_json") {
+    if (requiresQuery && query && !isDraft) {
+      validateJsonUrl(query);
+      normalizeUrlRequestOptions({
+        method: body?.chart_config?.url_method,
+        body: body?.chart_config?.url_body,
+        excludedColumns: body?.chart_config?.url_excluded_columns,
+      });
     }
   } else {
     if (requiresQuery && query && !isDraft) {
@@ -468,7 +545,9 @@ export const getTables = async (req, res) => {
     const effectiveDbSource = dbSource === "hybrid" ? "ims_postgresql" : dbSource;
     if (isExternalMssqlSource(effectiveDbSource)) {
       const { tablesRequestedData } = resolveExternalMssqlConfig(effectiveDbSource);
-      const imsRes = await fetchImsDataRaw(tablesRequestedData);
+      const imsRes = await fetchImsDataRaw(tablesRequestedData, null, {
+        timeoutMs: DASHBOARD_QUERY_TIMEOUT_MS,
+      });
       const rows = Array.isArray(imsRes?.records) ? imsRes.records : [];
       const values = rows
         .map((row) => String(row?.table_name || row?.name || "").trim())
@@ -686,6 +765,12 @@ export const previewWidgetHandler = async (req, res) => {
       is_hybrid: isHybridWidget,
       hybrid_mssql_query: body.chart_config?.hybrid_mssql_query,
       hybrid_external_source: hybridExternalSource,
+      hybrid_url: body.chart_config?.hybrid_url,
+      hybrid_url_method: body.chart_config?.hybrid_url_method,
+      hybrid_url_body: body.chart_config?.hybrid_url_body,
+      url_method: body.chart_config?.url_method,
+      url_body: body.chart_config?.url_body,
+      url_excluded_columns: body.chart_config?.url_excluded_columns,
     });
     res.json({ success: true, data: result.rows });
   } catch (error) {
@@ -695,18 +780,67 @@ export const previewWidgetHandler = async (req, res) => {
 
 export const hybridPreviewHandler = async (req, res) => {
   try {
-    const { mssql_query, pg_query, db_source, filters, stage_only } = req.body;
-
-    if (!mssql_query) {
-      throw new Error("External MSSQL query is required.");
-    }
+    const {
+      mssql_query,
+      pg_query,
+      db_source,
+      filters,
+      stage_only,
+      url,
+      url_method,
+      url_body,
+    } = req.body;
 
     const source = normalizeDbSource(db_source || "erp_mssql");
     const externalSource = source === "hybrid" ? "erp_mssql" : source;
+    const runtimeFilters = resolveWidgetFiltersForUser(req, filters || {});
+
+    // --- URL Step 1 (additive) ---
+    if (externalSource === "url_json") {
+      if (!String(url || "").trim()) {
+        throw new Error("External API URL is required.");
+      }
+      validateJsonUrl(url);
+      normalizeUrlRequestOptions({ method: url_method, body: url_body });
+      const externalConfig = {
+        source: "url_json",
+        url: String(url).trim(),
+        urlMethod: url_method,
+        urlBody: url_body,
+      };
+
+      if (stage_only === true || !pg_query) {
+        const preview = await HybridQueryEngine.previewExternal(externalConfig, runtimeFilters);
+        return res.json({
+          success: true,
+          data: preview.sampleRows,
+          columns: preview.columns,
+          placeholder: preview.placeholder,
+          row_count: preview.sampleRows.length,
+          external_row_count: preview.externalRowCount,
+        });
+      }
+
+      const result = await HybridQueryEngine.executeHybridPreview(
+        externalConfig,
+        pg_query,
+        runtimeFilters,
+      );
+      return res.json({
+        success: true,
+        data: result.rows,
+        row_count: result.rowCount,
+        external_row_count: result.externalRowCount,
+      });
+    }
+
+    // --- Original ERP / HRMS Hybrid path (unchanged) ---
+    if (!mssql_query) {
+      throw new Error("External MSSQL query is required.");
+    }
     if (!isExternalMssqlSource(externalSource)) {
       throw new Error("Hybrid staging requires an external SQL Server source (ERP / HRMS).");
     }
-    const runtimeFilters = resolveWidgetFiltersForUser(req, filters || {});
 
     if (stage_only === true || !pg_query) {
       validateExternalMssqlWidgetQuery(mssql_query, externalSource);
@@ -815,6 +949,7 @@ export const publishDashboardConfigHandler = async (req, res) => {
     if (!dashboardJson.widgets.length) {
       return res.status(400).json({ success: false, message: "Dashboard widgets are required." });
     }
+    validateUrlWidgetsForPublish(dashboardJson.widgets);
     const existing = await getDashboardConfigByKey(appKey, pageKey, dashboardKey, { publishedOnly: false });
     const { meta: existingMeta } = parseDashboardDocument(existing?.dashboard_json || {});
     const { scope: resolvedScope, targetUserIds: resolvedTargetUserIds } = resolveDashboardScopeAndUsers({
@@ -943,6 +1078,7 @@ export const cloneDashboardToUsersHandler = async (req, res) => {
     if (!dashboardJson.widgets.length) {
       return res.status(400).json({ success: false, message: "No widgets found to clone. Add widgets first." });
     }
+    validateUrlWidgetsForPublish(dashboardJson.widgets);
     if (dashboardKey === "default") {
       return res.status(400).json({ success: false, message: 'Clone dashboard key cannot be "default".' });
     }
@@ -1145,13 +1281,14 @@ export const getDashboardWidgetsHandler = async (req, res) => {
 
     const toPublicWidget = (widget, extra = {}) => {
       const chartConfig = widget?.chart_config && typeof widget.chart_config === "object" ? widget.chart_config : {};
+      const { url_body: _privateUrlBody, hybrid_url_body: _privateHybridUrlBody, ...publicChartConfig } = chartConfig;
       const layout = widget?.layout && typeof widget.layout === "object" ? widget.layout : {};
       return {
         id: widget.id,
         title: widget.title || "",
         description: widget.description || "",
         type: widget.type,
-        chart_config: chartConfig,
+        chart_config: publicChartConfig,
         layout,
         mobile_layout: widget?.mobile_layout && typeof widget.mobile_layout === "object" ? widget.mobile_layout : layout,
         audience_scope: String(widget.audience_scope || "global").toLowerCase(),
@@ -1184,6 +1321,12 @@ export const getDashboardWidgetsHandler = async (req, res) => {
           is_hybrid: isHybridWidget,
           hybrid_mssql_query: widget?.chart_config?.hybrid_mssql_query,
           hybrid_external_source: hybridExternalSource,
+          hybrid_url: widget?.chart_config?.hybrid_url,
+          hybrid_url_method: widget?.chart_config?.hybrid_url_method,
+          hybrid_url_body: widget?.chart_config?.hybrid_url_body,
+          url_method: widget?.chart_config?.url_method,
+          url_body: widget?.chart_config?.url_body,
+          url_excluded_columns: widget?.chart_config?.url_excluded_columns,
         });
         results.push(toPublicWidget(widget, { data: result.rows, error: null, has_query: true }));
       } catch (error) {

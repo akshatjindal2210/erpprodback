@@ -16,7 +16,6 @@ import { createStickerTypeTable } from "../tables/stickers/sticker_type.table.js
 import { createAppConfigTable } from "../tables/app-config/app_config.table.js";
 import { createAuditTables } from "../tables/audit/audit.table.js";
 import { createQcHoldMaterialTable } from "../tables/qc-hold-material/qc_hold_material.table.js";
-import { syncImsSequences } from "./syncSequences.js";
 
 /** Schema only — data backfills live in src/backfills/ */
 export async function initImsDB() {
@@ -40,6 +39,4 @@ export async function initImsDB() {
   await createOutEntryScannedBoxTable();
   await createTransactionBoxTable();
   await createAuditTables();
-
-  await syncImsSequences();
 }

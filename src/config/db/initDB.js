@@ -5,6 +5,7 @@ import { initCoreDB } from "../../apps/core/lib/config/db/initDB.js";
 import { initDashboardDB } from "../../apps/dashboard/lib/config/db/initDB.js";
 import { initRmStoreDB } from "../../apps/rmstore/lib/config/db/initDB.js";
 import { runStartupBackfills } from "../../backfills/index.js";
+import { syncSerialSequences } from "./syncSequences.js";
 
 export const initDB = async () => {
   try {
@@ -16,6 +17,8 @@ export const initDB = async () => {
     await initTaskDB();
     await initRmStoreDB();
     await initDashboardDB();
+
+    await syncSerialSequences();
 
     console.log("✅ All Tables Ready");
 

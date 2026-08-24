@@ -1,5 +1,6 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
+import { ensureIndexes } from "../../../../../../config/db/ensureDbColumns.js";
 
 export async function createRmStoreSpecMasterTable() {
   await dbQuery(`
@@ -25,11 +26,13 @@ export async function createRmStoreSpecMasterTable() {
       updated_by        TEXT,
       updated_at        TIMESTAMP
     );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS rmstore_spec_master_dcode_unique_active
-      ON ${T.SPEC_MASTER} (item_dcode)
-      WHERE is_deleted = false;
   `);
+
+  await ensureIndexes(dbQuery, [
+    `CREATE UNIQUE INDEX IF NOT EXISTS rmstore_spec_master_dcode_unique_active
+       ON ${T.SPEC_MASTER} (item_dcode)
+       WHERE is_deleted = false`,
+  ]);
 }
 
 export async function createRmStoreSpecDetailTable() {
@@ -50,4 +53,9 @@ export async function createRmStoreSpecDetailTable() {
       document_required   BOOLEAN DEFAULT false
     );
   `);
+
+  await ensureIndexes(dbQuery, [
+    `CREATE UNIQUE INDEX IF NOT EXISTS rmstore_spec_detail_item_sno_unique
+       ON ${T.SPEC_DETAIL} (spec_item_id, sno)`,
+  ]);
 }

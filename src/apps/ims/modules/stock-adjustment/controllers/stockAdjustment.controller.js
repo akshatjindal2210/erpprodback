@@ -14,9 +14,10 @@ import { syncAdjustmentMetadataOnly } from "../utils/apply/stockAdjustmentSync.j
 import { resolveStockAdjustmentPackingMeta } from "../utils/packing/stockAdjustmentPacking.js";
 import { applyStockAdjustmentOnApproveTx, revertStockAdjustmentOnUnapproveTx } from "../utils/apply/stockAdjustmentApply.js";
 import { persistAdjustmentDocDtTx } from "../utils/doc/stockAdjustmentDocDt.js";
-import { isBoxAvailableForMinus } from "../../box/utils/inventory/boxInventory.js";
+import { isBoxAvailableForMinus, isBoxInHand } from "../../box/utils/inventory/boxInventory.js";
 import { enrichStockAdjustmentListRows } from "../utils/list/stockAdjustmentList.js";
 import { buildMinusRemovedBoxIdsJson } from "../utils/minus/minusRemovedBoxPayload.js";
+import { buildQtyUpdatePayload, parseQtyUpdatePayload } from "../utils/update/stockAdjustmentUpdatePayload.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 
 const STOCK_CFG = getCrudModuleConfig("stock_adjustment");
@@ -55,7 +56,8 @@ export const createAdjustment = async (req, res) => {
     const normalizedApproved = normalizeApprovedInput(req.body.approved);
     const { item_dcode: bodyItemDcode, qty: bodyQty, unit, remarks, entry_type, packing_number: rawPacking, financial_year,
       per_box_qty, box_count_impact, no_of_boxes, removed_box_uids, acc_code: bodyAccCode, acc_name: bodyAccName,
-      category_id: bodyCategoryId, all_boxes_loose: bodyAllBoxesLoose, box_breakup: _ignoredBoxBreakup } = req.body;
+      category_id: bodyCategoryId, all_boxes_loose: bodyAllBoxesLoose, box_breakup: _ignoredBoxBreakup,
+      box_uid: bodyBoxUid, update_action: bodyUpdateAction, update_qty: bodyUpdateQty } = req.body;
 
     const allBoxesLoose = bodyAllBoxesLoose === true || bodyAllBoxesLoose === "true" || bodyAllBoxesLoose === 1;
 
@@ -158,6 +160,57 @@ export const createAdjustment = async (req, res) => {
       item_dcode = resolvedItem;
       const { ledgerMap } = await getImsMapsSafe();
       removed_box_ids_json = buildMinusRemovedBoxIdsJson(live, pnNorm, ledgerMap);
+    } else if (entry_type === "update") {
+      const boxUid = parseInt(String(bodyBoxUid ?? ""), 10);
+      if (!Number.isFinite(boxUid) || boxUid < 1) {
+        return res.status(400).json({ success: false, message: "Scan / select one box sticker." });
+      }
+      const rows = await findBoxesByUids([String(boxUid)]);
+      const box = (rows || []).find((r) => !r.is_deleted);
+      if (!box) {
+        return res.status(400).json({ success: false, message: "Box not found or was deleted." });
+      }
+      if (!isBoxInHand(box)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Box is not in hand — it may be dispatched or already removed via another stock adjustment.",
+        });
+      }
+      packing_number = String(box.packing_number ?? "").trim() || packing_number;
+      const snapshotQty = parseInt(String(box.qty ?? ""), 10);
+      let built;
+      try {
+        built = buildQtyUpdatePayload({
+          box_uid: box.box_uid,
+          box_no_uid: box.box_no_uid,
+          packing_number,
+          snapshot_qty: snapshotQty,
+          update_action: bodyUpdateAction,
+          update_qty: bodyUpdateQty,
+        });
+      } catch (buildErr) {
+        return res.status(buildErr.statusCode || 400).json({
+          success: false,
+          message: buildErr.message || "Invalid update qty.",
+        });
+      }
+      removed_box_ids_json = built.json;
+      qty = built.signedDelta;
+      per_box_qty_v = built.snapshot_qty;
+      box_count_impact_v = 1;
+      acc_code = resolveAccCodeFromBoxRows([box]) ?? bodyAccCode ?? null;
+      const resolvedItem = await resolveItemDcodeForMinusAdjustment({
+        packing_number,
+        boxRows: [box],
+      });
+      if (resolvedItem == null) {
+        return res.status(400).json({
+          success: false,
+          message: "Could not resolve item from the scanned box.",
+        });
+      }
+      item_dcode = resolvedItem;
     } else {
       if (item_dcode == null || item_dcode === "") {
         return res.status(400).json({ success: false, message: "item_dcode required" });
@@ -176,7 +229,7 @@ export const createAdjustment = async (req, res) => {
       remarks, 
       created_by: auditUserName(req) 
     };
-    if (entry_type === "minus") {
+    if (entry_type === "minus" || entry_type === "update") {
       data.acc_code = acc_code ?? null;
     } else if (acc_code !== undefined) {
       data.acc_code = acc_code;
@@ -185,13 +238,13 @@ export const createAdjustment = async (req, res) => {
       data.acc_name = String(bodyAccName).trim();
     }
 
-    if (entry_type === "add" || entry_type === "minus") {
+    if (entry_type === "add" || entry_type === "minus" || entry_type === "update") {
       data.entry_type = entry_type;
-      data.packing_number = packing_number;
+      data.packing_number = packing_number || null;
       data.financial_year = entry_type === "add" ? fyTrim : null;
-      data.per_box_qty = entry_type === "add" ? per_box_qty_v : null;
+      data.per_box_qty = entry_type === "add" || entry_type === "update" ? per_box_qty_v : null;
       data.box_count_impact = box_count_impact_v;
-      if (entry_type === "minus") data.removed_box_ids = removed_box_ids_json;
+      if (entry_type === "minus" || entry_type === "update") data.removed_box_ids = removed_box_ids_json;
       if (entry_type === "add") {
         const categoryId = parseInt(String(bodyCategoryId ?? ""), 10);
         data.category_id = categoryId;
@@ -199,7 +252,7 @@ export const createAdjustment = async (req, res) => {
     }
 
     let adjustment;
-    if (entry_type === "add" || entry_type === "minus") {
+    if (entry_type === "add" || entry_type === "minus" || entry_type === "update") {
       adjustment = await withTransaction(async (client) => {
         const adj = await insertAdjustmentTx(client, data);
         await persistAdjustmentDocDtTx(client, { ...adj, ...data });
@@ -276,7 +329,7 @@ export const getAdjustmentById = async (req, res) => {
 
     const isPackingForm =
       data?.packing_number &&
-      (data.entry_type === "add" || data.entry_type === "minus");
+      (data.entry_type === "add" || data.entry_type === "minus" || data.entry_type === "update");
 
     const [[enriched], packing_meta] = await Promise.all([
       enrichStockAdjustmentListRows(data ? [data] : []),
@@ -315,6 +368,9 @@ export const updateAdjustment = async (req, res) => {
       acc_name,
       all_boxes_loose,
       box_breakup: _ignoredBoxBreakup,
+      box_uid: bodyBoxUid,
+      update_action: bodyUpdateAction,
+      update_qty: bodyUpdateQty,
       ...incoming
     } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
@@ -348,6 +404,10 @@ export const updateAdjustment = async (req, res) => {
         incoming.per_box_qty !== undefined ||
         incoming.box_count_impact !== undefined ||
         no_of_boxes !== undefined);
+
+    const wantsQtyUpdateSync =
+      existing.entry_type === "update" &&
+      (bodyUpdateAction !== undefined || bodyUpdateQty !== undefined || bodyBoxUid !== undefined);
 
     const uidsToRemove = [
       ...(Array.isArray(removed_box_uids) ? removed_box_uids : []),
@@ -402,7 +462,10 @@ export const updateAdjustment = async (req, res) => {
       all_boxes_loose === true || all_boxes_loose === "true" || all_boxes_loose === 1;
 
     const hasBusinessChanges =
-      Object.keys(incoming).length > 0 || wantsPackingBoxSync || all_boxes_loose !== undefined;
+      Object.keys(incoming).length > 0 ||
+      wantsPackingBoxSync ||
+      wantsQtyUpdateSync ||
+      all_boxes_loose !== undefined;
 
     /** Approved row + any edit → pending only; Approve must be a separate action. */
     if (wasApproved && hasBusinessChanges) {
@@ -424,6 +487,61 @@ export const updateAdjustment = async (req, res) => {
         hasBusinessChanges,
         auditAsName: true,
       });
+    }
+
+    if (wantsQtyUpdateSync) {
+      const existingPlan = parseQtyUpdatePayload(existing.removed_box_ids) || {};
+      const boxUid = parseInt(
+        String(bodyBoxUid ?? existingPlan.box_uid ?? ""),
+        10
+      );
+      if (!Number.isFinite(boxUid) || boxUid < 1) {
+        return res.status(400).json({ success: false, message: "Valid box required for qty update." });
+      }
+      const rows = await findBoxesByUids([String(boxUid)]);
+      const box = (rows || []).find((r) => !r.is_deleted);
+      if (!box) {
+        return res.status(400).json({ success: false, message: "Box not found or was deleted." });
+      }
+      if (!isBoxInHand(box) && !wasApproved) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Box is not in hand — it may be dispatched or already removed via another stock adjustment.",
+        });
+      }
+      const liveQty = parseInt(String(box.qty ?? ""), 10);
+      // If row was approved, live qty already includes the applied delta — snapshot pre-apply qty for the plan.
+      const snapshotQty =
+        wasApproved &&
+        existingPlan.applied_delta != null &&
+        Number.isFinite(Number(existingPlan.applied_delta))
+          ? liveQty - Number(existingPlan.applied_delta)
+          : liveQty;
+      let built;
+      try {
+        built = buildQtyUpdatePayload({
+          box_uid: box.box_uid,
+          box_no_uid: box.box_no_uid,
+          packing_number: box.packing_number,
+          snapshot_qty: snapshotQty,
+          update_action: bodyUpdateAction ?? existingPlan.update_action,
+          update_qty: bodyUpdateQty ?? existingPlan.update_qty,
+        });
+      } catch (buildErr) {
+        return res.status(buildErr.statusCode || 400).json({
+          success: false,
+          message: buildErr.message || "Invalid update qty.",
+        });
+      }
+      fields.removed_box_ids = built.json;
+      fields.qty = built.signedDelta;
+      fields.per_box_qty = built.snapshot_qty;
+      fields.box_count_impact = 1;
+      fields.packing_number = String(box.packing_number ?? "").trim() || existing.packing_number;
+      delete fields.box_uid;
+      delete fields.update_action;
+      delete fields.update_qty;
     }
 
     let updated;
@@ -523,7 +641,9 @@ export const deleteAdjustment = async (req, res) => {
         ? "Adjustment deleted. Added boxes were permanently removed from inventory."
         : existing.entry_type === "minus"
           ? "Adjustment deleted. Removed boxes were restored to inventory."
-          : "Adjustment deleted.";
+          : existing.entry_type === "update"
+            ? "Adjustment deleted. Box qty change was reverted if it had been approved."
+            : "Adjustment deleted.";
 
     res.json({ success: true, message });
   } catch (err) {

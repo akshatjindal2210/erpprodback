@@ -1,4 +1,5 @@
 import { validateSelectSql } from "../query/sqlGenerator.js";
+import { applyDashboardUserPlaceholders } from "../query/widgetQuery.js";
 
 export const EXTERNAL_MSSQL_SOURCES = {
   erp_mssql: {
@@ -36,7 +37,7 @@ function escapeSqlLiteral(value) {
   return String(value).replace(/'/g, "''");
 }
 
-/** Replace {{fromDate}}, {{toDate}}, {{userId}}, {{fyuid}} before external SQL Server call. */
+/** Replace {{fromDate}}, {{toDate}}, {{username}}, {{fyuid}} before external SQL Server call. */
 export function resolveExternalMssqlSql(sql = "", runtimeFilters = {}) {
   const filters = runtimeFilters && typeof runtimeFilters === "object" ? runtimeFilters : {};
   const fromDate =
@@ -47,10 +48,6 @@ export function resolveExternalMssqlSql(sql = "", runtimeFilters = {}) {
     filters?.toDate && String(filters.toDate).trim()
       ? `${String(filters.toDate).trim()} 23:59:59`
       : "";
-  const userId =
-    filters?.userId !== undefined && filters?.userId !== null && String(filters.userId).trim() !== ""
-      ? Number(filters.userId)
-      : null;
   const fyuid =
     filters?.fyuid !== undefined && filters?.fyuid !== null && String(filters.fyuid).trim() !== ""
       ? Number(filters.fyuid)
@@ -69,12 +66,7 @@ export function resolveExternalMssqlSql(sql = "", runtimeFilters = {}) {
     }
     resolved = resolved.replace(/\{\{\s*toDate\s*\}\}/gi, `'${escapeSqlLiteral(toDate)}'`);
   }
-  if (/\{\{\s*userId\s*\}\}/i.test(resolved)) {
-    if (!Number.isFinite(userId)) {
-      throw new Error("runtime_filters.userId is required when SQL uses {{userId}}.");
-    }
-    resolved = resolved.replace(/\{\{\s*userId\s*\}\}/gi, String(userId));
-  }
+  resolved = applyDashboardUserPlaceholders(resolved, filters);
   if (/\{\{\s*fyuid\s*\}\}/i.test(resolved)) {
     if (!Number.isFinite(fyuid)) {
       throw new Error("runtime_filters.fyuid is required when SQL uses {{fyuid}}. Select a financial year first.");

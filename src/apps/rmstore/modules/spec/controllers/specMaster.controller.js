@@ -125,12 +125,23 @@ export const createSpec = async (req, res) => {
     if (err?.code === "23505") {
       return res.status(409).json({
         success: false,
-        message: "This serial number is already used for this RM item.",
+        message: specUniqueViolationMessage(err),
       });
     }
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
 };
+
+function specUniqueViolationMessage(err) {
+  const constraint = String(err?.constraint || err?.detail || "").toLowerCase();
+  if (constraint.includes("dcode")) {
+    return "Specifications already exist for this RM item. Use Edit to change them.";
+  }
+  if (constraint.includes("sno")) {
+    return "This serial number is already used for this RM item.";
+  }
+  return "Could not save this RM specification because it conflicts with an existing record.";
+}
 
 /**
  * Update:
@@ -263,7 +274,7 @@ export const updateSpec = async (req, res) => {
     if (err?.code === "23505") {
       return res.status(409).json({
         success: false,
-        message: "This serial number is already used for this RM item.",
+        message: specUniqueViolationMessage(err),
       });
     }
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });

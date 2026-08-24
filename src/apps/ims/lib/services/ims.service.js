@@ -21,9 +21,12 @@ function normalizeImsFilter(filter) {
   return trimmed;
 }
 
-async function imsPostJsonBody(requestedData, filter) {
+async function imsPostJsonBody(requestedData, filter, timeoutMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.erpInternalApi.timeoutMs || 15000);
+  const waitMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+    ? Number(timeoutMs)
+    : (config.erpInternalApi.timeoutMs || 15000);
+  const timer = setTimeout(() => controller.abort(), waitMs);
   const normalizedFilter = normalizeImsFilter(filter);
   try {
     const response = await fetch(config.erpInternalApi.url, {
@@ -58,9 +61,9 @@ async function readJsonResponse(response) {
  * @param {string} [filter] - optional SQL-style filter string (e.g. `dailyprod.docdt >= '2Apr2026' and dailyprod.docdt <= '6Apr2026'`)
  * @returns {Promise<any[]>} IMS `records` array, or **[]** if IMS is down / error (does not throw).
  */
-export const fetchFromIMS = async (requestedData, filter = null) => {
+export const fetchFromIMS = async (requestedData, filter = null, options = {}) => {
   try {
-    const response = await imsPostJsonBody(requestedData, filter);
+    const response = await imsPostJsonBody(requestedData, filter, options?.timeoutMs);
     const { json } = await readJsonResponse(response);
     if (!json || typeof json !== "object") {
       noteImsIssue("IMS returned an invalid response.");
@@ -84,9 +87,9 @@ export const fetchFromIMS = async (requestedData, filter = null) => {
 };
 
 /** Full IMS JSON (`success`, `records`, `message`) — never throws; network/HTML errors become `{ success: false, records: [] }`. */
-export const fetchImsDataRaw = async (requestedData, filter = null) => {
+export const fetchImsDataRaw = async (requestedData, filter = null, options = {}) => {
   try {
-    const response = await imsPostJsonBody(requestedData, filter);
+    const response = await imsPostJsonBody(requestedData, filter, options?.timeoutMs);
     const { ok, json } = await readJsonResponse(response);
     if (!json || typeof json !== "object") {
       noteImsIssue("IMS returned an invalid response.");

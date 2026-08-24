@@ -15,6 +15,7 @@ import { findCustomerHintsForPackings } from "../../../inventory-report/models/i
 import { buildPartyRateAccNameMap, lookupPartyRateAccName } from "../../../../lib/utils/packing-entry/customers/packingEntryCustomers.js";
 import { canonicalCode, getImsMapsSafe, getImsPartyRateMapSafe, pickPartyRateCustCode } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { applyMinusCustomerEnrichment, buildMinusCustomerLinesByAdjustmentId } from "../minus/stockAdjustmentMinusEnrich.js";
+import { parseQtyUpdatePayload } from "../update/stockAdjustmentUpdatePayload.js";
 
 const ALLOWED_FILTER_FIELDS = [
   "adjustment_id",
@@ -268,6 +269,10 @@ export async function enrichStockAdjustmentListRows(rows = [], options = {}) {
     const minusLines = minusLinesMap.get(row.adjustment_id);
     if (row.entry_type === "minus" && minusLines?.length) {
       return applyMinusCustomerEnrichment(base, minusLines);
+    }
+    if (row.entry_type === "update") {
+      const plan = parseQtyUpdatePayload(row.removed_box_ids);
+      if (plan) return { ...base, qty_update_plan: plan };
     }
     return base;
   });

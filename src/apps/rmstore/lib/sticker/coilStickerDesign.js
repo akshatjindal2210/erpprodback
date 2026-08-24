@@ -461,7 +461,7 @@ async function buildCard(row) {
       : coilIndex(uid);
 
   return buildCardHtml({
-    title: isQc ? "QC Sticker" : "Coil Sticker",
+    title: isQc ? "QC Sticker" : "RM Sticker",
     condition: esc(show(row.condition)),
     grade: esc(show(row.grade)),
     size: esc(show(text(row.base_size) || row.finish_size)),

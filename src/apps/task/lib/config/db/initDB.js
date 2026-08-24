@@ -10,7 +10,6 @@ import { createTaskRedTicketsTable } from "../tables/red-ticket/red_tickets.tabl
 import { createTaskMisScoreLedgerTable, createTaskReportReviewsTable } from "../tables/reports/mis_score.table.js";
 import { createTaskAppConfigTable } from "../tables/app-config/app_config.table.js";
 import { createTaskUpdatedAtTriggers } from "../tables/db/triggers.table.js";
-import { syncTaskSequences } from "./syncSequences.js";
 import { seedTaskNotificationTemplates } from "./seedNotifications.js";
 
 export async function initTaskDB() {
@@ -38,8 +37,6 @@ export async function initTaskDB() {
     await seedTaskNotificationTemplates();
 
     await createTaskUpdatedAtTriggers();
-
-    await syncTaskSequences();
   } catch (err) {
     console.error("❌ Task DB initialization failed:", err.message);
     throw err;

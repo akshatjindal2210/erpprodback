@@ -429,7 +429,7 @@ export const getBoxesViews = async (req, res) => {
         return res.json({ success: true, data: stripBoxAuditFromClientPayload(withSuggestion) });
       }
 
-      const useDetailedLookup = permission_module === "change_override_customer" || (permission_module === "boxes" && permission_action === "view");
+      const useDetailedLookup = permission_module === "change_override_customer" || permission_module === "stock_adjustment" || (permission_module === "boxes" && permission_action === "view");
 
       let boxRow = null;
       if (scanNoUid || scanUid) {

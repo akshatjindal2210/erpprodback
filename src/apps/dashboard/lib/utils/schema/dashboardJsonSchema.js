@@ -214,6 +214,9 @@ function readTableWidgetOptions(widget = {}, chartConfig = {}) {
     tableSearchWidth,
     tableColumnSortEnabled: widget.tableColumnSortEnabled === true || cfg.table_column_sort_enabled === true,
     tableExportEnabled: widget.tableExportEnabled === true || cfg.table_export_enabled === true,
+    tableCountPosition: ["left", "right", "top"].includes(String(widget.tableCountPosition ?? cfg.table_count_position ?? "right").trim().toLowerCase())
+      ? String(widget.tableCountPosition ?? cfg.table_count_position ?? "right").trim().toLowerCase()
+      : "right",
   };
 }
 
@@ -232,6 +235,9 @@ function tableWidgetOptionsToChartConfig(options = {}) {
     table_search_width: tableSearchWidth,
     table_column_sort_enabled: options.tableColumnSortEnabled === true,
     table_export_enabled: options.tableExportEnabled === true,
+    table_count_position: ["left", "top"].includes(String(options.tableCountPosition || "right").trim().toLowerCase())
+      ? String(options.tableCountPosition).trim().toLowerCase()
+      : "right",
   };
 }
 
@@ -317,6 +323,9 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
         is_hybrid: widget.chart_config?.is_hybrid === true || String(widget.dataSource || "").toLowerCase() === "hybrid",
         hybrid_mssql_query: widget.chart_config?.hybrid_mssql_query || "",
         hybrid_external_source: widget.chart_config?.hybrid_external_source || "erp_mssql",
+        hybrid_url: widget.chart_config?.hybrid_url || "",
+        hybrid_url_method: widget.chart_config?.hybrid_url_method || "GET",
+        hybrid_url_body: widget.chart_config?.hybrid_url_body || "",
       },
     };
   }
@@ -425,6 +434,9 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
         || (String(chartConfig.data_source || "").toLowerCase() === "erp_mssql" ? "erp_mssql"
           : String(chartConfig.data_source || "").toLowerCase() === "hrms_mssql" ? "hrms_mssql"
             : "erp_mssql"),
+      hybrid_url: chartConfig.hybrid_url || "",
+      hybrid_url_method: chartConfig.hybrid_url_method || "GET",
+      hybrid_url_body: chartConfig.hybrid_url_body || "",
     },
   };
 }
@@ -505,6 +517,14 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
         || String(stored.dataSource || "").toLowerCase() === "hybrid",
       hybrid_mssql_query: stored.chart_config?.hybrid_mssql_query || "",
       hybrid_external_source: stored.chart_config?.hybrid_external_source || "erp_mssql",
+      hybrid_url: stored.chart_config?.hybrid_url || "",
+      hybrid_url_method: stored.chart_config?.hybrid_url_method || "GET",
+      hybrid_url_body: stored.chart_config?.hybrid_url_body || "",
+      url_method: stored.chart_config?.url_method || "GET",
+      url_body: stored.chart_config?.url_body || "",
+      url_excluded_columns: Array.isArray(stored.chart_config?.url_excluded_columns)
+        ? stored.chart_config.url_excluded_columns
+        : [],
     },
     layout: sanitizeLayoutCoords(stored.layout, stored.id || `cfg_${idx}`, idx),
     mobile_layout: sanitizeLayoutCoords(stored.mobileLayout, stored.id || `cfg_${idx}`, idx),

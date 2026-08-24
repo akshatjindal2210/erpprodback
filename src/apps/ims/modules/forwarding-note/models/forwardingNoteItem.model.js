@@ -59,6 +59,7 @@ const DEFAULT_FIELDS = [
   "fnm.out_entry_locked_at",
   "oe.out_uid AS out_entry_uid",
   "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
+  "COALESCE(oe.approved, false) AS out_entry_approved",
   "(oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete",
   "fnm.created_by",
   "fnm.created_at",

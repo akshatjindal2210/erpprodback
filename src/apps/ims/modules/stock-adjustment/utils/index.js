@@ -12,6 +12,7 @@ export {
   applyStockAdjustmentOnApproveTx,
   parseMinusRemovedBoxPayload,
   parseRemovedBoxIdsJson,
+  parseQtyUpdatePayload,
   revertStockAdjustmentOnUnapproveTx,
 } from "./apply/stockAdjustmentApply.js";
 export {
@@ -19,3 +20,4 @@ export {
   buildMinusCustomerLinesByAdjustmentId,
   buildMinusRemovedBoxIdsJson,
 } from "./minus/stockAdjustmentMinusEnrich.js";
+export { buildQtyUpdatePayload, computeQtyUpdateResult } from "./update/stockAdjustmentUpdatePayload.js";

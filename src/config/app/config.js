@@ -89,7 +89,7 @@ const config = {
   /** ERP internal API — IMS data only (master, changepass, etc.) */
   erpInternalApi: {
     url: process.env.ERP_IMS_API_URL || "http://192.168.1.100:3200/data/imsdata",
-    timeoutMs: 15000,
+    timeoutMs: 60000,
   },
   /** WhatsApp message API — task/template notifications (requestedData: swa | swpa) */
   waApi: {

@@ -2,10 +2,11 @@ import { withTransaction } from "../../../../../config/db/db.js";
 import { fetchImsDataRaw } from "../../../../ims/lib/services/ims.service.js";
 import { resolveExternalMssqlSql, buildExternalMssqlPayload } from "../mssql/externalMssqlQuery.js";
 import { validateSelectSql } from "./sqlGenerator.js";
+import { fetchUrlJsonRows } from "./urlJsonQuery.js";
+import { DASHBOARD_QUERY_TIMEOUT_MS, applyDashboardUserPlaceholders } from "./widgetQuery.js";
 
 export const TEMP_TABLE = "temp_erp_data";
 const TEMP_PLACEHOLDER = /\{\{\s*temp_erp_data\s*\}\}/gi;
-const PG_TIMEOUT_MS = 120000;
 const BATCH_SIZE = 500;
 
 function quoteIdent(name) {
@@ -21,30 +22,38 @@ export function applyPgRuntimeFilters(rawSql, filters = {}) {
   const toRaw = filters?.toDate != null ? String(filters.toDate).trim() : "";
   const fromDate = fromRaw ? `${fromRaw} 00:00:00` : "1900-01-01 00:00:00";
   const toDate = toRaw ? `${toRaw} 23:59:59` : "2999-12-31 23:59:59";
-  const userId = filters?.userId != null && String(filters.userId).trim() !== ""
-    ? Number(filters.userId)
-    : null;
   const fyuid = filters?.fyuid != null && String(filters.fyuid).trim() !== ""
     ? Number(filters.fyuid)
     : null;
 
-  return String(rawSql || "")
-    .replace(/\{\{\s*fromDate\s*\}\}/gi, `'${escapeLiteral(fromDate)}'`)
-    .replace(/\{\{\s*toDate\s*\}\}/gi, `'${escapeLiteral(toDate)}'`)
-    .replace(/\{\{\s*userId\s*\}\}/gi, Number.isFinite(userId) ? String(userId) : "NULL")
-    .replace(/\{\{\s*fyuid\s*\}\}/gi, Number.isFinite(fyuid) ? String(fyuid) : "NULL");
+  return applyDashboardUserPlaceholders(
+    String(rawSql || "")
+      .replace(/\{\{\s*fromDate\s*\}\}/gi, `'${escapeLiteral(fromDate)}'`)
+      .replace(/\{\{\s*toDate\s*\}\}/gi, `'${escapeLiteral(toDate)}'`),
+    filters,
+  ).replace(/\{\{\s*fyuid\s*\}\}/gi, Number.isFinite(fyuid) ? String(fyuid) : "NULL");
+}
+
+function pgTypeForValue(val) {
+  if (val == null) return "TEXT";
+  if (typeof val === "number") return Number.isInteger(val) ? "BIGINT" : "NUMERIC";
+  if (typeof val === "boolean") return "BOOLEAN";
+  if (val instanceof Date) return "TIMESTAMP";
+  return "TEXT";
 }
 
 export function inferPgSchema(data) {
   if (!Array.isArray(data) || !data.length) return {};
   const schema = {};
-  for (const key of Object.keys(data[0])) {
-    const val = data[0][key];
-    if (val == null) schema[key] = "TEXT";
-    else if (typeof val === "number") schema[key] = Number.isInteger(val) ? "BIGINT" : "NUMERIC";
-    else if (typeof val === "boolean") schema[key] = "BOOLEAN";
-    else if (val instanceof Date) schema[key] = "TIMESTAMP";
-    else schema[key] = "TEXT";
+  for (const row of data) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    for (const [key, val] of Object.entries(row)) {
+      if (schema[key] && schema[key] !== "TEXT") continue;
+      const nextType = pgTypeForValue(val);
+      if (!schema[key] || (schema[key] === "TEXT" && val != null && nextType !== "TEXT")) {
+        schema[key] = nextType;
+      }
+    }
   }
   return schema;
 }
@@ -56,11 +65,45 @@ export function resolveHybridPgSql(pgQuery, runtimeFilters = {}) {
 }
 
 export class HybridQueryEngine {
+  /** Step 1 → rows. ERP/HRMS path unchanged; URL only adds a branch before it. */
   static async fetchExternalRows(externalConfig, runtimeFilters = {}) {
-    const { mssqlQuery, source } = externalConfig;
+    const source = String(externalConfig?.source || "erp_mssql").trim().toLowerCase();
+
+    if (source === "url_json") {
+      const url = String(externalConfig?.url || "").trim();
+      if (!url) throw new Error("Hybrid URL is required.");
+      const rawRows = await fetchUrlJsonRows(url, {
+        method: externalConfig?.urlMethod,
+        body: externalConfig?.urlBody,
+      });
+      // Same shape MSSQL returns: flat object rows (required by stageData / inferPgSchema).
+      const rows = (Array.isArray(rawRows) ? rawRows : [])
+        .filter((row) => row && typeof row === "object" && !Array.isArray(row))
+        .map((row) => {
+          const out = {};
+          for (const [key, value] of Object.entries(row)) {
+            if (value == null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+              out[key] = value;
+            } else if (value instanceof Date) {
+              out[key] = value;
+            } else {
+              out[key] = JSON.stringify(value);
+            }
+          }
+          return out;
+        });
+      if (!rows.length) {
+        throw new Error("API JSON must include an array of object records (e.g. [{ \"col\": 1 }]).");
+      }
+      return rows;
+    }
+
+    const { mssqlQuery } = externalConfig;
     const resolved = resolveExternalMssqlSql(mssqlQuery, runtimeFilters);
     const payload = buildExternalMssqlPayload(resolved, source);
-    const res = await fetchImsDataRaw(payload.requestedData, payload.filter);
+    const res = await fetchImsDataRaw(payload.requestedData, payload.filter, {
+      timeoutMs: DASHBOARD_QUERY_TIMEOUT_MS,
+    });
     if (!res.success) {
       const detail = String(res?.message || res?.error || "Unknown error").trim();
       throw new Error(`External MSSQL Error: ${detail}`);
@@ -110,7 +153,7 @@ export class HybridQueryEngine {
     const safeSql = resolveHybridPgSql(pgQuery, runtimeFilters);
 
     return withTransaction(async (client) => {
-      await client.query(`SET LOCAL statement_timeout = ${PG_TIMEOUT_MS}`);
+      await client.query(`SET LOCAL statement_timeout = ${DASHBOARD_QUERY_TIMEOUT_MS}`);
       await this.stageData(client, externalData);
       const { rows } = await client.query(safeSql);
       return {
