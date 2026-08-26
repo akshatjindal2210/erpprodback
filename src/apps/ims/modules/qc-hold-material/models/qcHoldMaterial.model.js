@@ -1,4 +1,5 @@
 import dbQuery from "../../../../../config/db/db.js";
+import { buildNaiveTimestampInsertParts, buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
 
 /** QC Hold Material — DB access for ims_qc_hold_material (list, CRUD, reasons). */
 
@@ -15,6 +16,18 @@ const ALLOWED_FILTER_FIELDS = [
   "to_date",
 ];
 
+/** Qty left on hold — same math as deriveStatusFromHoldData / deriveQcHoldStatus. */
+const HOLD_BALANCE_EXPR = `(
+  COALESCE((q.hold_data->>'qty')::int, 0)
+  - COALESCE((q.hold_data->>'completed_qty')::int, 0)
+  - COALESCE((q.hold_data->>'rejected_qty')::int, 0)
+)`;
+
+const HOLD_HAS_PROGRESS_EXPR = `(
+  COALESCE((q.hold_data->>'completed_qty')::int, 0) > 0
+  OR COALESCE((q.hold_data->>'rejected_qty')::int, 0) > 0
+)`;
+
 const SORT_EXPR = {
   hold_id: "q.hold_id",
   packing_number: "q.packing_number",
@@ -26,6 +39,15 @@ const SORT_EXPR = {
 };
 
 const JOINS = ``;
+
+/** Tab filters use hold_data balances so cleared holds never stay under Partial. */
+function statusFilterSql(status) {
+  const s = String(status ?? "").trim().toLowerCase();
+  if (s === "complete") return `${HOLD_BALANCE_EXPR} <= 0`;
+  if (s === "partial") return `${HOLD_BALANCE_EXPR} > 0 AND ${HOLD_HAS_PROGRESS_EXPR}`;
+  if (s === "pending") return `${HOLD_BALANCE_EXPR} > 0 AND NOT ${HOLD_HAS_PROGRESS_EXPR}`;
+  return null;
+}
 
 /** Audit cols store user name snapshot (not live user id). */
 const DEFAULT_FIELDS = [
@@ -68,10 +90,6 @@ function toJsonbParam(value) {
   return value;
 }
 
-function mapInsertValues(data) {
-  return Object.keys(data).map((k) => (k === "hold_data" ? toJsonbParam(data[k]) : data[k]));
-}
-
 export const findQcHoldMaterials = async (options = {}) => {
   const {
     filters = {},
@@ -106,9 +124,16 @@ export const findQcHoldMaterials = async (options = {}) => {
     if (key === "open_only") {
       const truthy = val === true || val === "true" || val === "1" || val === 1;
       if (truthy) {
-        conditions.push(`COALESCE(q.status, 'pending') IN ('pending', 'partial')`);
+        conditions.push(`${HOLD_BALANCE_EXPR} > 0`);
       }
       continue;
+    }
+    if (key === "status") {
+      const expr = statusFilterSql(val);
+      if (expr) {
+        conditions.push(expr);
+        continue;
+      }
     }
     assertField(key, ALLOWED_FILTER_FIELDS, "filter field");
     values.push(val);
@@ -171,30 +196,34 @@ export const findQcHoldMaterialById = async (hold_id) => {
 };
 
 export const insertQcHoldMaterial = async (data) => {
-  const keys = Object.keys(data);
-  const placeholders = keys.map((_, idx) => `$${idx + 1}`).join(", ");
+  const payload = { ...data };
+  if (payload.hold_data !== undefined) payload.hold_data = toJsonbParam(payload.hold_data);
+  const { cols, placeholders, values } = buildNaiveTimestampInsertParts(payload, {
+    jsonKeys: ["hold_data"],
+  });
+  if (!cols.length) return null;
   const rows = await dbQuery(
-    `INSERT INTO ${TABLE} (${keys.join(", ")})
-     VALUES (${placeholders})
+    `INSERT INTO ${TABLE} (${cols.join(", ")})
+     VALUES (${placeholders.join(", ")})
      RETURNING *`,
-    mapInsertValues(data)
+    values
   );
   return rows[0] || null;
 };
 
 export const updateQcHoldMaterial = async (hold_id, data) => {
-  const keys = Object.keys(data);
-  if (!keys.length) return findQcHoldMaterialById(hold_id);
-  const sets = keys.map((k, idx) => `${k} = $${idx + 2}`).join(", ");
+  const payload = { ...data };
+  if (payload.hold_data !== undefined) payload.hold_data = toJsonbParam(payload.hold_data);
+  const { setParts, values, nextIndex } = buildNaiveTimestampUpdateParts(payload, {
+    jsonKeys: ["hold_data"],
+  });
+  if (!setParts.length) return findQcHoldMaterialById(hold_id);
   const rows = await dbQuery(
     `UPDATE ${TABLE}
-     SET ${sets}
-     WHERE hold_id = $1 AND is_deleted = false
+     SET ${setParts.join(", ")}
+     WHERE hold_id = $${nextIndex} AND is_deleted = false
      RETURNING *`,
-    [
-      hold_id,
-      ...keys.map((k) => (k === "hold_data" ? toJsonbParam(data[k]) : data[k])),
-    ]
+    [...values, hold_id]
   );
   return rows[0] || null;
 };

@@ -1,4 +1,4 @@
-import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
+import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
 
 const VIEW = "view";
 const FORM_ACTIONS = ["add", "edit", "authorize"];
@@ -131,13 +131,25 @@ function fieldsForBoxes(mod, act) {
 const locPicker = [
   "lm.location_id", "lm.location_id AS id", "lm.rack_no", "lm.shelf_no",
   "COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no",
-  "lm.acc_code", "lm.item_dcode",
+  "lm.type",
+  "lm.total_capacity",
+  "(COALESCE((SELECT COUNT(*)::int FROM ims_box_table b WHERE b.location_id = lm.location_id AND b.is_deleted = false AND (b.out_uid IS NULL OR NULLIF(TRIM(b.out_uid::text), '') IS NULL) AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')), 0) + COALESCE((SELECT COUNT(*)::int FROM rmstore_coil_table rc WHERE rc.location_id = lm.location_id AND rc.is_deleted = false AND COALESCE(rc.status, 'active') IN ('active', 'rejected')), 0)) AS occupied_capacity",
+  "GREATEST(COALESCE(lm.total_capacity, 0) - (COALESCE((SELECT COUNT(*)::int FROM ims_box_table b WHERE b.location_id = lm.location_id AND b.is_deleted = false AND (b.out_uid IS NULL OR NULLIF(TRIM(b.out_uid::text), '') IS NULL) AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')), 0) + COALESCE((SELECT COUNT(*)::int FROM rmstore_coil_table rc WHERE rc.location_id = lm.location_id AND rc.is_deleted = false AND COALESCE(rc.status, 'active') IN ('active', 'rejected')), 0)), 0) AS available_capacity",
+  "COALESCE(lm.acc_codes, '{}') AS acc_codes",
+  "COALESCE(lm.item_dcodes, '{}') AS item_dcodes",
+  "(COALESCE(lm.acc_codes, '{}'))[1] AS acc_code",
+  "(COALESCE(lm.item_dcodes, '{}'))[1] AS item_dcode",
 ];
-const locModal = [...locPicker, "lm.location_description", "lm.acc_code::text AS acc_name", "lm.item_dcode::text AS item_code"];
+const locModal = [...locPicker, "lm.location_description", "NULL::text AS acc_name", "NULL::text AS item_code"];
 const locPackingListOnly = [
   "lm.rack_no", "lm.shelf_no",
   "COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no",
-  "lm.location_description", "lm.acc_code", "lm.item_dcode",
+  "lm.type",
+  "lm.location_description",
+  "COALESCE(lm.acc_codes, '{}') AS acc_codes",
+  "COALESCE(lm.item_dcodes, '{}') AS item_dcodes",
+  "(COALESCE(lm.acc_codes, '{}'))[1] AS acc_code",
+  "(COALESCE(lm.item_dcodes, '{}'))[1] AS item_dcode",
 ];
 const locAuditPicker = [
   ...locPicker,
@@ -237,6 +249,27 @@ function fieldsForStockAdjustment(mod, act) {
   return allowOnly(mod, act, "stock_adjustment", [VIEW, ...FORM_ACTIONS]);
 }
 
+/** Shared sticker fetch/print — allow from the calling page if user has that page's view (or form) access. */
+const BOX_STICKER_PRINT_PAGES = [
+  "packing_entry",
+  "stock_adjustment",
+  "change_override_customer",
+  "qc_hold_material",
+];
+
+function fieldsForBoxStickerPrint(mod, act) {
+  if (mod == null || act == null) return null;
+  if (!BOX_STICKER_PRINT_PAGES.includes(mod)) return null;
+  if (act === VIEW || isForm(act)) return [];
+  return null;
+}
+
+/** accessControlAny alternatives for sticker fetch/print (same pages as helper). */
+export const BOX_STICKER_PRINT_ACCESS_ANY = BOX_STICKER_PRINT_PAGES.map((moduleName) => ({
+  moduleName,
+  actions: "view",
+}));
+
 // ─── Route helper keys (same names as helperAccess("...")) ──────────────────
 const BY_HELPER = {
   items: fieldsForItems,
@@ -252,6 +285,7 @@ const BY_HELPER = {
   inventoryInwards: fieldsForInventoryInwards,
   outEntries: fieldsForOutEntries,
   stockAdjustment: fieldsForStockAdjustment,
+  boxStickerPrint: fieldsForBoxStickerPrint,
 };
 
 function resolveHelperFields(helper, { permission_module, permission_action } = {}) {
@@ -284,6 +318,21 @@ export function helperAccess(helper) {
     if (userType === "super_admin") return next();
 
     return accessControl(page, action)(req, res, next);
+  };
+}
+
+/**
+ * Sticker fetch/print: prefer helper contract (permission_module + permission_action from the page),
+ * else allow if the user has view on any whitelisted sticker page (legacy callers).
+ */
+export function boxStickerPrintAccess() {
+  return (req, res, next) => {
+    const page = req.body?.permission_module;
+    const action = req.body?.permission_action;
+    if (page && action) {
+      return helperAccess("boxStickerPrint")(req, res, next);
+    }
+    return accessControlAny(BOX_STICKER_PRINT_ACCESS_ANY)(req, res, next);
   };
 }
 

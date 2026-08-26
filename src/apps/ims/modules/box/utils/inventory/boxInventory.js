@@ -6,6 +6,8 @@
  * 3. out_uid set + outward dispatch (out entry) → not in hand
  */
 
+import { STICKER } from "../../../../lib/stickerUidFormat.js";
+
 export function isOutUidEmpty(box) {
   const out = box?.out_uid;
   return out == null || String(out).trim() === "";
@@ -96,7 +98,7 @@ function isMinusMarkedForAdjustment(box, adjustmentId) {
   return Number.isFinite(out) && out === adjId;
 }
 
-/** Packing column or SA sticker id (`{pn}_SA{adjId}_…`). */
+/** Packing column or SA sticker id (`{pn}_{SA}{adjId}_…`). */
 export function boxBelongsToPackingNumber(box, packingNumber) {
   const pn = packingNumber != null ? String(packingNumber).trim() : "";
   if (!pn || !box) return false;
@@ -106,7 +108,7 @@ export function boxBelongsToPackingNumber(box, packingNumber) {
     return true;
   }
   const uid = String(box.box_no_uid ?? "");
-  return uid.includes(`_${pn}_SA`);
+  return uid.includes(`_${pn}_${STICKER.SA}`);
 }
 
 /** Minus list: in-hand + this adjustment's stock_out (edit); hide out-entry outward. */

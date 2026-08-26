@@ -13,7 +13,12 @@ router.post("/ledgers/list", authenticate, accessControl("customer_master", "vie
 router.post("/ledgers/get",  authenticate, accessControl("customer_master", "view"), getLedgerById);
 
 router.post("/party-rates/list", authenticate, accessControl("customer_item_code", "view"), getPartyRates);
-router.post("/party-rates/resolve-cust-code", authenticate, accessControlAny([{ moduleName: "packing_entry", actions: ["view", "add", "edit"] }]), resolvePartyRateCustCodeForSticker);
+router.post("/party-rates/resolve-cust-code", authenticate, accessControlAny([
+  { moduleName: "packing_entry", actions: ["view", "add", "edit"] },
+  { moduleName: "stock_adjustment", actions: ["view", "add", "edit"] },
+  { moduleName: "qc_hold_material", actions: ["view", "add", "edit"] },
+  { moduleName: "change_override_customer", actions: ["view", "add", "edit"] },
+]), resolvePartyRateCustCodeForSticker);
 
 router.post("/daily-prod/list",  authenticate, accessControl("packing_entry", "view"), getDailyProd);
 router.post("/daily-prod/pack-by-fy", authenticate, dynamicAccessControl(), getPackByFinancialYearDoc);

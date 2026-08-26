@@ -7,7 +7,8 @@ import { imsPackRowToProduction, findImsPackByDocNo, buildImsDocFilterMany } fro
 import { findCustomerHintsForPackings } from "../../inventory-report/models/inventoryReport.model.js";
 import { buildImsPackDocdtFilter } from "../../master/controllers/master.controller.js";
 import { getDefaultListViewSpanDays, getBoxNoUidPrefix } from "../../../../core/configuration/models/appConfig.model.js";
-import { formatStandardBoxNoUid, docNoFromStandardBoxNoUid } from "../utils/uid/boxUid.js";
+import { formatStandardBoxNoUid } from "../../../lib/stickerUidFormat.js";
+import { docNoFromStandardBoxNoUid } from "../../../lib/stickerUidHelpers.js";
 import { getImsMapsSafe, getImsPartyRateMapSafe, pickPartyRateCustCode, partyRateAccCandidates, enrichRowsWithIMS, resolvePartyRateCustCodeFromIms } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { findSuggestedInwardLocationByHierarchy } from "../../location/models/locationMaster.model.js";
 import { isBoxInHand, isBoxSellable, isBoxEligibleForOverrideCustomer, overrideCustomerScanRejectMessage, isBoxOnQcHold, isBoxOutwardDispatch, isBoxStockAdjustmentOut, isStockAdjustmentOut } from "../utils/inventory/boxInventory.js";
@@ -482,7 +483,10 @@ export const getBoxesViews = async (req, res) => {
     });
 
     let enriched = await enrichBoxRowsFromIMS(result.data || []);
-    if (permission_module === "inventory_inwards" || permission_module === "stock_adjustment") {
+    // In-hand picker filter — skip when listing a specific SA (need all boxes for that adj, incl. later minus).
+    const filterSaId = filters?.sa_id ?? safeFilters?.sa_id;
+    const listingBySaId = filterSaId !== undefined && filterSaId !== null && String(filterSaId).trim() !== "";
+    if ((permission_module === "inventory_inwards" || permission_module === "stock_adjustment") && !listingBySaId) {
       enriched = (enriched || []).filter((row) => isBoxSellable(row));
     }
     if (permission_module === "change_override_customer") {

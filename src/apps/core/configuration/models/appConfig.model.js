@@ -169,6 +169,26 @@ export async function isInwardLocationValidationEnabled() {
   return false;
 }
 
+/**
+ * Whether location capacity is enforced (boxes / coils ≤ total_capacity).
+ * Shared key for IMS + RM Store. Env: LOCATION_CAPACITY_VALIDATION.
+ */
+export async function isLocationCapacityValidationEnabled() {
+  try {
+    const raw = await getAppConfigValue(APP_CONFIG_KEYS.LOCATION_CAPACITY_VALIDATION);
+    if (raw != null && String(raw).trim() !== "") {
+      return String(raw).trim().toLowerCase() === "true";
+    }
+  } catch {
+    /* table missing */
+  }
+  const envRaw = process.env.LOCATION_CAPACITY_VALIDATION;
+  if (envRaw != null && String(envRaw).trim() !== "") {
+    return String(envRaw).toLowerCase() === "true";
+  }
+  return false;
+}
+
 /** When true, MRN sticker modal allows editing total / per-coil qty (default true). */
 export async function getMrnCoilQtyEditable() {
   try {

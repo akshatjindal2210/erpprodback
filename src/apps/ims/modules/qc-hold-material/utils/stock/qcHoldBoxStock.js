@@ -16,7 +16,7 @@ import {
 import { QC_HOLD_PARTIAL_ENABLED } from "../../../../lib/constants/qcHoldFeatureFlags.js";
 import { logBoxTransaction, logBoxTransactionSafe, singlePackingFromRows } from "../../../box/utils/transactions/logBoxTransaction.js";
 import { BOX_TX_TYPES } from "../../../../lib/constants/boxTransactionTypes.js";
-import { qcHoldCompletionBoxTag } from "../../../box/utils/uid/boxUid.js";
+import { qcTag } from "../../../../lib/stickerUidHelpers.js";
 
 export const QC_HOLD_SCAN_PARTIAL = "partial";
 export const QC_HOLD_SCAN_FULL = "full";
@@ -152,7 +152,7 @@ export async function countRevertableBoxesForHold(holdId, sourceBoxUids = []) {
   const pk = Number(holdId);
   if (!Number.isFinite(pk) || pk < 1) return 0;
 
-  const qchTag = qcHoldCompletionBoxTag(pk);
+  const qchTag = qcTag(pk);
   const uids = normalizeHoldBoxUidList(sourceBoxUids);
   const numericOnly = uids.filter((c) => /^\d+$/.test(c));
 
@@ -183,7 +183,7 @@ export async function releaseQcHoldRevertTx(client, { holdId, userId, sourceBoxU
   const pk = Number(holdId);
   if (!Number.isFinite(pk) || pk < 1) return { released: 0, boxes: [] };
 
-  const qchTag = qcHoldCompletionBoxTag(pk);
+  const qchTag = qcTag(pk);
   const uids = normalizeHoldBoxUidList(sourceBoxUids);
   const numericOnly = uids.filter((c) => /^\d+$/.test(c));
 

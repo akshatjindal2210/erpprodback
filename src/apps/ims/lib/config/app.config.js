@@ -11,6 +11,7 @@ export const IMS_LIST_VIEW_SPAN = Object.freeze({
 
 export const IMS_APP_CONFIG_KEYS = Object.freeze({
   INWARD_LOCATION_VALIDATION: "inward_location_validation",
+  LOCATION_CAPACITY_VALIDATION: "location_capacity_validation",
   DEFAULT_LIST_VIEW_SPAN_DAYS: "default_list_view_span_days",
   BOX_QR_PUBLIC_BASE_URL: "box_qr_public_base_url",
   BOX_NO_UID_PREFIX: "box_no_uid_prefix",
@@ -20,7 +21,7 @@ export const IMS_APP_CONFIG_SECTION = Object.freeze({
   id: "application",
   scope: "ims",
   title: "Application settings",
-  description: "IMS-only options for all users.",
+  description: "IMS app-level options.",
 });
 
 export const IMS_APP_CONFIG_DEFINITIONS = Object.freeze([
@@ -28,9 +29,17 @@ export const IMS_APP_CONFIG_DEFINITIONS = Object.freeze([
     key: IMS_APP_CONFIG_KEYS.INWARD_LOCATION_VALIDATION,
     scope: "ims",
     section: "application",
-    label: "Inward location validation",
+    label: "Location validation",
     value_type: "boolean",
-    description: "Enabled = extra location checks run when saving inward.",
+    description: "Enabled = check location customer/item rules on inward. Disabled = no check.",
+  },
+  {
+    key: IMS_APP_CONFIG_KEYS.LOCATION_CAPACITY_VALIDATION,
+    scope: "ims",
+    section: "application",
+    label: "Capacity validation",
+    value_type: "boolean",
+    description: "Enabled = stock cannot exceed location capacity. Disabled = any qty OK.",
   },
   {
     key: IMS_APP_CONFIG_KEYS.DEFAULT_LIST_VIEW_SPAN_DAYS,
@@ -54,6 +63,7 @@ export const IMS_APP_CONFIG_DEFINITIONS = Object.freeze([
 
 export const IMS_APP_CONFIG_SEEDS = Object.freeze({
   [IMS_APP_CONFIG_KEYS.INWARD_LOCATION_VALIDATION]: "false",
+  [IMS_APP_CONFIG_KEYS.LOCATION_CAPACITY_VALIDATION]: "false",
   [IMS_APP_CONFIG_KEYS.DEFAULT_LIST_VIEW_SPAN_DAYS]: "7",
   [IMS_APP_CONFIG_KEYS.BOX_QR_PUBLIC_BASE_URL]: "https://jflindia.com/",
   [IMS_APP_CONFIG_KEYS.BOX_NO_UID_PREFIX]: "2026",

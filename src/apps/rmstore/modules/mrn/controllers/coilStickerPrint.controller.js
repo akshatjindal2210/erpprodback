@@ -5,7 +5,8 @@
  * HTML/layout changes → only coilStickerDesign.js (LAYOUT)
  */
 import { resolveMrnForSticker } from "../utils/resolveMrnForSticker.js";
-import { findCoilByUid, findCoils, formatCoilNoUid, incrementCoilDownloadCount } from "../../coil/models/coil.model.js";
+import { findCoilByUid, findCoils, incrementCoilDownloadCount } from "../../coil/models/coil.model.js";
+import { formatCoilNoUid } from "../../../lib/coilUidFormat.js";
 import { insertCoilDownloadLog } from "../../coil/models/coilDownloadLog.model.js";
 import { getBoxNoUidPrefix } from "../../../../core/configuration/models/appConfig.model.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";

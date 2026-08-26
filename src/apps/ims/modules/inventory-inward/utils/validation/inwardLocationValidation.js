@@ -1,9 +1,13 @@
 import dbQuery from "../../../../../../config/db/db.js";
-import { isInwardLocationValidationEnabled } from "../../../../../core/configuration/models/appConfig.model.js";
+import {
+  isInwardLocationValidationEnabled,
+  isLocationCapacityValidationEnabled,
+} from "../../../../../core/configuration/models/appConfig.model.js";
 import { effectiveBoxCustomerAcc } from "../../../box/utils/override-customer/boxCustomerOverride.js";
 import { sqlBoxInHand } from "../../../box/utils/inventory/boxInventorySql.js";
+import { LOCATION_APP_TYPE_IMS } from "../../../location/models/locationMaster.model.js";
 
-export { isInwardLocationValidationEnabled };
+export { isInwardLocationValidationEnabled, isLocationCapacityValidationEnabled };
 
 /** Same normalization as location suggestion (integers / numeric strings compare as tier keys). */
 function normCode(v) {
@@ -25,55 +29,117 @@ function effectiveBoxItem(itemdcode) {
   return normCode(itemdcode);
 }
 
-function locationHasAcc(loc) {
-  return loc?.acc_code != null && String(loc.acc_code).trim() !== "";
+function locationAccSet(loc) {
+  const arr =
+    Array.isArray(loc?.acc_codes) && loc.acc_codes.length
+      ? loc.acc_codes
+      : loc?.acc_code != null
+        ? [loc.acc_code]
+        : [];
+  return new Set(arr.map(normCode).filter(Boolean));
 }
 
-function locationHasItem(loc) {
-  return loc?.item_dcode != null && String(loc.item_dcode).trim() !== "";
+function locationItemSet(loc) {
+  const arr =
+    Array.isArray(loc?.item_dcodes) && loc.item_dcodes.length
+      ? loc.item_dcodes
+      : loc?.item_dcode != null
+        ? [loc.item_dcode]
+        : [];
+  return new Set(arr.map(normCode).filter(Boolean));
+}
+
+function locationRule(loc) {
+  // Include/exclude applies only when location has item(s); customer-only = include allowlist
+  const items = locationItemSet(loc);
+  if (!items.size) return "include";
+  return String(loc?.rule ?? loc?.restriction_mode ?? "include").trim().toLowerCase() === "exclude"
+    ? "exclude"
+    : "include";
 }
 
 /**
- * When `inward_location_validation` is true (see inventoryInward controller):
- * - Location has customer → only that customer's boxes; any item of that customer is OK.
- * - Location has item only (no customer) → only boxes with that item.
- * - Open location (no customer, no item) → only boxes with no customer/item on record.
- * When false → this function is not called; any box may go to any location.
+ * When `inward_location_validation` is true (IMS locations only):
+ * - include + customer/item list → box must match listed values
+ * - exclude + customer/item list → box must NOT match listed values
+ * - empty lists → open (any box allowed)
+ * Customer and item rules both apply when both lists are set.
+ *
+ * Capacity (`location_capacity_validation`) is separate: occupied + incoming ≤ total_capacity
+ * when total_capacity > 0.
  */
-/*
-function boxAllowedAtLocation(locAcc, locItem, boxAcc, boxItem) {
-  const hasAcc = locAcc != null;
-  const hasItem = locItem != null;
-  if (!hasAcc && !hasItem) return boxAcc == null && boxItem == null;
-  if (hasAcc) return boxAcc === locAcc;
-  if (hasItem) return boxItem === locItem;
-  return true;
-}
-*/
-function boxAllowedAtLocation(locAcc, locItem, boxAcc, boxItem) {
-  const hasAcc = locAcc != null;
-  const hasItem = locItem != null;
+function boxAllowedAtLocation(locAccs, locItems, boxAcc, boxItem, mode = "include") {
+  const hasAcc = locAccs.size > 0;
+  const hasItem = locItems.size > 0;
 
-  // Open location → any box allowed
   if (!hasAcc && !hasItem) return true;
 
-  // Location has customer → only that customer (any item)
-  if (hasAcc) return boxAcc === locAcc;
+  const isExclude = mode === "exclude";
 
-  // Location has item only → any box with matching item, regardless of customer
-  if (hasItem) return boxItem === locItem;
+  if (hasAcc) {
+    const accOk = boxAcc != null && locAccs.has(boxAcc);
+    if (isExclude ? accOk : !accOk) return false;
+  }
+
+  if (hasItem) {
+    const itemOk = boxItem != null && locItems.has(boxItem);
+    if (isExclude ? itemOk : !itemOk) return false;
+  }
 
   return true;
+}
+
+function denyMessage(uid, locLabel, locAccs, locItems, boxAcc, boxItem, mode) {
+  const isExclude = mode === "exclude";
+
+  if (locAccs.size > 0) {
+    const accHit = boxAcc != null && locAccs.has(boxAcc);
+    if (isExclude ? accHit : !accHit) {
+      return isExclude
+        ? `Box "${uid}" cannot be placed at location "${locLabel}": this customer is excluded from this location.`
+        : `Box "${uid}" cannot be placed at location "${locLabel}": this location is assigned to another customer, mixed stock is not allowed.`;
+    }
+  }
+
+  if (locItems.size > 0) {
+    const itemHit = boxItem != null && locItems.has(boxItem);
+    if (isExclude ? itemHit : !itemHit) {
+      return isExclude
+        ? `Box "${uid}" cannot be placed at location "${locLabel}": this item is excluded from this location.`
+        : `Box "${uid}" cannot be placed at location "${locLabel}": this location is assigned to specific item(s) only.`;
+    }
+  }
+
+  return `Box "${uid}" cannot be placed at location "${locLabel}".`;
 }
 
 async function loadLocationsByIds(locationIds) {
   const ids = [...new Set(locationIds.map((id) => parseInt(String(id), 10)).filter((n) => Number.isFinite(n) && n > 0))];
   if (!ids.length) return new Map();
+  // IMS inward places boxes — capacity check counts boxes only (not RM coils).
+  const occupiedSql = `COALESCE(
+    (
+      SELECT COUNT(*)::int
+      FROM ims_box_table b
+      WHERE b.location_id = lm.location_id
+        AND ${sqlBoxInHand("b")}
+    ),
+    0
+  )`;
   const rows = await dbQuery(
-    `SELECT location_id, acc_code, item_dcode,
-            COALESCE(location_no, CONCAT(rack_no, UPPER(COALESCE(shelf_no, '')))) AS display_no
-     FROM ims_location_master
-     WHERE is_deleted = false AND location_id = ANY($1::int[])`,
+    `SELECT lm.location_id,
+            COALESCE(lm.acc_codes, '{}') AS acc_codes,
+            COALESCE(lm.item_dcodes, '{}') AS item_dcodes,
+            (COALESCE(lm.acc_codes, '{}'))[1] AS acc_code,
+            (COALESCE(lm.item_dcodes, '{}'))[1] AS item_dcode,
+            COALESCE(NULLIF(lower(trim(lm.rule)), ''), 'include') AS rule,
+            COALESCE(lm.total_capacity, 0)::int AS total_capacity,
+            ${occupiedSql} AS occupied_capacity,
+            COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS display_no
+     FROM ims_location_master lm
+     WHERE lm.is_deleted = false
+       AND lower(trim(COALESCE(lm.type, '${LOCATION_APP_TYPE_IMS}'))) = '${LOCATION_APP_TYPE_IMS}'
+       AND lm.location_id = ANY($1::int[])`,
     [ids]
   );
   const map = new Map();
@@ -88,6 +154,7 @@ async function loadBoxesByNoUid(boxNoUids) {
   if (!uids.length) return new Map();
   const rows = await dbQuery(
     `SELECT b.box_no_uid,
+            b.location_id,
             b.override_cust,
             j.acc_code AS prod_acc_code,
             j.item_dcode AS itemdcode
@@ -104,27 +171,87 @@ async function loadBoxesByNoUid(boxNoUids) {
   return map;
 }
 
+function extractBoxUid(b) {
+  if (b == null) return "";
+  if (typeof b === "string" || typeof b === "number") return String(b).trim();
+  return String(b.box_no_uid ?? b.boxNoUid ?? "").trim();
+}
+
+/**
+ * Capacity: after placing incoming boxes, count must be <= total_capacity.
+ * Boxes already on this location do not increase occupancy again.
+ */
+function capacityErrorForLocation(lm, incomingUids, boxMap) {
+  const total = Number(lm?.total_capacity);
+  // Enforce only when capacity is configured (> 0); legacy/null rows stay open.
+  if (!Number.isFinite(total) || total <= 0) return null;
+
+  const lid = Number(lm.location_id);
+  const uniqueIncoming = [...new Set(incomingUids.filter(Boolean))];
+  let alreadyHere = 0;
+  for (const uid of uniqueIncoming) {
+    const row = boxMap.get(uid);
+    if (row && Number(row.location_id) === lid) alreadyHere += 1;
+  }
+
+  const occupied = Number(lm.occupied_capacity) || 0;
+  const projected = occupied - alreadyHere + uniqueIncoming.length;
+  if (projected > total) {
+    const locLabel = lm.display_no || `id ${lid}`;
+    const available = Math.max(total - occupied + alreadyHere, 0);
+    return `Location "${locLabel}" capacity exceeded: total ${total}, occupied ${occupied}, available ${available}, trying to place ${uniqueIncoming.length}.`;
+  }
+  return null;
+}
+
 /**
  * @param {Array<{ location_id: unknown, boxes?: unknown[] }>} locations
  * @returns {Promise<string|null>} Error message or null if OK
  */
 export async function validateInwardLocationsAgainstBoxes(locations) {
+  const checkRules = await isInwardLocationValidationEnabled();
+  const checkCapacity = await isLocationCapacityValidationEnabled();
+  if (!checkRules && !checkCapacity) return null;
   if (!Array.isArray(locations) || locations.length === 0) return null;
 
   const locIds = [];
   const allBoxUids = [];
+  /** @type {Map<number, string[]>} */
+  const boxesByLoc = new Map();
+
   for (const loc of locations) {
-    if (loc?.location_id != null) locIds.push(loc.location_id);
-    const boxes = loc?.boxes;
-    if (!Array.isArray(boxes)) continue;
+    const lid = parseInt(String(loc?.location_id), 10);
+    if (Number.isFinite(lid) && lid > 0) locIds.push(lid);
+
+    const boxes = Array.isArray(loc?.boxes) ? loc.boxes : [];
+    const uids = [];
     for (const b of boxes) {
-      const uid = b == null ? "" : typeof b === "string" || typeof b === "number" ? String(b).trim() : String(b.box_no_uid ?? b.boxNoUid ?? "").trim();
-      if (uid) allBoxUids.push(uid);
+      const uid = extractBoxUid(b);
+      if (!uid) continue;
+      allBoxUids.push(uid);
+      uids.push(uid);
+    }
+    if (Number.isFinite(lid) && lid > 0 && uids.length) {
+      const prev = boxesByLoc.get(lid) || [];
+      boxesByLoc.set(lid, prev.concat(uids));
     }
   }
 
   const locMap = await loadLocationsByIds(locIds);
   const boxMap = await loadBoxesByNoUid(allBoxUids);
+
+  if (checkCapacity) {
+    for (const [lid, uids] of boxesByLoc.entries()) {
+      const lm = locMap.get(lid);
+      if (!lm) {
+        return `Location id ${lid} not found or inactive.`;
+      }
+      const capErr = capacityErrorForLocation(lm, uids, boxMap);
+      if (capErr) return capErr;
+    }
+  }
+
+  if (!checkRules) return null;
 
   for (const loc of locations) {
     const lid = parseInt(String(loc?.location_id), 10);
@@ -135,17 +262,13 @@ export async function validateInwardLocationsAgainstBoxes(locations) {
       return `Location id ${lid} not found or inactive.`;
     }
 
-    const locAcc = locationHasAcc(lm) ? normCode(lm.acc_code) : null;
-    const locItem = locationHasItem(lm) ? normCode(lm.item_dcode) : null;
+    const locAccs = locationAccSet(lm);
+    const locItems = locationItemSet(lm);
+    const mode = locationRule(lm);
 
     const boxes = Array.isArray(loc.boxes) ? loc.boxes : [];
     for (const b of boxes) {
-      const uid =
-        b == null
-          ? ""
-          : typeof b === "string" || typeof b === "number"
-            ? String(b).trim()
-            : String(b.box_no_uid ?? b.boxNoUid ?? "").trim();
+      const uid = extractBoxUid(b);
       if (!uid) continue;
 
       const row = boxMap.get(uid);
@@ -156,17 +279,8 @@ export async function validateInwardLocationsAgainstBoxes(locations) {
       const boxAcc = effectiveBoxCustomer(row.override_cust, row.prod_acc_code);
       const boxItem = effectiveBoxItem(row.itemdcode);
 
-      if (!boxAllowedAtLocation(locAcc, locItem, boxAcc, boxItem)) {
-        const locLabel = lm.display_no || `id ${lid}`;
-        // console.log(locOpen && (boxAcc != null || boxItem != null));
-        // }
-        if (locAcc != null && boxAcc !== locAcc) {
-          return `Box "${uid}" cannot be placed at location "${locLabel}": this location is assigned to another customer, mixed stock is not allowed.`;
-        }
-        if (locItem != null && boxItem !== locItem) {
-          return `Box "${uid}" cannot be placed at location "${locLabel}": this location is assigned to item ${locItem} only.`;
-        }
-        return `Box "${uid}" cannot be placed at location "${locLabel}".`;
+      if (!boxAllowedAtLocation(locAccs, locItems, boxAcc, boxItem, mode)) {
+        return denyMessage(uid, lm.display_no || `id ${lid}`, locAccs, locItems, boxAcc, boxItem, mode);
       }
     }
   }
@@ -183,7 +297,7 @@ export async function validateSingleBoxAtLocation(location_id, box_no_uid) {
   return err ? { allowed: false, message: err } : { allowed: true, message: null };
 }
 
-function validateOneBoxAtLoadedLocation(lm, locAcc, locItem, uid, row) {
+function validateOneBoxAtLoadedLocation(lm, locAccs, locItems, mode, uid, row, capacityCtx = null, checkRules = true) {
   const lid = lm ? Number(lm.location_id) : null;
   if (!lm) {
     return { box_no_uid: uid, allowed: false, message: `Location id ${lid} not found or inactive.` };
@@ -196,29 +310,37 @@ function validateOneBoxAtLoadedLocation(lm, locAcc, locItem, uid, row) {
     };
   }
 
-  const boxAcc = effectiveBoxCustomer(row.override_cust, row.prod_acc_code);
-  const boxItem = effectiveBoxItem(row.itemdcode);
-
-  if (boxAllowedAtLocation(locAcc, locItem, boxAcc, boxItem)) {
-    return { box_no_uid: uid, allowed: true, message: null };
+  if (capacityCtx) {
+    const alreadyHere = Number(row.location_id) === lid;
+    const nextOccupied = capacityCtx.occupied + (alreadyHere ? 0 : 1);
+    if (nextOccupied > capacityCtx.total) {
+      const locLabel = lm.display_no || `id ${lid}`;
+      const available = Math.max(capacityCtx.total - capacityCtx.occupied, 0);
+      return {
+        box_no_uid: uid,
+        allowed: false,
+        message: `Box "${uid}" cannot be placed at location "${locLabel}": capacity full (total ${capacityCtx.total}, occupied ${capacityCtx.occupied}, available ${available}).`,
+      };
+    }
   }
 
-  const locLabel = lm.display_no || `id ${lid}`;
-  if (locAcc != null && boxAcc !== locAcc) {
-    return {
-      box_no_uid: uid,
-      allowed: false,
-      message: `Box "${uid}" cannot be placed at location "${locLabel}": this location is assigned to another customer, mixed stock is not allowed.`,
-    };
+  if (checkRules) {
+    const boxAcc = effectiveBoxCustomer(row.override_cust, row.prod_acc_code);
+    const boxItem = effectiveBoxItem(row.itemdcode);
+
+    if (!boxAllowedAtLocation(locAccs, locItems, boxAcc, boxItem, mode)) {
+      return {
+        box_no_uid: uid,
+        allowed: false,
+        message: denyMessage(uid, lm.display_no || `id ${lid}`, locAccs, locItems, boxAcc, boxItem, mode),
+      };
+    }
   }
-  if (locItem != null && boxItem !== locItem) {
-    return {
-      box_no_uid: uid,
-      allowed: false,
-      message: `Box "${uid}" cannot be placed at location "${locLabel}": this location is assigned to item ${locItem} only.`,
-    };
+
+  if (capacityCtx && Number(row.location_id) !== lid) {
+    capacityCtx.occupied += 1;
   }
-  return { box_no_uid: uid, allowed: false, message: `Box "${uid}" cannot be placed at location "${locLabel}".` };
+  return { box_no_uid: uid, allowed: true, message: null };
 }
 
 /**
@@ -227,7 +349,9 @@ function validateOneBoxAtLoadedLocation(lm, locAcc, locItem, uid, row) {
  */
 export async function validateBoxesAtLocationBatch(location_id, box_no_uids) {
   const uids = [...new Set((box_no_uids || []).map((u) => String(u).trim()).filter(Boolean))];
-  const validation_enabled = await isInwardLocationValidationEnabled();
+  const checkRules = await isInwardLocationValidationEnabled();
+  const checkCapacity = await isLocationCapacityValidationEnabled();
+  const validation_enabled = checkRules || checkCapacity;
 
   if (!uids.length) {
     return { validation_enabled, results: [] };
@@ -243,12 +367,23 @@ export async function validateBoxesAtLocationBatch(location_id, box_no_uids) {
   const lid = parseInt(String(location_id), 10);
   const locMap = await loadLocationsByIds([lid]);
   const lm = locMap.get(lid);
-  const locAcc = lm && locationHasAcc(lm) ? normCode(lm.acc_code) : null;
-  const locItem = lm && locationHasItem(lm) ? normCode(lm.item_dcode) : null;
+  const locAccs = lm ? locationAccSet(lm) : new Set();
+  const locItems = lm ? locationItemSet(lm) : new Set();
+  const mode = lm ? locationRule(lm) : "include";
   const boxMap = await loadBoxesByNoUid(uids);
+  const totalCap = Number(lm?.total_capacity);
+  const capacityCtx =
+    checkCapacity && lm && Number.isFinite(totalCap) && totalCap > 0
+      ? {
+          total: totalCap,
+          occupied: Number(lm.occupied_capacity) || 0,
+        }
+      : null;
 
   return {
     validation_enabled: true,
-    results: uids.map((uid) => validateOneBoxAtLoadedLocation(lm, locAcc, locItem, uid, boxMap.get(uid))),
+    results: uids.map((uid) =>
+      validateOneBoxAtLoadedLocation(lm, locAccs, locItems, mode, uid, boxMap.get(uid), capacityCtx, checkRules)
+    ),
   };
 }

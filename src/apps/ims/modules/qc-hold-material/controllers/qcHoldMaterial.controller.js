@@ -7,7 +7,7 @@ import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "..
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { resolveQcHoldPackingMeta } from "../utils/packing/qcHoldPackingMeta.js";
 import { enrichHoldScannedBoxes, enrichQcHoldListRows } from "../utils/list/qcHoldList.js";
-import { VALID_SUBMISSION_TYPES, normalizeSubmissionType, normalizeQcHoldStatus, validateSubmissionQuantities } from "../utils/submission/qcHoldSubmission.js";
+import { VALID_SUBMISSION_TYPES, normalizeSubmissionType, validateSubmissionQuantities } from "../utils/submission/qcHoldSubmission.js";
 import { findBoxByUidOrNoUid } from "../../box/models/box.model.js";
 import { isBoxSellable, isBoxOnQcHold } from "../../box/utils/inventory/boxInventory.js";
 import { applyQcHoldToBoxes, countRevertableBoxesForHold, expandFullHoldBoxesForPacking, normalizeHoldScanMode, QC_HOLD_SCAN_FULL, QC_HOLD_SCAN_PARTIAL, releaseQcHoldFromBoxes, releaseQcHoldRevertTx, resolveHoldBoxUids, syncQcHoldBoxStock, validateBoxesForHold } from "../utils/stock/qcHoldBoxStock.js";
@@ -134,6 +134,10 @@ export const getQcHoldMaterialById = async (req, res) => {
     const row = await findQcHoldMaterialById(pk);
     if (!row) return res.status(404).json({ success: false, message: QC_HOLD_MSG.NOT_FOUND });
     const [enriched] = await enrichQcHoldListRows([row]);
+    // Heal stale status column when balance already cleared (e.g. old partial rows).
+    if (enriched?.status && String(row.status || "").toLowerCase() !== String(enriched.status).toLowerCase()) {
+      await updateQcHoldMaterial(pk, { status: enriched.status });
+    }
     const submissions = listSubmissions(row.hold_data).map((s) => submissionToApi(s, pk));
     const scanned_boxes = await enrichHoldScannedBoxes(enriched);
     res.json({ success: true, data: { ...enriched, submissions, scanned_boxes } });
@@ -562,6 +566,7 @@ export const approveQcHoldSubmissionController = async (req, res) => {
               userId,
               userName,
               pendingUntilApproval: false,
+              submissionId: submission.submission_id,
             });
           }
         }
@@ -687,32 +692,44 @@ export const getQcHoldCompletionBoxes = async (req, res) => {
     const userId = req.user?.id ?? null;
     const userName = auditUserName(req);
     let packingConfig = null;
+    const isRevert = String(submission?.submission_type ?? "").trim().toLowerCase() === "revert";
 
-    if (submission && (Number(submission.completed_qty) || 0) > 0) {
-      const submissionType = String(submission.submission_type ?? "").trim().toLowerCase();
-      if (submissionType !== "revert") {
-        try {
-          const ensured = await withTransaction(async (client) =>
-            ensureQcHoldSubmissionCompletionBoxesTx(client, { hold, submission, userId, userName })
-          );
-          packingConfig = ensured.packing_config;
-          if (ensured.holdData) {
-            hold = await updateQcHoldMaterial(pk, {
-              hold_data: ensured.holdData,
-              updated_by: userName,
-              updated_at: new Date(),
-            });
-            submission = findSubmissionById(hold.hold_data, submission.submission_id);
-          }
-        } catch (err) {
-          const code = err?.statusCode === 400 ? 400 : 500;
-          return res.status(code).json({ success: false, message: err.message });
+    const ensureList = isRevert
+      ? []
+      : [
+          ...listSubmissions(hold.hold_data, { approvedOnly: true }),
+          ...listSubmissions(hold.hold_data, { pendingOnly: true }),
+        ].filter(
+          (s) =>
+            String(s.submission_type ?? "").trim().toLowerCase() !== "revert" &&
+            (Number(s.completed_qty) || 0) > 0
+        );
+
+    for (const sub of ensureList) {
+      try {
+        const ensured = await withTransaction(async (client) =>
+          ensureQcHoldSubmissionCompletionBoxesTx(client, { hold, submission: sub, userId, userName })
+        );
+        packingConfig = ensured.packing_config || packingConfig;
+        if (ensured.holdData) {
+          hold = await updateQcHoldMaterial(pk, {
+            hold_data: ensured.holdData,
+            updated_by: userName,
+            updated_at: new Date(),
+          });
         }
+      } catch (err) {
+        const code = err?.statusCode === 400 ? 400 : 500;
+        return res.status(code).json({ success: false, message: err.message });
       }
     }
 
     const [enriched] = await enrichQcHoldListRows([hold]);
-    const boxes = await listQcHoldPrintStickers({ hold, submission });
+    const boxes = await listQcHoldPrintStickers({
+      hold,
+      submission,
+      allCompletions: !isRevert,
+    });
     const packingMeta = hold.packing_number
       ? await resolveQcHoldPackingMeta(hold.packing_number)
       : null;
@@ -734,7 +751,7 @@ export const getQcHoldCompletionBoxes = async (req, res) => {
 
 export const updateQcHoldMaterialController = async (req, res) => {
   try {
-    const { id, hold_id, packing_number, item_dcode, qty, remarks, reason, status, approved, scanned_box_uids, hold_scan_mode } = req.body;
+    const { id, hold_id, packing_number, item_dcode, qty, remarks, reason, approved, scanned_box_uids, hold_scan_mode } = req.body;
     const pk = hold_id ?? id;
     if (!pk) return res.status(400).json({ success: false, message: QC_HOLD_MSG.HOLD_ID_REQUIRED });
 
@@ -755,7 +772,7 @@ export const updateQcHoldMaterialController = async (req, res) => {
       }
       payload.reason = String(reason).trim();
     }
-    if (status !== undefined) payload.status = normalizeQcHoldStatus(status, existing.status);
+    // `status` from body is ignored — always derived from hold_data balances below.
 
     const holdDataPatch = {};
     const prevHoldData = parseHoldData(existing.hold_data);
@@ -806,6 +823,9 @@ export const updateQcHoldMaterialController = async (req, res) => {
     if (Object.keys(holdDataPatch).length) {
       payload.hold_data = buildHoldDataPatch(existing.hold_data, holdDataPatch);
     }
+
+    // Always sync status from hold_data balances (cleared → complete, never stuck on partial).
+    payload.status = deriveStatusFromHoldData(payload.hold_data ?? existing.hold_data);
 
     if (approved !== undefined) {
       const normalizedApproved = normalizeApprovedInput(approved);

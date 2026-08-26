@@ -1,0 +1,5 @@
+{
+  "watch": ["src", "app.js"],
+  "ext": "js,json",
+  "ignore": ["logs/**", "backups/**", "uploads/**", "node_modules/**"]
+}

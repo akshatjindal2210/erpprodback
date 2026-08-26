@@ -1,5 +1,5 @@
 import dbQuery from "../../../../../config/db/db.js";
-import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { IMS_TABLES as IT, RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { orderMrnQuotasFifo } from "../../../lib/utils/mrnFifoOrder.js";
 import { COIL_QC_JOIN, COIL_QC_PASSED_COND } from "../../../lib/utils/coilQcStatusSql.js";
 import { coilIndexFromUidSql } from "../../coil/models/coil.model.js";
@@ -8,7 +8,7 @@ import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampU
 const TABLE = T.OUT_ENTRY;
 const SCANNED = T.OUT_ENTRY_SCANNED_COIL;
 const COIL = T.COIL_TABLE;
-const LOC = T.MASTER_LOCATION;
+const LOC = IT.LOCATION_MASTER;
 const ISSUE_REQUEST = T.ISSUE_REQUEST;
 const ISSUE_REQUEST_JC = T.ISSUE_REQUEST_JOB_CARD;
 const REJECTION = T.REJECTION;
@@ -289,7 +289,7 @@ export const findOutEntryScannedCoilsDetailed = async (out_uid) => {
             m.item_desc,
             lm.location_no,
             lm.rack_no,
-            lm.row_no,
+            lm.shelf_no AS row_no,
             s.created_at AS scanned_at
      FROM ${SCANNED} s
      JOIN ${COIL} c ON c.coil_no_uid = s.coil_no_uid AND c.is_deleted = false
@@ -326,7 +326,7 @@ export const findOutEntryLinkedCoils = async (out_uid) => {
               m.item_desc,
               lm.location_no,
               lm.rack_no,
-              lm.row_no
+              lm.shelf_no AS row_no
        FROM ${COIL} c
        LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
        LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
@@ -502,7 +502,7 @@ export const findStoredMrnDetail = async (mrn_uid) => {
             m.remarks AS remarks,
             lm.location_no,
             lm.rack_no,
-            lm.row_no
+            lm.shelf_no AS row_no
      FROM ${COIL} c
      LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
      ${COIL_QC_JOIN}
@@ -735,7 +735,7 @@ export const findJobCardStoreOutPlan = async ({ issue_uid, pjobcardno, excludeOu
             m.remarks AS remarks,
             lm.location_no,
             lm.rack_no,
-            lm.row_no
+            lm.shelf_no AS row_no
      FROM ${COIL} c
      LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
      ${COIL_QC_JOIN}

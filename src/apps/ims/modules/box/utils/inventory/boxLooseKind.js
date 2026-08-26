@@ -3,7 +3,7 @@
  * Keep in sync with `frontend/src/core/utils/utilHelper.js` (isForwardingLooseBox*).
  */
 
-import { parseStandardBoxNoUid } from "../uid/boxUid.js";
+import { parseStandardBoxNoUid } from "../../../../lib/stickerUidHelpers.js";
 
 export function isBoxLooseFlagged(box) {
   const v = box?.is_loose;

@@ -1,7 +1,8 @@
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
-import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { IMS_TABLES as IT, RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { hasCoilJourneyFilter, appendCoilJourneyCondition } from "../../../lib/utils/logJourneyFilter.js";
-import { resolveSerialNoForUid } from "../../../lib/utils/resolveSerialNoForUid.js";
+import { formatCoilNoUid, formatStockAdjustmentCoilUid } from "../../../lib/coilUidFormat.js";
+import { parseCoilNoUidMeta, resolveSerialNoForUid } from "../../../lib/coilUidHelpers.js";
 import { COIL_QC_JOIN, COIL_QC_PASSED_COND, COIL_QC_STATUS_EXPR } from "../../../lib/utils/coilQcStatusSql.js";
 import { COIL_REJECTION_JOIN, COIL_REJECTION_SELECT } from "../../../lib/utils/coilRejectionSql.js";
 import { coilAreaEligibleSql, coilAreaPhysicalStatusSql, portalMrnCoilBaseSql } from "../../../lib/utils/mrnPortalCoilSql.js";
@@ -18,20 +19,6 @@ export const SA_ENTRY_TYPE = {
   STOCK_OUT: "stock_out",
   PRODUCTION_RETURN: "production_return",
 };
-
-/** Last segment = coil index, second-to-last = total (MRN + SA UID formats). */
-export function parseCoilNoUidMeta(coilNoUid) {
-  const s = String(coilNoUid || "").trim();
-  if (!s) return { index: null, total: null };
-  const parts = s.split("_").filter(Boolean);
-  if (parts.length < 2) return { index: null, total: null };
-  const index = Number(parts[parts.length - 1]);
-  const total = Number(parts[parts.length - 2]);
-  return {
-    index: Number.isFinite(index) ? index : null,
-    total: Number.isFinite(total) ? total : null,
-  };
-}
 
 export function enrichCoilUidMeta(row) {
   if (!row) return row;
@@ -96,16 +83,6 @@ export function portalMrnCoilSql(alias = "c") {
 
 /** List columns only (no remarks/audit) — faster reads from coil_table. */
 const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, c.status, c.created_at, ${coilSourceSql("c")}::varchar AS source`;
-
-/** IMS sticker-prefix coil UID: {prefix}_mrnno_serialno_totalno_colino e.g. 26_1001_3_10_03 */
-export function formatCoilNoUid({ prefix, mrn_no, serial_no, total, index }) {
-  const pfx = String(prefix ?? "").trim() || "0";
-  const mrn = String(mrn_no ?? "").trim() || "0";
-  const serial = String(serial_no ?? "").trim() || "0";
-  const tb = String(Math.max(1, Number(total) || 1));
-  const bi = String(Math.max(1, Number(index) || 1));
-  return `${pfx}_${mrn}_${serial}_${tb}_${bi}`;
-}
 
 export const findCoilUidsByQcCheck = async (qc_uid) => {
   const id = Number(qc_uid);
@@ -330,13 +307,13 @@ export const findCoils = async (options = {}) => {
     `SELECT ${COIL_LIST_SELECT},
             lm.location_no,
             lm.rack_no,
-            lm.row_no
+            lm.shelf_no AS row_no
      FROM ${TABLE} c
      ${COIL_MRN_JOIN}
      ${COIL_QC_JOIN}
      ${COIL_REJECTION_JOIN}
      ${COIL_JOB_CARD_JOIN}
-     LEFT JOIN ${T.MASTER_LOCATION} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
+     LEFT JOIN ${IT.LOCATION_MASTER} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
      ${where}
      ORDER BY ${sortExpr} ${sortOrder} NULLS LAST
      LIMIT $${i++} OFFSET $${i}`,
@@ -351,14 +328,14 @@ export const findCoilByUid = async (coil_no_uid) => {
     `SELECT ${COIL_DETAIL_SELECT},
             lm.location_no,
             lm.rack_no,
-            lm.row_no
+            lm.shelf_no AS row_no
      FROM ${TABLE} c
      ${COIL_MRN_JOIN}
      ${COIL_SA_BILL_JOIN}
      ${COIL_QC_JOIN}
      ${COIL_REJECTION_JOIN}
      ${COIL_JOB_CARD_JOIN}
-     LEFT JOIN ${T.MASTER_LOCATION} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
+     LEFT JOIN ${IT.LOCATION_MASTER} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
      WHERE c.coil_no_uid = $1 AND c.is_deleted = false
      LIMIT 1`,
     [String(coil_no_uid || "").trim()]
@@ -1351,17 +1328,6 @@ export const softDeleteCoilsByCoilNoUids = async (coil_no_uids = [], deleted_by 
   );
   return Array.isArray(rows) ? rows.length : 0;
 };
-
-/** Stock Adjustment Add coil UID: {prefix}_mrnno_serial_SA{adjId}_total_index e.g. 26_3819_1_SA3_6_1 */
-export function formatStockAdjustmentCoilUid({ prefix, mrn_no, serial_no, adjustment_id, total, index }) {
-  const pfx = String(prefix ?? "").trim() || "0";
-  const mrn = String(mrn_no ?? "").trim() || "0";
-  const serial = String(serial_no ?? "").trim() || "0";
-  const adj = Math.max(0, Number(adjustment_id) || 0);
-  const ci = Math.max(1, Number(index) || 1);
-  const tc = Math.max(1, Number(total) || 1);
-  return `${pfx}_${mrn}_${serial}_SA${adj}_${tc}_${ci}`;
-}
 
 /** Build coil_no_uid list for a Stock Adjustment Add approve plan. */
 export function buildStockAdjustmentAddCoilUidList({

@@ -1,7 +1,7 @@
 import QRCode from "qrcode";
 import fs from "fs";
 import path from "path";
-import { docNoFromStandardBoxNoUid } from "../../../../ims/modules/box/utils/uid/boxUid.js";
+import { docNoFromStandardBoxNoUid } from "../../../../ims/lib/stickerUidHelpers.js";
 import { getAppConfigValue, getStickerCompanyInfo, APP_CONFIG_KEYS } from "../../../configuration/models/appConfig.model.js";
 
 export function resolveStickerPackingNumber(sticker = {}, fallback = null) {
@@ -421,25 +421,89 @@ const fmtBillShortDate = (d) => {
   }
 };
 
-/** Split comma-separated bill_no into deduped list. */
+/** Split comma-separated values into deduped list. */
 const parseBillNoList = (raw) => {
-  if (raw == null || String(raw).trim() === "") return [];
+  if (raw == null) return [];
+  const s = String(raw).trim();
+  if (!s) return [];
+  if (!s.includes(",")) return [s];
   const seen = new Set();
   const out = [];
-  for (const part of String(raw).split(/,\s*/)) {
-    const bill = part.trim();
-    if (!bill || seen.has(bill)) continue;
-    seen.add(bill);
-    out.push(bill);
+  for (const part of s.split(",")) {
+    const v = part.trim();
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
   }
   return out;
 };
 
-/** Print HTML — one bill number per line (matches handwritten FN layout). */
-const formatBillNosPrintHtml = (raw) => {
-  const list = parseBillNoList(raw);
+/**
+ * Print footer bill meta.
+ * Prefer note-level rollup from enrich; walk breakdowns only when blank.
+ */
+const collectPrintBillMeta = (note = {}) => {
+  const bills = parseBillNoList(note.billno || note.bill_no);
+  const dates = parseBillNoList(note.billdt || note.bill_dt);
+  let maker = String(note.bill_made_by || note.bill_updated_by || "").trim() || null;
+  let at = note.bill_updated_at || null;
+
+  if (bills.length) return { bills, dates, maker, at };
+
+  const billSeen = new Set();
+  const dateSeen = new Set();
+  let atMs = 0;
+
+  for (const grp of note.items || []) {
+    for (const line of grp.breakdowns || []) {
+      const bill = String(line?.billno || line?.line_bill_no || line?.bill_no || "").trim();
+      if (bill && !billSeen.has(bill)) {
+        billSeen.add(bill);
+        bills.push(bill);
+      }
+
+      const dt = String(line?.billdt || line?.line_bill_dt || line?.bill_dt || "").trim();
+      if (dt && !dateSeen.has(dt)) {
+        dateSeen.add(dt);
+        dates.push(dt);
+      }
+
+      const lineMaker = String(
+        line?.bill_updated_by_name || line?.line_bill_updated_by || line?.bill_updated_by || ""
+      ).trim();
+      const lineAt = line?.line_bill_updated_at || line?.bill_updated_at || null;
+      const lineAtMs = lineAt ? new Date(lineAt).getTime() : 0;
+      if (Number.isFinite(lineAtMs) && lineAtMs >= atMs) {
+        atMs = lineAtMs;
+        at = lineAt;
+        if (lineMaker) maker = lineMaker;
+      } else if (!maker && lineMaker) {
+        maker = lineMaker;
+      }
+    }
+  }
+
+  return { bills, dates, maker, at };
+};
+
+/** Print HTML — comma-separated; each value never wraps mid-token. */
+const formatBillNosPrintHtml = (bills) => {
+  const list = Array.isArray(bills) ? bills : parseBillNoList(bills);
   if (!list.length) return "";
-  return list.map((bill) => escapeHtml(bill)).join("<br>");
+  return list .map((bill) => `<span class="fn-bill-one">${escapeHtml(bill)}</span>`).join('<span class="fn-bill-sep">, </span>');
+};
+
+const fmtBillAtPrint = (d) => {
+  if (!d) return "";
+  try {
+    const x = new Date(d);
+    if (Number.isNaN(x.getTime())) return String(d);
+    const hh = String(x.getHours()).padStart(2, "0");
+    const mm = String(x.getMinutes()).padStart(2, "0");
+    return `${fmtBillShortDate(x)} ${hh}:${mm}`;
+  } catch {
+    return String(d);
+  }
 };
 
 /**
@@ -526,7 +590,17 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
   const docDateShort = fmtBillShortDate(note.timestamp || note.created_at);
   const challanNo = String(note.fuid ?? "");
   const partyName = escapeHtml(note.acc_name || "—");
-  const billNoHtml = formatBillNosPrintHtml(note.bill_no);
+  const { bills: printBills, dates: printDates, maker: printMaker, at: printAt } = collectPrintBillMeta(note);
+  const billNoHtml = formatBillNosPrintHtml(printBills);
+  const billDateHtml = formatBillNosPrintHtml(printDates);
+  const billMadeByHtml = printMaker ? escapeHtml(printMaker) : "";
+  const billAtHtml = printAt ? escapeHtml(fmtBillAtPrint(printAt)) : "";
+  const forwardedByHtml = escapeHtml(
+    String(note.created_by_name || note.created_by || "").trim()
+  );
+  const forwardedAtHtml = escapeHtml(
+    fmtBillAtPrint(note.created_at || note.timestamp || "")
+  );
   const transport = escapeHtml(note.transporter_name || "");
   const transportId = escapeHtml(note.transporter_id || "");
   const vehicle = escapeHtml(note.vehicle_number || "");
@@ -709,35 +783,46 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
     }
     .fn-total-num { font-size: 10.5pt; padding: 6px 6px; }
     .fn-foot-wrap { margin-top: 3mm; page-break-inside: avoid; }
-    .fn-foot { width: 100%; border-collapse: collapse; font-size: 10pt; table-layout: fixed; }
-    .fn-foot td { padding: 5px 6px 6px; vertical-align: bottom; }
-    .fn-fg-lbl {
-      font-weight: 700;
-      white-space: normal;
-      width: 32%;
-      max-width: 42mm;
-      padding-right: 10px;
-      padding-left: 2px;
-      vertical-align: bottom;
-      line-height: 1.25;
-      hyphens: manual;
+    .fn-foot {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 10pt;
+      table-layout: fixed;
     }
-    .fn-fg-cell { width: 18%; vertical-align: bottom; }
-    .fn-fg-full { vertical-align: bottom; padding-left: 4px; }
+    .fn-foot td {
+      padding: 5px 0 6px;
+      vertical-align: bottom;
+    }
+    .fn-fl {
+      font-weight: 700;
+      white-space: nowrap;
+      padding-right: 8px;
+      line-height: 1.3;
+    }
+    .fn-fv { padding-right: 10px; }
+    .fn-fv-last { padding-right: 0; }
     .fn-under {
       display: block;
+      width: 100%;
       border-bottom: 1px dotted #000;
       min-height: 1.35em;
-      padding: 2px 4px 3px 6px;
-      word-break: break-word;
-      overflow: visible;
+      padding: 1px 2px 2px;
+      overflow: hidden;
       text-align: left;
+      word-break: break-word;
     }
     .fn-bill-stack {
-      line-height: 1.35;
+      line-height: 1.45;
       white-space: normal;
-      min-height: 1.35em;
+      word-break: normal;
+      overflow-wrap: normal;
     }
+    .fn-bill-one {
+      display: inline;
+      white-space: nowrap;
+      word-break: keep-all;
+    }
+    .fn-bill-sep { white-space: nowrap; }
     .fn-remarks {
       margin-top: 2mm;
       font-size: 9.5pt;
@@ -794,38 +879,53 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
 
         <div class="fn-foot-wrap">
           <table class="fn-foot" cellspacing="0">
-            <colgroup><col style="width:32%" /><col style="width:18%" /><col style="width:18%" /><col style="width:32%" /></colgroup>
+            <colgroup>
+              <col style="width:24%" />
+              <col style="width:26%" />
+              <col style="width:24%" />
+              <col style="width:26%" />
+            </colgroup>
             <tr>
-              <td class="fn-fg-lbl">BOXES</td>
-              <td class="fn-fg-cell"><span class="fn-under">${escapeHtml(boxesDisplay)}</span></td>
-              <td class="fn-fg-lbl">WEIGHT</td>
-              <td class="fn-fg-cell"><span class="fn-under">&#160;</span></td>
+              <td class="fn-fl">BOXES</td>
+              <td class="fn-fv"><span class="fn-under">${escapeHtml(boxesDisplay) || "&#160;"}</span></td>
+              <td class="fn-fl">WEIGHT</td>
+              <td class="fn-fv fn-fv-last"><span class="fn-under">&#160;</span></td>
             </tr>
             <tr>
-              <td class="fn-fg-lbl">CARTAGE</td>
-              <td class="fn-fg-full" colspan="3"><span class="fn-under">${escapeHtml(cartageStr)}</span></td>
+              <td class="fn-fl">CARTAGE</td>
+              <td class="fn-fv fn-fv-last" colspan="3"><span class="fn-under">${escapeHtml(cartageStr) || "&#160;"}</span></td>
             </tr>
             <tr>
-              <td class="fn-fg-lbl">TRANSPORTER NAME</td>
-              <td class="fn-fg-full" colspan="3"><span class="fn-under">${transport}</span></td>
+              <td class="fn-fl">TRANSPORTER NAME</td>
+              <td class="fn-fv fn-fv-last" colspan="3"><span class="fn-under">${transport || "&#160;"}</span></td>
             </tr>
             <tr>
-              <td class="fn-fg-lbl">TRANSPORTER ID</td>
-              <td class="fn-fg-full" colspan="3"><span class="fn-under">${transportId || "&#160;"}</span></td>
+              <td class="fn-fl">TRANSPORTER ID</td>
+              <td class="fn-fv fn-fv-last" colspan="3"><span class="fn-under">${transportId || "&#160;"}</span></td>
             </tr>
             <tr>
-              <td class="fn-fg-lbl">VEHICLE NO</td>
-              <td class="fn-fg-full" colspan="3"><span class="fn-under">${vehicle}</span></td>
+              <td class="fn-fl">VEHICLE NO</td>
+              <td class="fn-fv fn-fv-last" colspan="3"><span class="fn-under">${vehicle || "&#160;"}</span></td>
             </tr>
             <tr>
-              <td class="fn-fg-lbl">Bill No.</td>
-              <td class="fn-fg-cell"><span class="fn-under fn-bill-stack">${billNoHtml || "&#160;"}</span></td>
-              <td class="fn-fg-lbl">Bill Made by</td>
-              <td class="fn-fg-cell"><span class="fn-under">&#160;</span></td>
+              <td class="fn-fl">Bill No.</td>
+              <td class="fn-fv fn-fv-last" colspan="3"><span class="fn-under fn-bill-stack">${billNoHtml || "&#160;"}</span></td>
             </tr>
             <tr>
-              <td class="fn-fg-lbl">Forwarded By</td>
-              <td class="fn-fg-full" colspan="3"><span class="fn-under">&#160;</span></td>
+              <td class="fn-fl">Bill Date</td>
+              <td class="fn-fv fn-fv-last" colspan="3"><span class="fn-under fn-bill-stack">${billDateHtml || "&#160;"}</span></td>
+            </tr>
+            <tr>
+              <td class="fn-fl">Bill Made by</td>
+              <td class="fn-fv"><span class="fn-under">${billMadeByHtml || "&#160;"}</span></td>
+              <td class="fn-fl">Bill At</td>
+              <td class="fn-fv fn-fv-last"><span class="fn-under">${billAtHtml || "&#160;"}</span></td>
+            </tr>
+            <tr>
+              <td class="fn-fl">Forwarded By</td>
+              <td class="fn-fv"><span class="fn-under">${forwardedByHtml || "&#160;"}</span></td>
+              <td class="fn-fl">Forwarded At</td>
+              <td class="fn-fv fn-fv-last"><span class="fn-under">${forwardedAtHtml || "&#160;"}</span></td>
             </tr>
           </table>
           ${remarks ? `<div class="fn-remarks"><strong>Remarks :</strong> ${remarks}</div>` : ""}

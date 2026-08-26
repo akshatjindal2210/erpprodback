@@ -87,7 +87,15 @@ export function buildInventoryReportSql() {
           FILTER (WHERE (${STOCK_BOX}) AND NULLIF(TRIM(b.box_no_uid::text), '') IS NOT NULL),
           ARRAY[]::text[]
         ) AS stock_box_nos,
-        STRING_AGG(DISTINCT ${LOC_LABEL}, ', ') FILTER (WHERE (${SHOW_LOC})) AS location_details,
+        COALESCE(
+          jsonb_agg(jsonb_build_object('l', ${LOC_LABEL}, 'u', NULLIF(TRIM(b.box_no_uid::text), '')))
+          FILTER (
+            WHERE (${SHOW_LOC})
+              AND ${LOC_LABEL} IS NOT NULL
+              AND NULLIF(TRIM(b.box_no_uid::text), '') IS NOT NULL
+          ),
+          '[]'::jsonb
+        ) AS location_box_json,
         COALESCE(ARRAY_AGG(DISTINCT b.location_id::text) FILTER (WHERE (${SHOW_LOC})), ARRAY[]::text[]) AS in_store_location_ids
       FROM ims_box_table b
       LEFT JOIN ims_stock_adjustment sa
@@ -121,8 +129,27 @@ export function buildInventoryReportSql() {
         g.packing_area_boxes,
         g.stock_box_count,
         g.stock_box_nos,
-        g.location_details,
-        g.in_store_location_ids
+        g.in_store_location_ids,
+        COALESCE((
+          SELECT STRING_AGG(x.loc || ' (' || x.n::text || ')', ', ' ORDER BY x.loc)
+          FROM (
+            SELECT e->>'l' AS loc, COUNT(*)::int AS n
+            FROM jsonb_array_elements(COALESCE(g.location_box_json, '[]'::jsonb)) e
+            WHERE NULLIF(TRIM(e->>'l'), '') IS NOT NULL
+            GROUP BY e->>'l'
+          ) x
+        ), '—') AS location_details,
+        COALESCE((
+          SELECT STRING_AGG(x.loc || ' (' || x.n::text || '): ' || x.uids, E'\n' ORDER BY x.loc)
+          FROM (
+            SELECT e->>'l' AS loc, COUNT(*)::int AS n,
+                   STRING_AGG(e->>'u', ', ' ORDER BY e->>'u') AS uids
+            FROM jsonb_array_elements(COALESCE(g.location_box_json, '[]'::jsonb)) e
+            WHERE NULLIF(TRIM(e->>'l'), '') IS NOT NULL
+              AND NULLIF(TRIM(e->>'u'), '') IS NOT NULL
+            GROUP BY e->>'l'
+          ) x
+        ), '') AS location_tip
       FROM grouped g
     )`;
 
@@ -152,6 +179,7 @@ export function sqlPageSlice({ sortBy, sortCol, sortDir, limitIdx, offsetIdx }) 
       f.customer_code,
       f.customer_name,
       COALESCE(f.location_details, '—') AS location_details,
+      COALESCE(f.location_tip, '') AS location_tip,
       COALESCE(f.in_store_location_ids, ARRAY[]::text[]) AS in_store_location_ids,
       COALESCE(f.fg_stock_qty, 0)::bigint AS fg_stock_qty,
       COALESCE(f.in_store_qty, 0)::bigint AS in_store_qty,

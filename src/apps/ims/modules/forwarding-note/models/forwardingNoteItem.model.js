@@ -8,8 +8,9 @@ import { applyForwardingOutEntryListFilter } from "../utils/list/forwardingNoteL
 const ALLOWED_FILTER_FIELDS = ["id", "fuid", "item_dcode", "approved", "out_entry_locked", "from_date", "to_date", "po_number", "acc_code"];
 const ALLOWED_SORT_FIELDS = ["created_at", "qty", "fuid", "po_number", "packing_number"];
 const ALLOWED_UPDATE_FIELDS = [
-  "item_dcode", "packing_number", "box", "box_qty", 
+  "item_dcode", "packing_number", "box", "box_qty",
   "loose_box", "loose_box_qty", "total_qty",
+  "bill_no", "bill_dt", "bill_updated_by", "bill_updated_at",
   "approved", "approved_by", "approved_at", "updated_by", "updated_at"
 ];
 
@@ -37,6 +38,11 @@ const DEFAULT_FIELDS = [
   "fi.loose_box_qty",
   "fi.total_qty",
   "fi.schno",
+  "fi.bill_no AS line_bill_no",
+  "fi.bill_dt AS line_bill_dt",
+  "fi.bill_updated_by AS line_bill_updated_by",
+  "fi.bill_updated_at AS line_bill_updated_at",
+  "fi.bill_updated_by AS bill_updated_by_name",
   "fi.item_dcode::text AS item_code",
   "NULL::text AS item_desc",
   // Master-level data (must match summary/action context)
@@ -47,9 +53,6 @@ const DEFAULT_FIELDS = [
   "fnm.vehicle_number",
   "fnm.cartage",
   "fnm.total_items",
-  "fnm.bill_no",
-  "fnm.bill_updated_by",
-  "fnm.bill_updated_at",
   "fnm.timestamp AS timestamp",
   "fnm.approved",
   "fnm.approved_by",
@@ -72,8 +75,7 @@ const DEFAULT_FIELDS = [
   "fnm.updated_by AS updated_by_name",
   "fnm.deleted_by AS deleted_by_name",
   "fnm.approved_by AS approved_by_name",
-  "fnm.out_entry_locked_by AS out_entry_locked_by_name",
-  "fnm.bill_updated_by AS bill_updated_by_name"
+  "fnm.out_entry_locked_by AS out_entry_locked_by_name"
 ];
 
 export const findForwardingNoteItems = async (options = {}) => {
@@ -133,7 +135,7 @@ export const findForwardingNoteItems = async (options = {}) => {
       fnm.po_number ILIKE $${i} OR
       fnm.acc_code::text ILIKE $${i} OR
       fnm.vehicle_number ILIKE $${i} OR
-      fnm.bill_no ILIKE $${i} OR
+      fi.bill_no ILIKE $${i} OR
       fi.packing_number ILIKE $${i} OR
       EXISTS (
         SELECT 1 FROM ims_dailyprod dp
@@ -269,6 +271,42 @@ export const updateForwardingNoteItems = async (fields = {}, filters = {}) => {
     values
   );
   return row;
+};
+
+/** Assign bill onto one or more item-wise lines. */
+export const assignForwardingNoteItemBills = async ({
+  itemIds = [],
+  bill_no,
+  bill_dt = null,
+  userName,
+} = {}) => {
+  const ids = [...new Set(
+    (Array.isArray(itemIds) ? itemIds : [])
+      .map((id) => Number(id))
+      .filter((n) => Number.isFinite(n) && n > 0)
+  )];
+  if (!ids.length) return [];
+
+  const billNo = bill_no == null ? null : String(bill_no).trim() || null;
+
+  return dbQuery(
+    `UPDATE ims_forwarding_note_item_wise
+     SET bill_no = $2,
+         bill_dt = $3,
+         bill_updated_by = $4,
+         bill_updated_at = NOW(),
+         updated_by = $4,
+         updated_at = NOW()
+     WHERE is_deleted = false
+       AND id = ANY($1::int[])
+     RETURNING id, fuid, bill_no, bill_dt, bill_updated_by, bill_updated_at`,
+    [
+      ids,
+      billNo,
+      bill_dt == null ? null : String(bill_dt).trim() || null,
+      userName ?? null,
+    ]
+  );
 };
 
 export const deleteForwardingNoteItems = async (filters = {}, meta = {}, { client } = {}) => {

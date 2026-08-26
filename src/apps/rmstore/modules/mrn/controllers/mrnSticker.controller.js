@@ -1,6 +1,7 @@
 import { findMrnByUid, insertMrn, setMrnStickerGenerated, updateMrnDocs, updateMrnStickerMeta, saveMrnStickerDraft } from "../models/mrn.model.js";
 import { resolveMrnForSticker } from "../utils/resolveMrnForSticker.js";
-import { formatCoilNoUid, countCoilsForMrn, insertBulkCoils, findCoils, softDeleteCoilsByCoilNoUids } from "../../coil/models/coil.model.js";
+import { countCoilsForMrn, insertBulkCoils, findCoils, softDeleteCoilsByCoilNoUids } from "../../coil/models/coil.model.js";
+import { formatCoilNoUid } from "../../../lib/coilUidFormat.js";
 import { computeMrnQtyBudget } from "../../stock-adjustment/utils/mrnQtyBudget.js";
 import { softDeleteQcChecksByCoilNoUids } from "../../qc-check/models/qcCheck.model.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";

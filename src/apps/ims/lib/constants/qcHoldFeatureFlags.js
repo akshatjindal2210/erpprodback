@@ -5,4 +5,4 @@
  * QC_HOLD_PARTIAL_ENABLED = true   →  also Partial Hold scan + Partial Submit.
  */
 
-export const QC_HOLD_PARTIAL_ENABLED = false;
+export const QC_HOLD_PARTIAL_ENABLED = true;

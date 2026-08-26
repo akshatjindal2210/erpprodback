@@ -1,5 +1,7 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { BOX_TX_TYPES } from "../../../lib/constants/boxTransactionTypes.js";
+import { STICKER } from "../../../lib/stickerUidFormat.js";
+import { saTag, qcTag } from "../../../lib/stickerUidHelpers.js";
 import { logBoxTransaction, logBoxTransactionSafe, singlePackingFromRows } from "../utils/transactions/logBoxTransaction.js";
 import { sqlBoxInHand, sqlBoxOutUidEmpty, sqlBoxCustomerCode, sqlDailyprodLateralForBox, sqlBoxSellable, sqlBoxNotOnQcHold, sqlBoxOutwardDispatchAny, sqlBoxPackingNumberMatch, sqlDocDtText, sqlDocDtFromDailyprod, sqlOutEntryCustomerDispatch } from "../utils/inventory/boxInventorySql.js";
 import { normalizeDocDtForDb } from "../../../lib/utils/packing-entry/parse/packRowParse.js";
@@ -540,7 +542,7 @@ function sqlPackingNumberMatch(alias, paramRef) {
 }
 
 function sqlSaBoxNoUidMatchesPacking(paramRef) {
-  return `position(('_' || trim(${paramRef}::text) || '_SA') IN b.box_no_uid::text) > 0`;
+  return `position(('_' || trim(${paramRef}::text) || '_${STICKER.SA}') IN b.box_no_uid::text) > 0`;
 }
 
 function parseItemDcodeId(v) {
@@ -906,7 +908,7 @@ export const findStockAdjustmentAddBoxesByPattern = async (packing_number, adjus
   const pn = String(packing_number ?? "").trim();
   const adjId = Number(adjustment_id);
   if (!pn || !Number.isFinite(adjId) || adjId <= 0) return [];
-  const saTag = `_SA${adjId}_`;
+  const tag = saTag(adjId);
 
   return dbQuery(
     `SELECT ${IN_HAND_BOX_SELECT_SQL}
@@ -916,7 +918,7 @@ export const findStockAdjustmentAddBoxesByPattern = async (packing_number, adjus
        AND ${sqlPackingNumberMatch("b", "$1")}
        AND position($2::text IN b.box_no_uid::text) > 0
      ORDER BY b.box_uid ASC`,
-    [pn, saTag]
+    [pn, tag]
   );
 };
 
@@ -925,7 +927,7 @@ export const findQcHoldCompletionBoxesByPattern = async (packing_number, hold_id
   const pn = String(packing_number ?? "").trim();
   const hid = Number(hold_id);
   if (!pn || !Number.isFinite(hid) || hid <= 0) return [];
-  const tag = `_QCH${hid}_`;
+  const tag = qcTag(hid);
 
   return dbQuery(
     `SELECT ${IN_HAND_BOX_SELECT_SQL}
@@ -1500,11 +1502,11 @@ const PRODUCTION_STICKER_BOX_FILTER = `
 `;
 
 /** Production sticker UI only SA boxes use ims_stock_adjustment module + `checkSaStockInBoxesExist`. */
-const SQL_SA_BOX_NO_UID_MATCH = `b.box_no_uid::text ~ '_SA[0-9]+_'`;
+const SQL_SA_BOX_NO_UID_MATCH = `b.box_no_uid::text ~ '_${STICKER.SA}[0-9]+_'`;
 const SQL_EXCLUDE_SA_BOX_NO_UID = `AND NOT (${SQL_SA_BOX_NO_UID_MATCH})`;
 
 function sqlSaTokenInBoxNoUid(adjustmentIdExpr, boxNoUidRef = "b.box_no_uid") {
-  return `position(('_SA' || ${adjustmentIdExpr}::text || '_') IN ${boxNoUidRef}::text) > 0`;
+  return `position(('_${STICKER.SA}' || ${adjustmentIdExpr}::text || '_') IN ${boxNoUidRef}::text) > 0`;
 }
 
 /**

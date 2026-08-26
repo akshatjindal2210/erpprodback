@@ -13,6 +13,9 @@ export const RMSTORE_APP_CONFIG_KEYS = Object.freeze({
   MRN_STICKER_MODE: "mrn_sticker_mode",
   MRN_COIL_QTY_EDITABLE: "mrn_coil_qty_editable",
   MRN_COIL_QTY_AUTO_CALC: "mrn_coil_qty_auto_calc",
+  /** Shared with IMS App Console (same DB keys) */
+  LOCATION_VALIDATION: "inward_location_validation",
+  LOCATION_CAPACITY_VALIDATION: "location_capacity_validation",
 });
 
 /**
@@ -31,11 +34,27 @@ export const ISSUE_REQUEST_MACHINE_JOB_CARD_LOCK = true;
 export const RMSTORE_APP_CONFIG_SECTION = Object.freeze({
   id: "rmstore",
   scope: "rmstore",
-  title: "MRN / coil settings",
-  description: "Controls QC sticker mode and how coil quantities work when generating MRN stickers.",
+  title: "Application settings",
+  description: "RM Store app-level options.",
 });
 
 export const RMSTORE_APP_CONFIG_DEFINITIONS = Object.freeze([
+  {
+    key: RMSTORE_APP_CONFIG_KEYS.LOCATION_VALIDATION,
+    scope: "rmstore",
+    section: "rmstore",
+    label: "Location validation",
+    value_type: "boolean",
+    description: "Enabled = check location item rules on store in. Disabled = no check.",
+  },
+  {
+    key: RMSTORE_APP_CONFIG_KEYS.LOCATION_CAPACITY_VALIDATION,
+    scope: "rmstore",
+    section: "rmstore",
+    label: "Capacity validation",
+    value_type: "boolean",
+    description: "Enabled = coils cannot exceed location capacity. Disabled = any qty OK.",
+  },
   {
     key: RMSTORE_APP_CONFIG_KEYS.MRN_STICKER_MODE,
     scope: "rmstore",
@@ -69,6 +88,8 @@ export const RMSTORE_APP_CONFIG_DEFINITIONS = Object.freeze([
 ]);
 
 export const RMSTORE_APP_CONFIG_SEEDS = Object.freeze({
+  [RMSTORE_APP_CONFIG_KEYS.LOCATION_VALIDATION]: "false",
+  [RMSTORE_APP_CONFIG_KEYS.LOCATION_CAPACITY_VALIDATION]: "false",
   [RMSTORE_APP_CONFIG_KEYS.MRN_STICKER_MODE]: RMSTORE_STICKER_MODES.BATCH,
   [RMSTORE_APP_CONFIG_KEYS.MRN_COIL_QTY_EDITABLE]: "true",
   [RMSTORE_APP_CONFIG_KEYS.MRN_COIL_QTY_AUTO_CALC]: "true",

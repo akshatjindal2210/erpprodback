@@ -1,5 +1,5 @@
 import { getAllAppConfig, setAppConfigValue, getAppConfigValue } from "../../../../core/configuration/models/appConfig.model.js";
-import { normalizeBoxNoUidPrefix } from "../../../modules/box/utils/uid/boxUid.js";
+import { normalizeBoxNoUidPrefix } from "../../../lib/stickerUidHelpers.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import {
   CORE_APP_CONFIG_SECTIONS,

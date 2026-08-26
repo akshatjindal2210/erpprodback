@@ -1,6 +1,7 @@
 import { getBoxNoUidPrefix } from "../../../../../core/configuration/models/appConfig.model.js";
 import { insertBulkBoxesTx, findQcHoldCompletionBoxesByPattern, findBoxByUidOrNoUid } from "../../../box/models/box.model.js";
-import { formatQcHoldBoxNoUid, qcHoldCompletionBoxTag } from "../../../box/utils/uid/boxUid.js";
+import { formatQcBoxNoUid } from "../../../../lib/stickerUidFormat.js";
+import { qcTag } from "../../../../lib/stickerUidHelpers.js";
 import { resolveOverrideCustForPacking, resolveStandardQtyPerBoxForPacking } from "../../../stock-adjustment/utils/packing/stockAdjustmentPacking.js";
 import { logBoxTransaction } from "../../../box/utils/transactions/logBoxTransaction.js";
 import { BOX_TX_TYPES } from "../../../../lib/constants/boxTransactionTypes.js";
@@ -34,6 +35,7 @@ export function buildQcHoldCompletionBoxRows({
   userName = null,
   boxNoUidPrefix = "",
   override_cust = null,
+  submissionId = null,
 }) {
   const pn = String(packingNumber ?? "").trim();
   const hid = parseInt(String(holdId), 10);
@@ -51,8 +53,7 @@ export function buildQcHoldCompletionBoxRows({
   for (let i = 1; i <= total; i++) {
     const isLoose = i > fullCount;
     rows.push({
-      box_no_uid: formatQcHoldBoxNoUid(pn, hid, total, i, boxNoUidPrefix),
-      packing_number: pn,
+      box_no_uid: formatQcBoxNoUid(pn, hid, submissionId, total, i, boxNoUidPrefix),      packing_number: pn,
       qty: Number(isLoose ? cfg.loose_box_qty : cfg.qty_per_box),
       is_loose: isLoose,
       override_cust: cust,
@@ -68,6 +69,7 @@ export async function createQcHoldCompletionBoxesTx(client, {
   userId,
   userName = null,
   pendingUntilApproval = false,
+  submissionId = null,
 }) {
   const qty = Math.max(0, parseInt(String(completedQty), 10) || 0);
   if (!qty) return { boxes: [], boxUids: [], completed_boxes: 0, packing_config: null };
@@ -108,6 +110,7 @@ export async function createQcHoldCompletionBoxesTx(client, {
     userName,
     boxNoUidPrefix,
     override_cust,
+    submissionId,
   });
 
   let inserted = await insertBulkBoxesTx(client, insertRows);
@@ -203,7 +206,7 @@ export async function softDeleteQcHoldCompletionBoxesByHoldTx(client, { holdId, 
   const pk = Number(holdId);
   if (!Number.isFinite(pk) || pk < 1) return { deleted: 0 };
 
-  const tag = qcHoldCompletionBoxTag(pk);
+  const tag = qcTag(pk);
   const auditBy = userName ?? null;
   const sql = requireOnHold
     ? `UPDATE ims_box_table b
@@ -284,6 +287,7 @@ export async function ensureQcHoldSubmissionCompletionBoxesTx(client, { hold, su
     userId,
     userName,
     pendingUntilApproval: !submission.approved,
+    submissionId: sid,
   });
 
   const holdData = patchSubmissionCompletedBoxes(hold.hold_data, sid, {
@@ -488,11 +492,15 @@ export async function listQcHoldRevertSourceBoxes({ hold, submission = null }) {
   return mapPrintStickerRows(boxes, pn);
 }
 
-/** Completion stickers for pass/full flows, or original boxes for revert. */
-export async function listQcHoldPrintStickers({ hold, submission = null }) {
+/** Completion stickers for pass/full flows, or original boxes for revert.
+ *  `allCompletions` lists every QCH sticker on the hold (partials + final). */
+export async function listQcHoldPrintStickers({ hold, submission = null, allCompletions = false } = {}) {
   const submissionType = String(submission?.submission_type ?? "").trim().toLowerCase();
   if (submissionType === "revert") {
     return listQcHoldRevertSourceBoxes({ hold, submission });
+  }
+  if (allCompletions) {
+    return listQcHoldCompletionBoxes({ hold, submission: null });
   }
   return listQcHoldCompletionBoxes({ hold, submission });
 }

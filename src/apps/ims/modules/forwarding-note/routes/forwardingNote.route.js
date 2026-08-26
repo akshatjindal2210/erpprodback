@@ -1,5 +1,5 @@
 import express from "express";
-import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, updateForwardingNoteBill, deleteForwardingNote, getAvailableBoxesByItem, getAvailableItemsForForwarding, getForwardingNoteItems, lockForwardingNoteLock, unlockForwardingNoteLock, getForwardingNotesViews, printForwardingNoteBill, getForwardingNoteTransportersViews, getForwardingNoteBillNumbersViews, getErpFgStockByItem, getForwardingNoteCustomerCategory } from "../controllers/forwardingNote.controller.js";
+import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, assignForwardingNoteItemBill, deleteForwardingNote, getAvailableBoxesByItem, getAvailableItemsForForwarding, getForwardingNoteItems, lockForwardingNoteLock, unlockForwardingNoteLock, getForwardingNotesViews, printForwardingNoteBill, getForwardingNoteTransportersViews, getForwardingNoteBillNumbersViews, getErpFgStockByItem, getForwardingNoteCustomerCategory } from "../controllers/forwardingNote.controller.js";
 
 import { authenticate, authorize } from "../../../lib/middleware/auth.js";
 import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
@@ -25,8 +25,11 @@ router.post("/get", authenticate, accessControlAny([
   { moduleName: "out_entry", actions: "view" }
 ]), getForwardingNoteById);
 
-// Printable bill (HTML ? user prints or saves as PDF)
-router.post("/print-bill", authenticate, accessControl("forwarding_note_master", "view"), printForwardingNoteBill);
+// Printable bill (HTML — user prints or saves as PDF)
+router.post("/print-bill", authenticate, accessControlAny([
+  { moduleName: "forwarding_note_master", actions: "view" },
+  { moduleName: "out_entry", actions: "view" },
+]), printForwardingNoteBill);
 
 // Create
 router.post("/create", authenticate, accessControl("forwarding_note_master", "add"), createForwardingNote);
@@ -34,8 +37,8 @@ router.post("/create", authenticate, accessControl("forwarding_note_master", "ad
 // Update (allow both edit users and authorize users)
 router.post("/update", authenticate, accessControl("forwarding_note_master", ["edit", "authorize"]), updateForwardingNote);
 
-// Bill # only (works when locked for out entry)
-router.post("/update-bill", authenticate, accessControl("forwarding_note_master", "edit"), updateForwardingNoteBill);
+// Assign bill to item-wise line(s)
+router.post("/assign-item-bill", authenticate, accessControl("forwarding_note_master", "edit"), assignForwardingNoteItemBill);
 
 // Delete
 router.post("/delete", authenticate, accessControl("forwarding_note_master", "delete"), deleteForwardingNote);

@@ -13,8 +13,7 @@ import { getCrudModuleConfig } from "../../../lib/config/crud/crudModules.js";
 import { resolveUserViewsSelectFields } from "../../../lib/config/views/fields/user.js";
 import { extractListParams, sanitizeFilters } from "../../../lib/utils/query/queryHelper.js";
 import { cleanPermissionMap, formatPermissions, sanitizeSearch } from "../../../lib/utils/helper/helper.js";
-import { getDefaultListViewSpanDays, getBoxNoUidPrefix } from "../../../configuration/models/appConfig.model.js";
-import { isInwardLocationValidationEnabled } from "../../../configuration/models/appConfig.model.js";
+import { getDefaultListViewSpanDays, getBoxNoUidPrefix, isInwardLocationValidationEnabled, isLocationCapacityValidationEnabled } from "../../../configuration/models/appConfig.model.js";
 import { auditUserName } from "../../../lib/utils/auth/approval.js";
 
 /** DB `CHECK (auth_source IN ('local','erp'))` — keep in sync with frontend `AUTH_SOURCES`. */
@@ -625,9 +624,10 @@ export const loginUser = async (req, res) => {
     setCachedPermissions(user.id, cleanedPermissions);
 
     const { id, name, username: dbUsername, type: role, email, special_permissions } = user;
-    const [default_list_view_span_days, inward_location_validation, box_no_uid_prefix] = await Promise.all([
+    const [default_list_view_span_days, inward_location_validation, location_capacity_validation, box_no_uid_prefix] = await Promise.all([
       getDefaultListViewSpanDays(),
       isInwardLocationValidationEnabled(),
+      isLocationCapacityValidationEnabled(),
       getBoxNoUidPrefix(),
     ]);
 
@@ -654,6 +654,7 @@ export const loginUser = async (req, res) => {
         app_access: appAccess,
         default_list_view_span_days,
         inward_location_validation,
+        location_capacity_validation,
         box_no_uid_prefix,
       },
     });
@@ -709,9 +710,10 @@ export const getMe = async (req, res) => {
 
     const permissions = await findUserPermissions(req.user.id);
     const appAccess = await findUserAppAccess(req.user.id);
-    const [default_list_view_span_days, inward_location_validation, box_no_uid_prefix] = await Promise.all([
+    const [default_list_view_span_days, inward_location_validation, location_capacity_validation, box_no_uid_prefix] = await Promise.all([
       getDefaultListViewSpanDays(),
       isInwardLocationValidationEnabled(),
+      isLocationCapacityValidationEnabled(),
       getBoxNoUidPrefix(),
     ]);
     const { password, ...safeUser } = user;
@@ -725,6 +727,7 @@ export const getMe = async (req, res) => {
         app_access: appAccess,
         default_list_view_span_days,
         inward_location_validation,
+        location_capacity_validation,
         box_no_uid_prefix,
       },
     });

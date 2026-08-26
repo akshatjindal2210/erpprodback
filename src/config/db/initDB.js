@@ -4,22 +4,27 @@ import { initTaskDB } from "../../apps/task/lib/config/db/initDB.js";
 import { initCoreDB } from "../../apps/core/lib/config/db/initDB.js";
 import { initDashboardDB } from "../../apps/dashboard/lib/config/db/initDB.js";
 import { initRmStoreDB } from "../../apps/rmstore/lib/config/db/initDB.js";
+import { runVersionMigrations } from "../../migrations/index.js";
 import { runStartupBackfills } from "../../backfills/index.js";
 import { syncSerialSequences } from "./syncSequences.js";
 
+/** Boot: structure (tables) → one-shot migrations → sequences. */
 export const initDB = async () => {
   try {
     await dbQuery("SELECT 1");
     console.log("✅ PostgreSQL Connected");
 
+    // Structure only
     await initCoreDB();
     await initImsDB();
     await initTaskDB();
     await initRmStoreDB();
     await initDashboardDB();
 
-    await syncSerialSequences();
+    // One-shot migrations.
+    await runVersionMigrations();
 
+    await syncSerialSequences();
     console.log("✅ All Tables Ready");
 
     // await runStartupBackfills();

@@ -10,6 +10,15 @@ export function sqlBoxOutUidEmpty(alias = "b") {
   return `${alias}.out_uid IS NULL`;
 }
 
+/** List/group SOURCE label — packing entry / SA stock_in / QC hold completion. */
+export function boxSourceSql(alias = "b") {
+  return `CASE
+    WHEN ${alias}.sa_id IS NOT NULL AND ${alias}.sa_entry_type = 'stock_in' THEN 'STOCK ADJUSTMENT'
+    WHEN ${alias}.box_no_uid ~ '_QCH[0-9]+_' THEN 'QC HOLD'
+    ELSE 'PACKING ENTRY'
+  END`;
+}
+
 export function sqlBoxSaIdSet(alias = "b") {
   return `${alias}.sa_id IS NOT NULL`;
 }

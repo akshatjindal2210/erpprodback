@@ -1,6 +1,7 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { sqlBoxSellable, sqlDocDtText } from "../../box/utils/inventory/boxInventorySql.js";
 import { applyForwardingOutEntryListFilter } from "../utils/list/forwardingNoteListFilters.js";
+import { STICKER } from "../../../lib/stickerUidFormat.js";
 
 /**
  * Forwarding Note — DB access (ims_forwarding_note_master + items + available boxes).
@@ -13,8 +14,7 @@ const ALLOWED_SORT_FIELDS = ["created_at", "approved_at", "updated_at", "po_numb
 
 const ALLOWED_UPDATE_FIELDS = [
   "acc_code", "po_number", "remarks", "transporter_name", "transporter_id",
-  "vehicle_number", "cartage", "total_items", "bill_no", "packing_category_id", "schno",
-  "bill_updated_by", "bill_updated_at",
+  "vehicle_number", "cartage", "total_items", "packing_category_id", "schno",
   "approved", "approved_by", "approved_at", "updated_by", "updated_at"
 ];
 
@@ -51,7 +51,6 @@ const DEFAULT_FIELDS = [
   "f.deleted_by AS deleted_by_name",
   "f.approved_by AS approved_by_name",
   "f.out_entry_locked_by AS out_entry_locked_by_name",
-  "f.bill_updated_by AS bill_updated_by_name",
   "oe.out_uid AS out_entry_uid",
   "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
   "COALESCE(oe.approved, false) AS out_entry_approved",
@@ -123,8 +122,12 @@ export const findForwardingNotes = async (options = {}) => {
       f.po_number ILIKE $${i} OR
       f.transporter_name ILIKE $${i} OR
       f.vehicle_number ILIKE $${i} OR
-      f.bill_no ILIKE $${i} OR
-      f.acc_code::text ILIKE $${i}
+      f.acc_code::text ILIKE $${i} OR
+      EXISTS (
+        SELECT 1 FROM ims_forwarding_note_item_wise fi
+        WHERE fi.fuid = f.fuid AND fi.is_deleted = false
+          AND fi.bill_no ILIKE $${i}
+      )
     )`);
     i++;
   }
@@ -239,16 +242,8 @@ export const findForwardingNote = async (filters = {}) => {
 };
 
 export const insertForwardingNote = async (data, { client } = {}) => {
-  const fields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage", "total_items", "packing_category_id", "schno", "bill_no", "approved", "created_by"];
-  const hasBill = data.bill_no != null && String(data.bill_no).trim() !== "";
-  if (hasBill) {
-    fields.push("bill_updated_by", "bill_updated_at");
-  }
-  const values = fields.map((f) => {
-    if (f === "bill_updated_by") return data.bill_updated_by ?? data.created_by ?? null;
-    if (f === "bill_updated_at") return data.bill_updated_at ?? new Date();
-    return data[f] ?? null;
-  });
+  const fields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage", "total_items", "packing_category_id", "schno", "approved", "created_by"];
+  const values = fields.map((f) => data[f] ?? null);
   const placeholders = fields.map((_, idx) => `$${idx + 1}`).join(", ");
   const run = client?.query
     ? async (sql, params) => {
@@ -320,24 +315,6 @@ export const updateForwardingNotes = async (fields = {}, filters = {}, { client 
     }
   }
   return null;
-};
-
-/** Bill is entered after out entry allowed even when `out_entry_locked` is true. */
-export const updateForwardingNoteBillNo = async ({ fuid, bill_no, userName }) => {
-  const normalized =
-    bill_no === null || bill_no === undefined ? null : String(bill_no).trim() || null;
-
-  const [row] = await dbQuery(
-    `UPDATE ims_forwarding_note_master
-     SET bill_no = $2,
-         bill_updated_by = $3,
-         bill_updated_at = NOW()
-     WHERE fuid = $1
-       AND is_deleted = false
-     RETURNING *`,
-    [fuid, normalized, userName ?? null]
-  );
-  return row || null;
 };
 
 export const deleteForwardingNotes = async (filters = {}, meta = {}) => {
@@ -551,7 +528,7 @@ export const findAvailableBoxes = async (item_dcode, { client } = {}) => {
           FROM ims_qc_hold_material h
           WHERE h.is_deleted = false
             AND h.item_dcode::int = $1::int
-            AND position(concat('_QCH', h.hold_id::text, '_') IN b.box_no_uid::text) > 0
+            AND position(concat('_${STICKER.QCH}', h.hold_id::text, '_') IN b.box_no_uid::text) > 0
         )
       )
     ORDER BY b.created_at ASC

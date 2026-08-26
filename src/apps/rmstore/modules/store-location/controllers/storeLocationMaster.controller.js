@@ -1,4 +1,5 @@
 import { findLocations, findLocation, findLocationDuplicate, insertLocation, updateLocations, deleteLocations, LOCATION_DEFAULT_FIELDS } from "../models/storeLocationMaster.model.js";
+import { LOCATION_APP_TYPE_RMSTORE, normalizeIntIds } from "../../../../ims/modules/location/models/locationMaster.model.js";
 import { logRmstoreActivity } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { resolveViewsFields } from "../../../lib/config/views/helperViews.js";
@@ -6,60 +7,85 @@ import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/q
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
-import { loadMappedItems } from "../../production/utils/erpItems.js";
+import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
 
 const CFG = getCrudModuleConfig("rm_store_location_master");
 const RACK_NO_NUMERIC_RE = /^\d+$/;
 const ROW_NO_ALPHA_RE = /^[A-Za-z]+$/;
+const APP_TYPE = LOCATION_APP_TYPE_RMSTORE;
 
 function normalizeRowNo(value) {
   return value?.toString().trim().toUpperCase() || "";
 }
 
-/** Loc No format: RM-{rack}{row} e.g. RM-12A */
 function buildLocationNo(rackNo, rowNo) {
-  return `RM-${rackNo || ""}${(rowNo || "").toString().toUpperCase()}`;
+  return `${rackNo || ""}${(rowNo || "").toString().toUpperCase()}`;
 }
 
-/** Optional item_dcode → null, or positive int. */
-function parseOptionalItemDcode(value) {
-  if (value === undefined) return { provided: false, value: undefined };
-  if (value === null || value === "") return { provided: true, value: null };
-  const n = parsePositiveIntId(value);
-  if (!n) return { provided: true, error: "RM item code must be a valid number." };
-  return { provided: true, value: n };
+function parseMultiIds(body, arrayKey, singleKey) {
+  if (body?.[arrayKey] !== undefined) return normalizeIntIds(body[arrayKey]);
+  if (body?.[singleKey] !== undefined) return normalizeIntIds(body[singleKey]);
+  return undefined;
 }
 
-async function resolveRmItemSnapshot(item_dcode) {
-  if (item_dcode == null) return { item_dcode: null, item_code: null, item_desc: null };
-  try {
-    const rows = await loadMappedItems("item", { type: "rm" });
-    const raw = rows.find((r) => String(r.itemdcode) === String(item_dcode));
+async function enrichLocationRows(rows = []) {
+  if (!rows.length) return rows;
+  const { itemMap, ledgerMap } = await getImsMapsSafe();
+
+  return rows.map((row) => {
+    const acc_codes = normalizeIntIds(
+      Array.isArray(row.acc_codes) && row.acc_codes.length
+        ? row.acc_codes
+        : row.acc_code != null
+          ? [row.acc_code]
+          : []
+    );
+    const item_dcodes = normalizeIntIds(
+      Array.isArray(row.item_dcodes) && row.item_dcodes.length
+        ? row.item_dcodes
+        : row.item_dcode != null
+          ? [row.item_dcode]
+          : []
+    );
+    const acc_names = acc_codes
+      .map((c) => ledgerMap.get(canonicalCode(c)))
+      .filter(Boolean);
+    const item_labels = item_dcodes.map((d) => {
+      const item = itemMap.get(canonicalCode(d));
+      return item?.item_code || String(d);
+    });
+    const item_descs = item_dcodes
+      .map((d) => itemMap.get(canonicalCode(d))?.item_desc)
+      .filter(Boolean);
+
     return {
-      item_dcode,
-      item_code: raw?.item_code ?? null,
-      item_desc: raw?.itemdesc ?? null,
+      ...row,
+      acc_codes,
+      item_dcodes,
+      acc_code: acc_codes[0] ?? null,
+      item_dcode: item_dcodes[0] ?? null,
+      acc_name: acc_names.length ? acc_names.join(", ") : null,
+      item_code: item_labels.length ? item_labels.join(", ") : null,
+      item_desc: item_descs.length ? item_descs.join(", ") : null,
+      acc_names,
+      item_codes: item_labels,
     };
-  } catch {
-    // Still persist item_dcode if ERP lookup is temporarily unavailable
-    return { item_dcode, item_code: null, item_desc: null };
-  }
+  });
 }
 
-/** Map Postgres unique violations to the correct user-facing message. */
 function locationUniqueViolationMessage(err, locationNo = "") {
   const constraint = err?.constraint || "";
   const loc = locationNo ? ` "${locationNo}"` : "";
 
-  if (constraint === "rmstore_master_location_pkey") {
+  if (constraint === "ims_location_master_pkey") {
     return "Could not save location: database ID is out of sync. Restart the backend server and try again.";
   }
-  if (constraint === "rmstore_master_location_rack_row_unique_active") {
+  if (constraint === "location_master_rack_shelf_unique_active" || constraint === "location_master_rack_shelf_type_unique_active") {
     return loc
       ? `Location${loc} already exists for this RM rack and row.`
       : "A location with this RM rack and row already exists.";
   }
-  if (constraint === "rmstore_master_location_location_no_unique_active") {
+  if (constraint === "location_master_location_no_unique_active" || constraint === "location_master_location_no_type_unique_active") {
     return loc
       ? `Location number${loc} is already in use.`
       : "This location number is already in use. Use a different rack or row combination.";
@@ -95,7 +121,7 @@ export const getLocations = async (req, res) => {
       permission: req.permission
     });
 
-    const enrichedRows = result.data || [];
+    const enrichedRows = await enrichLocationRows(result.data || []);
     return res.json({ success: true, ...result, data: enrichedRows });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -105,7 +131,7 @@ export const getLocations = async (req, res) => {
 export const getLocationById = async (req, res) => {
   try {
     const id = parsePositiveIntId(req.body?.id);
-    
+
     if (!id) {
       return res.status(400).json({ success: false, message: "A valid store location ID is required." });
     }
@@ -115,13 +141,13 @@ export const getLocationById = async (req, res) => {
       return res.status(404).json({ success: false, message: "Store location not found." });
     }
 
-    const [enriched] = data ? [data] : [];
-    return res.json({ 
-      success: true, 
+    const [enriched] = await enrichLocationRows(data ? [data] : []);
+    return res.json({
+      success: true,
       data: {
         ...enriched,
         id: enriched.location_id
-      } 
+      }
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -131,12 +157,13 @@ export const getLocationById = async (req, res) => {
 export const createLocation = async (req, res) => {
   let locationNo = "";
   try {
-    const { rack_no, row_no, location_description, total_capacity, item_dcode, approved } = req.body;
+    const { rack_no, row_no, location_description, total_capacity, approved } = req.body;
     const normalizedApproved = normalizeApprovedInput(approved);
     const normalizedRackNo = rack_no?.toString().trim();
     const normalizedRowNo = normalizeRowNo(row_no);
     locationNo = buildLocationNo(normalizedRackNo, normalizedRowNo);
-    const itemParsed = parseOptionalItemDcode(item_dcode);
+    const acc_codes = parseMultiIds(req.body, "acc_codes", "acc_code") ?? [];
+    const item_dcodes = parseMultiIds(req.body, "item_dcodes", "item_dcode") ?? [];
 
     if (!normalizedRackNo) {
       return res.status(400).json({ success: false, message: "RM rack is required." });
@@ -154,9 +181,6 @@ export const createLocation = async (req, res) => {
     if (total_capacity !== undefined && Number.isNaN(Number(total_capacity))) {
       return res.status(400).json({ success: false, message: "Capacity must be a valid number." });
     }
-    if (itemParsed.error) {
-      return res.status(400).json({ success: false, message: itemParsed.error });
-    }
 
     const duplicate = await findLocationDuplicate({
       rack_no: normalizedRackNo,
@@ -169,17 +193,14 @@ export const createLocation = async (req, res) => {
       });
     }
 
-    const itemSnap = await resolveRmItemSnapshot(itemParsed.provided ? itemParsed.value : null);
-
     const row = await insertLocation({
       rack_no: normalizedRackNo,
       row_no: normalizedRowNo,
       location_no: locationNo,
       location_description: location_description?.toString().trim(),
       total_capacity,
-      item_dcode: itemSnap.item_dcode,
-      item_code: itemSnap.item_code,
-      item_desc: itemSnap.item_desc,
+      acc_codes,
+      item_dcodes,
       created_by: auditUserName(req),
     });
 
@@ -191,12 +212,12 @@ export const createLocation = async (req, res) => {
 
     const data = await findLocation({ location_id: row.location_id });
 
-    await log(req, "create", row.location_id, { rack_no: normalizedRackNo, row_no: normalizedRowNo, location_no: locationNo, item_dcode: itemSnap.item_dcode }, row);
+    await log(req, "create", row.location_id, { rack_no: normalizedRackNo, row_no: normalizedRowNo, location_no: locationNo, type: APP_TYPE, item_dcodes }, row);
 
     const authorized = normalizedApproved === true;
     return res.status(201).json({
       success: true,
-      data: data ?? row,
+      data: (await enrichLocationRows(data ? [data] : [row]))[0],
       toast_type: "success",
       message: authorized
         ? "Store location created and authorized."
@@ -217,33 +238,29 @@ export const createLocation = async (req, res) => {
 export const updateLocation = async (req, res) => {
   let locationNo = "";
   try {
-    const { rack_no, row_no, location_description, total_capacity, item_dcode, approved } = req.body;
+    const { rack_no, row_no, location_description, total_capacity, approved } = req.body;
     const id = parsePositiveIntId(req.body?.id);
     const normalizedApproved = normalizeApprovedInput(approved);
-    const itemParsed = parseOptionalItemDcode(item_dcode);
+    const acc_codes = parseMultiIds(req.body, "acc_codes", "acc_code");
+    const item_dcodes = parseMultiIds(req.body, "item_dcodes", "item_dcode");
 
     if (!id) return res.status(400).json({ success: false, message: "A valid store location ID is required." });
 
     const existing = await findLocation({ location_id: id });
     if (!existing) return res.status(404).json({ success: false, message: "Store location not found." });
 
-    // Permission-based date restriction (can_edit_days)
     if (req.user.type !== "super_admin" && req.permission && req.permission.can_edit_days > 0) {
       const createdAt = new Date(existing.created_at);
       const now = new Date();
       const diffTime = Math.abs(now - createdAt);
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      
+
       if (diffDays > req.permission.can_edit_days) {
-        return res.status(403).json({ 
-          success: false, 
-          message: `Edit time limit exceeded. You can only edit records from the last ${req.permission.can_edit_days} days.` 
+        return res.status(403).json({
+          success: false,
+          message: `Edit time limit exceeded. You can only edit records from the last ${req.permission.can_edit_days} days.`
         });
       }
-    }
-
-    if (itemParsed.error) {
-      return res.status(400).json({ success: false, message: itemParsed.error });
     }
 
     const hasBusinessChanges =
@@ -251,7 +268,8 @@ export const updateLocation = async (req, res) => {
       row_no !== undefined ||
       location_description !== undefined ||
       total_capacity !== undefined ||
-      itemParsed.provided;
+      acc_codes !== undefined ||
+      item_dcodes !== undefined;
 
     if (!hasBusinessChanges && normalizedApproved === undefined) {
       return res.status(400).json({ success: false, message: "There are no fields to update." });
@@ -279,12 +297,8 @@ export const updateLocation = async (req, res) => {
       updated_at: new Date(),
     };
 
-    if (itemParsed.provided) {
-      const itemSnap = await resolveRmItemSnapshot(itemParsed.value);
-      fields.item_dcode = itemSnap.item_dcode;
-      fields.item_code = itemSnap.item_code;
-      fields.item_desc = itemSnap.item_desc;
-    }
+    if (acc_codes !== undefined) fields.acc_codes = acc_codes;
+    if (item_dcodes !== undefined) fields.item_dcodes = item_dcodes;
 
     const nextRackNo = fields.rack_no ?? existing.rack_no;
     const nextRowNo = fields.row_no ?? existing.row_no;
@@ -313,14 +327,15 @@ export const updateLocation = async (req, res) => {
       auditAsName: true,
     });
 
-    const updated = await updateLocations(fields, { location_id: id });
+    await updateLocations(fields, { location_id: id });
+    const data = await findLocation({ location_id: id });
 
     await log(req, "update", id, { updated_fields: fields });
 
-    const authorized = fields.approved === true || updated?.approved === true;
+    const authorized = fields.approved === true || data?.approved === true;
     return res.json({
       success: true,
-      data: updated,
+      data: (await enrichLocationRows(data ? [data] : []))[0] ?? data,
       toast_type: "success",
       message: authorized
         ? "Store location updated and authorized."
@@ -357,7 +372,7 @@ export const deleteLocation = async (req, res) => {
       { location_id: id },
       { deleted_by: auditUserName(req)}
     );
-    
+
     await log(req, "delete", id, { rack_no: existing.rack_no, row_no: existing.row_no }, existing);
 
     return res.json({ success: true, message: "Store location deleted successfully." });
@@ -376,7 +391,7 @@ export const getLocationsViews = async (req, res) => {
         permission_module: req.body.permission_module,
         permission_action: req.body.permission_action,
       });
-      const location = await findLocation({ location_id: id, approved: true, is_deleted: false }, { fields: fields || LOCATION_DEFAULT_FIELDS });
+      const location = await findLocation({ location_id: id, approved: true }, { fields: fields || LOCATION_DEFAULT_FIELDS });
       if (!location) return res.json({ success: true, data: null });
       return res.json({
         success: true,
@@ -385,9 +400,14 @@ export const getLocationsViews = async (req, res) => {
           location_id: location.location_id,
           rack_no: location.rack_no,
           row_no: location.row_no,
-          location_no: location.location_no || `RM-${location.rack_no}${(location.row_no || "").toString().toUpperCase()}`,
+          location_no: location.location_no || `${location.rack_no}${(location.row_no || "").toString().toUpperCase()}`,
+          type: location.type ?? APP_TYPE,
+          acc_code: location.acc_code ?? null,
+          acc_name: location.acc_name ?? null,
           location_description: location.location_description ?? null,
           total_capacity: location.total_capacity,
+          occupied_capacity: location.occupied_capacity ?? 0,
+          available_capacity: location.available_capacity ?? null,
           item_dcode: location.item_dcode ?? null,
           item_code: location.item_code ?? null,
           item_desc: location.item_desc ?? null,
@@ -401,7 +421,7 @@ export const getLocationsViews = async (req, res) => {
     });
 
     const result = await findLocations({
-      filters: {...sanitizeFilters(filters, CFG.filterFields), approved: true, is_deleted: false },
+      filters: {...sanitizeFilters(filters, CFG.filterFields), approved: true },
       search: sanitizeSearch(search),
       sort: { by: sortBy, order },
       page: page || 1,
@@ -410,18 +430,17 @@ export const getLocationsViews = async (req, res) => {
       permission: req.permission
     });
 
-    const rows = result.data || [];
+    const rows = await enrichLocationRows(result.data || []);
 
-    // If no results found with approved: true, check if there are any unapproved ones to provide feedback
     if (rows.length === 0 && !search && !id) {
       const anyLocations = await findLocations({
-        filters: { is_deleted: false },
+        filters: {},
         limit: 1
       });
       if (anyLocations.total > 0) {
-        return res.json({ 
-          success: true, 
-          data: [], 
+        return res.json({
+          success: true,
+          data: [],
           message: "No approved locations found. Please ensure locations are authorized in RM Store Location Master.",
           _debug_info: "Locations exist but might be unapproved or restricted by date."
         });

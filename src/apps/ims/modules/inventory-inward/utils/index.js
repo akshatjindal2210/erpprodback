@@ -1,6 +1,6 @@
-/** Inventory inward — location validation. */
 export {
   isInwardLocationValidationEnabled,
+  isLocationCapacityValidationEnabled,
   validateBoxesAtLocationBatch,
   validateInwardLocationsAgainstBoxes,
   validateSingleBoxAtLocation,

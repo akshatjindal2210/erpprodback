@@ -1,5 +1,5 @@
 import dbQuery from "../../../../../config/db/db.js";
-import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { IMS_TABLES as IT, RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { coilQcStatusExpr, coilQcJoinForAlias } from "../../../lib/utils/coilQcStatusSql.js";
 
 /**
@@ -56,7 +56,7 @@ function buildCoilRules(alias = "c", qcAlias = "q") {
 function locationLabelSql(cAlias, lmAlias = "lm") {
   return `CASE
     WHEN ${cAlias}.location_id IS NULL THEN '—'
-    ELSE COALESCE(NULLIF(TRIM(${lmAlias}.location_no), ''), CONCAT('RM-', ${lmAlias}.rack_no, UPPER(COALESCE(${lmAlias}.row_no::text, ''))))
+    ELSE COALESCE(NULLIF(TRIM(${lmAlias}.location_no), ''), CONCAT(${lmAlias}.rack_no, UPPER(COALESCE(${lmAlias}.shelf_no::text, ''))))
   END`;
 }
 
@@ -74,7 +74,7 @@ function locationDetailsSubquerySql(mrnUidRef) {
         ${label} AS part_label,
         ${label} || ' (' || COUNT(*)::text || ')' AS part
       FROM ${T.COIL_TABLE} c2
-      LEFT JOIN ${T.MASTER_LOCATION} lm2 ON lm2.location_id = c2.location_id AND lm2.is_deleted = false
+      LEFT JOIN ${IT.LOCATION_MASTER} lm2 ON lm2.location_id = c2.location_id AND lm2.is_deleted = false
       ${coilQcJoinForAlias("c2", "q2")}
       WHERE c2.is_deleted = false
         AND COALESCE(NULLIF(TRIM(c2.mrn_uid::text), ''), '—') = ${mrnUidRef}

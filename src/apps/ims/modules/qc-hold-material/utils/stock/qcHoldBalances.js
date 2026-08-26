@@ -41,7 +41,7 @@ export function attachQcHoldBalances(row, pendingTotals = {}) {
 
   const pending = { ...pendingFromJson, ...pendingTotals };
 
-  return {
+  const withBalances = {
     ...flat,
     scanned_box_uids_list: heldUids,
     box_count: heldUids.length,
@@ -62,13 +62,21 @@ export function attachQcHoldBalances(row, pendingTotals = {}) {
     last_approved_submission: approvedSubs.length ? approvedSubs[approvedSubs.length - 1] : null,
     pending_submission: pendingSubs[0] || null,
   };
+
+  // Source of truth = hold_data qty rollup (not a possibly-stale status column).
+  // Once balance is cleared, never surface as "partial".
+  return {
+    ...withBalances,
+    status: deriveQcHoldStatus(withBalances),
+  };
 }
 
+/** Derive list/detail status from balances. Balance 0 → complete (even after partial batches). */
 export function deriveQcHoldStatus(row) {
-  const balanceQty = Number(row.balance_qty) ?? 0;
+  const balanceQty = Math.max(0, Number(row?.balance_qty) || 0);
   if (balanceQty <= 0) return "complete";
-  const completedQty = Number(row.completed_qty) || 0;
-  const rejectedQty = Number(row.rejected_qty) || 0;
+  const completedQty = Number(row?.completed_qty) || 0;
+  const rejectedQty = Number(row?.rejected_qty) || 0;
   if (completedQty > 0 || rejectedQty > 0) return "partial";
   return "pending";
 }

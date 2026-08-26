@@ -8,7 +8,7 @@ import { expandStickerScanLookupCodes, primaryStickerScanCode } from "../../box/
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { logInwardLinkBatch } from "../../box/utils/transactions/logBoxTransaction.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
-import { validateInwardLocationsAgainstBoxes, validateSingleBoxAtLocation, validateBoxesAtLocationBatch, isInwardLocationValidationEnabled } from "../utils/validation/inwardLocationValidation.js";
+import { validateInwardLocationsAgainstBoxes, validateSingleBoxAtLocation, validateBoxesAtLocationBatch, isInwardLocationValidationEnabled, isLocationCapacityValidationEnabled } from "../utils/validation/inwardLocationValidation.js";
 import { resolvePackingCustomerName } from "../../../lib/utils/packing-entry/customers/packingEntryCustomers.js";
 import { withTransaction } from "../../../../../config/db/db.js";
 import { snapshotMetadataFromBoxUids, snapshotInwardMetadata } from "../../../lib/utils/erp-api/list/entryListMetadata.js";
@@ -234,10 +234,8 @@ export const createInventoryInward = async (req, res) => {
       return res.status(400).json({ success: false, message: "Locations and boxes are required" });
     }
 
-    if (await isInwardLocationValidationEnabled()) {
-      const locErr = await validateInwardLocationsAgainstBoxes(locations);
-      if (locErr) return res.status(400).json({ success: false, message: locErr });
-    }
+    const locErr = await validateInwardLocationsAgainstBoxes(locations);
+    if (locErr) return res.status(400).json({ success: false, message: locErr });
 
     // 1. All boxes across locations → distinct packing numbers (Store In can mix multiple packings)
     const packingNumber = await resolveAggregatePackingForLocations(locations);
@@ -312,10 +310,8 @@ export const updateInventoryInward = async (req, res) => {
     }
 
     if (locations && locations.length > 0) {
-      if (await isInwardLocationValidationEnabled()) {
-        const locErr = await validateInwardLocationsAgainstBoxes(locations);
-        if (locErr) return res.status(400).json({ success: false, message: locErr });
-      }
+      const locErr = await validateInwardLocationsAgainstBoxes(locations);
+      if (locErr) return res.status(400).json({ success: false, message: locErr });
       await resetBoxesForInward(in_uid, userId);
       const linkResults = await Promise.all(
         locations.map((loc) =>
@@ -480,7 +476,11 @@ export const validateInwardBoxAtLocation = async (req, res) => {
       });
     }
 
-    const validation_enabled = await isInwardLocationValidationEnabled();
+    const [rulesOn, capacityOn] = await Promise.all([
+      isInwardLocationValidationEnabled(),
+      isLocationCapacityValidationEnabled(),
+    ]);
+    const validation_enabled = rulesOn || capacityOn;
     if (!validation_enabled) {
       return res.json({ success: true, validation_enabled: false, allowed: true, message: null });
     }

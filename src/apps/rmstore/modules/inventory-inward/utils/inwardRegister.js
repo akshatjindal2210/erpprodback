@@ -4,20 +4,20 @@
  */
 
 import dbQuery from "../../../../../config/db/db.js";
-import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { IMS_TABLES as IT, RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { COIL_QC_JOIN, COIL_QC_STATUS_EXPR } from "../../../lib/utils/coilQcStatusSql.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 
 const COIL = T.COIL_TABLE;
 const MRN = T.MRN;
-const LOC = T.MASTER_LOCATION;
+const LOC = IT.LOCATION_MASTER;
 const TX = T.COIL_TRANSACTION;
 
 const REGISTER_COIL_SELECT = `
   c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, m.heat_no,
   m.item_dcode, m.item_code, m.item_desc, c.qty, c.location_id, c.in_uid,
   c.out_uid, c.status, ${COIL_QC_STATUS_EXPR} AS qc_check_status,
-  lm.location_no, lm.rack_no, lm.row_no
+  lm.location_no, lm.rack_no, lm.shelf_no AS row_no
 `;
 
 /** Coils linked to a store-in entry (includes shop-floor / out status — register view). */
@@ -79,7 +79,7 @@ export function groupRegisterCoilsIntoLocations(coils) {
       } else {
         const locName =
           String(coil.location_no || "").trim() ||
-          `RM-${coil.rack_no || ""}${String(coil.row_no || "").toUpperCase()}`.trim() ||
+          `${coil.rack_no || ""}${String(coil.row_no || "").toUpperCase()}`.trim() ||
           String(lid);
         map[key] = {
           location_id: lid,

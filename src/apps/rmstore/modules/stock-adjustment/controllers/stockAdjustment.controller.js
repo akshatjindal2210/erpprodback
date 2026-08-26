@@ -13,7 +13,8 @@ import { resolveAddCoilQtys, assertCoilQtysMatchTotal, parseStoredCoilQtys, roun
 import { resolveEffectiveHeatNo } from "../utils/stockAdjustmentHeatNo.js";
 import { normalizeSaEntryType, isSaAddLikeEntryType, saEntryTypeNeedsFinancialYear, isSaLotGateEntryType, assertSaGateMetaFields, saMetaFieldsForSave, parseSaGateMeta } from "../utils/stockAdjustmentEntryTypes.js";
 import { requireAuthorizedRmSpecForItem } from "../../spec/models/specMaster.model.js";
-import { resolveSerialNoForUid } from "../../../lib/utils/resolveSerialNoForUid.js";
+import { formatStockAdjustmentCoilUid } from "../../../lib/coilUidFormat.js";
+import { resolveSerialNoForUid } from "../../../lib/coilUidHelpers.js";
 import { isCoilAvailableForSaMinus } from "../../../lib/utils/saMinusInventory.js";
 const MODULE = "rm_stock_adjustment";
 const log = createRmstoreActivityLogger(MODULE);

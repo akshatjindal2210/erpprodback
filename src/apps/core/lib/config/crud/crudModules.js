@@ -23,27 +23,17 @@ export const CRUD_MODULES = {
   },
   location_master: {
     idField: "location_id",
-    listFields: [
-      "lm.location_id", "lm.rack_no", "lm.shelf_no", "COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no", "lm.location_description", "lm.total_capacity",
-      "lm.acc_code", "lm.item_dcode", "lm.approved", "lm.approved_by", "lm.approved_at", 
-      "lm.created_at", "lm.updated_at", "lm.deleted_at",
-      "lm.acc_code::text AS acc_name", "lm.item_dcode::text AS item_code", "NULL::text AS item_desc",
-      "lm.created_by AS created_by_name", "lm.updated_by AS updated_by_name", "lm.deleted_by AS deleted_by_name", "lm.approved_by AS approved_by_name",
-    ],
-    filterFields: ["location_id", "rack_no", "shelf_no", "location_no", "acc_code", "item_dcode", "approved", "from_date", "to_date"],
-    searchFields: ["rack_no", "shelf_no", "location_no", "acc_name", "item_code"]
+    // list SQL lives in locationMaster.model DEFAULT_FIELDS
+    listFields: [],
+    filterFields: ["location_id", "rack_no", "shelf_no", "location_no", "type", "approved", "from_date", "to_date"],
+    searchFields: ["rack_no", "shelf_no", "location_no", "type", "acc_name", "item_code"],
   },
   rm_store_location_master: {
     idField: "location_id",
-    listFields: [
-      "lm.location_id", "lm.rack_no", "lm.row_no", "COALESCE(lm.location_no, CONCAT('RM-', lm.rack_no, UPPER(COALESCE(lm.row_no, '')))) AS location_no", "lm.location_description", "lm.total_capacity",
-      "lm.item_dcode", "lm.item_code", "lm.item_desc",
-      "lm.approved", "lm.approved_by", "lm.approved_at",
-      "lm.created_at", "lm.updated_at", "lm.deleted_at",
-      "lm.created_by AS created_by_name", "lm.updated_by AS updated_by_name", "lm.deleted_by AS deleted_by_name", "lm.approved_by AS approved_by_name",
-    ],
-    filterFields: ["location_id", "rack_no", "row_no", "location_no", "item_dcode", "approved", "from_date", "to_date"],
-    searchFields: ["rack_no", "row_no", "location_no", "location_description", "item_code", "item_desc"]
+    // list SQL lives in storeLocationMaster.model DEFAULT_FIELDS
+    listFields: [],
+    filterFields: ["location_id", "rack_no", "row_no", "location_no", "type", "approved", "from_date", "to_date"],
+    searchFields: ["rack_no", "row_no", "location_no", "type", "location_description", "item_code", "item_desc"],
   },
   rm_production_master: {
     idField: "production_id",
@@ -100,14 +90,13 @@ export const CRUD_MODULES = {
   forwarding_note_master: {
     idField: "fuid",
     listFields: [
-      "f.fuid", "f.acc_code", "f.po_number", "f.schno", "f.remarks", "f.transporter_name", "f.vehicle_number", "f.cartage", "f.total_items", "f.bill_no", "f.timestamp",
+      "f.fuid", "f.acc_code", "f.po_number", "f.schno", "f.remarks", "f.transporter_name", "f.vehicle_number", "f.cartage", "f.total_items", "f.timestamp",
       "f.approved", "f.approved_by", "f.approved_at",
       "f.out_entry_locked", "f.out_entry_locked_by", "f.out_entry_locked_at",
-      "f.bill_updated_by", "f.bill_updated_at",
       "f.created_by", "f.created_at",
       "f.updated_by", "f.updated_at",
       "f.deleted_by", "f.deleted_at",
-      "f.created_by AS created_by_name", "f.updated_by AS updated_by_name", "f.deleted_by AS deleted_by_name", "f.approved_by AS approved_by_name", "f.out_entry_locked_by AS out_entry_locked_by_name", "f.bill_updated_by AS bill_updated_by_name",
+      "f.created_by AS created_by_name", "f.updated_by AS updated_by_name", "f.deleted_by AS deleted_by_name", "f.approved_by AS approved_by_name", "f.out_entry_locked_by AS out_entry_locked_by_name",
       "f.acc_code::text AS acc_name",
       "oe.out_uid AS out_entry_uid",
       "COALESCE(oe.scan_complete, false) AS out_entry_scan_complete",
@@ -117,12 +106,13 @@ export const CRUD_MODULES = {
       "(oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete",
     ],
     filterFields: ["fuid", "acc_code", "po_number", "approved", "out_entry_locked", "out_entry_available", "out_entry_complete", "out_entry_approved", "from_date", "to_date"],
-    searchFields: ["f.po_number", "f.transporter_name", "f.vehicle_number", "f.bill_no", "f.acc_code", "f.created_by"]
+    searchFields: ["f.po_number", "f.transporter_name", "f.vehicle_number", "f.acc_code", "f.created_by"]
   },
   forwarding_note_item_wise: {
     idField: "id",
     listFields: [
       "fi.id", "fi.fuid", "fi.item_dcode", "fi.qty", "fi.schno",
+      "fi.bill_no AS line_bill_no", "fi.bill_dt AS line_bill_dt",
       "fi.item_dcode::text AS item_code", "fi.item_dcode AS itemdcode", "NULL::text AS item_desc",
       "fnm.out_entry_locked", "fnm.out_entry_locked_by", "fnm.out_entry_locked_at", "fnm.out_entry_locked_by AS out_entry_locked_by_name",
       "oe.out_uid AS out_entry_uid",
@@ -132,12 +122,10 @@ export const CRUD_MODULES = {
       "fnm.created_by", "fnm.created_at",
       "fnm.updated_by", "fnm.updated_at",
       "fnm.deleted_by", "fnm.deleted_at",
-      "fnm.bill_no", "fnm.bill_updated_by", "fnm.bill_updated_at",
       "fnm.created_by AS created_by_name", "fnm.updated_by AS updated_by_name", "fnm.deleted_by AS deleted_by_name", "fnm.approved_by AS approved_by_name",
-      "fnm.bill_updated_by AS bill_updated_by_name",
     ],
     filterFields: ["id", "fuid", "item_dcode", "approved", "out_entry_locked", "out_entry_complete", "out_entry_approved", "from_date", "to_date"],
-    searchFields: ["fi.item_dcode", "fi.qty"]
+    searchFields: ["fi.item_dcode", "fi.qty", "fi.bill_no"]
   },
   out_entry: {
     idField: "out_uid",

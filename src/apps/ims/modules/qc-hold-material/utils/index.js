@@ -20,7 +20,7 @@ export {
   rollupHoldDataAfterApproval,
   submissionToApi,
 } from "./list/qcHoldData.js";
-export { attachQcHoldBalances, parseBoxUidList } from "./stock/qcHoldBalances.js";
+export { attachQcHoldBalances, deriveQcHoldStatus, parseBoxUidList } from "./stock/qcHoldBalances.js";
 export {
   QC_HOLD_SCAN_FULL,
   QC_HOLD_SCAN_PARTIAL,

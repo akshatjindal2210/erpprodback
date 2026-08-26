@@ -1,6 +1,7 @@
 import { findInwards, findInward, insertInward, updateInward, softDeleteInward } from "../models/inventoryInward.model.js";
 import { findCoilByUid, updateCoilsAfterInward, syncInwardRegisterCoils, clearCoilsForInward, findCoils } from "../../coil/models/coil.model.js";
 import { groupRegisterCoilsIntoLocations, loadInwardRegisterPayload, buildInwardRegisterLogDetails } from "../utils/inwardRegister.js";
+import { validateRmInwardLocationsAgainstCoils } from "../utils/validation/inwardLocationValidation.js";
 import { findInProcessRequests, IPR_DOWNSTREAM } from "../../in-process-request/models/inProcessRequest.model.js";
 import { findPackingAreaByMrn } from "../utils/list/packingAreaList.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -256,6 +257,9 @@ export const createInward = async (req, res) => {
       });
     }
 
+    const locErr = await validateRmInwardLocationsAgainstCoils(locations);
+    if (locErr) return res.status(400).json({ success: false, message: locErr });
+
     const { resolved, error } = await resolveCoilsForInward(uids);
     if (error) return res.status(400).json({ success: false, message: error });
 
@@ -427,6 +431,9 @@ export const updateInwardCtrl = async (req, res) => {
           message: "The same coil cannot be assigned to more than one location.",
         });
       }
+
+      const locErr = await validateRmInwardLocationsAgainstCoils(locations);
+      if (locErr) return res.status(400).json({ success: false, message: locErr });
 
       const { resolved, error } = await resolveCoilsForInward(uids, { editInUid: id });
       if (error) return res.status(400).json({ success: false, message: error });

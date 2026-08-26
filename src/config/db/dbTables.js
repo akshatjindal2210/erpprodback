@@ -88,7 +88,6 @@ export const DB_TABLES = {
 
   /** RM Store application tables. */
   rmstore: [
-    "rmstore_master_location",
     "rmstore_master_production",
     "rmstore_spec_master",
     "rmstore_spec_detail",

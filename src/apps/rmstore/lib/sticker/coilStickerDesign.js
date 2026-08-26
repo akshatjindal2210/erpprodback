@@ -30,15 +30,17 @@ const LAYOUT = {
   rows: [
     { kind: "header" },
     {
-      kind: "field",
-      label: "Condition",
-      key: "condition",
-      cls: "st-condition",
+      kind: "split",
+      left: { label: "Condition", key: "condition", cls: "st-condition" },
+      right: { label: "Color", key: "conditionColor" },
     },
     {
-      kind: "split",
-      left: { label: "Grade", key: "grade", cls: "st-condition" },
-      right: { label: "Size", key: "size" },
+      kind: "split3",
+      cols: [
+        { label: "Grade", key: "grade", cls: "st-condition", width: "33%" },
+        { label: "Color", key: "gradeColor", width: "31%" },
+        { label: "Size", key: "size", width: "36%" },
+      ],
     },
     { kind: "field", label: "Heat No", key: "lotNo" },
     { kind: "field", label: "Vendor", key: "vendor", wrap: true },
@@ -53,15 +55,13 @@ const LAYOUT = {
     { label: "Coil No", key: "coilNo" },
     { label: "Wt.(Kg)", key: "qty" },
   ],
-  /** Bottom metadata — no border. align: "left" | "center" | "right" */
   meta: {
     align: "left",
   },
-  /** QR block — change numbers here only. */
   qr: {
     sizeMm: 22,
-    captionFontPx: 5.5,
-    captionMaxHeightMm: 3.5,
+    captionFontPx: 8.5,
+    captionMaxHeightMm: 5,
     captionGapMm: 0.25,
   },
 };
@@ -239,6 +239,8 @@ export function buildCoilStickerPrintRow(coil = {}, mrn = {}, opts = {}) {
     ...mapped,
     created_by: first(opts.created_by, mapped.created_by),
     created_at: opts.created_at ?? mapped.created_at ?? new Date(),
+    condition_color: text(spec.condition_color ?? coil.condition_color ?? mrn.condition_color),
+    grade_color: text(spec.grade_color ?? coil.grade_color ?? mrn.grade_color),
     ...(opts.isQc ? { is_qc: true, sticker_kind: "qc" } : {}),
   };
 }
@@ -255,41 +257,49 @@ export function buildCoilStickerPrintDocumentTitle(mrnNo) {
 const CSS = `
 #html-content-holder.rm-sticker{
   display:grid;
-  grid-template-rows:5.4mm 7.5mm 7.5mm 7.5mm 7.5mm 7.5mm 7.5mm 29.2mm 4.2mm;
+  grid-template-rows:5.4mm 7.4mm 7.4mm 7.4mm 7.4mm 7.4mm 7.4mm 29.6mm 4mm;
   height:${H}mm;max-height:${H}mm;padding:0.8mm;margin:0 auto;border:none;box-sizing:border-box;
 }
 #html-content-holder.rm-sticker *{box-sizing:border-box;font-family:Arial,Helvetica,sans-serif}
 .rm-sticker .st-row{display:flex;align-items:stretch;min-height:0;max-height:100%;overflow:hidden;width:100%}
+.rm-sticker .st-row.rm-field{align-items:center;flex-wrap:nowrap}
 .rm-sticker .st-row.st-footer{overflow:visible;max-height:none;align-items:center}
 .rm-sticker .st-box{border-left:.4px solid #000;border-right:.4px solid #000;border-bottom:.4px solid #000;border-top:none;overflow:hidden;width:100%;min-height:0;background:#fff}
 .rm-sticker .st-box.first{border-top:.4px solid #000}
 
-/* —— label (small/grey) vs value (large/black) —— */
 .rm-sticker .st-label{
-  display:block;margin:0;padding:0;
-  font-size:5.75px;line-height:1.05;font-weight:500;
-  text-transform:uppercase;letter-spacing:.03em;color:#555;
+  display:block;flex:0 0 auto;margin:0;padding:0;
+  font-size:2mm;line-height:1.15;font-weight:700;
+  text-transform:uppercase;letter-spacing:.02em;color:#000;
+  -webkit-print-color-adjust:exact;print-color-adjust:exact;
 }
 .rm-sticker .st-val,.rm-sticker .st-val-wrap,.rm-sticker .st-condition,.rm-sticker .st-mid,.rm-sticker .st-ts{
-  display:block;margin:0;padding:0;color:#000;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  display:block;flex:0 0 auto;margin:0;padding:0;color:#000;
+  white-space:nowrap;overflow:visible;line-height:1.15;
 }
-.rm-sticker .st-val,.rm-sticker .st-val-wrap{
-  font-size:2.15mm;font-weight:800;line-height:1.1;margin-top:.4mm;
+.rm-sticker .st-val,.rm-sticker .st-val-wrap,.rm-sticker .st-mid,.rm-sticker .st-condition{
+  font-size:2.7mm;
 }
-.rm-sticker .st-condition{font-size:2.35mm;font-weight:900;line-height:1.1;margin-top:.4mm}
-.rm-sticker .st-mid{font-size:2.05mm;font-weight:800;line-height:1.1;margin-top:.3mm}
-.rm-sticker .st-ts{font-size:1.7mm;font-weight:700;line-height:1.05;margin-top:0}
+.rm-sticker .st-val,.rm-sticker .st-val-wrap,.rm-sticker .st-mid{font-weight:700}
+.rm-sticker .st-val.st-condition{
+  font-weight:900;
+  -webkit-text-stroke:.35px #000;
+}
+.rm-sticker .st-val-wrap{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.rm-sticker .st-ts{font-size:2mm;font-weight:800;line-height:1.1}
 
-/* —— field rows (label above value) —— */
-.rm-field,.rm-half-field{
-  display:flex;flex-direction:column;justify-content:center;
-  padding:.45mm 1.2mm;min-width:0;width:100%;height:100%;
+.rm-field,.rm-half-field,.rm-sticker .st-left-cell{
+  display:flex;flex-direction:row;align-items:center;gap:.5mm;
+  padding:0 1mm;min-width:0;width:100%;height:100%;
+  overflow:hidden;
 }
-.rm-sticker .st-col6{width:50%;min-width:0;overflow:hidden;display:flex;flex-direction:column}
+.rm-sticker .st-split{display:flex;width:100%;height:100%;min-width:0;align-items:stretch}
+.rm-sticker .st-split .rm-half-field{padding:0 .7mm}
+.rm-sticker .st-col6{width:50%;min-width:0;overflow:hidden;display:flex;align-items:center}
 .rm-sticker .st-col6.l{border-right:.4px solid #000}
+.rm-sticker .st-col{min-width:0;overflow:hidden;height:100%;display:flex;align-items:center}
+.rm-sticker .st-col.l{border-right:.4px solid #000}
 
-/* —— header —— */
 .rm-header{align-items:center;padding:0;overflow:hidden}
 .rm-logo,.rm-header-spacer{width:12mm;flex-shrink:0;height:100%}
 .rm-logo{display:flex;align-items:center;justify-content:center;padding:.15mm}
@@ -302,21 +312,19 @@ const CSS = `
   overflow:hidden;white-space:nowrap;
 }
 
-/* —— bottom: compact stacked cells + QR —— */
 .rm-sticker .st-bottom{display:flex;height:100%;width:100%;min-height:0}
 .rm-sticker .st-left{
   width:50%;border-right:.4px solid #000;
-  display:grid;grid-template-rows:repeat(${LAYOUT.bottomLeft.length},1fr);
-  min-height:0;
+  display:grid;grid-template-rows:repeat(${LAYOUT.bottomLeft.length},7.4mm);
+  min-height:0;align-content:stretch;
 }
 .rm-sticker .st-left-cell{
-  min-height:0;overflow:hidden;
-  display:flex;flex-direction:column;justify-content:center;
-  padding:.35mm 1.1mm;gap:0;
+  min-height:0;height:7.4mm;max-height:7.4mm;overflow:hidden;
+  display:flex;flex-direction:row;align-items:center;gap:.5mm;
+  padding:0 1mm;
 }
 .rm-sticker .st-left-cell + .st-left-cell{border-top:.4px solid #000}
-.rm-sticker .st-left-cell .st-label{font-size:5.5px}
-.rm-sticker .st-left-cell .st-val{margin-top:.25mm}
+.rm-sticker .st-left-cell .st-label{font-size:2mm;font-weight:700;color:#000}
 
 .rm-sticker .st-right{
   width:50%;padding:.3mm;
@@ -336,7 +344,6 @@ const CSS = `
   margin:0;max-width:100%;overflow:hidden;max-height:${LAYOUT.qr.captionMaxHeightMm}mm;flex-shrink:0;
 }
 
-/* —— footer metadata (no border; align via LAYOUT.meta.align) —— */
 .rm-sticker .st-footer{
   border:none !important;
   background:transparent;
@@ -352,13 +359,14 @@ const CSS = `
   min-width:0;max-width:100%;overflow:visible;line-height:1.15;
 }
 .rm-sticker .st-footer .st-label{
-  display:inline;text-transform:none;font-size:4.75px;font-weight:500;
-  flex-shrink:0;color:#666;letter-spacing:0;line-height:1.15;
+  display:inline;text-transform:none;font-size:1.85mm;font-weight:700;
+  flex-shrink:0;color:#000;letter-spacing:0;line-height:1.15;
+  -webkit-print-color-adjust:exact;print-color-adjust:exact;
 }
 .rm-sticker .st-footer .st-val,
 .rm-sticker .st-footer .st-ts{
   display:inline;flex:0 1 auto;min-width:0;margin-top:0;
-  font-size:1.4mm;font-weight:700;line-height:1.15;color:#111;
+  font-size:1.85mm;font-weight:800;line-height:1.15;color:#000;
   overflow:visible;text-overflow:clip;
 }
 `;
@@ -367,7 +375,11 @@ function cell(label, value, { wrap = false, cls = "" } = {}) {
   const vCls = ["st-val", wrap ? "st-val-wrap" : "", cls]
     .filter(Boolean)
     .join(" ");
-  return `<span class="st-label">${label}</span><span class="${vCls}">${value}</span>`;
+  return `<span class="st-label">${esc(label)}:</span><span class="${vCls}">${value}</span>`;
+}
+
+function splitColClass(col, isLast) {
+  return `st-col${isLast ? "" : " l"} rm-half-field`;
 }
 
 function buildCardHtml(f) {
@@ -391,6 +403,15 @@ function buildCardHtml(f) {
           <div class="st-col6 l rm-half-field">${cell(row.left.label, f[row.left.key], row.left)}</div>
           <div class="st-col6 rm-half-field">${cell(row.right.label, f[row.right.key], row.right)}</div>
         </div>`;
+      }
+      if (row.kind === "split3") {
+        const cols = row.cols || [];
+        return `<div class="st-row st-box${firstCls} st-split">${cols
+          .map((col, ci) => {
+            const w = String(col.width || "33%").trim();
+            return `<div class="${splitColClass(col, ci === cols.length - 1)}" style="flex:0 0 ${w};width:${w}">${cell(col.label, f[col.key], col)}</div>`;
+          })
+          .join("")}</div>`;
       }
       if (row.kind === "bottom") {
         const left = LAYOUT.bottomLeft
@@ -417,8 +438,8 @@ function buildCardHtml(f) {
         const alignRaw = String(LAYOUT.meta?.align || "left").toLowerCase();
         const align = alignRaw === "center" || alignRaw === "right" ? alignRaw : "left";
         return `<div class="st-row st-footer st-meta-${align}">
-        <span class="st-meta-item">  
-          <span class="st-val st-ts">${f.createdBy}</span> 
+        <span class="st-meta-item">
+          <span class="st-val st-ts">${f.createdBy}</span>
           <span class="st-label st-ts">||</span>
           <span class="st-val st-ts">${f.timestamp}</span>
           </span>
@@ -463,7 +484,9 @@ async function buildCard(row) {
   return buildCardHtml({
     title: isQc ? "QC Sticker" : "RM Sticker",
     condition: esc(show(row.condition)),
+    conditionColor: esc(show(row.condition_color)),
     grade: esc(show(row.grade)),
+    gradeColor: esc(show(row.grade_color)),
     size: esc(show(text(row.base_size) || row.finish_size)),
     lotNo: esc(show(row.lot_no)),
     mrnDate: esc(fmtDate(row.doc_dt)),

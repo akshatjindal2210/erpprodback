@@ -1,16 +1,16 @@
-import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertForwardingNote, updateForwardingNotes, updateForwardingNoteBillNo, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters, findLastForwardingPackingCategory } from "../models/forwardingNote.model.js";
+import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertForwardingNote, updateForwardingNotes, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters, findLastForwardingPackingCategory } from "../models/forwardingNote.model.js";
 import { buildForwardingAvailableBoxes, findItemDcodesWithForwardingAvailableStock } from "../utils/stock/forwardingAvailableStock.js";
 import { buildPackingNumberSet, filterForwardingBoxesByCategoryId, filterErpStockByCategory } from "../utils/packing/forwardingPackingCategory.js";
 import { enrichRowsWithIMS } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
-import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo } from "../utils/list/forwardingNoteList.js";
+import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo, buildBillDropdownMatchKey, invfnoteBillDropdownMatchKey, resolveBillDropdownMatchForUser } from "../utils/list/forwardingNoteList.js";
 import { saveForwardingNoteItems, replaceForwardingNoteItems, validateExistingForwardingNoteItems } from "../utils/items/forwardingNoteItemsWrite.js";
 import { buildForwardingLockMessage } from "../utils/messages/forwardingNoteMessages.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
-import { withTransaction } from "../../../../../config/db/db.js";
-import { findForwardingNoteItems } from "../models/forwardingNoteItem.model.js";
+import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
+import { findForwardingNoteItems, findForwardingNoteItem, assignForwardingNoteItemBills } from "../models/forwardingNoteItem.model.js";
 import { sanitizeSearch, buildForwardingNoteBillDocument } from "../../../../core/lib/utils/helper/helper.js";
 import { fetchFromIMS } from "../../../lib/services/ims.service.js";
 import { findCategories } from "../../category/models/category.model.js";
@@ -170,48 +170,65 @@ export const createForwardingNote = async (req, res) => {
   }
 };
 
-/** Bill number only — allowed after out entry lock (bill arrives post dispatch). */
-export const updateForwardingNoteBill = async (req, res) => {
+/**
+ * Assign bill onto item-wise line(s).
+ * First save: any editor. Changing an already-saved DB bill: super admin only.
+ * Body: { item_ids: number[], billno, billdt? }
+ */
+export const assignForwardingNoteItemBill = async (req, res) => {
   try {
-    const { fuid, bill_no } = req.body;
-    if (fuid === undefined || fuid === null || fuid === "") {
-      return res.status(400).json({ success: false, message: "fuid required" });
+    const body = req.body || {};
+    const itemIds = Array.isArray(body.item_ids) ? body.item_ids : body.item_id != null ? [body.item_id] : [];
+    const billno = String(body.billno ?? body.bill_no ?? "").trim();
+    if (!itemIds.length) {
+      return res.status(400).json({ success: false, message: "item_ids required" });
+    }
+    if (!billno) {
+      return res.status(400).json({ success: false, message: "billno required" });
     }
 
-    const existing = await findForwardingNote({ fuid });
-    if (!existing) return res.status(404).json({ success: false, message: "Not found" });
-
-    const normalized =
-      bill_no === null || bill_no === undefined ? null : String(bill_no).trim() || null;
-    const previous = existing.bill_no ?? null;
-
-    if (previous === normalized) {
-      const unchanged = await enrichForwardingNoteDetail(existing);
-      return res.json({ success: true, data: unchanged, message: "No change" });
+    const isSuperAdmin = String(req.user?.type ?? req.user?.role ?? "").toLowerCase() === "super_admin";
+    if (!isSuperAdmin) {
+      const existing = await dbQuery(
+        `SELECT id FROM ims_forwarding_note_item_wise WHERE is_deleted = false AND id = ANY($1::int[]) AND NULLIF(trim(bill_no), '') IS NOT NULL LIMIT 1`,
+        [itemIds.map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0)]
+      );
+      if (existing?.length) {
+        return res.status(403).json({ success: false, message: "Only super admin can change a saved bill." });
+      }
     }
 
-    const row = await updateForwardingNoteBillNo({
-      fuid,
-      bill_no: normalized,
+    const updated = await assignForwardingNoteItemBills({
+      itemIds,
+      bill_no: billno,
+      bill_dt: body.billdt ?? body.bill_dt ?? null,
       userName: auditUserName(req),
     });
-    if (!row) return res.status(404).json({ success: false, message: "Not found" });
+
+    if (!updated?.length) {
+      return res.status(404).json({ success: false, message: "No item lines updated" });
+    }
 
     await logActivity(req, {
       action: "update",
-      entity: "forwarding_note_master",
-      entity_id: fuid,
+      entity: "forwarding_note_item_wise",
+      entity_id: updated.map((r) => r.id).join(","),
       meta: {
         field: "bill_no",
-        previous_bill_no: previous,
-        bill_no: normalized,
-        out_entry_locked: Boolean(existing.out_entry_locked),
+        billno,
+        billdt: body.billdt ?? body.bill_dt ?? null,
+        item_ids: updated.map((r) => r.id),
+        fuids: [...new Set(updated.map((r) => r.fuid))],
       },
     });
 
-    const enriched = await enrichForwardingNoteDetail(
-      await findForwardingNote({ fuid })
-    );
+    const refreshed = [];
+    for (const u of updated) {
+      const row = await findForwardingNoteItem({ id: u.id });
+      if (row) refreshed.push(row);
+    }
+    const enriched = await enrichForwardingItemRows(refreshed);
+
     res.json({ success: true, data: enriched });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, message: err.message });
@@ -249,7 +266,7 @@ export const updateForwardingNote = async (req, res) => {
     }
 
     // Check if any business fields changed (excluding approval fields)
-    const businessFields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage", "total_items", "bill_no"];
+    const businessFields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage", "total_items"];
     let hasBusinessChanges = businessFields.some(f => updateData[f] !== undefined && updateData[f] != existing[f]);
 
     // Check if items changed
@@ -265,20 +282,10 @@ export const updateForwardingNote = async (req, res) => {
       updated_at: new Date()
     };
 
-    if (updateData.bill_no !== undefined) {
-      const normalizedBill =
-        updateData.bill_no === null || updateData.bill_no === undefined
-          ? null
-          : String(updateData.bill_no).trim() || null;
-      const previousBill =
-        existing.bill_no === null || existing.bill_no === undefined
-          ? null
-          : String(existing.bill_no).trim() || null;
-      if (normalizedBill !== previousBill) {
-        fields.bill_updated_by = auditUserName(req);
-        fields.bill_updated_at = new Date();
-      }
-    }
+    // Strip legacy master bill fields if client still sends them
+    delete fields.bill_no;
+    delete fields.bill_updated_by;
+    delete fields.bill_updated_at;
     
     applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges, auditAsName: true });
 
@@ -423,23 +430,59 @@ function normalizeImsBillNo(record) {
   return String(raw ?? "").trim();
 }
 
-/** Live bill numbers from IMS (`requestedData: "billno"`). */
+/**
+ * Live invfnote bills for blank item lines.
+ * Match mode: super_admin → acc_item · others → acc_item_packing.
+ * Request body: `items: [{ acc_code, item_dcode, packing_number, total_qty? }]`.
+ */
 export const getForwardingNoteBillNumbersViews = async (req, res) => {
   try {
     const search = String(req.body?.search ?? "").trim().toLowerCase();
     const page = Math.max(1, Number(req.body?.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.body?.limit) || 50));
+    const matchMode = resolveBillDropdownMatchForUser(req.user);
 
-    const records = await fetchFromIMS("billno");
+    const keySet = new Set();
+    if (Array.isArray(req.body?.items)) {
+      for (const item of req.body.items) {
+        const key = buildBillDropdownMatchKey(item, matchMode);
+        if (key) keySet.add(key);
+      }
+    }
+
+    if (!keySet.size) {
+      return res.json({ success: true, data: [], total: 0 });
+    }
+
+    const records = await fetchFromIMS("invfnote");
     const seen = new Set();
     const rows = [];
 
-    for (const rec of records) {
+    for (const rec of records || []) {
+      const matchKey = invfnoteBillDropdownMatchKey(rec, matchMode);
+      if (!matchKey || !keySet.has(matchKey)) continue;
+
       const billNo = normalizeImsBillNo(rec);
-      if (!billNo || seen.has(billNo)) continue;
-      seen.add(billNo);
-      if (search && !billNo.toLowerCase().includes(search)) continue;
-      rows.push({ id: billNo, bill_no: billNo });
+      if (!billNo) continue;
+
+      const dedupeKey = `${billNo}::${matchKey}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      if (search && !billNo.toLowerCase().includes(search) && !matchKey.toLowerCase().includes(search)) {
+        continue;
+      }
+
+      rows.push({
+        id: dedupeKey,
+        bill_no: billNo,
+        billno: billNo,
+        billdt: String(rec?.billdt ?? "").trim() || null,
+        uid: String(rec?.uid ?? "").trim() || null,
+        muid: String(rec?.muid ?? "").trim() || null,
+        match_key: matchKey,
+        status: String(rec?.status ?? "").trim() || null,
+      });
     }
 
     rows.sort((a, b) =>

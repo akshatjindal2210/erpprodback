@@ -2,8 +2,8 @@ import express from "express";
 import { getBoxes, getBoxById, createBox, updateBox, deleteBox, getInHandBoxesByPacking, getStockAdjustmentAddBoxesByPattern, stickerFetchBox, generateStickers, previewSticker, removeGeneratedStickers, trackStickerDownload, trackBulkDownload, overrideCustomer, getBoxDownloadHistory, getPackingDownloadSummary, renderSingleSticker, renderBulkStickers, stickerManagementList, createOverrideRequest, listOverrideRequests, approveOverrideRequest, updateOverrideRequest, getBoxesViews } from "../controllers/box.controller.js";
 
 import { authenticate } from "../../../lib/middleware/auth.js";
-import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
-import { helperAccess } from "../../../lib/config/views/helperViews.js";
+import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
+import { helperAccess, boxStickerPrintAccess } from "../../../lib/config/views/helperViews.js";
 
 const router = express.Router();
 
@@ -12,7 +12,7 @@ router.post("/in-hand-by-packing", authenticate, accessControl("stock_adjustment
 router.post("/sa-add-by-adjustment", authenticate, accessControl("stock_adjustment", "view"), getStockAdjustmentAddBoxesByPattern);
 router.post("/get",    authenticate, accessControl("boxes", "view"),   getBoxById);
 
-router.post("/sticker/fetch", authenticate, accessControl("packing_entry", "view"), stickerFetchBox);
+router.post("/sticker/fetch", authenticate, boxStickerPrintAccess(), stickerFetchBox);
 
 // ——— Bulk generate ————————————————————————————————————————————
 router.post("/sticker/generate", authenticate, accessControl("packing_entry", ["add", "edit"]), generateStickers);
@@ -21,8 +21,8 @@ router.post("/sticker/remove", authenticate, accessControl("packing_entry", "del
 
 router.post("/sticker/download", authenticate, accessControl("packing_entry", "edit"), trackStickerDownload);
 router.post("/sticker/download-bulk", authenticate, accessControl("packing_entry", "edit"), trackBulkDownload);
-router.post("/sticker/render-single", authenticate, accessControlAny([{ moduleName: "packing_entry", actions: "view" }, { moduleName: "stock_adjustment", actions: "view" }, { moduleName: "change_override_customer", actions: "view" } ]), renderSingleSticker);
-router.post("/sticker/render-bulk", authenticate, accessControlAny([{ moduleName: "packing_entry", actions: "view" }, { moduleName: "stock_adjustment", actions: "view" }, { moduleName: "change_override_customer", actions: "view" } ]), renderBulkStickers);
+router.post("/sticker/render-single", authenticate, boxStickerPrintAccess(), renderSingleSticker);
+router.post("/sticker/render-bulk", authenticate, boxStickerPrintAccess(), renderBulkStickers);
 
 router.post("/sticker/download-history", authenticate, accessControl("packing_entry", "view"), getBoxDownloadHistory);
 router.post("/sticker/download-summary", authenticate, accessControl("packing_entry", "view"), getPackingDownloadSummary);

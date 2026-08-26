@@ -6,7 +6,7 @@
  */
 
 import dbQuery from "../../../../../../config/db/db.js";
-import { sqlBoxSellable, sqlBoxPackingNumber, sqlDailyprodDocNoMatch, sqlDailyprodMatchOrder, sqlDocDtFromDailyprod, sqlDocDtText } from "../../../box/utils/inventory/boxInventorySql.js";
+import { sqlBoxSellable, sqlBoxPackingNumber, sqlDailyprodDocNoMatch, sqlDailyprodMatchOrder, sqlDocDtFromDailyprod, sqlDocDtText, boxSourceSql } from "../../../box/utils/inventory/boxInventorySql.js";
 
 const TRIM = (expr) => `NULLIF(TRIM((${expr})::text), '')`;
 const DP_ITEM_CODE = TRIM("dp.item_code");
@@ -162,11 +162,13 @@ function paginate(page, limit) {
 
 function packingAreaBaseSql(whereClause) {
   const pn = sqlBoxPackingNumber("b");
+  const sourceExpr = boxSourceSql("b");
   return `
     SELECT
       ${pn} AS packing_number,
       ${BOX_ITEM_SQL} AS item_dcode,
       ${BOX_CUST_SQL} AS acc_code,
+      ${sourceExpr}::varchar AS source,
       NULLIF(TRIM(sa.financial_year::text), '') AS sa_financial_year,
       sa.doc_dt,
       sa.job_card_no,
@@ -177,6 +179,19 @@ function packingAreaBaseSql(whereClause) {
     FROM ims_box_table b
     LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
     WHERE ${whereClause}`;
+}
+
+function applyBoxSourceFilter(conditions, source) {
+  const src = source != null ? String(source).trim().toUpperCase() : "";
+  if (src === "STOCK ADJUSTMENT") {
+    conditions.push(`b.sa_id IS NOT NULL AND b.sa_entry_type = 'stock_in'`);
+  } else if (src === "QC HOLD") {
+    conditions.push(`(b.sa_id IS NULL OR b.sa_entry_type IS DISTINCT FROM 'stock_in')`);
+    conditions.push(`b.box_no_uid ~ '_QCH[0-9]+_'`);
+  } else if (src === "PACKING ENTRY") {
+    conditions.push(`(b.sa_id IS NULL OR b.sa_entry_type IS DISTINCT FROM 'stock_in')`);
+    conditions.push(`b.box_no_uid !~ '_QCH[0-9]+_'`);
+  }
 }
 
 export async function attachPackingDisplayMeta(rows = []) {
@@ -492,11 +507,12 @@ export async function fetchSaPackingMetaByContexts(contexts = []) {
 
 /** By Packing tab — summary grouped from boxes in packing area. */
 export async function findPackingAreaByPacking(options = {}) {
-  const { search, sort = {}, page = 1, limit = 1000 } = options;
+  const { search, sort = {}, page = 1, limit = 1000, filters = {} } = options;
   const values = [];
   let param = 1;
   const pnExpr = sqlBoxPackingNumber("b");
   const conditions = [...PACKING_AREA_WHERE("b")];
+  applyBoxSourceFilter(conditions, filters?.source);
 
   if (search && String(search).trim()) {
     values.push(`%${String(search).trim()}%`);
@@ -516,8 +532,8 @@ export async function findPackingAreaByPacking(options = {}) {
 
   const [{ count = 0 } = {}] = await dbQuery(
     `SELECT COUNT(*)::int AS count FROM (
-       SELECT packing_number, item_dcode, acc_code FROM (${baseSql}) raw
-       GROUP BY packing_number, item_dcode, acc_code
+       SELECT packing_number, item_dcode, acc_code, source FROM (${baseSql}) raw
+       GROUP BY packing_number, item_dcode, acc_code, source
      ) g`,
     values
   );
@@ -527,7 +543,7 @@ export async function findPackingAreaByPacking(options = {}) {
 
   const rows = await dbQuery(
      `WITH grouped AS (
-       SELECT packing_number, item_dcode, acc_code,
+       SELECT packing_number, item_dcode, acc_code, source,
          MAX(sa_financial_year) AS sa_financial_year,
          MAX(doc_dt) AS doc_dt,
          MAX(job_card_no) AS job_card_no,
@@ -540,7 +556,7 @@ export async function findPackingAreaByPacking(options = {}) {
          MIN(created_at) AS created_at,
          (array_agg(created_by ORDER BY created_at ASC NULLS LAST, created_by ASC NULLS LAST))[1] AS created_by
        FROM (${baseSql}) raw
-       GROUP BY packing_number, item_dcode, acc_code
+       GROUP BY packing_number, item_dcode, acc_code, source
      )
      SELECT * FROM grouped g
      ORDER BY ${orderSql}
@@ -561,11 +577,13 @@ export async function findPackingAreaByPacking(options = {}) {
 
 /** By Box tab — individual boxes in packing area. */
 export async function findPackingAreaBoxes(options = {}) {
-  const { search, packing_number, item_dcode, acc_code, sort = {}, page = 1, limit = 1000 } = options;
+  const { search, packing_number, item_dcode, acc_code, sort = {}, page = 1, limit = 1000, filters = {} } = options;
   const values = [];
   let param = 1;
   const pnExpr = sqlBoxPackingNumber("b");
+  const sourceExpr = boxSourceSql("b");
   const conditions = [...PACKING_AREA_WHERE("b")];
+  applyBoxSourceFilter(conditions, filters?.source);
 
   if (packing_number) {
     values.push(String(packing_number).trim());
@@ -612,6 +630,7 @@ export async function findPackingAreaBoxes(options = {}) {
        ${pnExpr} AS packing_number,
        ${BOX_ITEM_SQL} AS item_dcode,
        ${BOX_CUST_SQL} AS acc_code,
+       ${sourceExpr}::varchar AS source,
        COALESCE(b.qty, 0)::int AS qty,
        COALESCE(b.is_loose, false) AS is_loose,
        b.created_at,

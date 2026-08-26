@@ -10,7 +10,7 @@ import { withTransaction } from "../../../../../../config/db/db.js";
 import { findAvailableBoxes } from "../../models/forwardingNote.model.js";
 import { findBoxesByNoUids } from "../../../box/models/box.model.js";
 import { deleteForwardingNoteItems, findActiveForwardingNoteItemsByFuid, insertForwardingNoteItem } from "../../models/forwardingNoteItem.model.js";
-import { docNoFromStandardBoxNoUid } from "../../../box/utils/uid/boxUid.js";
+import { docNoFromStandardBoxNoUid } from "../../../../lib/stickerUidHelpers.js";
 import { buildForwardingAvailableBoxes, enrichForwardingBoxesWithPackingStd, inferForwardingPackingStandardQty, isForwardingLooseBox, sumBoxQty } from "../stock/forwardingAvailableStock.js";
 import { loadScheduleQtyForKeys, planKey } from "../../../schedule-planning/utils/db/schedulePlanDb.js";
 
