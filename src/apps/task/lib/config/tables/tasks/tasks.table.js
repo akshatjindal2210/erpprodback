@@ -1,5 +1,6 @@
 import dbQuery from "../../../shared/db.js";
 import { MST_TABLES as C, TASK_TABLES as T } from "../../../../../../config/db/dbTables.js";
+import { patchTableSchema, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 
 export async function createTaskTasksTable() {
   await dbQuery(`
@@ -25,6 +26,7 @@ export async function createTaskTasksTable() {
       reminder_date         TIMESTAMP,
       self_reminder_date    TIMESTAMP DEFAULT NULL,
       completed_at          TIMESTAMP NULL,
+      rating                INT DEFAULT NULL,
       is_recurring          BOOLEAN DEFAULT FALSE,
       recurrence_type       VARCHAR(10) DEFAULT NULL
         CHECK (recurrence_type IS NULL OR recurrence_type IN ('daily', 'weekly', 'monthly', 'yearly')),
@@ -53,4 +55,16 @@ export async function createTaskTasksTable() {
   await dbQuery(`ALTER TABLE ${T.TASKS} ADD COLUMN IF NOT EXISTS current_target_at TIMESTAMP`);
   await dbQuery(`ALTER TABLE ${T.TASKS} ADD COLUMN IF NOT EXISTS target_dates_history JSONB DEFAULT '[]'::jsonb`);
   await dbQuery(`CREATE INDEX IF NOT EXISTS idx_tasks_current_target ON ${T.TASKS} (current_target_at)`);
+
+  await patchTableSchema(dbQuery, T.TASKS, {
+    columns: [
+      patchCol("rating", "INT DEFAULT NULL"),
+    ],
+  });
+
+  await dbQuery(`ALTER TABLE ${T.TASKS} DROP CONSTRAINT IF EXISTS task_tasks_rating_check`);
+  await dbQuery(`
+    ALTER TABLE ${T.TASKS} ADD CONSTRAINT task_tasks_rating_check
+      CHECK (rating IS NULL OR (rating >= 1 AND rating <= 10))
+  `);
 }

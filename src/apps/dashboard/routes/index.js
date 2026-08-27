@@ -26,6 +26,7 @@ router.post("/configs/rename", superAdminOnly, dashboardController.renameDashboa
 // Dashboard render API (permission-filtered for logged in user)
 router.post("/dashboard/user-dashboards", dashboardController.getUserDashboardsHandler);
 router.post("/dashboard/status", dashboardController.getDashboardStatusHandler);
+router.post("/dashboard/filter-users", dashboardController.getDashboardFilterUsersHandler);
 router.post("/dashboard/widgets", dashboardController.getDashboardWidgetsHandler);
 
 export default router;

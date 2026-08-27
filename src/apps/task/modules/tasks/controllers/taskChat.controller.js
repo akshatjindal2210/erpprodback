@@ -54,6 +54,10 @@ export async function sendMessage(req, res) {
     if (!task)
       return res.status(404).json({ success: false, message: "Task not found" });
 
+    const staffType = String(req.user.type || "").toLowerCase();
+    if (task.status === "completed" && staffType !== "super_admin" && staffType !== "admin")
+      return res.status(400).json({ success: false, message: "Chat is locked. Task is completed." });
+
     const hasValidTarget = await TargetDate.hasValidCurrent(id);
     if (isChatLockedForUser(task, hasValidTarget, user_id)) {
       return res.status(403).json({
@@ -117,7 +121,7 @@ export async function deleteMessage(req, res) {
     if (!msg)
       return res.status(404).json({ success: false, message: "Message not found" });
 
-    if (Number(msg.user_id) !== Number(user_id))
+    if (Number(msg.user_id) !== Number(user_id) && req.user.type !== "super_admin" && req.user.type !== "admin")
       return res.status(403).json({ success: false, message: "Cannot delete someone else's message" });
 
     const files = msg.attachments

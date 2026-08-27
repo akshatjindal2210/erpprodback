@@ -397,7 +397,7 @@ export const getItemsViews = async (req, res) => {
     const { id, permission_module, permission_action } = req.body;
     const { page, limit, search, filters } = extractListParams(req.body);
 
-    const records = await fetchFromIMS("item");
+    const records = await fetchFromIMS("item", filters === "fg" ? { type: "fg" } : null);
     const rows = (records || []).map(mapItemRecord);
 
     if (id) {
@@ -468,6 +468,7 @@ export const getItemsViews = async (req, res) => {
 
     const wantUnit = fields.some((f) => String(f).includes("unit"));
     const wantCategory = fields.some((f) => String(f).includes("category_id"));
+    const wantWeight = fields.some((f) => String(f).includes("weight"));
     const miniData = out.data.map((item) => {
       const row = {
         id: item.itemdcode,
@@ -477,6 +478,7 @@ export const getItemsViews = async (req, res) => {
       };
       if (wantUnit) row.unit = item.unit;
       if (wantCategory) row.category_id = item.category_id;
+      if (wantWeight) row.weight = item.weight;
       return row;
     });
 
@@ -500,7 +502,8 @@ export const getItemViewById = async (req, res) => {
         id: item.itemdcode,
         itemdcode: item.itemdcode,
         item_code: item.item_code,
-        itemdesc: item.itemdesc
+        itemdesc: item.itemdesc,
+        weight: item.weight,
       }
     });
   } catch (err) {

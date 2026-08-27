@@ -7,7 +7,7 @@ import { getOpenFills, serializeOpenFillAsSubmission, normalizeToEntries } from 
 import { isSuperAdminReq } from "../../../../core/lib/utils/auth/permissionDays.js";
 import { paramsFromReq, listLimit } from "../../../lib/shared/postRequest.js";
 import User from "../../../../core/identity/users/models/user.model.js";
-import { REPORT_DATE_YEAR_MIN, REPORT_DATE_YEAR_MAX, REPORT_DATE_RANGE_MAX_YEARS, REPORT_DATE_RANGE_MAX_DAYS } from "../reportDateRange.config.js";
+import { REPORT_DATE_YEAR_MIN, REPORT_DATE_YEAR_MAX, REPORT_DATE_RANGE_MAX_YEARS, REPORT_DATE_RANGE_MAX_DAYS, REPORT_DEFAULT_DAYS_BACK, REPORT_DEFAULT_DAYS_FORWARD } from "../reportDateRange.config.js";
 import { compileUserPeriodScores, dayHeaderFromUserMaps, overallPeriodScorePct, REPORT_SCORE_FORMULAS } from "../helpers/reportScore.helper.js";
 
 /**
@@ -91,12 +91,12 @@ async function assertCanViewClReportInstance(req, task) {
   return { ok: false, status: 403, message: "You can only view your own tasks" };
 }
 
-/** Default: today −2 … +7. */
+/** Default: today −DAYS_BACK … +DAYS_FORWARD (see reportDateRange.config.js). */
 function defaultDateRange() {
   const from = new Date();
-  from.setDate(from.getDate() - 2);
+  from.setDate(from.getDate() - REPORT_DEFAULT_DAYS_BACK);
   const to = new Date();
-  to.setDate(to.getDate() + 7);
+  to.setDate(to.getDate() + REPORT_DEFAULT_DAYS_FORWARD);
   return { date_from: toYmd(from), date_to: toYmd(to) };
 }
 
@@ -133,9 +133,26 @@ function isNotDone(instance, today) {
   return sched && sched < today;
 }
 
+/** No verify / scoring off + completed → full credit (10 = 100%). */
+function isNoVerifyCompleted(instance) {
+  if (instance?.status !== "completed") return false;
+  return instance.verification_required === false || instance.scoring_enabled === false;
+}
+
 function effectiveScore(instance, review) {
   if (review?.score != null) return Number(review.score);
   if (instance.score != null) return Number(instance.score);
+  if (isNoVerifyCompleted(instance)) return 10;
+  return 0;
+}
+
+/** Open fill score: rated fill, else full credit when task needs no verify. */
+function fillEffectiveScore(fill, instance) {
+  if (Number(fill?.score) > 0) return Number(fill.score);
+  const noVerify = instance?.verification_required === false || instance?.scoring_enabled === false;
+  if (!noVerify) return 0;
+  if (fill?.status === "awaiting_verification" || fill?.status === "rejected") return 0;
+  if (fill?.status === "completed" || fill?.completed_at || fill?.submitted_at) return 10;
   return 0;
 }
 
@@ -477,7 +494,7 @@ function absorbOpenInstance(group, inst, review, today) {
       toYmd(fill.filled_at) ||
       toYmd(inst.scheduled_date);
     if (!fillDay) continue;
-    const scoreRaw = Number(fill.score) > 0 ? Number(fill.score) : 0;
+    const scoreRaw = fillEffectiveScore(fill, inst);
     const scorePct = scoreToPercent(scoreRaw);
     const rejectCount = Math.max(0, Number(fill.reject_count) || 0);
     group.reject_total += rejectCount;
@@ -694,7 +711,13 @@ export async function getDailyReport(req, res) {
         if (!group.minDay && !group.maxDay) return;
       }
 
-      const scoreRaw = compiled?.adjusted ?? 0;
+      let scoreRaw = compiled?.adjusted ?? 0;
+      /** No-verify done with no stored rating → still full credit in compile. */
+      if (scoreRaw <= 0 && group.verification_required === false && group.done_count > 0) {
+        scoreRaw = 10;
+        scoredForCompile.push({ score: 10, weightage: group.weightage });
+      }
+
       const onTime =
         !group.awaiting &&
         (scoreRaw > 0 || group.verification_required === false);

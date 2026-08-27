@@ -12,8 +12,13 @@ import path from "path";
 import config from "../../../../../config/app/config.js";
 const log = (task_id, user_id, performed_by, action, action_detail = null, assignment_id = null) => Task.addLog(task_id, user_id, performed_by, action, action_detail, assignment_id);
 
+function isTaskStaffFullAccess(reqUser) {
+  const t = String(reqUser?.type || "").toLowerCase();
+  return t === "super_admin" || t === "admin";
+}
+
 function canManageTask(reqUser, task) {
-  if (reqUser.type === "super_admin") return true;
+  if (isTaskStaffFullAccess(reqUser)) return true;
   if (task.task_type === "self") {
     return Number(reqUser.id) === Number(task.created_by_id ?? task.created_by);
   }
@@ -114,9 +119,9 @@ export async function getTaskById(req, res) {
 
     let hasAccess = false;
 
-    if (userType === "super_admin") {
+    if (userType === "super_admin" || userType === "admin") {
         hasAccess = true;
-    } else if (userType === "admin" || userType === "executive_assistant" || userType === "user") {
+    } else if (userType === "executive_assistant" || userType === "user") {
         const isCreator = await Task.checkTaskCreator(id, user_id);
     
         if (isCreator) {
@@ -456,7 +461,7 @@ export async function assignSubUsers(req, res) {
     if (req.user.type !== "super_admin" && Number(task.current_holder_id) !== Number(user_id))
       return res.status(403).json({ success: false, message: "Only current task holder (Level-1) can assign sub-users" });
 
-    if (!isDbTrue(task.current_is_level_one))
+    if (req.user.type !== "super_admin" && !isDbTrue(task.current_is_level_one))
       return res.status(403).json({ success: false, message: "Sub-user assignment allowed only for Level-1 Authority" });
 
     if (["completed", "creator_pending"].includes(task.status))
@@ -513,7 +518,7 @@ export async function updateTask(req, res) {
     const user_name = req.user.name ?? "Someone";
     const body = req.body || {};
 
-    const { title, description, category_id, priority, status, due_date, reminder_date, self_reminder_date, is_recurring, recurrence_type, note, assigned_to, sub_users, assigned_by } = body;
+    const { title, description, category_id, priority, status, due_date, reminder_date, self_reminder_date, is_recurring, recurrence_type, note, assigned_to, sub_users, assigned_by, rating } = body;
 
     const currentTask = await Task.getById(id);
     if (!currentTask) return res.status(404).json({ success: false, message: "Task not found" });
@@ -524,7 +529,7 @@ export async function updateTask(req, res) {
 
     const categoryIdNum = category_id ? Number(category_id) : (currentTask.category_id ? Number(currentTask.category_id) : null);
 
-    const canEditAssignment = req.user.type === "super_admin" || Number(user_id) === Number(currentTask.assigned_by_id);
+    const canEditAssignment = isTaskStaffFullAccess(req.user) || Number(user_id) === Number(currentTask.assigned_by_id);
 
     const hasChanged = (newVal, oldVal) => {
       if (newVal === undefined || newVal === null) return false;
@@ -563,8 +568,7 @@ export async function updateTask(req, res) {
       }
 
       if (assigned_by && Number(assigned_by) !== Number(currentTask.assigned_by_id)) {
-        // Only assigner can change assigned_by
-        if (Number(user_id) === Number(currentTask.assigned_by_id)) {
+        if (isTaskStaffFullAccess(req.user) || Number(user_id) === Number(currentTask.assigned_by_id)) {
           await Task.updateAssignedBy(id, assigned_by);
           await Task.updateL1AssignedBy(id, assigned_by);
           const newAbUser = await Task.getUserById(assigned_by);
@@ -692,6 +696,28 @@ export async function updateTask(req, res) {
         file_size: f.size, mime_type: f.mimetype,
       }));
       await Task.addChatMessage(id, user_id, note?.trim() || null, attachments);
+    }
+
+    // Rating edit only after completion (assigned tasks, Super Admin / Admin)
+    if (
+      rating !== undefined &&
+      isTaskStaffFullAccess(req.user) &&
+      currentTask.task_type !== "self" &&
+      currentTask.status === "completed"
+    ) {
+      const raw = rating;
+      let newRating = null;
+      if (raw !== "" && raw !== null && raw !== undefined) {
+        newRating = Number(raw);
+        if (!Number.isInteger(newRating) || newRating < 1 || newRating > 10) {
+          return res.status(400).json({ success: false, message: "Rating must be an integer between 1 and 10" });
+        }
+      }
+      const oldRating = currentTask.rating != null ? Number(currentTask.rating) : null;
+      if (newRating !== oldRating) {
+        await Task.updateRating(id, newRating);
+        await log(id, user_id, user_name, "rating_changed", `${oldRating ?? "—"} → ${newRating ?? "—"}`);
+      }
     }
 
     res.json({ success: true, message: "Task updated successfully" });
@@ -1141,7 +1167,7 @@ export async function creatorDecision(req, res) {
     const { id } = req.params;
     const user_id   = req.user.id;
     const user_name = req.user.name ?? "Someone";
-    const { decision, approval_note, rejection_note } = req.body;
+    const { decision, approval_note, rejection_note, rating } = req.body;
 
     const task = await Task.getById(id);
     if (!task)
@@ -1155,14 +1181,27 @@ export async function creatorDecision(req, res) {
 
     // ── APPROVE
     if (decision === "approved") {
-      await Task.markCompleted(id);
-      await Task.updateStatus(id, "completed");
+      let taskRating = null;
+      if (task.task_type === "assigned") {
+        const r = Number(rating);
+        if (!Number.isInteger(r) || r < 1 || r > 10) {
+          return res.status(400).json({
+            success: false,
+            message: "Rating (1–10) is required when completing an assigned task",
+          });
+        }
+        taskRating = r;
+      }
+
+      await Task.markCompleted(id, taskRating);
 
       const l1 = await Task.getActiveL1(id);
       if (l1) await Task.approveAssignmentCompletion(l1.assignment_id, user_id);
 
-      if (approval_note?.trim())
-        await Task.addChatMessage(id, user_id, `[Final Approval] ${approval_note.trim()}`);
+      const ratingPart = taskRating != null ? `Rating: ${taskRating}/10` : "";
+      const notePart = approval_note?.trim() || "";
+      const completedMsg = [ratingPart, notePart].filter(Boolean).join(" — ");
+      await Task.addChatMessage(id, user_id, `[Completed] ${completedMsg || "Task completed"}`);
 
       await log(id, user_id, user_name, "task_completed", `Creator approved — task completed`);
 

@@ -6,6 +6,10 @@ import { addTaskActivityLog, getTaskActivityLog, getTaskActivityLogCount, taskUn
 async function roleFilter(userRole, userId, report = false) {
   const role = userRole === "team" ? "executive_assistant" : userRole;
 
+  if (role === "super_admin" || role === "admin") {
+    return { clause: null, values: [] };
+  }
+
   let isManager = false;
   let department_id = null;
 
@@ -103,6 +107,7 @@ const Task = {
       "t.title",
       "t.priority",
       "t.status",
+      "t.rating",
       "t.due_date",
       "t.current_target_at",
       "t.created_at",
@@ -206,7 +211,7 @@ const Task = {
 
     return dbQuery(
       `SELECT DISTINCT
-        t.task_id, t.title, t.description, t.priority, t.status,
+        t.task_id, t.title, t.description, t.priority, t.status, t.rating,
         t.task_type, t.is_recurring, t.recurrence_type, t.creator_type,
 
         TO_CHAR(t.due_date, 'YYYY-MM-DD') AS due_date,
@@ -237,12 +242,8 @@ const Task = {
         ${taskLogCountSubquery("t")} AS log_count,
         (${taskUnseenUpdatesSql("t", "?")}) AS has_unseen_updates,
 
-        CASE 
-          WHEN t.status = 'pending' AND (lc.attachments IS NULL OR COALESCE(jsonb_array_length(lc.attachments::jsonb), 0) = 0)
-          THEN NULL
-          ELSE lc.message
-        END AS last_message,
-        
+        lc.message AS last_message,
+
         lc.created_at AS last_message_at,
         TO_CHAR(tsn.reminder_at, 'YYYY-MM-DD HH24:MI') AS reminder_date
 
@@ -503,7 +504,7 @@ const Task = {
   async getById(id) {
     const rows = await dbQuery(
       `SELECT
-         t.task_id, t.title, t.description, t.priority, t.status, t.task_type,
+         t.task_id, t.title, t.description, t.priority, t.status, t.task_type, t.rating,
          t.is_recurring, t.recurrence_type, t.creator_type, t.created_by,
 
          TO_CHAR(t.due_date,           'YYYY-MM-DD')       AS due_date,
@@ -669,11 +670,25 @@ const Task = {
   },
 
   // MARK COMPLETED
-  async markCompleted(task_id) {
+  async markCompleted(task_id, rating = null) {
+    if (rating != null) {
+      return dbQuery(
+        `UPDATE task_tasks SET status = 'completed', completed_at = NOW(), updated_at = NOW(), rating = ?
+         WHERE task_id = ?`,
+        [rating, task_id]
+      );
+    }
     return dbQuery(
       `UPDATE task_tasks SET status = 'completed', completed_at = NOW(), updated_at = NOW()
        WHERE task_id = ?`,
       [task_id]
+    );
+  },
+
+  async updateRating(task_id, rating) {
+    return dbQuery(
+      `UPDATE task_tasks SET rating = ?, updated_at = NOW() WHERE task_id = ?`,
+      [rating, task_id]
     );
   },
 

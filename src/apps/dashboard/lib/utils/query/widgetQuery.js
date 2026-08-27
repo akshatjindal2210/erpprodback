@@ -19,7 +19,24 @@ export function dashboardUserFilterSql(filters = {}) {
   };
 }
 
-/** Super admin with no user selected: `col = {{userId}}` → `col IS NOT NULL` (all rows). */
+function sqlInList(values, { numeric = false } = {}) {
+  const list = (Array.isArray(values) ? values : [])
+    .map((value) => {
+      if (numeric) {
+        const n = Number(value);
+        return Number.isInteger(n) && n > 0 ? String(n) : null;
+      }
+      const text = String(value || "").trim();
+      return text ? quoteSqlLiteral(text) : null;
+    })
+    .filter(Boolean);
+  return list.length ? list.join(", ") : "NULL";
+}
+
+/**
+ * - matchAllUsers: `= {{userId}}` → `IS NOT NULL`
+ * - matchTeamUsers (manager dept): `= {{userId}}` → `IN (…)`
+ */
 export function applyDashboardUserPlaceholders(sql, filters = {}) {
   const { userIdSql, usernameSql, nameSql } = dashboardUserFilterSql(filters);
   let resolved = String(sql || "");
@@ -28,6 +45,14 @@ export function applyDashboardUserPlaceholders(sql, filters = {}) {
       .replace(/=\s*\{\{\s*(?:userId|userid|user_id)\s*\}\}/gi, " IS NOT NULL")
       .replace(/=\s*\{\{\s*username\s*\}\}/gi, " IS NOT NULL")
       .replace(/=\s*\{\{\s*name\s*\}\}/gi, " IS NOT NULL");
+  } else if (filters?.matchTeamUsers) {
+    const idIn = sqlInList(filters.teamUserIds, { numeric: true });
+    const usernameIn = sqlInList(filters.teamUsernames);
+    const nameIn = sqlInList(filters.teamNames);
+    resolved = resolved
+      .replace(/=\s*\{\{\s*(?:userId|userid|user_id)\s*\}\}/gi, ` IN (${idIn})`)
+      .replace(/=\s*\{\{\s*username\s*\}\}/gi, ` IN (${usernameIn})`)
+      .replace(/=\s*\{\{\s*name\s*\}\}/gi, ` IN (${nameIn})`);
   }
   return resolved
     .replace(/\{\{\s*userId\s*\}\}/gi, userIdSql)

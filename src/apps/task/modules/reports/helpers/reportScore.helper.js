@@ -130,4 +130,5 @@ export const REPORT_SCORE_FORMULAS = {
   day: "Day % = (sum of each user's person day %) ÷ (number of users)",
   person: "Person period % = (sum of person day % in From–To) ÷ (number of days)",
   overall: "Score % = (sum of person period %) ÷ (number of persons)",
+  no_verify: "No-verify / scoring-off completed task = full credit 10/10 (100%). Verified task = (rating ÷ 10) × 100%.",
 };

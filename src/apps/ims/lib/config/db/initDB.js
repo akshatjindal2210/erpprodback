@@ -9,6 +9,8 @@ import { createForwardingNoteMasterTable } from "../tables/forwarding-note/forwa
 import { createForwardingNoteItemWiseTable } from "../tables/forwarding-note/forwarding_note_item_wise.table.js";
 import { createOutEntryTable } from "../tables/out-entry/out_entry.table.js";
 import { createOutEntryScannedBoxTable } from "../tables/out-entry/out_entry_scanned_box.table.js";
+// import { createGateEntryTable } from "../tables/gate-entry/gate_entry.table.js";
+// import { createGateEntryScannedBoxTable } from "../tables/gate-entry/gate_entry_scanned_box.table.js";
 import { createStockAdjustmentTable } from "../tables/stock-adjustment/stock_adjustment.table.js";
 import { createTransactionBoxTable } from "../tables/transaction-log/transaction_box.table.js";
 import { createCategoryTable } from "../tables/category/category.table.js";
@@ -29,6 +31,8 @@ export async function initImsDB() {
   await createForwardingNoteItemWiseTable();
   await createQcHoldMaterialTable();
   await createOutEntryTable();
+  // await createGateEntryTable();
+  // await createGateEntryScannedBoxTable();
   await createBoxTable();
   await createDailyProdTable();
   await createSchedulePlanTable();

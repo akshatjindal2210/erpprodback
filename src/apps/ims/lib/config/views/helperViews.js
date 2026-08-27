@@ -11,8 +11,8 @@ const itemModal = [...itemPicker, "unit", "category_id"];
 function fieldsForItems(mod, act) {
   if (mod == null || act == null) return null;
 
-  if (mod === "packing_standard" && act === VIEW) return [...itemPicker];
-  if (mod === "packing_standard" && isForm(act)) return [...itemModal];
+  if (mod === "packing_standard" && act === VIEW) return [...itemPicker, "weight"];
+  if (mod === "packing_standard" && isForm(act)) return [...itemModal, "weight"];
 
   if (mod === "stock_adjustment" && act === VIEW) return [...itemPicker];
   if (mod === "stock_adjustment" && isForm(act)) return [...itemModal];

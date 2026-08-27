@@ -11,6 +11,7 @@ import { isConfiguredWidgetQuery, DASHBOARD_QUERY_TIMEOUT_MS } from "../../../li
 import { normalizeUrlRequestOptions, validateJsonUrl } from "../../../lib/utils/query/urlJsonQuery.js";
 import { fetchImsDataRaw } from "../../../../ims/lib/services/ims.service.js";
 import { clearImsMetaForResponse } from "../../../../ims/lib/utils/erp-api/lookup/imsMeta.js";
+import { findUsers } from "../../../../core/identity/users/models/user.model.js";
 
 const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings", "rmstore"]);
 const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql", "hybrid", "url_json"]);
@@ -266,6 +267,33 @@ function isSuperAdminUser(user) {
   return userType === "super_admin" || userType === "super admin";
 }
 
+function normalizeDashboardUserType(user) {
+  return String(user?.type || user?.role || "").toLowerCase().trim();
+}
+
+/** Designation on type=user (not a role) — department Manager / Executive. */
+function dashboardDesignationName(user) {
+  return String(user?.designation_name || user?.designation?.name || "").toLowerCase().trim();
+}
+
+/**
+ * all | department | self
+ * Role wins: EA/admin/SA never use designation.
+ */
+function getDashboardUserFilterScope(user) {
+  const type = normalizeDashboardUserType(user);
+  if (
+    type === "super_admin" ||
+    type === "super admin" ||
+    type === "admin" ||
+    type === "executive_assistant"
+  ) {
+    return "all";
+  }
+  if (dashboardDesignationName(user) === "manager") return "department";
+  return "self";
+}
+
 function loggedInDashboardUserFilter(user) {
   const selfId = Number(user?.id);
   const username = String(user?.username || user?.email || "").trim() || null;
@@ -277,18 +305,84 @@ function loggedInDashboardUserFilter(user) {
   };
 }
 
-function resolveWidgetFiltersForUser(req, rawFilters = {}) {
+async function listActiveDashboardFilterUsers({ departmentId = null } = {}) {
+  const filters = { status: "active" };
+  const deptNum = Number(departmentId);
+  if (Number.isInteger(deptNum) && deptNum > 0) {
+    filters.department_id = deptNum;
+  }
+  const result = await findUsers({
+    page: 1,
+    limit: 5000,
+    filters,
+    fields: ["id", "name", "username", "department_id", "status"],
+    sort: { by: "name", order: "ASC" },
+  });
+  return (Array.isArray(result?.data) ? result.data : [])
+    .map((row) => {
+      const id = Number(row?.id);
+      const username = String(row?.username || "").trim();
+      if (!Number.isInteger(id) || id <= 0 || !username) return null;
+      return { id, username, name: String(row?.name || "").trim() || username };
+    })
+    .filter(Boolean);
+}
+
+function findAllowedDashboardFilterUser(team, { userId, username } = {}) {
+  const idNum = Number(userId);
+  const uname = String(username || "").trim().toLowerCase();
+  return (Array.isArray(team) ? team : []).find((row) => {
+    if (Number.isInteger(idNum) && idNum > 0 && Number(row.id) === idNum) return true;
+    if (uname && String(row.username).toLowerCase() === uname) return true;
+    return false;
+  }) || null;
+}
+
+async function resolveWidgetFiltersForUser(req, rawFilters = {}) {
   const normalized = normalizeWidgetFilters(rawFilters);
-  if (isSuperAdminUser(req.user)) {
+  const actor = req.user;
+  const scope = getDashboardUserFilterScope(actor);
+
+  if (scope === "all") {
     return {
       ...normalized,
       matchAllUsers: !normalized.userId && !normalized.username,
+      matchTeamUsers: false,
     };
   }
-  const self = loggedInDashboardUserFilter(req.user);
+
+  if (scope === "department") {
+    const deptId = Number(actor?.department_id ?? actor?.department?.id) || null;
+    const team = await listActiveDashboardFilterUsers({ departmentId: deptId });
+    const picked = findAllowedDashboardFilterUser(team, normalized);
+    if (picked) {
+      return {
+        ...normalized,
+        matchAllUsers: false,
+        matchTeamUsers: false,
+        userId: picked.id,
+        username: picked.username,
+        name: picked.name,
+      };
+    }
+    return {
+      ...normalized,
+      matchAllUsers: false,
+      matchTeamUsers: true,
+      teamUserIds: team.map((u) => u.id),
+      teamUsernames: team.map((u) => u.username),
+      teamNames: team.map((u) => u.name),
+      userId: null,
+      username: null,
+      name: null,
+    };
+  }
+
+  const self = loggedInDashboardUserFilter(actor);
   return {
     ...normalized,
     matchAllUsers: false,
+    matchTeamUsers: false,
     userId: self.userId,
     username: self.username,
     name: self.name,
@@ -715,7 +809,7 @@ export const previewWidgetHandler = async (req, res) => {
 
     if (isErpMssqlDirectRequest(body, q)) {
       const { filter, runtimeFilters, requestedData } = parseErpMssqlDirectRequest(body, q);
-      const resolvedRuntime = resolveWidgetFiltersForUser(req, runtimeFilters);
+      const resolvedRuntime = await resolveWidgetFiltersForUser(req, runtimeFilters);
       validateExternalMssqlWidgetQuery(filter, requestedData);
       const result = await executeReadOnlyWidgetQuery(filter, {
         source: requestedData,
@@ -737,7 +831,7 @@ export const previewWidgetHandler = async (req, res) => {
     );
     if (isExternalMssqlSource(dbSource) && !isHybridWidget) {
       const rawSql = resolveErpMssqlSqlFromRequest(body, q);
-      const runtimeFilters = resolveWidgetFiltersForUser(
+      const runtimeFilters = await resolveWidgetFiltersForUser(
         req,
         resolveErpMssqlRuntimeFilters(body, q),
       );
@@ -757,7 +851,7 @@ export const previewWidgetHandler = async (req, res) => {
     }
 
     const rawSql = String(body.query || q.query || "").trim();
-    const filters = resolveWidgetFiltersForUser(req, body.filters || q.filters || {});
+    const filters = await resolveWidgetFiltersForUser(req, body.filters || q.filters || {});
     const result = await executeReadOnlyWidgetQuery(rawSql, {
       source: dbSource, 
       filters,
@@ -792,7 +886,7 @@ export const hybridPreviewHandler = async (req, res) => {
 
     const source = normalizeDbSource(db_source || "erp_mssql");
     const externalSource = source === "hybrid" ? "erp_mssql" : source;
-    const runtimeFilters = resolveWidgetFiltersForUser(req, filters || {});
+    const runtimeFilters = await resolveWidgetFiltersForUser(req, filters || {});
 
     // --- URL Step 1 (additive) ---
     if (externalSource === "url_json") {
@@ -1247,6 +1341,27 @@ export const getDashboardStatusHandler = async (req, res) => {
   }
 };
 
+/** Active users for dashboard filter — scope from getDashboardUserFilterScope only. */
+export const getDashboardFilterUsersHandler = async (req, res) => {
+  try {
+    const actor = req.user;
+    const scope = getDashboardUserFilterScope(actor);
+    if (scope === "self") {
+      return res.json({ success: true, data: { users: [] } });
+    }
+    const deptId =
+      scope === "department"
+        ? Number(actor?.department_id ?? actor?.department?.id) || null
+        : null;
+    const users = await listActiveDashboardFilterUsers(
+      deptId ? { departmentId: deptId } : {},
+    );
+    return res.json({ success: true, data: { users } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 export const getDashboardWidgetsHandler = async (req, res) => {
   try {
     const appKey = normalizeAppKey(req.body?.app_key);
@@ -1254,7 +1369,7 @@ export const getDashboardWidgetsHandler = async (req, res) => {
     const requestedDashboardKey = normalizeDashboardKey(req.body?.dashboard_key || "default");
     const userType = String(req.user?.type || "").toLowerCase().trim();
     const isSuperAdmin = userType === "super_admin" || userType === "super admin";
-    const runtimeFilters = resolveWidgetFiltersForUser(req, req.body?.filters || {});
+    const runtimeFilters = await resolveWidgetFiltersForUser(req, req.body?.filters || {});
 
     const configRow = await resolveRuntimeDashboardConfig(appKey, req.user?.id, requestedDashboardKey, {
       isSuperAdmin,
