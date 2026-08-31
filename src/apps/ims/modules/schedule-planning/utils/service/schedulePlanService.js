@@ -2,7 +2,7 @@ import dbQuery, { withTransaction } from "../../../../../../config/db/db.js";
 import { fetchImsDataRaw } from "../../../../lib/services/ims.service.js";
 import { buildInventoryReportSql } from "../../../inventory-report/utils/sql/inventoryReportSql.js";
 import { deletePlans, loadAllPlanMap, loadCustomerMonthScheduleItems, loadDispatchCompleteTabItems, loadDispatchPlanItems, loadPlanRow, loadScheduleDispatchQtyMap, planKey, upsertPlan, updatePlanStatus, setPlanShortageNo } from "../db/schedulePlanDb.js";
-import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canReadyFrom, canRejectFrom, canTransitionAsSuperAdmin, normalizeScheduleStatus, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel, isScheduleCompleteRow, isScheduleOpenPlanRow, filterScheduleRowsByBalanceTab } from "../status/schedulePlanStatus.js";
+import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFrom, canPlanFrom, canReadyFrom, canRejectFrom, canTransitionAsSuperAdmin, normalizeScheduleStatus, parseListFilter, SCHEDULE_LIST_FILTER, SCHEDULE_REPORT_FILTER, statusLabel, actionTypeLabel, isScheduleCompleteRow, isScheduleOpenPlanRow, isScheduleRecommendedRow, isActiveDbOnlyScheduleRow, filterScheduleRowsByBalanceTab, scheduleDispatchMatchPct, scheduleDispatchWorkableQty, compareRecommendedDispatchRows } from "../status/schedulePlanStatus.js";
 import { insertScheduleTransaction, loadActionDates, loadActionReasons, loadItemTransactionHistory, loadLastTransactionMap, loadPlanDateHistoryMap, deletePlanTransactions } from "../db/schedulePlanTransactionDb.js";
 import { buildScheduleComparison, hasScheduleComparisonMismatch } from "../compare/schedulePlanCompare.js";
 import { toPublicImsMessage } from "../../../../lib/utils/erp-api/lookup/imsMeta.js";
@@ -671,8 +671,8 @@ export async function listSchedulePlanning(body = {}) {
   ]);
 
   let records = buildFilteredList(imsResult?.records, filterMode, planMap, lastTxnMap);
-  // Hide DB-only rows no longer returned by ERP/API (all tabs including Comparison).
-  records = records.filter((r) => !r.comparison?.missing_ims);
+  // Hide stale DB-only rows (removed from IMS) unless still active in plan/dispatch workflow.
+  records = records.filter((r) => !r.comparison?.missing_ims || isActiveDbOnlyScheduleRow(r));
   records = applyReportScopeFilter(records, body);
   records = enrichPlanDateHistory(records, planDateHistoryMap);
   records = await enrichFgStock(records);
@@ -1295,9 +1295,9 @@ export async function completeSchedulePlan(body = {}, userName = null, opts = {}
 }
 
 /**
- * Today Dispatch Plan filters (UI: Plan | Complete).
- * Same month, action_date month-start → today.
- * Plan → Planned (1) / Running (2) + balance > 0
+ * Today Dispatch Plan filters (UI: Recommended | Plan | Complete).
+ * Recommended → current schmonth Plan/Running/Ready with balance > 0 and FG > 0
+ * Plan → Planned/Running + action_date this month + balance > 0
  * Complete → Complete, or Planned/Running with balance 0
  */
 function parseDispatchStatusFilter(rawStatus) {
@@ -1312,12 +1312,27 @@ function parseDispatchStatusFilter(rawStatus) {
       ],
       showComplete: true,
       actionTypes: ["plan", "complete", "ready"],
+      recommended: false,
+    };
+  }
+  if (mode === "recommended") {
+    return {
+      codes: [
+        SCHEDULE_PLAN_STATUS.PLANNED,
+        SCHEDULE_PLAN_STATUS.RUNNING,
+        SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH,
+        SCHEDULE_PLAN_STATUS.PENDING, // legacy 0 → Ready to Dispatch
+      ],
+      showComplete: false,
+      actionTypes: ["plan", "ready"],
+      recommended: true,
     };
   }
   return {
     codes: [SCHEDULE_PLAN_STATUS.PLANNED, SCHEDULE_PLAN_STATUS.RUNNING],
     showComplete: false,
     actionTypes: ["plan"],
+    recommended: false,
   };
 }
 
@@ -1446,8 +1461,10 @@ export async function listCustomerMonthSchedules(body = {}) {
 
 /**
  * Today Dispatch Plan for Forwarding Note.
- * Same month · action_date month-start → today · no Hold.
- * Plan tab → balance_qty > 0 · Complete tab → balance_qty <= 0 or manual Complete.
+ * Same month · no Hold.
+ * Recommended → current schmonth Plan/Running/Ready with balance + FG (all that qualify).
+ * Plan → action_date month-start→today · Planned/Running · balance > 0.
+ * Complete → balance <= 0 or manual Complete.
  */
 export async function listScheduleDispatchPlan(body = {}) {
   const now = new Date();
@@ -1455,20 +1472,35 @@ export async function listScheduleDispatchPlan(body = {}) {
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const day = String(now.getDate()).padStart(2, "0");
   const toDate = `${year}-${month}-${day}`;
-  const { codes, showComplete, actionTypes } = parseDispatchStatusFilter(body?.status);
+  const { codes, showComplete, actionTypes, recommended } = parseDispatchStatusFilter(body?.status);
   const finYearId = String(body?.fin_year_id ?? "").trim() || null;
 
   try {
-    const rows = showComplete
-      ? await loadDispatchCompleteTabItems(toDate, finYearId, codes)
-      : await loadDispatchPlanItems(`${year}-${month}-01`, toDate, codes, { actionTypes });
+    let rows;
+    if (showComplete || recommended) {
+      // Month-wide load (LEFT JOIN txn) so Recommended gets every Plan/Ready/Running line.
+      rows = await loadDispatchCompleteTabItems(toDate, finYearId, codes);
+    } else {
+      rows = await loadDispatchPlanItems(`${year}-${month}-01`, toDate, codes, { actionTypes, finYearId });
+    }
 
     let records = await enrichFgStock((rows || []).map(mapDispatchPlanRecord));
     records = await enrichScheduleDispatchBalances(records);
     records = decorateScheduleDisplayRows(records);
-    records = filterScheduleRowsByBalanceTab(records, { complete: showComplete });
+    records = recommended
+      ? records.filter(isScheduleRecommendedRow)
+      : filterScheduleRowsByBalanceTab(records, { complete: showComplete });
 
-    records.sort((a, b) => Number(b.balance_qty ?? 0) - Number(a.balance_qty ?? 0));
+    if (recommended) {
+      records = records.map((r) => ({
+        ...r,
+        dispatch_match_pct: scheduleDispatchMatchPct(r),
+        dispatch_workable_qty: scheduleDispatchWorkableQty(r),
+      }));
+      records.sort(compareRecommendedDispatchRows);
+    } else {
+      records.sort((a, b) => Number(b.balance_qty ?? 0) - Number(a.balance_qty ?? 0));
+    }
 
     return { success: true, records };
   } catch (err) {

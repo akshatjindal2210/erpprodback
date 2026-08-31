@@ -6,9 +6,16 @@
 /** Current user display name for audit write (snapshot). */
 export function auditUserName(req) {
   const name = req?.user?.name;
-  if (name == null) return null;
-  const trimmed = String(name).trim();
-  return trimmed || null;
+  if (name != null) {
+    const trimmed = String(name).trim();
+    if (trimmed) return trimmed;
+  }
+  const username = req?.user?.username;
+  if (username != null) {
+    const trimmed = String(username).trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
 }
 
 /**

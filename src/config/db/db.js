@@ -1,7 +1,10 @@
 import pkg from "pg";
 import config from "../app/config.js";
 
-const { Pool } = pkg;
+const { Pool, types } = pkg;
+
+/** DATE → 'YYYY-MM-DD' string (avoid JS Date timezone shifting month/day). */
+types.setTypeParser(1082, (val) => (val == null ? null : String(val).slice(0, 10)));
 
 const pool = new Pool({
   ...config.db,

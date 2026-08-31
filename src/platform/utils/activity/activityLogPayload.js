@@ -54,6 +54,7 @@ const ENTITY_LABELS = {
   inventory_inwards: "inward",
   out_entry: "out entry",
   packing_standard: "packing standard",
+  shortage: "shortage",
   forwarding_note_master: "forwarding note",
   stock_adjustment: "adjustment",
   location_master: "location",

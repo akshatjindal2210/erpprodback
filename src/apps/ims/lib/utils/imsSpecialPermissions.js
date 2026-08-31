@@ -32,3 +32,26 @@ export function hasDirectForwardingNotePermission(user) {
   const perms = parseSpecialPermissions(user?.special_permissions);
   return Boolean(perms?.ims?.direct_forwarding_note);
 }
+
+/** Assign / change item-wise bill on forwarding note (super_admin always). */
+export function hasManageForwardingBillPermission(user) {
+  if (isSuperAdminUser(user)) return true;
+  const perms = parseSpecialPermissions(user?.special_permissions);
+  return Boolean(perms?.ims?.manage_forwarding_bill);
+}
+
+/**
+ * Packing sticker Deviation when monthly qty exceeds requirement.
+ * Super Admin always; others need special_permissions.ims.packing_deviation.
+ * (override_stock_shortage kept as alias for older grants.)
+ */
+export function canOverrideStockShortage(user) {
+  if (isSuperAdminUser(user)) return true;
+  const perms = parseSpecialPermissions(user?.special_permissions);
+  return Boolean(perms?.ims?.packing_deviation || perms?.ims?.override_stock_shortage);
+}
+
+/** Alias — same check as canOverrideStockShortage. */
+export function canCreatePackingDeviation(user) {
+  return canOverrideStockShortage(user);
+}

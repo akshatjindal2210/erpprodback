@@ -58,8 +58,8 @@ async function readJsonResponse(response) {
 
 /**
  * @param {string} requestedData - IMS dataset key (e.g. "pack")
- * @param {string} [filter] - optional SQL-style filter string (e.g. `dailyprod.docdt >= '2Apr2026' and dailyprod.docdt <= '6Apr2026'`)
- * @returns {Promise<any[]>} IMS `records` array, or **[]** if IMS is down / error (does not throw).
+ * @param {string} [filter] - optional SQL-style filter string
+ * @returns {Promise<any[]>} IMS records[], or [] if IMS is down / error (does not throw).
  */
 export const fetchFromIMS = async (requestedData, filter = null, options = {}) => {
   try {
@@ -86,7 +86,7 @@ export const fetchFromIMS = async (requestedData, filter = null, options = {}) =
   }
 };
 
-/** Full IMS JSON (`success`, `records`, `message`) — never throws; network/HTML errors become `{ success: false, records: [] }`. */
+/** Full IMS JSON — never throws; network errors → { success: false, records: [] }. */
 export const fetchImsDataRaw = async (requestedData, filter = null, options = {}) => {
   try {
     const response = await imsPostJsonBody(requestedData, filter, options?.timeoutMs);
@@ -98,13 +98,8 @@ export const fetchImsDataRaw = async (requestedData, filter = null, options = {}
     if (!ok) {
       const message = json.message || `IMS HTTP ${response.status}`;
       const records = Array.isArray(json.records) ? json.records : [];
-      // Only flag global IMS meta when nothing usable came back.
       if (!records.length) noteImsIssue(message);
-      return {
-        success: false,
-        records,
-        message,
-      };
+      return { success: false, records, message };
     }
     if (!json.success) {
       const records = Array.isArray(json.records) ? json.records : [];

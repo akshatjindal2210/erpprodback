@@ -24,6 +24,8 @@ import { resolveViewsFields } from "../../../lib/config/views/helperViews.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { fillMissingBoxItemFields } from "../utils/inventory/boxListItemMeta.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
+import { canCreatePackingDeviation } from "../../../lib/utils/imsSpecialPermissions.js";
+import { evaluateMonthlyPackingLimit } from "../../../lib/utils/inventory/monthlyPackingLimit.js";
 
 const BOX_STORE_FILTER_FIELDS = [ "box_uid", "box_no_uid", "packing_number", "sa_id", "location_id", "in_uid", "out_uid", "from_date", "to_date", "journey" ];
 
@@ -1063,6 +1065,61 @@ export const stickerFetchBox = async (req, res) => {
 
 // POST /box/sticker/generate
 // Body: { doc_no, itemdcode, acc_name, acc_code, packing_config }
+function monthlyLimitExceededPayload(limitCheck, canCreateDeviation) {
+  const excess = Number(limitCheck.excess_qty) || 0;
+  const baseMsg = `Monthly packing qty (${limitCheck.projected_total}) exceeds the allowed limit (${limitCheck.allowed_limit}).` + (excess > 0 ? ` Short by ${excess}.` : "");
+  return {
+    success: false,
+    code: "MONTHLY_QTY_EXCEEDED",
+    message: canCreateDeviation
+      ? `${baseMsg} Create Deviation first, then generate stickers.`
+      : `${baseMsg} A user with Packing Deviation permission must create Deviation first.`,
+    can_create_deviation: canCreateDeviation,
+    requested_qty: limitCheck.requested_qty,
+    month_used_qty: limitCheck.month_used_qty,
+    projected_total: limitCheck.projected_total,
+    monthly_requirement: limitCheck.monthly_requirement,
+    base_allowed_limit: limitCheck.base_allowed_limit,
+    base_qty: limitCheck.base_qty,
+    tolerance_qty: limitCheck.tolerance_qty,
+    shortage_buffer_qty: limitCheck.shortage_buffer_qty,
+    allowed_limit: limitCheck.allowed_limit,
+    excess_qty: excess,
+    shortage_qty_percentage: limitCheck.shortage_qty_percentage,
+    year_month: limitCheck.year_month,
+  };
+}
+
+/** Preview monthly packing limit for a packing row (Create Deviation drawer). */
+export const previewMonthlyPackingLimit = async (req, res) => {
+  try {
+    const { doc_no, itemdcode, total_qty, packing_config, doc_dt, year_month } = req.body || {};
+    if (!itemdcode) {
+      return res.status(400).json({ success: false, message: "itemdcode is required." });
+    }
+
+    const limitCheck = await evaluateMonthlyPackingLimit({
+      itemdcode,
+      total_qty,
+      packing_config,
+      doc_no: doc_no != null ? String(doc_no).trim() : null,
+      doc_dt,
+      year_month,
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        ...limitCheck,
+        can_create_deviation: canCreatePackingDeviation(req.user),
+      },
+    });
+  } catch (err) {
+    console.error("previewMonthlyPackingLimit Error:", err);
+    return res.status(500).json({ success: false, message: err.message || "Failed to evaluate monthly limit." });
+  }
+};
+
 export const generateStickers = async (req, res) => {
   try {
     // 1. Validation: Basic fields check
@@ -1096,7 +1153,19 @@ export const generateStickers = async (req, res) => {
       });
     }
 
-    // SA add boxes (e.g. *_SA*_* UIDs) may exist on the same packing; production stickers use normal UIDs only.
+    const limitCheck = await evaluateMonthlyPackingLimit({
+      itemdcode,
+      total_qty,
+      packing_config,
+      doc_no: docNo,
+      doc_dt,
+    });
+
+    if (!limitCheck.ok && !limitCheck.skipped) {
+      return res.status(400).json(
+        monthlyLimitExceededPayload(limitCheck, canCreatePackingDeviation(req.user))
+      );
+    }
 
     const boxNoUidPrefix = await getBoxNoUidPrefix();
     const stickerCategoryId = parseInt(String(category_id ?? ""), 10);

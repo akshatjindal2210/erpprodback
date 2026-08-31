@@ -128,6 +128,23 @@ export async function getDefaultListViewSpanDays() {
   return LIST_VIEW_SPAN_FALLBACK;
 }
 
+/**
+ * Allowed over-qty % for packing/sticker create.
+ * Base = approved shortage total (Packing Entry). Example: base 2000, 10% → allowed 2200.
+ */
+export async function getShortageQtyPercentage() {
+  try {
+    const raw = await getAppConfigValue(APP_CONFIG_KEYS.SHORTAGE_QTY_PERCENTAGE);
+    if (raw != null && String(raw).trim() !== "") {
+      const n = Number(String(raw).trim());
+      if (Number.isFinite(n)) return Math.max(0, Math.min(100, n));
+    }
+  } catch {
+    /* table missing */
+  }
+  return 0;
+}
+
 /** Upsert; `config_value` stored as text (e.g. "true", "false"). */
 export async function getAllAppConfig() {
   const rows = await dbQuery(

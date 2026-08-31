@@ -216,6 +216,17 @@ export const CRUD_MODULES = {
     filterFields: ["hold_id", "packing_number", "item_dcode", "status", "approved", "from_date", "to_date", "open_only"],
     searchFields: ["q.packing_number", "q.remarks", "q.reason", "q.status", "q.created_by"]
   },
+  shortage: {
+    idField: "id",
+    listFields: [
+      "s.id", "s.itemdcode", "s.itemcode", "s.type", "s.qty",
+      "s.month", "s.remarks",
+      "s.approved", "s.approved_by", "s.approved_at",
+      "s.created_by", "s.created_at", "s.updated_by", "s.updated_at",
+    ],
+    filterFields: ["id", "itemdcode", "type", "approved", "month", "from_date", "to_date"],
+    searchFields: ["itemcode", "type", "itemdcode"],
+  },
 };
 
 export const getCrudModuleConfig = (moduleKey) => CRUD_MODULES[moduleKey] ?? null;

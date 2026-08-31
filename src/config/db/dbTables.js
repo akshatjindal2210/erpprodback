@@ -53,8 +53,7 @@ export const DB_TABLES = {
     "ims_forwarding_note_item_wise",
     "ims_out_entry",
     "ims_out_entry_scanned_box",
-    // "ims_gate_entry",
-    // "ims_gate_entry_scanned_box",
+    "ims_gate_entry",
     "ims_stock_adjustment",
     "ims_box_table",
     "ims_box_download_log",
@@ -67,6 +66,7 @@ export const DB_TABLES = {
     "ims_audit_locations",
     "ims_audit_scans",
     "ims_qc_hold_material",
+    "ims_shortage",
   ],
 
   /** Task application tables. */

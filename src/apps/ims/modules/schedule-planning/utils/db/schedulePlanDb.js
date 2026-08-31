@@ -130,6 +130,7 @@ export async function setPlanShortageNo({ fin_year_id, schno, itemdcode, shortag
 }
 
 const DISPATCH_PLAN_STATUSES = new Set([
+  SCHEDULE_PLAN_STATUS.PENDING, // legacy Ready to Dispatch (0)
   SCHEDULE_PLAN_STATUS.PLANNED,
   SCHEDULE_PLAN_STATUS.RUNNING,
   SCHEDULE_PLAN_STATUS.COMPLETE,
@@ -148,7 +149,7 @@ export async function loadDispatchPlanItems(
   fromDate,
   toDate,
   statuses = [SCHEDULE_PLAN_STATUS.PLANNED],
-  { actionTypes = ["plan"] } = {}
+  { actionTypes = ["plan"], finYearId = null } = {}
 ) {
   const statusList = uniqueStatuses(statuses, [SCHEDULE_PLAN_STATUS.PLANNED]).filter((s) =>
     DISPATCH_PLAN_STATUSES.has(s)
@@ -159,6 +160,7 @@ export async function loadDispatchPlanItems(
     .map((t) => String(t || "").trim().toLowerCase())
     .filter((t) => DISPATCH_PLAN_TXN_TYPES.has(t));
   const txnTypes = types.length ? types : ["plan"];
+  const fyFilter = String(finYearId ?? "").trim();
 
   const rows = await dbQuery(
     `SELECT
@@ -184,8 +186,9 @@ export async function loadDispatchPlanItems(
        AND lt.action_date <= $2::date
        AND EXTRACT(MONTH FROM lt.action_date) = EXTRACT(MONTH FROM $2::date)
        AND EXTRACT(YEAR FROM lt.action_date) = EXTRACT(YEAR FROM $2::date)
+       AND ($5 = '' OR sp.fin_year_id = $5)
      ORDER BY lt.action_date ASC, sp.schno, sp.item_code`,
-    [fromDate, toDate, codes, txnTypes]
+    [fromDate, toDate, codes, txnTypes, fyFilter]
   );
   return rows || [];
 }

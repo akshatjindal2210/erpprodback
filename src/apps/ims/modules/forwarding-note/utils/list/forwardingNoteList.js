@@ -20,7 +20,7 @@ import dbQuery from "../../../../../../config/db/db.js";
  */
 export const BILL_DROPDOWN_MATCH = "acc_item";
 
-export const BILL_SOURCE_PREFER = "live";     // When live invfnote + DB saved bill both exist, which one to show. Change this only: "db" | "live"
+export const BILL_SOURCE_PREFER = "db";     // When live invfnote + DB saved bill both exist, which one to show. Change this only: "db" | "live"
 
 /** Super admin uses broader match; normal users match packing too. */
 export function resolveBillDropdownMatchForUser(user = {}) {
@@ -51,7 +51,6 @@ export function buildBillDropdownMatchKey(row = {}, matchMode = BILL_DROPDOWN_MA
   return null;
 }
 
-/** Build the same-style key from an IMS invfnote record (prefers uid, else muid). */
 export function invfnoteBillDropdownMatchKey(rec = {}, matchMode = BILL_DROPDOWN_MATCH) {
   // uid example: 2003-17831-37010-9600 · muid example: 2003-17831-37010
   const raw = String(rec?.uid ?? "").trim() || String(rec?.muid ?? "").trim();
@@ -76,6 +75,100 @@ export function invfnoteBillDropdownMatchKey(rec = {}, matchMode = BILL_DROPDOWN
     return parts[0] + "-" + parts[1] + "-" + parts[2] + "-" + parts[3];
   }
   return "";
+}
+
+/** IMS invfnote status — only green bills are selectable on FN item-wise. */
+export function isGreenInvfnoteRecord(rec = {}) {
+  return String(rec?.status ?? "").trim().toLowerCase() === "green";
+}
+
+export function normalizeInvfnoteBillNo(rec = {}) {
+  return String(rec?.prnbillno ?? rec?.PrnBillNo ?? rec?.bill_no ?? rec?.billno ?? rec?.DocNo ?? "").trim();
+}
+
+/** Bill dropdown rows: all matching bills; green flag marks what can be saved. */
+export function buildInvfnoteBillOptions(records = [], { keySet, matchMode, search = "" } = {}) {
+  const keys = keySet instanceof Set ? keySet : new Set(keySet || []);
+  if (!keys.size) return [];
+
+  const needle = String(search ?? "").trim().toLowerCase();
+  const byKey = new Map();
+
+  for (const rec of records || []) {
+    const matchKey = invfnoteBillDropdownMatchKey(rec, matchMode);
+    if (!matchKey || !keys.has(matchKey)) continue;
+
+    const billNo = normalizeInvfnoteBillNo(rec);
+    if (!billNo) continue;
+
+    const dedupeKey = `${billNo}::${matchKey}`;
+    if (needle && !billNo.toLowerCase().includes(needle) && !matchKey.toLowerCase().includes(needle)) {
+      continue;
+    }
+
+    const status = String(rec?.status ?? "").trim() || null;
+    const green = isGreenInvfnoteRecord(rec);
+    const billdt = String(rec?.billdt ?? "").trim() || null;
+
+    const prev = byKey.get(dedupeKey);
+    if (!prev) {
+      byKey.set(dedupeKey, {
+        id: dedupeKey,
+        bill_no: billNo,
+        billno: billNo,
+        billdt,
+        uid: String(rec?.uid ?? "").trim() || null,
+        muid: String(rec?.muid ?? "").trim() || null,
+        match_key: matchKey,
+        status,
+        is_green: green,
+      });
+      continue;
+    }
+
+    if (green) prev.is_green = true;
+    if (!prev.status && status) prev.status = status;
+    if (!prev.billdt && billdt) prev.billdt = billdt;
+    if (!prev.uid && rec?.uid) prev.uid = String(rec.uid).trim();
+  }
+
+  const rows = [...byKey.values()].map((row) => ({
+    ...row,
+    selectable: row.is_green === true,
+  }));
+
+  rows.sort((a, b) => {
+    if (a.is_green !== b.is_green) return a.is_green ? -1 : 1;
+    return String(a.bill_no).localeCompare(String(b.bill_no), undefined, { sensitivity: "base" });
+  });
+  return rows;
+}
+
+export function invfnoteHasGreenBillForItems(records, billno, items = [], matchMode = BILL_DROPDOWN_MATCH) {
+  const billNeedle = String(billno ?? "").trim().toLowerCase();
+  if (!billNeedle) return false;
+
+  const keys = [];
+  for (const item of items || []) {
+    const key = buildBillDropdownMatchKey(item, matchMode);
+    if (!key) return false;
+    keys.push(key);
+  }
+  if (!keys.length) return false;
+
+  for (const key of keys) {
+    let matched = false;
+    for (const rec of records || []) {
+      if (!isGreenInvfnoteRecord(rec)) continue;
+      if (normalizeInvfnoteBillNo(rec).toLowerCase() !== billNeedle) continue;
+      if (invfnoteBillDropdownMatchKey(rec, matchMode) === key) {
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) return false;
+  }
+  return true;
 }
 
 function buildForwardingInvfnoteRowKey(row = {}) {
@@ -220,7 +313,8 @@ export async function enrichForwardingItemRows(rows = []) {
     itemCodeOut: "item_code",
     itemDescOut: "item_desc",
   });
-  return mergeForwardingInvfnoteFields(enriched);
+  const withBills = await mergeForwardingInvfnoteFields(enriched);
+  return withBills;
 }
 
 export async function enrichForwardingNoteDetail(data) {

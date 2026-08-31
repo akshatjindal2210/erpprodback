@@ -1,11 +1,33 @@
-import { findPermissions, findUserPermissions, findPermission, findPermissionById, upsertPermission, upsertBulkPermissions, updatePermissionById, deletePermission, deletePermissionById } from "../models/permission.model.js";
+import { findPermissions, findUserPermissions, findPermission, findPermissionById, upsertPermission, upsertBulkPermissions, updatePermissionById, deletePermission, deletePermissionById, findUserAppAccess } from "../models/permission.model.js";
 import User from "../../users/models/user.model.js";
 import { findModule } from "../../modules/models/module.model.js";
 import { getCrudModuleConfig } from "../../../lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../lib/utils/query/queryHelper.js";
 import { auditUserName } from "../../../lib/utils/auth/approval.js";
+import { clearCachedPermissions, setCachedPermissions } from "../../../../../config/auth/permissionCache.js";
+import { emitToUser } from "../../../lib/utils/realtime/socket.js";
+import { cleanPermissionMap } from "../../../lib/utils/helper/helper.js";
 
 const PERM_CFG = getCrudModuleConfig("user_permissions");
+
+async function refreshUserPermissionCache(userId) {
+  const targetId = Number(userId);
+  if (!Number.isFinite(targetId) || targetId <= 0) return;
+  clearCachedPermissions(targetId);
+  try {
+    const freshPermissions = await findUserPermissions(targetId);
+    const cleaned = (freshPermissions || []).map(cleanPermissionMap);
+    setCachedPermissions(targetId, cleaned);
+    const freshAppAccess = await findUserAppAccess(targetId);
+    emitToUser(targetId, "permissions_updated", {
+      user_id: targetId,
+      permissions: cleaned,
+      app_access: freshAppAccess,
+    });
+  } catch (err) {
+    console.error("[permissions] cache refresh failed:", err?.message || err);
+  }
+}
 
 export const getUserPermissions = async (req, res) => {
   try {
@@ -50,6 +72,7 @@ export const setPermission = async (req, res) => {
     if (!module) return res.status(404).json({ success: false, message: "Module not found" });
 
     const permission = await upsertPermission(user_id, module_id, { can_view, can_add, can_edit, can_delete });
+    await refreshUserPermissionCache(user_id);
     res.json({ success: true, data: permission });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -67,6 +90,7 @@ export const setBulkPermissions = async (req, res) => {
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
     const result = await upsertBulkPermissions(user_id, permissions);
+    await refreshUserPermissionCache(user_id);
     res.json({ success: true, data: result });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -79,6 +103,7 @@ export const removePermission = async (req, res) => {
     if (id) {
       const deleted = await deletePermissionById(id, { deleted_by: auditUserName(req) });
       if (!deleted) return res.status(404).json({ success: false, message: "Permission not found" });
+      if (deleted.user_id != null) await refreshUserPermissionCache(deleted.user_id);
       return res.json({ success: true, message: "Permission removed" });
     }
 
@@ -86,6 +111,7 @@ export const removePermission = async (req, res) => {
     if (!permission) return res.status(404).json({ success: false, message: "Permission not found" });
 
     await deletePermission(user_id, module_id, { deleted_by: auditUserName(req) });
+    await refreshUserPermissionCache(user_id);
     res.json({ success: true, message: "Permission removed" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -104,6 +130,7 @@ export const updatePermission = async (req, res) => {
     );
 
     if (!updated) return res.status(404).json({ success: false, message: "Permission not found" });
+    if (updated.user_id != null) await refreshUserPermissionCache(updated.user_id);
     res.json({ success: true, data: updated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

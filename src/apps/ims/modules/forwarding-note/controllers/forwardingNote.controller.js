@@ -2,7 +2,7 @@ import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertFor
 import { buildForwardingAvailableBoxes, findItemDcodesWithForwardingAvailableStock } from "../utils/stock/forwardingAvailableStock.js";
 import { buildPackingNumberSet, filterForwardingBoxesByCategoryId, filterErpStockByCategory } from "../utils/packing/forwardingPackingCategory.js";
 import { enrichRowsWithIMS } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
-import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo, buildBillDropdownMatchKey, invfnoteBillDropdownMatchKey, resolveBillDropdownMatchForUser } from "../utils/list/forwardingNoteList.js";
+import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo, buildBillDropdownMatchKey, buildInvfnoteBillOptions, invfnoteHasGreenBillForItems, resolveBillDropdownMatchForUser } from "../utils/list/forwardingNoteList.js";
 import { saveForwardingNoteItems, replaceForwardingNoteItems, validateExistingForwardingNoteItems } from "../utils/items/forwardingNoteItemsWrite.js";
 import { buildForwardingLockMessage } from "../utils/messages/forwardingNoteMessages.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
@@ -15,7 +15,7 @@ import { sanitizeSearch, buildForwardingNoteBillDocument } from "../../../../cor
 import { fetchFromIMS } from "../../../lib/services/ims.service.js";
 import { findCategories } from "../../category/models/category.model.js";
 import { fetchErpFgStockForItem, summarizeErpFgRecords } from "../../../lib/utils/erp-api/stock/erpFgStock.js";
-import { hasDirectForwardingNotePermission } from "../../../lib/utils/imsSpecialPermissions.js";
+import { hasDirectForwardingNotePermission, hasManageForwardingBillPermission } from "../../../lib/utils/imsSpecialPermissions.js";
 
 const FORWARDING_CFG = getCrudModuleConfig("forwarding_note_master");
 const FORWARDING_ITEM_CFG = getCrudModuleConfig("forwarding_note_item_wise");
@@ -172,7 +172,7 @@ export const createForwardingNote = async (req, res) => {
 
 /**
  * Assign bill onto item-wise line(s).
- * First save: any editor. Changing an already-saved DB bill: super admin only.
+ * Requires special permission manage_forwarding_bill (or super_admin).
  * Body: { item_ids: number[], billno, billdt? }
  */
 export const assignForwardingNoteItemBill = async (req, res) => {
@@ -181,32 +181,78 @@ export const assignForwardingNoteItemBill = async (req, res) => {
     const itemIds = Array.isArray(body.item_ids) ? body.item_ids : body.item_id != null ? [body.item_id] : [];
     const billno = String(body.billno ?? body.bill_no ?? "").trim();
     if (!itemIds.length) {
-      return res.status(400).json({ success: false, message: "item_ids required" });
+      return res.status(400).json({ success: false, message: "At least one item line is required." });
     }
     if (!billno) {
-      return res.status(400).json({ success: false, message: "billno required" });
+      return res.status(400).json({ success: false, message: "Bill number is required." });
     }
 
-    const isSuperAdmin = String(req.user?.type ?? req.user?.role ?? "").toLowerCase() === "super_admin";
-    if (!isSuperAdmin) {
-      const existing = await dbQuery(
-        `SELECT id FROM ims_forwarding_note_item_wise WHERE is_deleted = false AND id = ANY($1::int[]) AND NULLIF(trim(bill_no), '') IS NOT NULL LIMIT 1`,
-        [itemIds.map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0)]
-      );
-      if (existing?.length) {
-        return res.status(403).json({ success: false, message: "Only super admin can change a saved bill." });
+    if (!hasManageForwardingBillPermission(req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: "You do not have permission to assign or change forwarding note bills.",
+      });
+    }
+
+    const ids = itemIds.map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0);
+    const lineRows = await dbQuery(
+      `SELECT fi.id, fi.bill_no, fnm.acc_code, fi.item_dcode, fi.packing_number, fi.total_qty, (oe.out_uid IS NOT NULL AND COALESCE(oe.scan_complete, false) = true) AS out_entry_complete
+       FROM ims_forwarding_note_item_wise fi
+       INNER JOIN ims_forwarding_note_master fnm ON fnm.fuid = fi.fuid AND fnm.is_deleted = false
+       LEFT JOIN LATERAL (
+         SELECT oe.out_uid, oe.scan_complete
+         FROM ims_out_entry oe
+         WHERE oe.fuid = fnm.fuid AND oe.is_deleted = false
+         ORDER BY oe.out_uid DESC
+         LIMIT 1
+       ) oe ON true
+       WHERE fi.is_deleted = false AND fi.id = ANY($1::int[])`,
+      [ids]
+    );
+
+    if (!lineRows?.length) {
+      return res.status(404).json({ success: false, message: "No item lines were found." });
+    }
+
+    for (const row of lineRows) {
+      if (!row.out_entry_complete) {
+        return res.status(409).json({
+          success: false,
+          message: "A bill can only be assigned after store-out is complete for this line.",
+        });
       }
     }
 
+    const matchMode = resolveBillDropdownMatchForUser(req.user);
+    const invfnoteRecords = await fetchFromIMS("invfnote");
+    if (
+      !invfnoteHasGreenBillForItems(
+        invfnoteRecords,
+        billno,
+        lineRows.map((row) => ({
+          acc_code: row.acc_code,
+          item_dcode: row.item_dcode,
+          packing_number: row.packing_number,
+          total_qty: row.total_qty,
+        })),
+        matchMode
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: `Bill "${billno}" cannot be assigned on this item line.`,
+      });
+    }
+
     const updated = await assignForwardingNoteItemBills({
-      itemIds,
+      itemIds: ids,
       bill_no: billno,
       bill_dt: body.billdt ?? body.bill_dt ?? null,
       userName: auditUserName(req),
     });
 
     if (!updated?.length) {
-      return res.status(404).json({ success: false, message: "No item lines updated" });
+      return res.status(404).json({ success: false, message: "No item lines were updated." });
     }
 
     await logActivity(req, {
@@ -229,7 +275,7 @@ export const assignForwardingNoteItemBill = async (req, res) => {
     }
     const enriched = await enrichForwardingItemRows(refreshed);
 
-    res.json({ success: true, data: enriched });
+    res.json({ success: true, message: "Bill saved successfully.", data: enriched });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
@@ -420,19 +466,10 @@ export const getForwardingNoteTransportersViews = async (req, res) => {
   }
 };
 
-function normalizeImsBillNo(record) {
-  const raw =
-    record?.prnbillno ??
-    record?.PrnBillNo ??
-    record?.bill_no ??
-    record?.billno ??
-    "";
-  return String(raw ?? "").trim();
-}
-
 /**
- * Live invfnote bills for blank item lines.
+ * Live invfnote bills for item-wise assign dropdown.
  * Match mode: super_admin → acc_item · others → acc_item_packing.
+ * Only green-status bills can be saved; all matching bills are listed with status.
  * Request body: `items: [{ acc_code, item_dcode, packing_number, total_qty? }]`.
  */
 export const getForwardingNoteBillNumbersViews = async (req, res) => {
@@ -455,39 +492,7 @@ export const getForwardingNoteBillNumbersViews = async (req, res) => {
     }
 
     const records = await fetchFromIMS("invfnote");
-    const seen = new Set();
-    const rows = [];
-
-    for (const rec of records || []) {
-      const matchKey = invfnoteBillDropdownMatchKey(rec, matchMode);
-      if (!matchKey || !keySet.has(matchKey)) continue;
-
-      const billNo = normalizeImsBillNo(rec);
-      if (!billNo) continue;
-
-      const dedupeKey = `${billNo}::${matchKey}`;
-      if (seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-
-      if (search && !billNo.toLowerCase().includes(search) && !matchKey.toLowerCase().includes(search)) {
-        continue;
-      }
-
-      rows.push({
-        id: dedupeKey,
-        bill_no: billNo,
-        billno: billNo,
-        billdt: String(rec?.billdt ?? "").trim() || null,
-        uid: String(rec?.uid ?? "").trim() || null,
-        muid: String(rec?.muid ?? "").trim() || null,
-        match_key: matchKey,
-        status: String(rec?.status ?? "").trim() || null,
-      });
-    }
-
-    rows.sort((a, b) =>
-      String(a.bill_no).localeCompare(String(b.bill_no), undefined, { sensitivity: "base" })
-    );
+    const rows = buildInvfnoteBillOptions(records, { keySet, matchMode, search });
 
     const total = rows.length;
     const start = (page - 1) * limit;

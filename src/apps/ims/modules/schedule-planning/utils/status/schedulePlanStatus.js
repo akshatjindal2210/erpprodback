@@ -263,6 +263,71 @@ export function isScheduleCompleteRow(row) {
   return false;
 }
 
+/** DB plan with no matching IMS row — still show if actively planned or dispatchable. */
+export function isActiveDbOnlyScheduleRow(row) {
+  if (!row?.comparison?.missing_ims) return false;
+  const st = normalizeScheduleStatus(row?.db_is_planned ?? row?.is_planned);
+  return (
+    st === SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH ||
+    st === SCHEDULE_PLAN_STATUS.PLANNED ||
+    st === SCHEDULE_PLAN_STATUS.RUNNING
+  );
+}
+
+/** Recommended tab: Plan / Running / Ready + qty left to forward + FG stock to dispatch. */
+export function isScheduleRecommendedRow(row) {
+  const st = normalizeScheduleStatus(row?.db_is_planned ?? row?.is_planned);
+  const bal = scheduleBalanceQty(row);
+  if (bal == null || bal <= 0) return false;
+
+  const fgStock = Number(row?.fg_stock_qty ?? row?.in_hand_qty ?? 0);
+  if (!Number.isFinite(fgStock) || fgStock <= 0) return false;
+
+  return (
+    st === SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH ||
+    st === SCHEDULE_PLAN_STATUS.PLANNED ||
+    st === SCHEDULE_PLAN_STATUS.RUNNING
+  );
+}
+
+/**
+ * How well FG stock covers remaining balance (0–100).
+ * 100 = FG can fully cover balance (best to work first).
+ */
+export function scheduleDispatchMatchPct(row) {
+  const bal = scheduleBalanceQty(row);
+  if (bal == null || bal <= 0) return 0;
+  const fg = Number(row?.fg_stock_qty ?? row?.in_hand_qty ?? 0);
+  if (!Number.isFinite(fg) || fg <= 0) return 0;
+  return Math.min(100, Math.round((Math.min(fg, bal) / bal) * 100));
+}
+
+/** Qty we can actually forward now = min(FG, balance). */
+export function scheduleDispatchWorkableQty(row) {
+  const bal = scheduleBalanceQty(row);
+  if (bal == null || bal <= 0) return 0;
+  const fg = Number(row?.fg_stock_qty ?? row?.in_hand_qty ?? 0);
+  if (!Number.isFinite(fg) || fg <= 0) return 0;
+  return Math.min(fg, bal);
+}
+
+/** Recommended list: highest match % first, then larger workable qty, then earlier due date. */
+export function compareRecommendedDispatchRows(a, b) {
+  const pctA = Number(a?.dispatch_match_pct ?? scheduleDispatchMatchPct(a));
+  const pctB = Number(b?.dispatch_match_pct ?? scheduleDispatchMatchPct(b));
+  if (pctB !== pctA) return pctB - pctA;
+
+  const workA = Number(a?.dispatch_workable_qty ?? scheduleDispatchWorkableQty(a));
+  const workB = Number(b?.dispatch_workable_qty ?? scheduleDispatchWorkableQty(b));
+  if (workB !== workA) return workB - workA;
+
+  const dateA = String(a?.action_date ?? "").slice(0, 10);
+  const dateB = String(b?.action_date ?? "").slice(0, 10);
+  if (dateA && dateB && dateA !== dateB) return dateA.localeCompare(dateB);
+
+  return String(a?.schno ?? "").localeCompare(String(b?.schno ?? ""), undefined, { numeric: true });
+}
+
 /** Plan tab: Plan/Running + balance_qty > 0. */
 export function isScheduleOpenPlanRow(row) {
   const st = Number(row?.db_is_planned ?? row?.is_planned ?? SCHEDULE_PLAN_STATUS.PENDING);

@@ -37,9 +37,39 @@ export function buildImsItemMap(items = []) {
       item_code: row.Item_Code ?? row.item_code ?? null,
       item_desc: row.ItemDesc ?? row.itemdesc ?? row.item_desc ?? null,
       weight: row.weight ?? row.Weight ?? null,
+      grpname: row.Grpname ?? row.grpname ?? row.GrpName ?? row.group_name ?? null,
+      primitemdcode: canonicalCode(row.PrimItemdcode ?? row.primitemdcode ?? row.PrimItemDcode) || null,
+      primitem_code: row.primitem_code ?? row.Primitem_code ?? row.PrimItem_Code ?? row.PrimItem_code ?? null,
+      primitemdesc: row.PrimItemdesc ?? row.primitemdesc ?? row.primItemDesc ?? null,
     });
   }
   return map;
+}
+
+/** Display-only primary / group from IMS item map (not stored). */
+export function resolveImsItemDisplay(itemMap, itemdcodeRaw) {
+  const dcode = canonicalCode(itemdcodeRaw);
+  const item = dcode && itemMap ? itemMap.get(dcode) : null;
+  if (!item) {
+    return {
+      item_code: null,
+      item_desc: null,
+      grpname: null,
+      primitemdcode: null,
+      primitem_code: null,
+      primitemdesc: null,
+    };
+  }
+  const primDcode = item.primitemdcode || null;
+  const primFromMap = primDcode && itemMap ? itemMap.get(primDcode) : null;
+  return {
+    item_code: item.item_code || null,
+    item_desc: item.item_desc || null,
+    grpname: item.grpname || null,
+    primitemdcode: primDcode,
+    primitem_code: item.primitem_code || primFromMap?.item_code || null,
+    primitemdesc: item.primitemdesc || primFromMap?.item_desc || null,
+  };
 }
 
 export function buildImsLedgerMap(ledgers = []) {
@@ -188,12 +218,18 @@ export async function enrichRowsWithIMS(rows = [], options = {}) {
       itemCode != null &&
       rawOut != null &&
       canonicalCode(rawOut) === itemCode;
+    const primDcode = item?.primitemdcode || canonicalCode(row?.primitemdcode) || null;
+    const primFromMap = primDcode ? itemMap.get(primDcode) : null;
 
     return {
       ...row,
       [itemCodeOut]: item?.item_code ?? (outLooksLikeDcode ? null : rawOut) ?? null,
       [itemDescOut]: item?.item_desc ?? row?.[itemDescOut] ?? null,
-      [accNameOut]: accName ?? row?.[accNameOut] ?? null
+      [accNameOut]: accName ?? row?.[accNameOut] ?? null,
+      grpname: item?.grpname ?? row?.grpname ?? null,
+      primitem_code: item?.primitem_code ?? primFromMap?.item_code ?? row?.primitem_code ?? null,
+      primitemdcode: primDcode ?? row?.primitemdcode ?? null,
+      primitemdesc: item?.primitemdesc ?? primFromMap?.item_desc ?? row?.primitemdesc ?? null,
     };
   });
 }

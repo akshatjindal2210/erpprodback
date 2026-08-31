@@ -1,5 +1,5 @@
 import express from "express";
-import { getBoxes, getBoxById, createBox, updateBox, deleteBox, getInHandBoxesByPacking, getStockAdjustmentAddBoxesByPattern, stickerFetchBox, generateStickers, previewSticker, removeGeneratedStickers, trackStickerDownload, trackBulkDownload, overrideCustomer, getBoxDownloadHistory, getPackingDownloadSummary, renderSingleSticker, renderBulkStickers, stickerManagementList, createOverrideRequest, listOverrideRequests, approveOverrideRequest, updateOverrideRequest, getBoxesViews } from "../controllers/box.controller.js";
+import { getBoxes, getBoxById, createBox, updateBox, deleteBox, getInHandBoxesByPacking, getStockAdjustmentAddBoxesByPattern, stickerFetchBox, generateStickers, previewSticker, previewMonthlyPackingLimit, removeGeneratedStickers, trackStickerDownload, trackBulkDownload, overrideCustomer, getBoxDownloadHistory, getPackingDownloadSummary, renderSingleSticker, renderBulkStickers, stickerManagementList, createOverrideRequest, listOverrideRequests, approveOverrideRequest, updateOverrideRequest, getBoxesViews } from "../controllers/box.controller.js";
 
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
@@ -17,6 +17,7 @@ router.post("/sticker/fetch", authenticate, boxStickerPrintAccess(), stickerFetc
 // ——— Bulk generate ————————————————————————————————————————————
 router.post("/sticker/generate", authenticate, accessControl("packing_entry", ["add", "edit"]), generateStickers);
 router.post("/sticker/preview", authenticate, accessControl("packing_entry", ["view", "add", "edit"]), previewSticker);
+router.post("/sticker/monthly-limit", authenticate, accessControl("packing_entry", ["view", "add", "edit"]), previewMonthlyPackingLimit);
 router.post("/sticker/remove", authenticate, accessControl("packing_entry", "delete"), removeGeneratedStickers);
 
 router.post("/sticker/download", authenticate, accessControl("packing_entry", "edit"), trackStickerDownload);
