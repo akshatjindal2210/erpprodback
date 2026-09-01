@@ -311,7 +311,7 @@ export function scheduleDispatchWorkableQty(row) {
   return Math.min(fg, bal);
 }
 
-/** Recommended list: highest match % first, then larger workable qty, then earlier due date. */
+/** Recommended: highest FG match % first (100% top → lower below), then workable qty, due date. */
 export function compareRecommendedDispatchRows(a, b) {
   const pctA = Number(a?.dispatch_match_pct ?? scheduleDispatchMatchPct(a));
   const pctB = Number(b?.dispatch_match_pct ?? scheduleDispatchMatchPct(b));
