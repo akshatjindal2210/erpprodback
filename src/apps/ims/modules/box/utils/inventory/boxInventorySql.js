@@ -2,7 +2,7 @@
  * SQL fragments for box inventory — mirrors backend/src/utils/box/boxInventory.js
  *
  * 1. out_uid empty  → in hand (inventory counts)
- * 2. out_uid set + stock adjustment (sa_entry_type stock_out, or out_uid = sa_id) → not inventory
+ * 2. out_uid set + stock_out (or legacy out_uid = sa_id when not stock_in) → not inventory
  * 3. out_uid set + not SA out (typical out entry; sa_id may stay from prior SA add) → not inventory
  */
 
@@ -21,6 +21,19 @@ export function boxSourceSql(alias = "b") {
 
 export function sqlBoxSaIdSet(alias = "b") {
   return `${alias}.sa_id IS NOT NULL`;
+}
+
+/**
+ * Legacy minus marker: out_uid copied from sa_id.
+ * Skip when sa_entry_type is stock_in — that sa_id is the *add* that created the box,
+ * so a later out-entry with the same numeric id is dispatch, not minus.
+ */
+function sqlBoxLegacySaMinusMarker(alias = "b") {
+  return `(
+    ${sqlBoxSaIdSet(alias)}
+    AND ${alias}.out_uid = ${alias}.sa_id
+    AND (${alias}.sa_entry_type IS DISTINCT FROM 'stock_in')
+  )`;
 }
 
 /** Case 1 — physically in hand (includes QC hold). */
@@ -54,10 +67,7 @@ export function sqlBoxStockAdjustmentOut(alias = "b") {
     AND NOT ${sqlBoxOutUidEmpty(alias)}
     AND (
       ${alias}.sa_entry_type = 'stock_out'
-      OR (
-        ${sqlBoxSaIdSet(alias)}
-        AND ${alias}.out_uid = ${alias}.sa_id
-      )
+      OR ${sqlBoxLegacySaMinusMarker(alias)}
     )
   `.trim();
 }
@@ -205,10 +215,7 @@ export function sqlBoxOutwardDispatchAny(alias = "b") {
     AND NOT ${sqlBoxOutUidEmpty(alias)}
     AND NOT (
       ${alias}.sa_entry_type IS NOT DISTINCT FROM 'stock_out'
-      OR (
-        ${sqlBoxSaIdSet(alias)}
-        AND ${alias}.out_uid = ${alias}.sa_id
-      )
+      OR ${sqlBoxLegacySaMinusMarker(alias)}
     )
   `.trim();
 }
@@ -225,10 +232,7 @@ export function sqlBoxOutwardDispatch(alias = "b") {
     AND NOT ${sqlBoxOutUidEmpty(alias)}
     AND NOT (
       ${alias}.sa_entry_type IS NOT DISTINCT FROM 'stock_out'
-      OR (
-        ${sqlBoxSaIdSet(alias)}
-        AND ${alias}.out_uid = ${alias}.sa_id
-      )
+      OR ${sqlBoxLegacySaMinusMarker(alias)}
     )
     AND EXISTS (
       SELECT 1 FROM ims_out_entry o

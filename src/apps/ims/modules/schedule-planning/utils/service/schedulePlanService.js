@@ -347,18 +347,16 @@ function buildFilteredList(imsRecords, filterMode, planMap, lastTxnMap = new Map
   }
 }
 
-function computeDispatchBoxSplit(workableQty, qtyPerBox) {
+function computeDispatchBoxCount(workableQty, qtyPerBox) {
   const q = Math.max(0, Number(workableQty) || 0);
+  if (q <= 0) return 0;
   const per = Number(qtyPerBox);
-  if (!Number.isFinite(per) || per <= 0 || q <= 0) {
-    return { dispatch_full_boxes: 0, dispatch_loose_boxes: 0 };
-  }
+  if (!Number.isFinite(per) || per <= 0) return 1;
   const full = Math.floor(q / per);
-  const rem = q % per;
-  return { dispatch_full_boxes: full, dispatch_loose_boxes: rem > 0 ? 1 : 0 };
+  return full + (q % per > 0 ? 1 : 0);
 }
 
-/** Recommended dispatch — full + loose box count from packing standard × workable qty. */
+/** Recommended dispatch — simple box count from packing standard × workable qty. */
 async function enrichRecommendedDispatchBoxes(records) {
   if (!records.length) return records;
   const dcodes = [
@@ -394,7 +392,7 @@ async function enrichRecommendedDispatchBoxes(records) {
     return {
       ...r,
       qty_per_box: per,
-      ...computeDispatchBoxSplit(workable, per),
+      dispatch_box_count: computeDispatchBoxCount(workable, per),
     };
   });
 }

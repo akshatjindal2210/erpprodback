@@ -2,7 +2,7 @@
  * Box availability — `out_uid` + `sa_id` + `sa_entry_type`.
  *
  * 1. out_uid empty  → in hand (inventory)
- * 2. out_uid set + stock adjustment out (stock_out, or out_uid = sa_id) → not in hand
+ * 2. out_uid set + stock adjustment out (stock_out, or legacy out_uid = sa_id when not stock_in) → not in hand
  * 3. out_uid set + outward dispatch (out entry) → not in hand
  */
 
@@ -26,10 +26,16 @@ export function isStockAdjustmentIn(box) {
   return String(box?.sa_entry_type ?? "").trim() === "stock_in";
 }
 
-/** Case 2 — stock adjustment minus (out_uid usually equals sa_id). */
+/**
+ * Case 2 — stock adjustment minus.
+ * `out_uid === sa_id` is a legacy minus marker, but SA *add* boxes keep `sa_id`
+ * from stock_in. If they later dispatch and out-entry id collides with that sa_id
+ * (e.g. sticker SA366 + OUT-366), treat as dispatch, not minus.
+ */
 export function isBoxStockAdjustmentOut(box) {
   if (!box || box.is_deleted) return false;
   if (isStockAdjustmentOut(box)) return true;
+  if (isStockAdjustmentIn(box)) return false;
   if (isOutUidEmpty(box)) return false;
   if (isSaIdEmpty(box)) return false;
   const out = Number(box.out_uid);
