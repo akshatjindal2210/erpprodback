@@ -1,7 +1,7 @@
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { fetchImsDataRaw } from "../../../lib/services/ims.service.js";
 import { enrichRowsWithIMS, getImsMapsSafe } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
-import { findGateRows, findGateByBillNo, findGateByUid, findSavedGateBillSet, insertGateEntry, softDeleteGate, updateGateEntryMeta } from "../models/gateEntry.model.js";
+import { findGateRows, findGateByBillNo, findGateByUid, findNextGateUid, findSavedGateBillSet, insertGateEntry, softDeleteGate, updateGateEntryMeta } from "../models/gateEntry.model.js";
 import { parseBillScanPayload } from "../utils/parseBillScan.js";
 import { GATE_PENDING_MIN_BILL_DT, parseBillDateHint, resolveGateImsBilldtFilter } from "../utils/imsBillDateFilter.js";
 
@@ -200,6 +200,7 @@ async function buildOpenPayload(bill_no, bill_dt_hint = null) {
     transporter_name: String(invmnote?.transporter_name ?? invmnote?.transporter ?? invmnote?.transport ?? "").trim() || null,
     vehicle_number: String(invmnote?.vehicle_number ?? invmnote?.vehicleno ?? invmnote?.vehicle_no ?? "").trim() || null,
     remarks: "",
+    next_uid: await findNextGateUid(),
     invmnote,
     invfnote,
   };

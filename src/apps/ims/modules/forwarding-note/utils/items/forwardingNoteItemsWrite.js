@@ -13,8 +13,10 @@ import { deleteForwardingNoteItems, findActiveForwardingNoteItemsByFuid, insertF
 import { docNoFromStandardBoxNoUid } from "../../../../lib/stickerUidHelpers.js";
 import { buildForwardingAvailableBoxes, enrichForwardingBoxesWithPackingStd, inferForwardingPackingStandardQty, isForwardingLooseBox, sumBoxQty } from "../stock/forwardingAvailableStock.js";
 import { loadScheduleQtyForKeys, planKey } from "../../../schedule-planning/utils/db/schedulePlanDb.js";
+import { fetchImsDataRaw } from "../../../../lib/services/ims.service.js";
 
 const FN_RESERVE_LOCK_NS = 71;
+const IMS_SCHEDULE_LIST = "schdule";
 
 async function enrichSelectedBoxes(selected_boxes = []) {
   if (!selected_boxes?.length) return [];
@@ -83,23 +85,53 @@ function buildScheduleDemandByKey(items = []) {
     if (!(qty > 0)) continue;
 
     const key = planKey(schno, itemdcode);
-    const prev = byKey.get(key) || { qty: 0, targets: [], useSystemStd: false };
+    const prev = byKey.get(key) || { qty: 0, targets: [], useSystemStd: false, item_code: null };
     const targetRaw = item?.dispatch_target;
     const target =
       targetRaw != null && targetRaw !== "" && Number.isFinite(Number(targetRaw))
         ? Number(targetRaw)
         : null;
+    const itemCode = String(item?.item_code ?? item?.itemcode ?? "").trim() || prev.item_code || null;
     byKey.set(key, {
       qty: prev.qty + qty,
       targets: target != null ? [...prev.targets, target] : prev.targets,
       useSystemStd: prev.useSystemStd || Boolean(item?.use_system_std),
+      item_code: itemCode,
     });
   }
   return byKey;
 }
 
-/** Schedule-linked FN lines must exist on the current plan (balance may go negative after FIFO over-dispatch). */
+/** Fill missing schno|item keys from IMS Ready schedule (not only local schedule_plan). */
+async function fillScheduleQtyFromIms(qtyMap, pairs = []) {
+  const need = new Set(
+    (pairs || [])
+      .filter((p) => !(Number(qtyMap.get(planKey(p.schno, p.itemdcode)) ?? 0) > 0))
+      .map((p) => planKey(p.schno, p.itemdcode))
+  );
+  if (!need.size) return qtyMap;
+
+  try {
+    const json = await fetchImsDataRaw(IMS_SCHEDULE_LIST, null);
+    const records = Array.isArray(json?.records) ? json.records : [];
+    for (const row of records) {
+      const schno = String(row?.schno ?? row?.SchNo ?? "").trim();
+      const itemdcode = Number(row?.itemdcode ?? row?.item_dcode ?? row?.ItemDcode);
+      if (!schno || !Number.isFinite(itemdcode)) continue;
+      const key = planKey(schno, itemdcode);
+      if (!need.has(key)) continue;
+      const qty = Number(row?.totalqty ?? row?.total_qty ?? row?.TotalQty ?? 0);
+      if (qty > 0) qtyMap.set(key, qty);
+    }
+  } catch (err) {
+    console.error("[forwarding-note] IMS schedule qty fallback failed", err?.message || err);
+  }
+  return qtyMap;
+}
+
+/** Schedule-linked FN lines must exist on plan DB or IMS Ready schedule. */
 export async function assertScheduleDispatchWithinBalance(items = [], exclude_fuid = null) {
+  void exclude_fuid;
   const demandByKey = buildScheduleDemandByKey(items);
   if (!demandByKey.size) return;
 
@@ -108,14 +140,16 @@ export async function assertScheduleDispatchWithinBalance(items = [], exclude_fu
     return { schno, itemdcode: Number(itemdcode) };
   });
 
-  const scheduleQtyMap = await loadScheduleQtyForKeys(pairs);
+  let scheduleQtyMap = await loadScheduleQtyForKeys(pairs);
+  scheduleQtyMap = await fillScheduleQtyFromIms(scheduleQtyMap, pairs);
 
-  for (const key of demandByKey.keys()) {
+  for (const [key, demand] of demandByKey.entries()) {
     const scheduleQty = Number(scheduleQtyMap.get(key) ?? 0);
     if (!(scheduleQty > 0)) {
       const [schno, itemdcode] = key.split("|");
+      const itemLabel = String(demand?.item_code ?? "").trim() || itemdcode;
       throw reserveValidationError(
-        `Schedule Sch ${schno} item ${itemdcode} is not on the current schedule plan.`
+        `Schedule Sch ${schno} item ${itemLabel} is not on the current schedule.`
       );
     }
   }

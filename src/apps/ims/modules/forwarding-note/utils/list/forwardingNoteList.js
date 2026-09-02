@@ -181,7 +181,10 @@ function buildForwardingInvfnoteRowKey(row = {}) {
 }
 
 function shouldMergeForwardingInvfnote(row = {}) {
-  return row?.out_entry_complete === true && row?.out_entry_approved === true;
+  // Show live IMS bills as soon as FN exists — out-entry complete/approved not required.
+  void row;
+  return true;
+  // return row?.out_entry_complete === true && row?.out_entry_approved === true;
 }
 
 /** Pick bill by BILL_SOURCE_PREFER when both exist. Sets bill_source: db | live. */

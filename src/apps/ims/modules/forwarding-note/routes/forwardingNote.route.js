@@ -1,5 +1,5 @@
 import express from "express";
-import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, assignForwardingNoteItemBill, deleteForwardingNote, getAvailableBoxesByItem, getAvailableItemsForForwarding, getForwardingNoteItems, lockForwardingNoteLock, unlockForwardingNoteLock, getForwardingNotesViews, printForwardingNoteBill, getForwardingNoteTransportersViews, getForwardingNoteBillNumbersViews, getErpFgStockByItem, getForwardingNoteCustomerCategory } from "../controllers/forwardingNote.controller.js";
+import { getForwardingNotes, getForwardingNoteById, createForwardingNote, updateForwardingNote, assignForwardingNoteItemBill, deleteForwardingNote, getAvailableBoxesByItem, getAvailableItemsForForwarding, getForwardingNoteItems, lockForwardingNoteLock, unlockForwardingNoteLock, getForwardingNotesViews, printForwardingNoteBill, getForwardingNoteTransportersViews, getForwardingNoteVehiclesViews, getForwardingNoteBillNumbersViews, getErpFgStockByItem, getForwardingNoteCustomerCategory } from "../controllers/forwardingNote.controller.js";
 
 import { authenticate, authorize } from "../../../lib/middleware/auth.js";
 import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
@@ -64,6 +64,9 @@ router.post("/helper", authenticate, helperAccess("forwardingNotes"), getForward
 
 // Transporter suggestions from past forwarding notes (helper)
 router.post("/transporter-helper", authenticate, accessControl("forwarding_note_master", "view"), getForwardingNoteTransportersViews);
+
+// Vehicle number suggestions from past forwarding notes (helper)
+router.post("/vehicle-helper", authenticate, accessControl("forwarding_note_master", "view"), getForwardingNoteVehiclesViews);
 
 // Bill numbers from live IMS (helper)
 router.post("/bill-helper", authenticate, accessControl("forwarding_note_master", "view"), getForwardingNoteBillNumbersViews);

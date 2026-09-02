@@ -77,6 +77,13 @@ export async function findGateByBillNo(bill_no) {
   return row || null;
 }
 
+/** Preview next OUT-/IN- id before save (MAX+1). Actual uid still comes from INSERT. */
+export async function findNextGateUid() {
+  const [row] = await dbQuery(`SELECT COALESCE(MAX(uid), 0)::int + 1 AS next_uid FROM ${T.GATE_ENTRY}`);
+  const n = Number(row?.next_uid);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
 export async function insertGateEntry({
   bill_no,
   bill_dt,

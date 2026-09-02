@@ -452,6 +452,42 @@ export const findForwardingNoteTransporters = async ({ acc_code, search, limit =
   return rows || [];
 };
 
+/** Past vehicle numbers for this customer (suggestions). */
+export const findForwardingNoteVehicles = async ({ acc_code, search, limit = 200 } = {}) => {
+  if (acc_code == null || acc_code === "") return [];
+  const n = Number(acc_code);
+  if (!Number.isFinite(n)) return [];
+
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
+  const values = [n];
+  let i = 2;
+
+  const conditions = [
+    `is_deleted = false`,
+    `acc_code = $1`,
+    `vehicle_number IS NOT NULL`,
+    `BTRIM(vehicle_number) <> ''`,
+  ];
+
+  if (search && String(search).trim()) {
+    const q = `%${String(search).trim().slice(0, 100)}%`;
+    values.push(q);
+    conditions.push(`vehicle_number ILIKE $${i++}`);
+  }
+
+  const rows = await dbQuery(
+    `SELECT vehicle_number, MAX(created_at) AS last_used_at
+     FROM ims_forwarding_note_master
+     WHERE ${conditions.join(" AND ")}
+     GROUP BY vehicle_number
+     ORDER BY last_used_at DESC
+     LIMIT $${i}`,
+    [...values, safeLimit]
+  );
+
+  return rows || [];
+};
+
 /** Last packing category used for this customer on forwarding notes. */
 export const findLastForwardingPackingCategory = async (acc_code) => {
   if (acc_code == null || acc_code === "") return null;

@@ -1,4 +1,4 @@
-import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertForwardingNote, updateForwardingNotes, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters, findLastForwardingPackingCategory } from "../models/forwardingNote.model.js";
+import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertForwardingNote, updateForwardingNotes, deleteForwardingNotes, findAvailableBoxes, isForwardingNoteLockedForOutEntry, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry, findForwardingNoteTransporters, findForwardingNoteVehicles, findLastForwardingPackingCategory } from "../models/forwardingNote.model.js";
 import { buildForwardingAvailableBoxes, findItemDcodesWithForwardingAvailableStock } from "../utils/stock/forwardingAvailableStock.js";
 import { buildPackingNumberSet, filterForwardingBoxesByCategoryId, filterErpStockByCategory } from "../utils/packing/forwardingPackingCategory.js";
 import { enrichRowsWithIMS } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
@@ -214,14 +214,15 @@ export const assignForwardingNoteItemBill = async (req, res) => {
       return res.status(404).json({ success: false, message: "No item lines were found." });
     }
 
-    for (const row of lineRows) {
-      if (!row.out_entry_complete) {
-        return res.status(409).json({
-          success: false,
-          message: "A bill can only be assigned after store-out is complete for this line.",
-        });
-      }
-    }
+    // Future: require store-out complete before bill assign
+    // for (const row of lineRows) {
+    //   if (!row.out_entry_complete) {
+    //     return res.status(409).json({
+    //       success: false,
+    //       message: "A bill can only be assigned after store-out is complete for this line.",
+    //     });
+    //   }
+    // }
 
     const matchMode = resolveBillDropdownMatchForUser(req.user);
     const invfnoteRecords = await fetchFromIMS("invfnote");
@@ -460,6 +461,26 @@ export const getForwardingNoteTransportersViews = async (req, res) => {
         transporter_id: r.transporter_id,
         last_used_at: r.last_used_at,
       })),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const getForwardingNoteVehiclesViews = async (req, res) => {
+  try {
+    const { acc_code, search, limit } = req.body || {};
+    const rows = await findForwardingNoteVehicles({ acc_code, search, limit });
+    res.json({
+      success: true,
+      data: (rows || []).map((r) => {
+        const vehicle_number = String(r.vehicle_number || "").trim();
+        return {
+          id: vehicle_number,
+          vehicle_number,
+          last_used_at: r.last_used_at,
+        };
+      }),
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
