@@ -16,16 +16,42 @@ export async function findSavedGateBillSet() {
   return new Set((rows || []).map((r) => String(r.bill_key || "").trim()).filter(Boolean));
 }
 
-export async function findGateRows() {
+export async function findGateRows({ from_date, to_date, type, permission } = {}) {
+  const values = [];
+  let i = 1;
+  const conditions = ["is_deleted = false"];
+
+  const viewDays = Number(permission?.can_view_days);
+  if (Number.isFinite(viewDays) && viewDays > 0) {
+    const days = Math.max(1, Math.floor(viewDays)) - 1;
+    conditions.push(`created_at >= CURRENT_DATE - INTERVAL '${days} days'`);
+  }
+
+  if (from_date) {
+    values.push(from_date);
+    conditions.push(`created_at >= $${i++}`);
+  }
+  if (to_date) {
+    values.push(to_date);
+    conditions.push(`created_at <= $${i++}`);
+  }
+
+  const typeVal = String(type || "").trim().toLowerCase();
+  if (typeVal && typeVal !== "all") {
+    values.push(typeVal);
+    conditions.push(`LOWER(COALESCE(type, 'out')) = $${i++}`);
+  }
+
   return dbQuery(
     `
     SELECT
-      uid, bill_no, bill_dt, remarks, transporter_name, vehicle_number,
+      uid, type, bill_no, bill_dt, remarks, transporter_name, vehicle_number,
       created_by, created_at, updated_by, updated_at, approved_at
     FROM ${T.GATE_ENTRY}
-    WHERE is_deleted = false
+    WHERE ${conditions.join(" AND ")}
     ORDER BY uid DESC
-    `
+    `,
+    values
   );
 }
 

@@ -78,9 +78,21 @@ const Holiday = {
     const values       = rows.flatMap(({ name, date }) => [name, date]);
 
     return await dbQuery(
-      `INSERT INTO ${this.tableName} (name, date) VALUES ${placeholders} ON CONFLICT (name) DO NOTHING`,
+      `INSERT INTO ${this.tableName} (name, date) VALUES ${placeholders} ON CONFLICT (date) DO NOTHING`,
       values,
     );
+  },
+
+  async findExistingDates(dates = []) {
+    const list = [...new Set((dates || []).map((d) => String(d ?? "").trim()).filter(Boolean))];
+    if (!list.length) return new Set();
+
+    const placeholders = list.map(() => "?").join(", ");
+    const rows = await dbQuery(
+      `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date FROM ${this.tableName} WHERE date IN (${placeholders})`,
+      list,
+    );
+    return new Set((rows || []).map((r) => String(r.date || "").slice(0, 10)));
   },
 };
 

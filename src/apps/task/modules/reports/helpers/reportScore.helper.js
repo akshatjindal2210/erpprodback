@@ -4,6 +4,8 @@
  * person day %, person period %, day headers, and overall Score %.
  */
 
+import { isClOccurrenceDay, parseRecurrenceArray } from "../../cl-task/helpers/recurrence/clTaskRecurrence.helper.js";
+
 function round1(n) {
   return Math.round(Number(n) * 10) / 10;
 }
@@ -13,6 +15,50 @@ function toYmd(val) {
   const s = String(val).trim();
   const iso = s.match(/^(\d{4}-\d{2}-\d{2})/);
   return iso ? iso[1] : "";
+}
+
+function isSundayYmd(ymd) {
+  const day = toYmd(ymd);
+  if (!day) return false;
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d, 12)).getUTCDay() === 0;
+}
+
+function userSkipsSundays(user) {
+  const tasks = user?.tasks || [];
+  const frequent = tasks.filter((t) => String(t.task_type || "").toLowerCase() === "frequently");
+  if (!frequent.length) return false;
+  return frequent.every((t) => !t.include_sunday);
+}
+
+function taskHasStoredDay(task, ymd) {
+  const scores = task?.day_scores && typeof task.day_scores === "object" ? task.day_scores : {};
+  const states = task?.day_states && typeof task.day_states === "object" ? task.day_states : {};
+  return Boolean(toYmd(ymd) && (ymd in scores || ymd in states));
+}
+
+function isFrequentTaskOccurrenceDay(task, ymd) {
+  if (String(task?.task_type || "").toLowerCase() !== "frequently") return false;
+  return isClOccurrenceDay(
+    task.recurrence_type || "daily",
+    {
+      recurrence_weekdays: parseRecurrenceArray(task.recurrence_weekdays),
+      recurrence_month_dates: parseRecurrenceArray(task.recurrence_month_dates),
+      recurrence_year_dates: parseRecurrenceArray(task.recurrence_year_dates),
+    },
+    ymd,
+    { includeSunday: task.include_sunday === true },
+  );
+}
+
+/** Count day in period average only when at least one task was due or has stored data. */
+function userHasScheduledDay(user, ymd, pctMap = {}) {
+  if (ymd in pctMap) return true;
+  for (const t of user?.tasks || []) {
+    if (taskHasStoredDay(t, ymd)) return true;
+    if (isFrequentTaskOccurrenceDay(t, ymd)) return true;
+  }
+  return false;
 }
 
 /**
@@ -91,18 +137,23 @@ export function compileUserPeriodScores(user, dateColumns = []) {
   const day_pct_by_date = {};
   const day_pct_breakdown_by_date = {};
   const cols = (dateColumns || []).map(toYmd).filter(Boolean);
+  const skipSun = userSkipsSundays(user);
   let sum = 0;
+  let count = 0;
   for (const ymd of cols) {
+    if (skipSun && isSundayYmd(ymd)) continue;
+    if (!userHasScheduledDay(user, ymd, pctMap)) continue;
     const pct = Number(pctMap[ymd]) || 0;
     day_pct_by_date[ymd] = pct;
     sum += pct;
+    count += 1;
     day_pct_breakdown_by_date[ymd] = breakdown[ymd] || {
       result: 0,
       parts: [],
-      expression: "0% (no task data that day)",
+      expression: "0% (no task scheduled this day)",
     };
   }
-  const period_score_pct = cols.length ? round1(sum / cols.length) : 0;
+  const period_score_pct = count ? round1(sum / count) : 0;
   return { day_pct_by_date, day_pct_breakdown_by_date, period_score_pct };
 }
 

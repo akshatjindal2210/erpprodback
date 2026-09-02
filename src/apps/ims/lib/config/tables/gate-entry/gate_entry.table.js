@@ -1,4 +1,5 @@
 import dbQuery from "../../../../../../config/db/db.js";
+import { patchTableSchema, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 import { IMS_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
 export async function createGateEntryTable() {
@@ -10,6 +11,7 @@ export async function createGateEntryTable() {
       remarks        TEXT,
       transporter_name TEXT,
       vehicle_number TEXT,
+      type           VARCHAR(16) NOT NULL DEFAULT 'out',
       approved       BOOLEAN DEFAULT true,
       approved_by    TEXT,
       approved_at    TIMESTAMP,
@@ -26,4 +28,10 @@ export async function createGateEntryTable() {
       ON ${T.GATE_ENTRY} (LOWER(TRIM(bill_no)))
       WHERE is_deleted = false AND NULLIF(TRIM(bill_no), '') IS NOT NULL;
   `);
+
+  await patchTableSchema(dbQuery, T.GATE_ENTRY, {
+    columns: [
+      patchCol("type", "VARCHAR(16) NOT NULL DEFAULT 'out'"),
+    ],
+  });
 }

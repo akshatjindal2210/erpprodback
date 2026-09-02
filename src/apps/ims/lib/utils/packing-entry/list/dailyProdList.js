@@ -11,6 +11,7 @@ import { buildPartyRateAccNameMap, resolvePackingCustomerName } from "../custome
 import { dailyProdListFieldsFromRow, dailyProdSnapshotCoreFields, storedPackingCustomerName, stickerFetchRowFromDailyProd, DAILYPROD_STICKER_EXTRA_SELECT } from "../stickers/stickerGenerateSnapshot.js";
 import { sanitizeSearch } from "../../../../../core/lib/utils/helper/helper.js";
 import { buildImsDocFilterMany, imsPackRowToProduction } from "../../erp-api/pack/imsPackRow.js";
+import { attachNeedsDeviationFlag } from "../../inventory/monthlyPackingLimit.js";
 import { buildImsPackDocdtFilter, normalizePackingDocNo, packRowInYmdRange, parsePackRow, toCalendarDateKey, trimYmdFilter } from "../parse/packRowParse.js";
 
 const DAILYPROD_ROW_SELECT = `
@@ -912,6 +913,7 @@ async function buildPendingList(body, defaultSpanDays) {
   const sliced = sliceList(data, page, limit);
   if (pendingOnly) {
     sliced.data = await enrichPendingRowsWithBoxPlan(sliced.data);
+    sliced.data = await attachNeedsDeviationFlag(sliced.data);
   }
   sliced.data = await enrichGeneratedRowsPage(sliced.data, itemMap, ledgerMap, EMPTY_PARTY_RATE_MAP);
   return sliced;

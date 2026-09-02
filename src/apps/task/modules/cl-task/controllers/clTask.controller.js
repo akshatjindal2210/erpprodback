@@ -167,6 +167,7 @@ function serializeMasterRow(row) {
     approved_by: row.approved_by || row.activated_by_name || null,
     approved_by_name: row.approved_by_name || row.approved_by || row.activated_by_name || null,
     day_offset: clampDayOffset(row.day_offset),
+    include_sunday: row.include_sunday === true,
     sop_required: isTruthyFlag(row.sop_required),
     created_by_name: row.created_by_name || null,
     updated_by_name: row.updated_by_name || null,
@@ -177,7 +178,7 @@ function serializeInstanceRow(row) {
   if (!row) return row;
   const scheduled = serializeClDate(row.scheduled_date);
   const dayOffset = clampDayOffset(row.day_offset);
-  const normalized = { ...row, scheduled_date: scheduled, day_offset: dayOffset };
+  const normalized = { ...row, scheduled_date: scheduled, day_offset: dayOffset, include_sunday: row.include_sunday === true };
   const fillDeadline = row.task_type === "frequently"
     ? (getClTaskFillDeadlineYmd(normalized) || scheduled)
     : null;
@@ -393,6 +394,7 @@ function buildValidatedMasterFields(body) {
   const sop_description = body.sop_description;
   const sop_required = body.sop_required;
   const day_offset = body.day_offset;
+  const include_sunday = body.include_sunday;
 
   const parsedSchema = parseFormSchema(form_schema);
 
@@ -501,6 +503,7 @@ function buildValidatedMasterFields(body) {
       assignee_person_ids: storedPersonIds.length ? storedPersonIds : null,
       due_time: task_type === "frequently" ? (resolvedDueTime || "11:00") : null,
       day_offset: task_type === "frequently" ? clampDayOffset(day_offset) : 0,
+      include_sunday: task_type === "frequently" ? parseBool(include_sunday, false) : false,
       form_schema: parsedSchema,
       verification_required: needsVerification,
       scoring_enabled: needsVerification,
@@ -860,7 +863,7 @@ export async function getVerificationClTasks(req, res) {
       limit = 1000,
       search = "",
       sortBy = "submitted_at",
-      order = "DESC",
+      order = "ASC",
       status = "approval",
       department_id,
       designation_id,
@@ -1112,7 +1115,7 @@ export async function updateClTask(req, res) {
         recurrence_month_dates: parseRecurrenceArray(refreshed.recurrence_month_dates),
         recurrence_year_dates: parseRecurrenceArray(refreshed.recurrence_year_dates),
       };
-      if (isClOccurrenceDay(refreshed.recurrence_type, recurrenceData, today)) {
+      if (isClOccurrenceDay(refreshed.recurrence_type, recurrenceData, today, { includeSunday: refreshed.include_sunday === true })) {
         await spawnInstancesForMasterDay(refreshed, today);
       }
     }

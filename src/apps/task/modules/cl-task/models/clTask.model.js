@@ -23,6 +23,7 @@ const MASTER_TABLE   = "task_cl_tasks_master";
 const INSTANCE_SELECT = `
   SELECT i.*,
     COALESCE(i.day_offset, m.day_offset, 0) AS day_offset,
+    COALESCE(i.include_sunday, m.include_sunday, FALSE) AS include_sunday,
     m.created_by AS master_created_by,
     COALESCE(NULLIF(TRIM(m.created_by_name), ''), cb.name) AS master_created_by_name,
     CASE
@@ -439,10 +440,10 @@ const ClTask = {
         recurrence_weekdays, recurrence_month_dates, recurrence_year_dates,
         weightage, verification_user_id, department_id, designation_id, person_id,
         assignee_person_ids,
-        due_time, day_offset, next_occurrence, approved,
+        due_time, day_offset, include_sunday, next_occurrence, approved,
         created_by, created_by_name, approved_by, approved_at,
         form_schema, verification_required, scoring_enabled, sop_required, attachment
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         data.title,
         data.description || null,
@@ -462,6 +463,7 @@ const ClTask = {
           : null,
         data.due_time != null && data.due_time !== "" ? data.due_time : null,
         Number.isFinite(Number(data.day_offset)) ? Math.max(0, Math.min(14, Math.floor(Number(data.day_offset)))) : 0,
+        data.include_sunday === true,
         data.next_occurrence || null,
         data.approved !== false && data.is_active !== false,
         data.created_by,
@@ -507,6 +509,7 @@ const ClTask = {
         assignee_person_ids = ?,
         due_time = ?,
         day_offset = ?,
+        include_sunday = ?,
         form_schema = ?,
         verification_required = ?,
         scoring_enabled = ?,
@@ -535,6 +538,7 @@ const ClTask = {
           : null,
         data.due_time != null && data.due_time !== "" ? data.due_time : null,
         Number.isFinite(Number(data.day_offset)) ? Math.max(0, Math.min(14, Math.floor(Number(data.day_offset)))) : 0,
+        data.include_sunday === true,
         JSON.stringify(data.form_schema || []),
         data.verification_required !== false,
         data.scoring_enabled !== false,
@@ -570,6 +574,7 @@ const ClTask = {
         verification_user_id = ?,
         due_time = ?,
         day_offset = ?,
+        include_sunday = ?,
         form_schema = ?,
         verification_required = ?,
         scoring_enabled = ?,
@@ -593,6 +598,7 @@ const ClTask = {
         data.task_type === "frequently"
           ? (Number.isFinite(Number(data.day_offset)) ? Math.max(0, Math.min(14, Math.floor(Number(data.day_offset)))) : 0)
           : 0,
+        data.include_sunday === true,
         JSON.stringify(data.form_schema || []),
         data.verification_required !== false,
         data.scoring_enabled !== false,
@@ -611,9 +617,9 @@ const ClTask = {
         cl_task_id, title, description, sop_description, task_type, recurrence_type,
         recurrence_weekdays, recurrence_month_dates, recurrence_year_dates,
         weightage, verification_user_id, department_id, designation_id, person_id,
-        due_time, day_offset, scheduled_date, status,
+        due_time, day_offset, include_sunday, scheduled_date, status,
         form_schema, verification_required, scoring_enabled, sop_required, attachment
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         data.cl_task_id,
         data.title,
@@ -631,6 +637,7 @@ const ClTask = {
         data.person_id || null,
         data.due_time != null && data.due_time !== "" ? data.due_time : null,
         Number.isFinite(Number(data.day_offset)) ? Math.max(0, Math.min(14, Math.floor(Number(data.day_offset)))) : 0,
+        data.include_sunday === true,
         data.scheduled_date,
         data.status || "pending",
         JSON.stringify(data.form_schema || []),

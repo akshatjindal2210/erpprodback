@@ -1,6 +1,10 @@
 import { IMS_TABLES as T } from "../../../../config/db/dbTables.js";
 
-export const SHORTAGE_TYPES = ["PPC", "Deviation", "Additional"];
+/** Allowed shortage types — validated on save (genericCrud enum). Match frontend shortage.js. */
+export const SHORTAGE_TYPES = ["PPC", "WIP", "Deviation", "Additional"];
+
+/** Bulk spreadsheet import supports PPC and WIP only. */
+export const SHORTAGE_BULK_IMPORT_TYPES = ["PPC", "WIP"];
 
 function todayYmd() {
   const d = new Date();

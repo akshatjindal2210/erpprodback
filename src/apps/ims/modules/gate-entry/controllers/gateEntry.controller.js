@@ -61,6 +61,10 @@ function mapInvfnote(rec = {}) {
     item_code: String(rec?.item_code ?? rec?.itemdcode ?? "").trim() || null,
     item_desc: String(rec?.item_desc ?? rec?.itemdesc ?? "").trim() || null,
     qty,
+    itsrno: (() => {
+      const n = Number(rec?.itsrno ?? rec?.ITSRNO ?? rec?.item_srno);
+      return Number.isFinite(n) ? n : null;
+    })(),
     billdt: String(rec?.billdt ?? "").trim() || null,
     packing_number: packingFromUid(rec),
   };
@@ -193,7 +197,7 @@ async function buildOpenPayload(bill_no, bill_dt_hint = null) {
     already_saved: false,
     bill_no: bill,
     bill_dt: invmnote?.billdt || invfnote[0]?.billdt || bill_dt_hint || null,
-    transporter_name: String(invmnote?.transporter_name ?? invmnote?.transporter ?? "").trim() || null,
+    transporter_name: String(invmnote?.transporter_name ?? invmnote?.transporter ?? invmnote?.transport ?? "").trim() || null,
     vehicle_number: String(invmnote?.vehicle_number ?? invmnote?.vehicleno ?? invmnote?.vehicle_no ?? "").trim() || null,
     remarks: "",
     invmnote,
@@ -252,9 +256,13 @@ export async function listPendingGateEntries(_req, res) {
   }
 }
 
-export async function listGateEntries(_req, res) {
+export async function listGateEntries(req, res) {
   try {
-    const rows = await findGateRows();
+    const filters = req.body?.filters && typeof req.body.filters === "object" ? req.body.filters : req.body || {};
+    const from_date = filters.from_date || filters.fromDate || null;
+    const to_date = filters.to_date || filters.toDate || null;
+    const type = filters.type || filters.typeFilter || null;
+    const rows = await findGateRows({from_date, to_date, type, permission: req.permission});
     res.json({ success: true, data: rows || [], total: (rows || []).length });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message || "Failed to load gate entries." });

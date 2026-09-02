@@ -255,14 +255,14 @@ function finalizeDayScores(acc) {
 
 /**
  * Per-day report state for UI:
- * - missed   → assigned, fill window closed, not completed
- * - pending  → due today still open, OR action taken (awaiting verification)
- * - done     → scored / completed
- * - none     → no assignment that day (frontend uses for pre-start "0")
+ * - missed        → assigned, fill window closed, not completed
+ * - pending       → due / still open (not submitted)
+ * - verification  → submitted, awaiting verifier
+ * - done          → scored / completed
  */
 function addDayState(acc, ymd, state) {
   if (!ymd || !state) return;
-  const rank = { missed: 1, pending: 2, done: 3 };
+  const rank = { missed: 1, pending: 2, verification: 3, done: 4 };
   const prev = acc[ymd];
   if (!prev || (rank[state] || 0) >= (rank[prev] || 0)) {
     acc[ymd] = state;
@@ -311,6 +311,9 @@ function emptyMasterGroup(pid, inst, weightage) {
     weightage,
     task_type: inst.task_type || null,
     recurrence_type: inst.recurrence_type || null,
+    recurrence_weekdays: inst.recurrence_weekdays ?? null,
+    recurrence_month_dates: inst.recurrence_month_dates ?? null,
+    recurrence_year_dates: inst.recurrence_year_dates ?? null,
     dayScoreAcc: {},
     dayStateAcc: {},
     score_parts: [],
@@ -329,6 +332,7 @@ function emptyMasterGroup(pid, inst, weightage) {
     management_remark: null,
     review: null,
     verification_required: inst.verification_required,
+    include_sunday: inst.include_sunday === true,
   };
 }
 
@@ -350,6 +354,10 @@ function absorbFrequentInstance(group, inst, review, today) {
   group.verification_required = inst.verification_required;
   group.task_type = inst.task_type || group.task_type;
   group.recurrence_type = inst.recurrence_type || group.recurrence_type;
+  group.recurrence_weekdays = inst.recurrence_weekdays ?? group.recurrence_weekdays;
+  group.recurrence_month_dates = inst.recurrence_month_dates ?? group.recurrence_month_dates;
+  group.recurrence_year_dates = inst.recurrence_year_dates ?? group.recurrence_year_dates;
+  group.include_sunday = inst.include_sunday === true;
 
   if (!group.minDay || day < group.minDay) group.minDay = day;
   if (!group.maxDay || day > group.maxDay) group.maxDay = day;
@@ -382,7 +390,7 @@ function absorbFrequentInstance(group, inst, review, today) {
     group.awaiting_instance_id = inst.instance_id;
     addDayScore(group.dayScoreAcc, day, 0);
     /** Action taken — submitted, waiting verification */
-    addDayState(group.dayStateAcc, day, "pending");
+    addDayState(group.dayStateAcc, day, "verification");
     trackLatestInstance(group, inst, null, day);
     return;
   }
@@ -516,7 +524,7 @@ function absorbOpenInstance(group, inst, review, today) {
       group.awaiting_day = toYmd(inst.scheduled_date) || today;
       group.awaiting_instance_id = inst.instance_id;
       group.not_done_count += 1;
-      addDayState(group.dayStateAcc, group.awaiting_day, "pending");
+      addDayState(group.dayStateAcc, group.awaiting_day, "verification");
     }
     trackLatestInstance(
       group,
@@ -542,7 +550,7 @@ function absorbOpenInstance(group, inst, review, today) {
     group.not_done_count += 1;
     group.attempt_count += 1;
     addDayScore(group.dayScoreAcc, day, 0);
-    addDayState(group.dayStateAcc, day, "pending");
+    addDayState(group.dayStateAcc, day, "verification");
     if (!group.minDay || day < group.minDay) group.minDay = day;
     if (!group.maxDay || day > group.maxDay) group.maxDay = day;
     trackLatestInstance(group, inst, null, day);
@@ -756,6 +764,10 @@ export async function getDailyReport(req, res) {
           designation_name: group.designation_name,
           task_type: taskType,
           recurrence_type: group.recurrence_type || null,
+          recurrence_weekdays: group.recurrence_weekdays ?? null,
+          recurrence_month_dates: group.recurrence_month_dates ?? null,
+          recurrence_year_dates: group.recurrence_year_dates ?? null,
+          include_sunday: group.include_sunday === true,
           status: group.awaiting
             ? "awaiting_verification"
             : scoreRaw > 0 || group.done_count > 0

@@ -198,7 +198,7 @@ const Task = {
     if (open_tasks) { where.push(OPEN_TASKS_SQL); }
     const unseenUid = unseenUserId({ userId, user_id });
     if (updated_tasks) {
-      where.push(taskUnseenUpdatesSql("t", "?"));
+      where.push(`(${taskUnseenUpdatesSql("t", "?")} AND t.status NOT IN ('completed','closed'))`);
       params.push(unseenUid);
     }
 
@@ -358,7 +358,7 @@ const Task = {
     if (open_tasks) { where.push(OPEN_TASKS_SQL); }
     const unseenUid = unseenUserId({ userId, user_id });
     if (updated_tasks) {
-      where.push(taskUnseenUpdatesSql("t", "?"));
+      where.push(`(${taskUnseenUpdatesSql("t", "?")} AND t.status NOT IN ('completed','closed'))`);
       params.push(unseenUid);
     }
 
@@ -489,7 +489,7 @@ const Task = {
 
         COUNT(DISTINCT CASE WHEN ${OPEN_TASKS_SQL} THEN t.task_id END) AS open_tasks,
 
-        COUNT(DISTINCT CASE WHEN ${taskUnseenUpdatesSql("t", "?")} THEN t.task_id END) AS updated_tasks
+        COUNT(DISTINCT CASE WHEN ${taskUnseenUpdatesSql("t", "?")} AND t.status NOT IN ('completed','closed') THEN t.task_id END) AS updated_tasks
 
       FROM task_tasks t
       LEFT JOIN task_self_notes tsn 

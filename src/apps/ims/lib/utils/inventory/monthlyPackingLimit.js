@@ -2,7 +2,7 @@
  * Monthly packing limit for Packing Entry (Daily Production) New Sticker / generate.
  *
  * Rule (business):
- * - Base = SUM(approved shortage for same item + month) — PPC + Additional + Deviation.
+ * - Base = SUM(approved shortage for same item + month) — PPC + WIP + Additional + Deviation.
  *   Schedule plan is NOT used.
  * - Allowed = base + floor(base × shortage_qty_percentage/100).
  *   e.g. base 2000 + 10% ⇒ max 2200; % = 0 ⇒ max = base only.
@@ -106,7 +106,7 @@ export async function getItemMonthlyPackingUsed(
 }
 
 /**
- * All approved shortage qty for item/month (PPC + Additional + Deviation).
+ * All approved shortage qty for item/month (PPC + WIP + Additional + Deviation).
  * This is the monthly packing budget for Packing Entry stickers.
  */
 export async function getApprovedShortageQty(itemdcode, yearMonth = currentYearMonth()) {
@@ -177,4 +177,30 @@ export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing
     schmonth: month,
     year_month: yearMonth,
   };
+}
+
+/** Pending packing rows — true when Create Deviation is required before New Sticker. */
+export async function rowNeedsPackingDeviation(row = {}) {
+  if (row?.sticker_generated === true || row?.sticker_generated === "true") return false;
+  const itemdcode = row.item_dcode ?? row.itemdcode;
+  if (itemdcode == null || String(itemdcode).trim() === "") return false;
+
+  const check = await evaluateMonthlyPackingLimit({
+    itemdcode,
+    total_qty: row.total_qty,
+    doc_no: row.doc_no != null ? String(row.doc_no).trim() : null,
+    doc_dt: row.doc_dt,
+  });
+  return !check.ok && !check.skipped;
+}
+
+/** Attach `needs_deviation` for packing-entry pending list (red row hint in UI). */
+export async function attachNeedsDeviationFlag(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return rows;
+  return Promise.all(
+    rows.map(async (row) => ({
+      ...row,
+      needs_deviation: await rowNeedsPackingDeviation(row),
+    })),
+  );
 }

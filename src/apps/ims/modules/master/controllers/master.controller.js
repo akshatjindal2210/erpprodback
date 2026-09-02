@@ -420,6 +420,7 @@ export const getItemsViews = async (req, res) => {
     const s = sanitizeSearch(search);
     if (s) {
       filtered = filterBySearch(filtered, s, [
+        (r) => r.itemdcode,
         (r) => r.item_code,
         (r) => r.itemdesc,
         (r) => r.grpname

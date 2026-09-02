@@ -1,6 +1,6 @@
 import ClTask from "../../models/clTask.model.js";
 import { parseFormSchema, parseClAttachments } from "../form/clTaskForm.helper.js";
-import { parseRecurrenceArray } from "../recurrence/clTaskRecurrence.helper.js";
+import { parseRecurrenceArray, isClOccurrenceDay } from "../recurrence/clTaskRecurrence.helper.js";
 import { getISTDateString, toYmd, isClTaskMissed } from "../time/clTaskTime.helper.js";
 import { resolveClMasterAssignees } from "../assignee/clTaskAssignee.helper.js";
 
@@ -31,6 +31,7 @@ export function masterSnapshotForInstance(master, scheduledDate, personOverride 
         ? Math.max(0, Math.min(14, Math.floor(Number(master.day_offset))))
         : 0)
       : 0,
+    include_sunday: master.include_sunday === true,
     scheduled_date: toYmd(scheduledDate) || getISTDateString(),
     status: "pending",
     form_schema: parseFormSchema(master.form_schema),
@@ -43,6 +44,20 @@ export function masterSnapshotForInstance(master, scheduledDate, personOverride 
 
 /** Spawn one pending instance per assignee for a scheduled day (idempotent). */
 export async function spawnInstancesForMasterDay(master, cursor, { onlyPersonId = null } = {}) {
+  const recurrenceData = {
+    recurrence_weekdays: parseRecurrenceArray(master.recurrence_weekdays),
+    recurrence_month_dates: parseRecurrenceArray(master.recurrence_month_dates),
+    recurrence_year_dates: parseRecurrenceArray(master.recurrence_year_dates),
+  };
+  const ymd = toYmd(cursor);
+  if (
+    !isClOccurrenceDay(master.recurrence_type, recurrenceData, ymd, {
+      includeSunday: master.include_sunday === true,
+    })
+  ) {
+    return 0;
+  }
+
   let people = await resolveClMasterAssignees(master);
   if (master.verification_user_id) {
     const vid = Number(master.verification_user_id);

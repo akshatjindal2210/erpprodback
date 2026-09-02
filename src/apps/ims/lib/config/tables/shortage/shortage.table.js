@@ -1,13 +1,17 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
+/**
+ * Shortage types are validated in shortage.config.js (SHORTAGE_TYPES), not via DB CHECK —
+ * so new types can be added without a migration.
+ */
 export async function createShortageTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.SHORTAGE} (
       id              SERIAL PRIMARY KEY,
       itemdcode       INTEGER NOT NULL,
       itemcode        VARCHAR(50),
-      type            VARCHAR(32) NOT NULL CHECK (type IN ('PPC', 'Deviation', 'Additional')),
+      type            VARCHAR(32) NOT NULL,
       qty             INTEGER NOT NULL CHECK (qty > 0),
       month           DATE NOT NULL DEFAULT CURRENT_DATE,
       remarks         TEXT,
@@ -27,4 +31,6 @@ export async function createShortageTable() {
     CREATE INDEX IF NOT EXISTS idx_shortage_month ON ${T.SHORTAGE}(month) WHERE is_deleted = false;
     CREATE INDEX IF NOT EXISTS idx_shortage_approved ON ${T.SHORTAGE}(approved) WHERE is_deleted = false;
   `);
+
+  await dbQuery(`ALTER TABLE ${T.SHORTAGE} DROP CONSTRAINT IF EXISTS ims_shortage_type_check`);
 }

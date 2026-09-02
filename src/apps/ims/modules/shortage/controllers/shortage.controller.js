@@ -1,5 +1,5 @@
 import { createCrud } from "../../../lib/crud/genericCrud.js";
-import { shortageCrudConfig, normalizeShortageMonth } from "./../shortage.config.js";
+import { shortageCrudConfig, normalizeShortageMonth, SHORTAGE_BULK_IMPORT_TYPES } from "./../shortage.config.js";
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { canCreatePackingDeviation } from "../../../lib/utils/imsSpecialPermissions.js";
@@ -13,9 +13,11 @@ function monthYmKey(monthYmd) {
   return s.slice(0, 7);
 }
 
-/** Existing PPC rows for itemdcode + calendar month (import skip). */
-async function findExistingPpcImportKeys(pairs = []) {
+/** Existing import rows for itemdcode + calendar month + type (import skip). */
+async function findExistingImportKeys(type, pairs = []) {
   if (!pairs.length) return new Set();
+  const importType = String(type || "").trim();
+  if (!SHORTAGE_BULK_IMPORT_TYPES.includes(importType)) return new Set();
   const dcodes = [...new Set(pairs.map((p) => p.itemdcode).filter((n) => Number.isFinite(n)))];
   const yms = [...new Set(pairs.map((p) => p.ym).filter(Boolean))];
   if (!dcodes.length || !yms.length) return new Set();
@@ -25,13 +27,18 @@ async function findExistingPpcImportKeys(pairs = []) {
     SELECT itemdcode, to_char(month, 'YYYY-MM') AS ym
     FROM ${T.SHORTAGE}
     WHERE is_deleted = false
-      AND type = 'PPC'
+      AND type = $3
       AND itemdcode = ANY($1::int[])
       AND to_char(month, 'YYYY-MM') = ANY($2::text[])
     `,
-    [dcodes, yms]
+    [dcodes, yms, importType]
   );
   return new Set((rows || []).map((r) => `${r.itemdcode}|${r.ym}`));
+}
+
+function normalizeBulkImportType(raw) {
+  const type = String(raw ?? "PPC").trim();
+  return SHORTAGE_BULK_IMPORT_TYPES.includes(type) ? type : null;
 }
 
 async function enrichShortageRows(rows = []) {
@@ -148,10 +155,14 @@ function buildItemCodeLookup(itemMap) {
 }
 
 /**
- * Normalize + group file rows by itemdcode (sum qty). Type always PPC.
- * Marks invalid IMS items and same item+month already in DB.
+ * Normalize + group file rows by itemdcode (sum qty).
+ * Marks invalid IMS items and same item+month+type already in DB.
  */
-async function buildPpcBulkPreviewRows(rawRows, monthRaw) {
+async function buildBulkPreviewRows(rawRows, monthRaw, importTypeRaw) {
+  const importType = normalizeBulkImportType(importTypeRaw);
+  if (!importType) {
+    throw new Error(`Import type must be ${SHORTAGE_BULK_IMPORT_TYPES.join(" or ")}.`);
+  }
   const month = normalizeShortageMonth(monthRaw, null);
   const { itemMap } = await getImsMapsSafe();
   const byItemCode = buildItemCodeLookup(itemMap);
@@ -174,8 +185,8 @@ async function buildPpcBulkPreviewRows(rawRows, monthRaw) {
     }
 
     const itemdcode = itemdcodeStr != null ? parseInt(String(itemdcodeStr), 10) : NaN;
+    if (!Number.isFinite(qty) || qty <= 0) continue;
     if (!Number.isFinite(itemdcode) || itemdcode <= 0) continue;
-    if (!Number.isFinite(qty) || qty < 1) continue;
 
     const key = String(itemdcode);
     const prev = grouped.get(key);
@@ -194,6 +205,7 @@ async function buildPpcBulkPreviewRows(rawRows, monthRaw) {
       item_desc: ims?.item_desc || null,
       qty,
       month,
+      type: importType,
       valid: found,
       error: found ? null : "Item not found in IMS",
     });
@@ -201,7 +213,8 @@ async function buildPpcBulkPreviewRows(rawRows, monthRaw) {
 
   const rows = Array.from(grouped.values()).sort((a, b) => a.itemdcode - b.itemdcode);
   const ym = monthYmKey(month);
-  const existing = await findExistingPpcImportKeys(
+  const existing = await findExistingImportKeys(
+    importType,
     rows.map((r) => ({ itemdcode: r.itemdcode, ym }))
   );
 
@@ -210,19 +223,20 @@ async function buildPpcBulkPreviewRows(rawRows, monthRaw) {
     if (existing.has(existKey)) {
       row.valid = false;
       row.already_exists = true;
-      row.error = "Already in DB for this month";
+      row.error = `Already in DB for this month (${importType})`;
     }
   }
 
   return {
     month,
+    type: importType,
     rows,
   };
 }
 
 /**
  * POST /shortage/bulk-preview — Super Admin. Group + IMS desc + already_exists flags.
- * Body: { month, data|records|rows: [...] }
+ * Body: { month, type: "PPC"|"WIP", data|records|rows: [...] }
  */
 export const previewBulkShortages = async (req, res) => {
   try {
@@ -234,18 +248,25 @@ export const previewBulkShortages = async (req, res) => {
     if (!monthRaw || !String(monthRaw).trim()) {
       return res.status(400).json({ success: false, message: "Month is required." });
     }
-    const { month, rows } = await buildPpcBulkPreviewRows(raw, monthRaw);
+    const importType = normalizeBulkImportType(req.body?.type ?? req.body?.import_type);
+    if (!importType) {
+      return res.status(400).json({
+        success: false,
+        message: `Import type is required (${SHORTAGE_BULK_IMPORT_TYPES.join(" or ")}).`,
+      });
+    }
+    const { month, type, rows } = await buildBulkPreviewRows(raw, monthRaw, importType);
     if (!rows.length) {
       return res.status(400).json({
         success: false,
-        message: "No valid rows. Need item_dcode (or item_code) and qty ≥ 1.",
+        message: "No valid rows. Need item and qty > 0.",
       });
     }
     return res.json({
       success: true,
       data: rows,
       total: rows.length,
-      meta: { month, type: "PPC" },
+      meta: { month, type },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || "Preview failed." });
@@ -254,8 +275,8 @@ export const previewBulkShortages = async (req, res) => {
 
 /**
  * POST /shortage/bulk — Super Admin only.
- * Groups by item, type=PPC, skips invalid / same item+month already in DB.
- * Body: { month: "YYYY-MM", data|records|rows: [{ item_dcode|itemdcode, item_code?, qty }, ...] }
+ * Groups by item, skips invalid / same item+month+type already in DB.
+ * Body: { month: "YYYY-MM", type: "PPC"|"WIP", data|records|rows: [...] }
  */
 export const bulkCreateShortages = async (req, res) => {
   try {
@@ -267,12 +288,19 @@ export const bulkCreateShortages = async (req, res) => {
     if (!monthRaw || !String(monthRaw).trim()) {
       return res.status(400).json({ success: false, message: "Month is required." });
     }
+    const importType = normalizeBulkImportType(req.body?.type ?? req.body?.import_type);
+    if (!importType) {
+      return res.status(400).json({
+        success: false,
+        message: `Import type is required (${SHORTAGE_BULK_IMPORT_TYPES.join(" or ")}).`,
+      });
+    }
 
-    const { month, rows } = await buildPpcBulkPreviewRows(raw, monthRaw);
+    const { month, type, rows } = await buildBulkPreviewRows(raw, monthRaw, importType);
     if (!rows.length) {
       return res.status(400).json({
         success: false,
-        message: "No valid rows. Need item_dcode (or item_code) and qty ≥ 1.",
+        message: "No valid rows. Need item and qty > 0.",
       });
     }
 
@@ -282,7 +310,7 @@ export const bulkCreateShortages = async (req, res) => {
     if (!toInsert.length) {
       return res.status(200).json({
         success: true,
-        message: `Nothing to import. ${skipped} skipped (not in IMS or already same item + month).`,
+        message: `Nothing to import. ${skipped} skipped (not in IMS or already same item + month + type).`,
         count: 0,
         skipped,
       });
@@ -300,9 +328,9 @@ export const bulkCreateShortages = async (req, res) => {
         let p = 1;
         for (const row of chunk) {
           values.push(
-            `($${p++}, $${p++}, 'PPC', $${p++}, $${p++}::date, NULL, true, $${p++}, $${p++}, false, $${p++}, NOW())`
+            `($${p++}, $${p++}, $${p++}, $${p++}, $${p++}::date, NULL, true, $${p++}, $${p++}, false, $${p++}, NOW())`
           );
-          params.push(row.itemdcode, row.itemcode, row.qty, month, user, approvedAt, user);
+          params.push(row.itemdcode, row.itemcode, type, row.qty, month, user, approvedAt, user);
         }
         await client.query(
           `
@@ -320,8 +348,8 @@ export const bulkCreateShortages = async (req, res) => {
       success: true,
       message:
         skipped > 0
-          ? `${count} saved (PPC). ${skipped} skipped.`
-          : `${count} PPC shortage saved.`,
+          ? `${count} saved (${type}). ${skipped} skipped.`
+          : `${count} ${type} shortage saved.`,
       count,
       skipped,
     });

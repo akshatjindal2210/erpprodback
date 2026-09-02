@@ -152,5 +152,5 @@ export function resolveGateImsBilldtFilter(bill_dt_hint, options = {}) {
  * Gate Entry Pending ONLY — bills on/after this date (inclusive).
  * Complete register (`listGateEntries` / findGateRows) does NOT use this.
  */
-export const GATE_PENDING_MIN_BILL_DT = new Date(2026, 8, 30); // 1 Sep 2026
+export const GATE_PENDING_MIN_BILL_DT = new Date(2026, 8, 1); // 1 Sep 2026 
 // export const GATE_PENDING_MIN_BILL_DT = new Date(2026, 7, 30); // 26 Aug 2026

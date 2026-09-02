@@ -44,6 +44,7 @@ export async function createTaskClTasksMasterTable() {
   await patchTableSchema(dbQuery, T.CL_TASKS_MASTER, {
     columns: [
       patchCol("assignee_person_ids", "JSONB DEFAULT NULL"),
+      patchCol("include_sunday", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ],
   });
 }
@@ -91,4 +92,8 @@ export async function createTaskClTasksTable() {
       updated_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  await patchTableSchema(dbQuery, T.CL_TASKS, {
+    columns: [patchCol("include_sunday", "BOOLEAN NOT NULL DEFAULT FALSE")],
+  });
 }

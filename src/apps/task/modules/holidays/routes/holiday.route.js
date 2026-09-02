@@ -1,5 +1,5 @@
 import express from "express";
-import { getHolidays, getHolidayById, createHoliday, updateHoliday, deleteHoliday, bulkUploadHolidays } from "../controllers/holiday.controller.js";
+import { getHolidays, getHolidayById, createHoliday, updateHoliday, deleteHoliday, bulkUploadHolidays, previewBulkHolidays, bulkCreateHolidays } from "../controllers/holiday.controller.js";
 import { authenticate, authorize, activityLogger, csvUpload } from "../../../lib/shared/index.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
 
@@ -13,6 +13,8 @@ router.post("/get", allRoles, accessControl("holiday", "view"), getHolidayById);
 router.post("/create", allRoles, accessControl("holiday", "add"), activityLogger, createHoliday);
 router.post("/update", allRoles, accessControl("holiday", "edit"), activityLogger, updateHoliday);
 router.post("/delete", allRoles, accessControl("holiday", "delete"), activityLogger, deleteHoliday);
+router.post("/bulk-preview", allRoles, accessControl("holiday", "add"), previewBulkHolidays);
+router.post("/bulk", allRoles, accessControl("holiday", "add"), activityLogger, bulkCreateHolidays);
 router.post("/bulk-upload", allRoles, accessControl("holiday", "add"), activityLogger, csvUpload.single("file"), bulkUploadHolidays);
 
 export default router;

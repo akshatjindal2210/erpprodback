@@ -347,6 +347,58 @@ function buildFilteredList(imsRecords, filterMode, planMap, lastTxnMap = new Map
   }
 }
 
+function computeDispatchBoxSplit(workableQty, qtyPerBox) {
+  const q = Math.max(0, Number(workableQty) || 0);
+  const per = Number(qtyPerBox);
+  if (!Number.isFinite(per) || per <= 0 || q <= 0) {
+    return { dispatch_full_boxes: 0, dispatch_loose_boxes: 0 };
+  }
+  const full = Math.floor(q / per);
+  const rem = q % per;
+  return { dispatch_full_boxes: full, dispatch_loose_boxes: rem > 0 ? 1 : 0 };
+}
+
+/** Recommended dispatch — full + loose box count from packing standard × workable qty. */
+async function enrichRecommendedDispatchBoxes(records) {
+  if (!records.length) return records;
+  const dcodes = [
+    ...new Set(
+      records
+        .map((r) => parseInt(String(r.itemdcode ?? ""), 10))
+        .filter((n) => Number.isFinite(n) && n > 0)
+    ),
+  ];
+  const stdMap = new Map();
+  if (dcodes.length) {
+    try {
+      const rows = await dbQuery(
+        `SELECT DISTINCT ON (ps.item_dcode) ps.item_dcode, ps.qty AS qty_per_box
+         FROM ims_packing_standard ps
+         WHERE ps.item_dcode = ANY($1::int[])
+           AND ps.is_deleted = false
+           AND ps.approved = true
+         ORDER BY ps.item_dcode, ps.standard_id DESC`,
+        [dcodes]
+      );
+      for (const row of rows || []) {
+        const n = parseInt(row.qty_per_box, 10);
+        if (Number.isFinite(n) && n > 0) stdMap.set(String(row.item_dcode), n);
+      }
+    } catch (err) {
+      console.error("[schedule-planning] recommended dispatch box split failed", err?.message || err);
+    }
+  }
+  return records.map((r) => {
+    const per = stdMap.get(String(r.itemdcode ?? "").trim()) ?? null;
+    const workable = Number(r.dispatch_workable_qty ?? scheduleDispatchWorkableQty(r));
+    return {
+      ...r,
+      qty_per_box: per,
+      ...computeDispatchBoxSplit(workable, per),
+    };
+  });
+}
+
 async function enrichFgStock(records) {
   if (!records.length) return records;
   try {
@@ -1317,7 +1369,7 @@ function parseDispatchStatusFilter(rawStatus) {
       recommended: false,
     };
   }
-  if (mode === "recommended") {
+  if (mode === "recommended" || mode === "recommended_customer") {
     return {
       codes: [
         SCHEDULE_PLAN_STATUS.PLANNED,
@@ -1516,6 +1568,7 @@ export async function listScheduleDispatchPlan(body = {}) {
         dispatch_match_pct: scheduleDispatchMatchPct(r),
         dispatch_workable_qty: scheduleDispatchWorkableQty(r),
       }));
+      records = await enrichRecommendedDispatchBoxes(records);
       records.sort(compareRecommendedDispatchRows);
       return { success: true, records };
     }

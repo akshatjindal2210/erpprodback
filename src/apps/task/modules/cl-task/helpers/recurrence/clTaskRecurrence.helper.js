@@ -84,9 +84,18 @@ function normalizeWeekdays(weekdays) {
     .sort((a, b) => a - b);
 }
 
+/** True when ymd is Sunday (IST calendar day, UTC-safe). */
+export function isSundayYmd(ymd) {
+  return weekdayFromYmd(toYmd(ymd) || getISTDateString()) === 0;
+}
+
 /** True if ymd is a scheduled occurrence day for this recurrence (not “next after”). */
-export function isClOccurrenceDay(recurrence_type, data = {}, ymd = null) {
+export function isClOccurrenceDay(recurrence_type, data = {}, ymd = null, options = {}) {
+  const includeSunday = options.includeSunday === true;
   const day = toYmd(ymd) || getISTDateString();
+
+  if (!includeSunday && isSundayYmd(day)) return false;
+
   const weekdays = Array.isArray(data.recurrence_weekdays) ? data.recurrence_weekdays : [];
   const monthDates = Array.isArray(data.recurrence_month_dates) ? data.recurrence_month_dates : [];
   const yearDates = Array.isArray(data.recurrence_year_dates) ? data.recurrence_year_dates : [];

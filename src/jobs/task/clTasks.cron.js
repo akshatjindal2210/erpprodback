@@ -75,7 +75,7 @@ export async function processClFrequentTasks({ personId = null } = {}) {
           ? people.filter((p) => Number(p.id) === Number(personId))
           : people;
       let needsToday = false;
-      if (isClOccurrenceDay(ct.recurrence_type, recurrenceData, today)) {
+      if (isClOccurrenceDay(ct.recurrence_type, recurrenceData, today, { includeSunday: ct.include_sunday === true })) {
         for (const person of targets) {
           const hasToday = await ClTask.hasPendingInstanceForDay(ct.cl_task_id, person.id, today);
           if (!hasToday) {
