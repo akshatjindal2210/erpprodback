@@ -81,3 +81,33 @@ export function customerLinesFromRemovedBoxPayload(raw, defaultPn, ledgerMap) {
   const payload = parseMinusRemovedBoxPayload(raw);
   return normalizeStoredMinusCustomerLines(payload.customer_lines, defaultPn, ledgerMap);
 }
+
+/** Pending Add Full/Loose in `removed_box_ids` — `{ uids: number[], all_boxes_loose?: boolean }`. */
+export function parseAddPendingMeta(raw) {
+  const uids = parseRemovedBoxIdsJson(raw);
+  let all_boxes_loose;
+  if (raw == null || raw === "") return { uids, all_boxes_loose };
+  try {
+    let parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (typeof parsed === "string") parsed = JSON.parse(parsed);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "all_boxes_loose" in parsed) {
+      all_boxes_loose =
+        parsed.all_boxes_loose === true ||
+        parsed.all_boxes_loose === "true" ||
+        parsed.all_boxes_loose === 1;
+    }
+  } catch {
+    /* ignore */
+  }
+  return { uids, all_boxes_loose };
+}
+
+export function buildAddPendingMetaJson(uids, allBoxesLoose) {
+  const clean = [
+    ...new Set((Array.isArray(uids) ? uids : []).map((u) => Number(u)).filter((n) => Number.isFinite(n) && n > 0)),
+  ];
+  if (allBoxesLoose === undefined) {
+    return clean.length ? JSON.stringify(clean) : null;
+  }
+  return JSON.stringify({ uids: clean, all_boxes_loose: !!allBoxesLoose });
+}

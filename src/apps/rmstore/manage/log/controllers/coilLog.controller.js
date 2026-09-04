@@ -80,6 +80,7 @@ export const listCoilDownloadLog = async (req, res) => {
       page,
       limit: limit || 100,
       user_id: userIdFilter,
+      permission: req.permission,
     });
     return res.json({ success: true, ...result });
   } catch (err) {

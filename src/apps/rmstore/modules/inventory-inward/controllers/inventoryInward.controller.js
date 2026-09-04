@@ -132,6 +132,7 @@ export const getInwards = async (req, res) => {
       search: sanitizeSearch(search),
       page,
       limit,
+      permission: req.permission,
     });
     return res.json({ success: true, ...result });
   } catch (err) {

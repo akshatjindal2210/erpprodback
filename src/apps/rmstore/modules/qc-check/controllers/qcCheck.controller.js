@@ -12,6 +12,7 @@ import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilT
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { evaluateSpecLine, formatExpected } from "../../../lib/utils/qc/evaluateSpec.js";
+import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 
 const MODULE = "rm_qc_check";
 const log = createRmstoreActivityLogger(MODULE);
@@ -214,6 +215,7 @@ export const getQcChecks = async (req, res) => {
       search: sanitizeSearch(search),
       page,
       limit,
+      permission: req.permission,
     });
     return res.json({ success: true, ...result });
   } catch (err) {
@@ -484,6 +486,13 @@ export const submitQcCheck = async (req, res) => {
       const canContinueDraft = hasQcPerm(req, "edit") && check.qc_check_uid && (liveSt === "draft" || liveSt === "pending");
       if (!canContinueDraft) {
         return res.status(403).json({ success: false, message: "You do not have permission to submit a QC check." });
+      }
+    }
+
+    if (check?.qc_check_uid && check?.created_at) {
+      const editBlocked = assertWithinEditDays(req, check.created_at, "edit");
+      if (editBlocked) {
+        return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
       }
     }
 

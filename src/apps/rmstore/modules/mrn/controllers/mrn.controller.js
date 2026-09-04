@@ -281,7 +281,14 @@ export const getMrnList = async (req, res) => {
     const financial_year = String(filters?.financial_year ?? filters?.financialYear ?? "").trim() || null;
 
     if (status === "generated") {
-      const result = await findGeneratedMrns({ search: q, page, limit, from_date, to_date });
+      const result = await findGeneratedMrns({
+        search: q,
+        page,
+        limit,
+        from_date,
+        to_date,
+        permission: req.permission,
+      });
       const [qty_editable, qty_auto_calc, sticker_mode] = await Promise.all([
         getMrnCoilQtyEditable(),
         getMrnCoilQtyAutoCalc(),

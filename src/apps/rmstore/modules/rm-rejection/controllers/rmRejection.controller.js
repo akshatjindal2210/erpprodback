@@ -11,6 +11,7 @@ import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilT
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
+import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 
 const MODULE = "rm_rejection";
 const log = createRmstoreActivityLogger(MODULE);
@@ -166,6 +167,7 @@ export const getQcRejections = async (req, res) => {
       search: sanitizeSearch(search),
       page,
       limit,
+      permission: req.permission,
     });
     return res.json({ success: true, ...result });
   } catch (err) {
@@ -648,6 +650,11 @@ export const approveRejectionRegister = async (req, res) => {
     let existing = await findQcRejection(id);
     if (!existing) return res.status(404).json({ success: false, message: "QC rejection record not found." });
 
+    const editBlocked = assertWithinEditDays(req, existing.created_at, "edit");
+    if (editBlocked) {
+      return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
+    }
+
     const user = auditUserName(req);
 
     if (existing.out_uid) {
@@ -790,6 +797,11 @@ export const updateQcRejectionBill = async (req, res) => {
         success: false,
         message: "Complete Store Out authorization before saving a bill number.",
       });
+    }
+
+    const editBlocked = assertWithinEditDays(req, existing.created_at, "edit");
+    if (editBlocked) {
+      return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
     }
 
     const bill_no =

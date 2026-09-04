@@ -481,7 +481,6 @@ export const getBoxesViews = async (req, res) => {
       page: page || 1,
       limit: limit || 5000,
       fields: fields || ["b.box_uid AS id", "b.box_no_uid", "b.packing_number", "b.qty", "b.override_cust::text AS acc_name", "b.location_id", "b.in_uid", "b.out_uid"],
-      permission: req.permission
     });
 
     let enriched = await enrichBoxRowsFromIMS(result.data || []);

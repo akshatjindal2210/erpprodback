@@ -999,11 +999,7 @@ export async function createClTask(req, res) {
 
     const clTaskId = await ClTask.createMaster(masterData);
     const master = await ClTask.getMasterById(clTaskId);
-    try {
-      await spawnOnActivate(master);
-    } catch (spawnErr) {
-      console.error("createClTask spawn:", spawnErr.stack || spawnErr);
-    }
+    /** Report: instances spawn when due (cron) — not at master create. */
     const after = await ClTask.getMasterById(clTaskId);
 
     await logClTask(req, {

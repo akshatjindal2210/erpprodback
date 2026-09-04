@@ -4,6 +4,17 @@ import readline from "readline";
 
 const LOG_TS_RE = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/;
 
+/** POSIX rename overwrites; Windows throws EPERM/EEXIST if the dest exists. */
+async function replaceFile(tmpPath, filePath) {
+  try {
+    await fsp.rename(tmpPath, filePath);
+  } catch (err) {
+    if (err.code !== "EPERM" && err.code !== "EEXIST") throw err;
+    await fsp.copyFile(tmpPath, filePath);
+    await fsp.unlink(tmpPath);
+  }
+}
+
 function lineTimestamp(line) {
   const m = line.match(LOG_TS_RE);
   if (!m) return null;
@@ -11,7 +22,7 @@ function lineTimestamp(line) {
   return Number.isNaN(ts) ? null : ts;
 }
 
-/** Drop log lines older than retentionDays. Lines without a timestamp are kept. */
+/** Drop log lines older than retentionDays. Untimestamped lines follow the previous entry. */
 export async function enforceLogRetention(filePath, retentionDays = 30) {
   try {
     await fsp.access(filePath);
@@ -23,6 +34,7 @@ export async function enforceLogRetention(filePath, retentionDays = 30) {
   const tmpPath = `${filePath}.retention-tmp`;
   let kept = 0;
   let removed = 0;
+  let keepContinuation = false;
 
   const input = readline.createInterface({
     input: fs.createReadStream(filePath, { encoding: "utf8" }),
@@ -33,7 +45,10 @@ export async function enforceLogRetention(filePath, retentionDays = 30) {
   try {
     for await (const line of input) {
       const ts = lineTimestamp(line);
-      if (ts == null || ts >= cutoff) {
+      const keep = ts == null ? keepContinuation : ts >= cutoff;
+      if (ts != null) keepContinuation = keep;
+
+      if (keep) {
         output.write(`${line}\n`);
         kept += 1;
       } else {
@@ -42,12 +57,12 @@ export async function enforceLogRetention(filePath, retentionDays = 30) {
     }
 
     await new Promise((resolve, reject) => {
-      output.end(resolve);
       output.on("error", reject);
+      output.end(resolve);
     });
 
     if (removed > 0) {
-      await fsp.rename(tmpPath, filePath);
+      await replaceFile(tmpPath, filePath);
     } else {
       await fsp.unlink(tmpPath).catch(() => {});
     }

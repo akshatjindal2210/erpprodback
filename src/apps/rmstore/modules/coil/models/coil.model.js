@@ -119,11 +119,28 @@ async function fetchCoilsWithMrnDetails(coilNoUids = []) {
 }
 
 export const findCoils = async (options = {}) => {
-  const { filters = {}, search, page = 1, limit = 100, sortBy = "coil_uid", order = "DESC" } = options;
+  const { filters = {}, search, page = 1, limit = 100, sortBy = "coil_uid", order = "DESC", permission = {} } = options;
   const values = [];
   let i = 1;
   const conditions = ["c.is_deleted = false"];
   const journeyMode = hasCoilJourneyFilter(filters);
+  const operationalLookup =
+    filters.coil_area === true ||
+    filters.coil_area === "true" ||
+    filters.only_stock === true ||
+    filters.only_stock === "true" ||
+    (filters.out_uid != null && filters.out_uid !== "") ||
+    (filters.in_uid != null && filters.in_uid !== "") ||
+    (filters.rm_uid != null && filters.rm_uid !== "") ||
+    (filters.qc_uid != null && filters.qc_uid !== "") ||
+    (filters.qc_check_uid != null && filters.qc_check_uid !== "") ||
+    (filters.sa_id != null && filters.sa_id !== "") ||
+    (filters.adjustment_id != null && filters.adjustment_id !== "");
+
+  // Register date window only — never clamp stock pickers / linked-coil lookups
+  if (!journeyMode && !operationalLookup && permission?.can_view_days > 0) {
+    conditions.push(`c.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+  }
 
   const status = filters.status != null && String(filters.status).trim() !== "" ? String(filters.status).trim().toLowerCase() : null;
 

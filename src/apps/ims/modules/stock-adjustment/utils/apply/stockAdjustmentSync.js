@@ -2,7 +2,7 @@ import { updateAdjustmentsTx } from "../../models/stockAdjustment.model.js";
 import { findBoxesByUids } from "../../../box/models/box.model.js";
 import { boxBelongsToPackingNumber, isBoxAvailableForMinus } from "../../../box/utils/inventory/boxInventory.js";
 import { resolveAccCodeFromBoxRows } from "../../../box/utils/override-customer/boxCustomerOverride.js";
-import { buildMinusRemovedBoxIdsJson } from "../minus/minusRemovedBoxPayload.js";
+import { buildMinusRemovedBoxIdsJson, buildAddPendingMetaJson, parseAddPendingMeta } from "../minus/minusRemovedBoxPayload.js";
 import { getImsMapsSafe } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
 
 /**
@@ -47,6 +47,11 @@ export async function syncAdjustmentMetadataOnly(client, { existing, body, userI
       body.add_extra_boxes !== undefined ||
       body.box_count_impact !== undefined ||
       body.no_of_boxes !== undefined;
+    const hasKind = body.all_boxes_loose !== undefined;
+    const kindLoose =
+      body.all_boxes_loose === true ||
+      body.all_boxes_loose === "true" ||
+      body.all_boxes_loose === 1;
 
     if (hasPlan) {
       let finalCount = parseInt(String(body.box_count_impact ?? body.no_of_boxes ?? ""), 10);
@@ -60,11 +65,20 @@ export async function syncAdjustmentMetadataOnly(client, { existing, body, userI
       if (Number.isFinite(pb) && pb >= 1) {
         fields.qty = finalCount * pb;
       }
-      if (toRemove.length) {
-        fields.removed_box_ids = JSON.stringify(
-          toRemove.map((u) => Number(u)).filter((n) => Number.isFinite(n))
-        );
+      const removeUids = toRemove.map((u) => Number(u)).filter((n) => Number.isFinite(n));
+      if (hasKind) {
+        fields.removed_box_ids = buildAddPendingMetaJson(removeUids, kindLoose);
+      } else if (removeUids.length) {
+        const prevLoose = parseAddPendingMeta(existing.removed_box_ids).all_boxes_loose;
+        fields.removed_box_ids =
+          prevLoose !== undefined
+            ? buildAddPendingMetaJson(removeUids, prevLoose)
+            : JSON.stringify(removeUids);
       }
+      touched = true;
+    } else if (hasKind) {
+      const { uids } = parseAddPendingMeta(existing.removed_box_ids);
+      fields.removed_box_ids = buildAddPendingMetaJson(uids, kindLoose);
       touched = true;
     }
   }

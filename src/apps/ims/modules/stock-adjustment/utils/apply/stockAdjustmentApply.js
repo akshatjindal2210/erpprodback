@@ -90,6 +90,7 @@ export async function applyStockAdjustmentOnApproveTx(client, { adjustment, user
         per_box_qty: pb,
         qty,
         unit: adjustment.unit ?? "PCS",
+        removed_box_ids: null,
       },
       { adjustment_id: adjId }
     );

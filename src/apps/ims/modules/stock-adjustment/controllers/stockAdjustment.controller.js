@@ -16,7 +16,7 @@ import { applyStockAdjustmentOnApproveTx, revertStockAdjustmentOnUnapproveTx } f
 import { persistAdjustmentDocDtTx } from "../utils/doc/stockAdjustmentDocDt.js";
 import { isBoxAvailableForMinus, isBoxInHand } from "../../box/utils/inventory/boxInventory.js";
 import { enrichStockAdjustmentListRows } from "../utils/list/stockAdjustmentList.js";
-import { buildMinusRemovedBoxIdsJson } from "../utils/minus/minusRemovedBoxPayload.js";
+import { buildMinusRemovedBoxIdsJson, parseRemovedBoxIdsJson, buildAddPendingMetaJson, parseAddPendingMeta } from "../utils/minus/minusRemovedBoxPayload.js";
 import { buildQtyUpdatePayload, parseQtyUpdatePayload } from "../utils/update/stockAdjustmentUpdatePayload.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 
@@ -248,6 +248,8 @@ export const createAdjustment = async (req, res) => {
       if (entry_type === "add") {
         const categoryId = parseInt(String(bodyCategoryId ?? ""), 10);
         data.category_id = categoryId;
+        // Pending Full/Loose until approve (no new SA column).
+        data.removed_box_ids = buildAddPendingMetaJson([], allBoxesLoose);
       }
     }
 
@@ -403,7 +405,8 @@ export const updateAdjustment = async (req, res) => {
         add_extra_boxes !== undefined ||
         incoming.per_box_qty !== undefined ||
         incoming.box_count_impact !== undefined ||
-        no_of_boxes !== undefined);
+        no_of_boxes !== undefined ||
+        (existing.entry_type === "add" && all_boxes_loose !== undefined));
 
     const wantsQtyUpdateSync =
       existing.entry_type === "update" &&
@@ -424,12 +427,7 @@ export const updateAdjustment = async (req, res) => {
       normalizedApproved === true && existing.entry_type === "minus";
     let addHasPendingRemovals = false;
     if (normalizedApproved === true && existing.entry_type === "add" && existing.removed_box_ids) {
-      try {
-        const parsed = JSON.parse(existing.removed_box_ids);
-        addHasPendingRemovals = Array.isArray(parsed) && parsed.length > 0;
-      } catch {
-        addHasPendingRemovals = false;
-      }
+      addHasPendingRemovals = parseRemovedBoxIdsJson(existing.removed_box_ids).length > 0;
     }
     if ((approvingMinus || addHasPendingRemovals) && !canUserRemoveInventoryBoxes(req)) {
       return res.status(403).json({
@@ -443,7 +441,8 @@ export const updateAdjustment = async (req, res) => {
       removed_box_uids,
       remove_add_box_uids,
       add_extra_boxes,
-      no_of_boxes
+      no_of_boxes,
+      ...(all_boxes_loose !== undefined ? { all_boxes_loose } : {}),
     };
 
     const fields = { 
@@ -458,8 +457,13 @@ export const updateAdjustment = async (req, res) => {
       fields.acc_name = String(acc_name).trim();
     }
     const wasApproved = !!existing.approved;
+    const storedAddLoose = parseAddPendingMeta(existing.removed_box_ids).all_boxes_loose;
     const allBoxesLoose =
-      all_boxes_loose === true || all_boxes_loose === "true" || all_boxes_loose === 1;
+      all_boxes_loose !== undefined
+        ? all_boxes_loose === true || all_boxes_loose === "true" || all_boxes_loose === 1
+        : storedAddLoose !== undefined
+          ? !!storedAddLoose
+          : false;
 
     const hasBusinessChanges =
       Object.keys(incoming).length > 0 ||

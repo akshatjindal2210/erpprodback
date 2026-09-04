@@ -1,7 +1,7 @@
 import cron from "node-cron";
 import path from "path";
 
-import logger from "../apps/core/lib/utils/logging/logger.js";
+import logger, { withFileLoggingPaused } from "../apps/core/lib/utils/logging/logger.js";
 import { deferCronWork, scheduleDeferred } from "../jobs/shared/cronUtil.js";
 import { getLogSettings } from "./config.js";
 import { getLogDir, LOG_FILES } from "./paths.js";
@@ -13,9 +13,25 @@ export async function runLogCleanup() {
   const { retentionDays } = getLogSettings();
   const dir = getLogDir();
 
-  const results = await Promise.all(
-    LOG_FILES.map((name) => enforceLogRetention(path.join(dir, name), retentionDays)),
-  );
+  const results = await withFileLoggingPaused(async () => {
+    const out = [];
+    const errors = [];
+
+    for (const name of LOG_FILES) {
+      try {
+        out.push(await enforceLogRetention(path.join(dir, name), retentionDays));
+      } catch (err) {
+        errors.push(`${name}: ${err.message}`);
+        out.push({ file: path.join(dir, name), kept: 0, removed: 0, skipped: true });
+      }
+    }
+
+    if (errors.length) {
+      throw new Error(errors.join("; "));
+    }
+
+    return out;
+  });
 
   const pruned = results.filter((r) => !r.skipped && r.removed > 0);
   if (pruned.length) {

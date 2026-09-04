@@ -6,6 +6,7 @@
  *   ims_*     — IMS app tables only
  *   task_*    — Task app tables only
  *   rmstore_* — RM Store app tables only
+ *   hrms_*    — HRMS app tables only
  *
  * Imports:
  *   Core / settings  → MST_TABLES
@@ -20,6 +21,7 @@ export const TABLE_PREFIX = {
   ims: "ims_",
   task: "task_",
   rmstore: "rmstore_",
+  hrms: "hrms_",
 };
 
 export const DB_TABLES = {
@@ -106,6 +108,9 @@ export const DB_TABLES = {
     "rmstore_stock_adjustment",
     "rmstore_coil_transaction",
   ],
+
+  /** HRMS application tables — only 2. */
+  hrms: ["hrms_attendance_log", "hrms_attendance"],
 };
 
 /** Map table stem to full name, e.g. USERS → "mst_users". */
@@ -123,5 +128,6 @@ export const MST_TABLES = toKeyMap(DB_TABLES.master, TABLE_PREFIX.master);
 export const IMS_TABLES = toKeyMap(DB_TABLES.ims, TABLE_PREFIX.ims);
 export const TASK_TABLES = toKeyMap(DB_TABLES.task, TABLE_PREFIX.task);
 export const RMSTORE_TABLES = toKeyMap(DB_TABLES.rmstore, TABLE_PREFIX.rmstore);
+export const HRMS_TABLES = toKeyMap(DB_TABLES.hrms, TABLE_PREFIX.hrms);
 
 export default DB_TABLES;

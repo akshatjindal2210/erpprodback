@@ -46,6 +46,8 @@ const RECORD_KEYS = [
   "entry_type",
   "po_number",
   "bill_no",
+  "employee_code",
+  "attendance_date",
 ];
 
 const ENTITY_LABELS = {
@@ -62,6 +64,8 @@ const ENTITY_LABELS = {
   audit: "audit",
   change_override_customer: "customer override",
   ims_box_override_request: "customer override",
+  qc_hold_material: "QC hold",
+  hrms_attendance: "daily attendance",
 };
 
 const ACTION_VERBS = {
@@ -69,6 +73,7 @@ const ACTION_VERBS = {
   UPDATE: "Updated",
   DELETE: "Deleted",
   APPROVE: "Approved",
+  SUBMIT: "Submitted",
   MODIFY: "Updated",
   LOCK: "Locked",
   UNLOCK: "Unlocked",
@@ -98,16 +103,35 @@ const FIELD_LABELS = {
   entry_type: "Type",
   po_number: "PO no",
   bill_no: "Bill no",
+  hold_id: "Hold id",
+  submission_id: "Submission id",
+  submission_type: "Submission type",
+  completed_qty: "Completed qty",
+  rejected_qty: "Rejected qty",
+  balance_qty: "Balance qty",
+  box_count: "Box count",
+  status: "Status",
+  event: "Event",
+  hold_scan_mode: "Scan mode",
+  completion_sticker_count: "Completion stickers",
   deleted_count: "Removed",
   total_stickers: "Sticker count",
   sticker_count: "Download count",
   item_count: "Item count",
+  employee_code: "Emp code",
+  attendance_date: "Date",
+  approval_status: "Approval",
+  check_in: "First punch",
+  check_out: "Last punch",
+  punch_count: "Punches",
+  approved_count: "Approved rows",
+  unapproved_count: "Unapproved rows",
+  edited_codes: "Edited employees",
   updated_fields: "Changed fields",
   from_customer: "From customer",
   to_customer: "To customer",
   old_cust: "From customer",
   new_cust: "To customer",
-  box_count: "Box count",
   remarks: "Remarks",
 };
 
@@ -210,7 +234,19 @@ function formatObjectRef(obj) {
   return null;
 }
 
-function formatObjectSummary(obj, maxPairs = 8) {
+function formatArraySummary(value, maxItems = 12) {
+  if (!Array.isArray(value) || !value.length) return null;
+  const allScalar = value.every(
+    (item) => item == null || ["string", "number", "boolean"].includes(typeof item)
+  );
+  if (allScalar && value.length <= maxItems) {
+    return `[${value.map((item) => JSON.stringify(item)).join(", ")}]`;
+  }
+  return `[${value.length}]`;
+}
+
+/** Nested objects: expand one level (so hold_data is not just `{...}`). */
+function formatObjectSummary(obj, maxPairs = 8, depth = 0) {
   if (!isPlainObject(obj)) return null;
   const parts = [];
   for (const [key, value] of Object.entries(obj)) {
@@ -218,12 +254,17 @@ function formatObjectSummary(obj, maxPairs = 8) {
     if (SENSITIVE_KEYS.has(lower) || SKIP_KEYS.has(lower)) continue;
     if (value == null || value === "") continue;
     if (Array.isArray(value)) {
-      if (!value.length) continue;
-      parts.push(`${key}: [${value.length}]`);
+      const arr = formatArraySummary(value);
+      if (arr) parts.push(`${key}: ${arr}`);
     } else if (isPlainObject(value)) {
       const ref = formatObjectRef(value);
       if (ref) parts.push(`${key}: ${ref}`);
-      else parts.push(`${key}: {...}`);
+      else if (depth < 1) {
+        const nested = formatObjectSummary(value, 10, depth + 1);
+        parts.push(nested ? `${key}: { ${nested} }` : `${key}: {}`);
+      } else {
+        parts.push(`${key}: {...}`);
+      }
     } else {
       const text = String(value).trim();
       if (text) parts.push(`${key}: ${text}`);
@@ -460,12 +501,105 @@ function buildStockAdjustmentDescription(actionType, ref, record, extra) {
   return bits.length ? `${verb} adjustment, ${bits.join(", ")}` : `${verb} adjustment`;
 }
 
+function qcHoldEventLabel(event, submissionType) {
+  const e = String(event || "").toLowerCase();
+  if (e === "qc_hold_created") return "QC hold created";
+  if (e === "partial_submit") return "Partial submit awaiting approval";
+  if (e === "full_submit") return "Full submit awaiting approval";
+  if (e === "revert_submit") return "Revert submit awaiting approval";
+  if (e === "partial_approved") return "Partial submit approved";
+  if (e === "hold_completed") return "QC hold completed";
+  if (e === "revert_approved") return "QC hold reverted";
+  if (e === "qc_hold_updated") return "QC hold updated";
+  if (e === "qc_hold_deleted") return "QC hold deleted";
+  const t = String(submissionType || "").toLowerCase();
+  if (t === "partial") return "Partial submit";
+  if (t === "full") return "Full submit";
+  if (t === "revert") return "Revert submit";
+  return null;
+}
+
+function buildQcHoldDescription(actionType, ref, record, extra) {
+  const item = entityLabel("qc_hold_material");
+  const verb = ACTION_VERBS[actionType] || actionType;
+  if (ref) return `${verb} ${item}, id ${ref}`;
+  return `${verb} ${item}`;
+}
+
+function compactHoldDataSnapshot(raw) {
+  if (raw == null || raw === "") return null;
+  let data = raw;
+  if (typeof raw === "string") {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!isPlainObject(data)) return null;
+  const boxes = Array.isArray(data.boxes)
+    ? data.boxes.map((v) => String(v).trim()).filter(Boolean)
+    : [];
+  const out = {};
+  if (data.hold_type) out.hold_type = String(data.hold_type);
+  if (data.hold_scan_mode) out.hold_scan_mode = String(data.hold_scan_mode);
+  if (data.qty != null && data.qty !== "") out.qty = Number(data.qty) || 0;
+  if (data.total_boxes != null) out.total_boxes = Number(data.total_boxes) || boxes.length;
+  else if (boxes.length) out.total_boxes = boxes.length;
+  if (boxes.length) out.boxes = boxes;
+  if (data.completed_qty != null) out.completed_qty = Number(data.completed_qty) || 0;
+  if (data.completed_boxes != null) out.completed_boxes = Number(data.completed_boxes) || 0;
+  if (data.rejected_qty != null) out.rejected_qty = Number(data.rejected_qty) || 0;
+  if (data.rejected_boxes != null) out.rejected_boxes = Number(data.rejected_boxes) || 0;
+  if (Array.isArray(data.submissions)) out.submissions_count = data.submissions.length;
+  return Object.keys(out).length ? out : null;
+}
+
+function buildQcHoldLog(extra, record) {
+  const source = { ...(isPlainObject(record) ? record : {}), ...(extra || {}) };
+  const info = {};
+  const more = {};
+
+  const eventLabel = qcHoldEventLabel(source.event, source.submission_type);
+  if (eventLabel) info["Event"] = eventLabel;
+  if (source.submission_type) {
+    const t = String(source.submission_type).toLowerCase();
+    info["Submission"] = t === "partial" ? "Partial" : t === "full" ? "Full" : t === "revert" ? "Revert" : String(source.submission_type);
+  }
+  if (source.status) info["Status"] = String(source.status);
+  if (source.packing_number) info["Packing no"] = String(source.packing_number);
+  if (source.item_dcode != null) info["Item code"] = String(source.item_dcode);
+  if (source.qty != null && source.qty !== "") info["Qty"] = String(source.qty);
+  if (source.completed_qty != null && source.completed_qty !== "") info["Completed qty"] = String(source.completed_qty);
+  if (source.rejected_qty != null && source.rejected_qty !== "") info["Rejected qty"] = String(source.rejected_qty);
+  if (source.balance_qty != null && source.balance_qty !== "") info["Balance qty"] = String(source.balance_qty);
+  if (source.box_count != null) info["Box count"] = String(source.box_count);
+
+  if (source.submission_id != null) more["Submission id"] = String(source.submission_id);
+  if (source.hold_scan_mode) more["Scan mode"] = String(source.hold_scan_mode);
+  if (source.completion_sticker_count != null) more["Completion stickers"] = String(source.completion_sticker_count);
+  if (source.reason) more["Reason"] = String(source.reason);
+  if (source.remarks) more["Remarks"] = String(source.remarks);
+
+  const holdDataSnap = compactHoldDataSnapshot(source.hold_data);
+  if (holdDataSnap) more.hold_data = holdDataSnap;
+
+  return {
+    info: Object.keys(info).length ? info : null,
+    more: Object.keys(more).length ? more : null,
+  };
+}
+
 function buildSimpleDescription(actionType, entity, ref, record, extra) {
   const item = entityLabel(entity);
   const refText = ref ? ` ${ref}` : "";
 
   if (entity === "stock_adjustment") {
     return buildStockAdjustmentDescription(actionType, ref, record, extra);
+  }
+
+  if (entity === "qc_hold_material") {
+    return buildQcHoldDescription(actionType, ref, record, extra);
   }
 
   if (isOverrideCustomerContext(entity, actionType)) {
@@ -559,6 +693,10 @@ export function buildActivityLogPayload({
     const sa = buildStockAdjustmentLog(extra, record);
     if (sa.info) log_data.info = sa.info;
     if (sa.more) log_data.more = sa.more;
+  } else if (entity === "qc_hold_material") {
+    const qh = buildQcHoldLog(extra, record);
+    if (qh.info) log_data.info = qh.info;
+    if (qh.more) log_data.more = qh.more;
   } else if (isOverrideCustomerContext(entity, actionType)) {
     const oc = buildOverrideCustomerLog(extra, record);
     if (oc.info) log_data.info = oc.info;

@@ -44,14 +44,48 @@ export const findAudit = async (filters = {}) => {
 };
 
 const insertAuditLocationRow = async (run, auditId, locationId, assignedUserId, { client = null } = {}) => {
-  const expectedBoxes = await fetchBoxSnapshotForLocation(locationId, { client });
+  // Expected boxes freeze when user starts scanning — not at create time.
   const userId = assignedUserId ?? null;
   await run(
     `INSERT INTO ${T.AUDIT_LOCATIONS}
      (audit_id, location_id, assigned_user_id, plan_assigned_user_id, expected_boxes, scanned_boxes, is_active)
-     VALUES ($1, $2, $3, $3, $4::jsonb, '[]'::jsonb, true)`,
-    [auditId, locationId, userId, JSON.stringify(expectedBoxes)]
+     VALUES ($1, $2, $3, $3, '[]'::jsonb, '[]'::jsonb, true)`,
+    [auditId, locationId, userId]
   );
+};
+
+/**
+ * Freeze live in-hand boxes as expected when location audit actually starts.
+ * Skips if already scanning (has scans) or location is closed.
+ */
+export const ensureExpectedBoxesAtScanStart = async (audit_id, location_id, { client = null } = {}) => {
+  const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
+  const locRes = await run(
+    `SELECT expected_boxes, scanned_boxes, status
+     FROM ${T.AUDIT_LOCATIONS}
+     WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
+    [audit_id, location_id]
+  );
+  const locRow = client ? locRes.rows[0] : locRes[0];
+  if (!locRow) throw new Error("Audit location not found");
+
+  if (isLocationClosed(locRow.status)) {
+    return parseExpectedBoxes(locRow.expected_boxes);
+  }
+
+  const scans = parseScannedBoxes(locRow.scanned_boxes);
+  if (scans.length > 0) {
+    return parseExpectedBoxes(locRow.expected_boxes);
+  }
+
+  const expectedBoxes = await fetchBoxSnapshotForLocation(location_id, { client });
+  await run(
+    `UPDATE ${T.AUDIT_LOCATIONS}
+     SET expected_boxes = $3::jsonb
+     WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
+    [audit_id, location_id, JSON.stringify(expectedBoxes)]
+  );
+  return expectedBoxes;
 };
 
 export const insertAudit = async (data, { client = null } = {}) => {
@@ -255,6 +289,8 @@ export const appendAuditScannedBoxes = async (data, { client = null } = {}) => {
   );
   const locRow = client ? locRes.rows[0] : locRes[0];
   if (!locRow) throw new Error("Audit location not found");
+
+  await ensureExpectedBoxesAtScanStart(audit_id, location_id, { client });
 
   const merged = mergeScannedBoxes(locRow.scanned_boxes, box_no_uids, scanned_by);
   const nextStatus = merged.length ? "draft" : "pending";
@@ -468,7 +504,6 @@ export const reassignAuditLocation = async (audit_id, location_id, assigned_user
     };
   }
 
-  const expectedBoxes = parseExpectedBoxes(locRow.expected_boxes);
   const planUserId = locRow.plan_assigned_user_id ?? prevUserId;
   const clonedAt = new Date();
 
@@ -482,15 +517,9 @@ export const reassignAuditLocation = async (audit_id, location_id, assigned_user
   const insertRes = await run(
     `INSERT INTO ${T.AUDIT_LOCATIONS}
      (audit_id, location_id, assigned_user_id, plan_assigned_user_id, expected_boxes, scanned_boxes, status, is_active)
-     VALUES ($1, $2, $3, $4, $5::jsonb, '[]'::jsonb, 'pending', true)
+     VALUES ($1, $2, $3, $4, '[]'::jsonb, '[]'::jsonb, 'pending', true)
      RETURNING assignment_id`,
-    [
-      audit_id,
-      location_id,
-      nextUserId,
-      planUserId,
-      JSON.stringify(expectedBoxes),
-    ]
+    [audit_id, location_id, nextUserId, planUserId]
   );
   const newRow = client ? insertRes.rows[0] : insertRes[0];
 

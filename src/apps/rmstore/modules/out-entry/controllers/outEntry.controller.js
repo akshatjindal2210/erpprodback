@@ -12,6 +12,7 @@ import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { OUT_ENTRY_TYPE, normalizeOutEntryType, isRmRejectionOutEntry, isJobCardOutEntry, isMrnStoreOutEntry, normalizeStoreOutReason } from "../../../lib/constants/outEntryTypes.js";
 import { assertMrnScanFifoOrder } from "../../../lib/utils/mrnFifoOrder.js";
+import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 
 const MODULE = "rm_out_entry";
 const log = createRmstoreActivityLogger(MODULE);
@@ -284,6 +285,7 @@ export const getOutEntries = async (req, res) => {
       search: sanitizeSearch(search),
       page,
       limit,
+      permission: req.permission,
     });
     return res.json({ success: true, ...result });
   } catch (err) {
@@ -774,6 +776,11 @@ export const updateOutEntryCtrl = async (req, res) => {
 
     const existing = await findOutEntry(id);
     if (!existing) return res.status(404).json({ success: false, message: "Store-out entry not found." });
+
+    const editBlocked = assertWithinEditDays(req, existing.created_at, "edit");
+    if (editBlocked) {
+      return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
+    }
 
     const user = auditUserName(req);
     const remarks =

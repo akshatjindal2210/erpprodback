@@ -91,6 +91,11 @@ const config = {
     url: process.env.ERP_IMS_API_URL || "http://192.168.1.100:3200/data/imsdata",
     timeoutMs: 60000,
   },
+  /** HRMS ERP internal API — same POST { requestedData, filter } pattern as IMS */
+  hrmsErpApi: {
+    url: process.env.HRMS_ERP_API_URL || "http://192.168.1.100:3200/data/imsdata",
+    timeoutMs: 60000,
+  },
   /** WhatsApp message API — task/template notifications (requestedData: swa | swpa) */
   waApi: {
     url: process.env.WA_API_URL || "http://192.168.1.100:3200/send/wa",

@@ -5,6 +5,7 @@
  */
 
 import { isClOccurrenceDay, parseRecurrenceArray } from "../../cl-task/helpers/recurrence/clTaskRecurrence.helper.js";
+import { getISTDateString } from "../../cl-task/helpers/time/clTaskTime.helper.js";
 
 function round1(n) {
   return Math.round(Number(n) * 10) / 10;
@@ -51,12 +52,12 @@ function isFrequentTaskOccurrenceDay(task, ymd) {
   );
 }
 
-/** Count day in period average only when at least one task was due or has stored data. */
-function userHasScheduledDay(user, ymd, pctMap = {}) {
+/** Count day in period average only when a due instance has stored score/state (not future). */
+function userHasScheduledDay(user, ymd, pctMap = {}, today = "") {
   if (ymd in pctMap) return true;
+  if (today && ymd > today) return false;
   for (const t of user?.tasks || []) {
     if (taskHasStoredDay(t, ymd)) return true;
-    if (isFrequentTaskOccurrenceDay(t, ymd)) return true;
   }
   return false;
 }
@@ -138,11 +139,12 @@ export function compileUserPeriodScores(user, dateColumns = []) {
   const day_pct_breakdown_by_date = {};
   const cols = (dateColumns || []).map(toYmd).filter(Boolean);
   const skipSun = userSkipsSundays(user);
+  const today = getISTDateString();
   let sum = 0;
   let count = 0;
   for (const ymd of cols) {
     if (skipSun && isSundayYmd(ymd)) continue;
-    if (!userHasScheduledDay(user, ymd, pctMap)) continue;
+    if (!userHasScheduledDay(user, ymd, pctMap, today)) continue;
     const pct = Number(pctMap[ymd]) || 0;
     day_pct_by_date[ymd] = pct;
     sum += pct;

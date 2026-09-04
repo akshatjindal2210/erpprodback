@@ -81,10 +81,14 @@ function coilNotOnApprovedIssueRequestSql(alias = "c") {
 }
 
 export const findOutEntries = async (options = {}) => {
-  const { filters = {}, search, page = 1, limit = 100 } = options;
+  const { filters = {}, search, page = 1, limit = 100, permission = {} } = options;
   const values = [];
   let i = 1;
   const conditions = ["o.is_deleted = false"];
+
+  if (permission?.can_view_days > 0) {
+    conditions.push(`o.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+  }
 
   if (filters.approved !== undefined && filters.approved !== null && filters.approved !== "") {
     values.push(filters.approved === true || filters.approved === "true");

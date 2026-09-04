@@ -134,11 +134,18 @@ function buildInstanceFilters({
   viewer_id,
   viewer_is_creator,
   view_days,
+  report_due_only,
 }) {
   const conditions = ["1=1"];
   const params = [];
   const today = getISTDateString();
   const nowHm = getISTTimeHM();
+
+  /** CL report: only instances whose occurrence day has arrived (not future schedule). */
+  if (report_due_only) {
+    conditions.push(`i.scheduled_date <= ?::date`);
+    params.push(today);
+  }
 
   if (search) {
     conditions.push(`(i.title ILIKE ? OR i.description ILIKE ? OR p.name ILIKE ?)`);

@@ -164,6 +164,50 @@ async function loadInvmnoteByBill(bill_no, bill_dt_hint = null) {
   return mapped;
 }
 
+/** Register list — live bill header fields from IMS invmnote (not stored on gate row). */
+async function enrichGateRowsFromIms(rows = []) {
+  if (!rows.length) return rows;
+
+  const billKeys = new Set(rows.map((r) => String(r?.bill_no || "").trim().toLowerCase()).filter(Boolean));
+  if (!billKeys.size) return rows;
+
+  const metaByBill = new Map();
+  const pickListFields = (mapped) => ({
+    acc_name: mapped?.acc_name || null,
+    boxes: mapped?.boxes ?? null,
+    totalqty: mapped?.totalqty ?? mapped?.total_qty ?? null,
+    total_item_count: mapped?.total_item_count ?? null,
+  });
+
+  const fy = resolveGateImsBilldtFilter(null, { useTodayAsEnd: true });
+  let json = await fetchImsDataRaw("invmnote", fy.filter);
+  if (!json?.success) {
+    json = await fetchImsDataRaw("invmnote", null);
+  }
+  for (const rec of Array.isArray(json?.records) ? json.records : []) {
+    const billno = String(rec?.billno ?? rec?.bill_no ?? rec?.DocNo ?? "").trim().toLowerCase();
+    if (!billno || !billKeys.has(billno) || metaByBill.has(billno)) continue;
+    metaByBill.set(billno, pickListFields(mapInvmnote(rec)));
+  }
+
+  const missing = [...billKeys].filter((k) => !metaByBill.has(k));
+  if (missing.length) {
+    const byBill = new Map(rows.map((r) => [String(r?.bill_no || "").trim().toLowerCase(), r]));
+    await Promise.all(
+      missing.map(async (key) => {
+        const row = byBill.get(key);
+        const invmnote = await loadInvmnoteByBill(row?.bill_no, row?.bill_dt);
+        if (invmnote) metaByBill.set(key, pickListFields(invmnote));
+      })
+    );
+  }
+
+  return rows.map((row) => {
+    const key = String(row?.bill_no || "").trim().toLowerCase();
+    return { ...row, ...(metaByBill.get(key) || pickListFields(null)) };
+  });
+}
+
 /** Independent open: light DB row + live IMS invmnote / invfnote (no JSON snapshots). */
 async function buildOpenPayload(bill_no, bill_dt_hint = null) {
   const bill = String(bill_no || "").trim();
@@ -264,7 +308,8 @@ export async function listGateEntries(req, res) {
     const to_date = filters.to_date || filters.toDate || null;
     const type = filters.type || filters.typeFilter || null;
     const rows = await findGateRows({from_date, to_date, type, permission: req.permission});
-    res.json({ success: true, data: rows || [], total: (rows || []).length });
+    const data = await enrichGateRowsFromIms(rows || []);
+    res.json({ success: true, data, total: data.length });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message || "Failed to load gate entries." });
   }

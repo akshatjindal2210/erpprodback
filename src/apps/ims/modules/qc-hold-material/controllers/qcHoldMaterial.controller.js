@@ -5,6 +5,7 @@ import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/q
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
+import ActivityLog from "../../../../core/activity-logs/models/activityLog.model.js";
 import { resolveQcHoldPackingMeta } from "../utils/packing/qcHoldPackingMeta.js";
 import { enrichHoldScannedBoxes, enrichQcHoldListRows } from "../utils/list/qcHoldList.js";
 import { VALID_SUBMISSION_TYPES, normalizeSubmissionType, validateSubmissionQuantities } from "../utils/submission/qcHoldSubmission.js";
@@ -18,6 +19,15 @@ import { QC_HOLD_MSG, qcHoldBoxBelongsToPacking } from "../../../lib/constants/q
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 
 const CFG = getCrudModuleConfig("qc_hold_material");
+
+function qcHoldLogDetails(extra = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(extra)) {
+    if (v === undefined || v === null || v === "") continue;
+    out[k] = v;
+  }
+  return out;
+}
 
 function mapCompletionStickers(completionBoxes = []) {
   return (completionBoxes || []).map((row, idx) => ({
@@ -258,6 +268,18 @@ export const createQcHoldMaterial = async (req, res) => {
       entity: "qc_hold_material",
       entity_id: created.hold_id,
       record: created,
+      details: qcHoldLogDetails({
+        event: "qc_hold_created",
+        packing_number: created.packing_number,
+        item_dcode: created.item_dcode,
+        qty: qtyNum,
+        reason: created.reason,
+        remarks: created.remarks,
+        hold_scan_mode: scanMode,
+        box_count: boxUids.length,
+        status: "pending",
+        hold_data: parseHoldData(created.hold_data),
+      }),
     });
     
     const [enriched] = await enrichQcHoldListRows([created]);
@@ -359,6 +381,25 @@ export const submitQcHoldMaterial = async (req, res) => {
       entity: "qc_hold_material",
       entity_id: pk,
       record: apiSubmission,
+      details: qcHoldLogDetails({
+        event:
+          type === "partial"
+            ? "partial_submit"
+            : type === "full"
+              ? "full_submit"
+              : "revert_submit",
+        submission_type: type,
+        submission_id: apiSubmission?.submission_id ?? submission?.submission_id,
+        packing_number: hold.packing_number,
+        item_dcode: hold.item_dcode,
+        completed_qty: finalCompletedQty,
+        rejected_qty: rejectedQtyNum,
+        balance_qty: balanceQty,
+        reason: String(reason).trim(),
+        remarks: remarks != null ? String(remarks).trim() : null,
+        status: hold.status || "pending",
+        hold_data: parseHoldData(nextHoldData),
+      }),
     });
 
     res.json({
@@ -639,11 +680,31 @@ export const approveQcHoldSubmissionController = async (req, res) => {
     }
 
     const apiSubmission = submissionToApi(approvedSubmission, hold.hold_id);
+    const holdStatus = String(updatedHold?.status || "").toLowerCase();
     await logActivity(req, {
       action: "approve",
       entity: "qc_hold_material",
       entity_id: hold.hold_id,
-      record: { submission: apiSubmission, hold: updatedHold },
+      record: apiSubmission,
+      details: qcHoldLogDetails({
+        event:
+          type === "revert"
+            ? "revert_approved"
+            : holdStatus === "complete"
+              ? "hold_completed"
+              : "partial_approved",
+        submission_type: type,
+        submission_id: apiSubmission?.submission_id ?? approvedSubmission?.submission_id,
+        packing_number: updatedHold?.packing_number || hold.packing_number,
+        item_dcode: updatedHold?.item_dcode || hold.item_dcode,
+        completed_qty: apiSubmission?.completed_qty ?? approvedSubmission?.completed_qty,
+        rejected_qty: apiSubmission?.rejected_qty ?? approvedSubmission?.rejected_qty,
+        status: holdStatus || updatedHold?.status,
+        completion_sticker_count: Array.isArray(completionBoxes) ? completionBoxes.length : 0,
+        reason: finalReason,
+        remarks: finalRemarks,
+        hold_data: parseHoldData(updatedHold?.hold_data ?? hold.hold_data),
+      }),
     });
 
     const [enriched] = await enrichQcHoldListRows([updatedHold]);
@@ -854,6 +915,18 @@ export const updateQcHoldMaterialController = async (req, res) => {
       entity: "qc_hold_material",
       entity_id: pk,
       record: updated,
+      details: qcHoldLogDetails({
+        event: "qc_hold_updated",
+        packing_number: updated.packing_number,
+        item_dcode: updated.item_dcode,
+        qty: parseHoldData(updated.hold_data).qty,
+        box_count: parseHoldData(updated.hold_data).boxes?.length ?? 0,
+        reason: updated.reason,
+        remarks: updated.remarks,
+        status: updated.status,
+        hold_scan_mode: parseHoldData(updated.hold_data).hold_scan_mode,
+        hold_data: parseHoldData(updated.hold_data),
+      }),
     });
     const [enriched] = await enrichQcHoldListRows([updated]);
     res.json({ success: true, data: enriched, message: QC_HOLD_MSG.QC_HOLD_UPDATED });
@@ -884,6 +957,16 @@ export const deleteQcHoldMaterialController = async (req, res) => {
       action: "delete",
       entity: "qc_hold_material",
       entity_id: pk,
+      record: deleted,
+      details: qcHoldLogDetails({
+        event: "qc_hold_deleted",
+        packing_number: deleted.packing_number,
+        item_dcode: deleted.item_dcode,
+        qty: parseHoldData(deleted.hold_data).qty,
+        box_count: parseHoldData(deleted.hold_data).boxes?.length ?? 0,
+        reason: deleted.reason,
+        status: deleted.status,
+      }),
     });
     res.json({ success: true, message: QC_HOLD_MSG.QC_HOLD_DELETED });
   } catch (err) {
@@ -903,6 +986,44 @@ export const getQcHoldReasonsViews = async (req, res) => {
         last_used_at: r.last_used_at,
       })),
     });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** POST { hold_id } — activity timeline for one QC hold (all users). Separate from core activity-logs GET. */
+export const getQcHoldActivityLog = async (req, res) => {
+  try {
+    const holdId = parsePositiveIntId(req.body?.hold_id ?? req.body?.id);
+    if (!holdId) {
+      return res.status(400).json({ success: false, message: QC_HOLD_MSG.HOLD_ID_REQUIRED });
+    }
+
+    const hold = await findQcHoldMaterialById(holdId);
+    if (!hold) {
+      return res.status(404).json({ success: false, message: QC_HOLD_MSG.NOT_FOUND });
+    }
+
+    const limit = Math.min(Math.max(parseInt(req.body?.limit, 10) || 200, 1), 500);
+    const { data } = await ActivityLog.getAll({
+      user_id: null,
+      app_type: "ims",
+      module: "qc_hold_material",
+      entity: "qc_hold_material",
+      entity_id: String(holdId),
+      page: 1,
+      limit,
+      skipCount: true,
+    });
+
+    const list = Array.isArray(data) ? [...data] : [];
+    list.sort((a, b) => {
+      const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
+      const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
+      return tb - ta;
+    });
+
+    res.json({ success: true, data: list });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

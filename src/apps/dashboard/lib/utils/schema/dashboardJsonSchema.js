@@ -314,10 +314,14 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
         ? "APP"
         : String(widget.linkType || widget.link_type || "NONE").toUpperCase() === "URL"
           ? "URL"
-          : "NONE",
+          : String(widget.linkType || widget.link_type || "NONE").toUpperCase() === "DRAWER"
+            ? "DRAWER"
+            : "NONE",
       linkUrl: String(widget.linkUrl || widget.link_url || "").trim(),
       linkAppId: String(widget.linkAppId || widget.link_app_id || "").trim(),
       linkPageId: String(widget.linkPageId || widget.link_page_id || "").trim(),
+      drawerTitle: String(widget.drawerTitle || widget.drawer_title || "").trim(),
+      drawerWidget: widget.drawerWidget || widget.drawer_widget || null,
       chart_config: {
         ...(widget.chart_config || {}),
         is_hybrid: widget.chart_config?.is_hybrid === true || String(widget.dataSource || "").toLowerCase() === "hybrid",
@@ -326,6 +330,8 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
         hybrid_url: widget.chart_config?.hybrid_url || "",
         hybrid_url_method: widget.chart_config?.hybrid_url_method || "GET",
         hybrid_url_body: widget.chart_config?.hybrid_url_body || "",
+        drawer_title: String(widget.drawerTitle || widget.drawer_title || widget.chart_config?.drawer_title || "").trim(),
+        drawer_widget: widget.drawerWidget || widget.drawer_widget || widget.chart_config?.drawer_widget || null,
       },
     };
   }
@@ -422,10 +428,14 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       ? "APP"
       : String(chartConfig.link_type || widget.linkType || widget.link_type || "NONE").toUpperCase() === "URL"
         ? "URL"
-        : "NONE",
+        : String(chartConfig.link_type || widget.linkType || widget.link_type || "NONE").toUpperCase() === "DRAWER"
+          ? "DRAWER"
+          : "NONE",
     linkUrl: String(chartConfig.link_url || widget.linkUrl || widget.link_url || "").trim(),
     linkAppId: String(chartConfig.link_app_id || widget.linkAppId || widget.link_app_id || "").trim(),
     linkPageId: String(chartConfig.link_page_id || widget.linkPageId || widget.link_page_id || "").trim(),
+    drawerTitle: String(chartConfig.drawer_title || widget.drawerTitle || widget.drawer_title || "").trim(),
+    drawerWidget: chartConfig.drawer_widget || widget.drawerWidget || widget.drawer_widget || null,
     chart_config: {
       ...chartConfig,
       is_hybrid: hybridMode,
@@ -437,6 +447,8 @@ export function widgetToStoredJson(widget = {}, idx = 0) {
       hybrid_url: chartConfig.hybrid_url || "",
       hybrid_url_method: chartConfig.hybrid_url_method || "GET",
       hybrid_url_body: chartConfig.hybrid_url_body || "",
+      drawer_title: String(chartConfig.drawer_title || widget.drawerTitle || widget.drawer_title || "").trim(),
+      drawer_widget: chartConfig.drawer_widget || widget.drawerWidget || widget.drawer_widget || null,
     },
   };
 }
@@ -513,6 +525,8 @@ export function widgetToRuntimeRow(widget = {}, idx = 0) {
       link_url: stored.linkUrl || "",
       link_app_id: stored.linkAppId || "",
       link_page_id: stored.linkPageId || "",
+      drawer_title: String(stored.drawerTitle || stored.chart_config?.drawer_title || "").trim(),
+      drawer_widget: stored.drawerWidget || stored.chart_config?.drawer_widget || null,
       is_hybrid: stored.chart_config?.is_hybrid === true
         || String(stored.dataSource || "").toLowerCase() === "hybrid",
       hybrid_mssql_query: stored.chart_config?.hybrid_mssql_query || "",

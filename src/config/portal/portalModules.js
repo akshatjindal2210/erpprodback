@@ -3,6 +3,7 @@ export const APP_GATES = {
   ims: "app_ims",
   rmstore: "app_rmstore",
   task: "app_task",
+  hrms: "app_hrms",
 };
 
 export const APP_META = {
@@ -10,9 +11,10 @@ export const APP_META = {
   ims: { label: "IMS", permissions: true },
   rmstore: { label: "RM Store", permissions: true },
   task: { label: "Task", permissions: true },
+  hrms: { label: "HRMS", permissions: true },
 };
 
-export const PORTAL_APP_KEYS = ["core", "ims", "rmstore", "task"];
+export const PORTAL_APP_KEYS = ["core", "ims", "rmstore", "task", "hrms"];
 
 export const SETTINGS_MODULES = ["users", "modules", "training_videos", "departments", "designations"];
 
@@ -74,6 +76,11 @@ export const MODULES = {
     { name: "category", label: "Category" },
     { name: "holiday", label: "Holiday" },
   ],
+  hrms: [
+    { name: "hrms_attendance_log", label: "Attendance Log" },
+    { name: "hrms_attendance", label: "Attendance" },
+    { name: "hrms_employee", label: "Employee Master" },
+  ],
 };
 
 export const SEED_MODULES = [
@@ -127,4 +134,7 @@ export const SEED_MODULES = [
   { name: "rm_activity_logs",             label: "Activity Logs",                   sort_order: 46,       app_type: "rmstore" },
   { name: "rm_coil_transaction_logs",     label: "Coil Transaction Logs",           sort_order: 47,       app_type: "rmstore" },
   { name: "rm_coil_download_logs",        label: "Sticker Download Logs",           sort_order: 48,       app_type: "rmstore" },
+  { name: "hrms_attendance_log",          label: "Attendance Log",                  sort_order: 48,       app_type: "hrms" },
+  { name: "hrms_attendance",              label: "Attendance",                      sort_order: 49,       app_type: "hrms" },
+  { name: "hrms_employee",                label: "Employee Master",                 sort_order: 50,       app_type: "hrms" },
 ];

@@ -3,15 +3,15 @@ import morgan from "morgan";
 
 import { getLogFilePath } from "../../../logging/paths.js";
 
-const logger = winston.createLogger({
-  level: "info",
-  format: winston.format.combine(
-    winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
-    winston.format.printf(({ timestamp, level, message }) => {
-      return `[${timestamp}] ${level.toUpperCase()} — ${message}`;
-    }),
-  ),
-  transports: [
+const LOG_FORMAT = winston.format.combine(
+  winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
+  winston.format.printf(({ timestamp, level, message }) => {
+    return `[${timestamp}] ${level.toUpperCase()} — ${message}`;
+  }),
+);
+
+function createFileTransports() {
+  return [
     new winston.transports.File({
       filename: getLogFilePath("error.log"),
       level: "error",
@@ -19,8 +19,71 @@ const logger = winston.createLogger({
     new winston.transports.File({
       filename: getLogFilePath("combined.log"),
     }),
-  ],
+  ];
+}
+
+function closeFileTransport(transport) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    const dest = transport?._dest;
+    const timer = setTimeout(() => {
+      if (dest && typeof dest.destroy === "function" && !dest.destroyed) {
+        dest.destroy();
+      }
+      done();
+    }, 4000);
+
+    const finish = () => {
+      clearTimeout(timer);
+      if (dest && typeof dest.destroy === "function" && !dest.destroyed) {
+        dest.destroy();
+      }
+      done();
+    };
+
+    if (!transport?._stream) {
+      finish();
+      return;
+    }
+
+    try {
+      transport.close(finish);
+    } catch {
+      finish();
+    }
+  });
+}
+
+let fileTransports = createFileTransports();
+
+const logger = winston.createLogger({
+  level: "info",
+  format: LOG_FORMAT,
+  transports: fileTransports,
 });
+
+/** Close winston file handles so retention can replace logs on Windows. */
+export async function withFileLoggingPaused(fn) {
+  const current = fileTransports;
+  for (const transport of current) {
+    logger.remove(transport);
+  }
+  await Promise.all(current.map(closeFileTransport));
+  try {
+    return await fn();
+  } finally {
+    fileTransports = createFileTransports();
+    for (const transport of fileTransports) {
+      logger.add(transport);
+    }
+  }
+}
 
 const isLoginPost = (req) =>
   req.method === "POST" && req.originalUrl.endsWith("/login");

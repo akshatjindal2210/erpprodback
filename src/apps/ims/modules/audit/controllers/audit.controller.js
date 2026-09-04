@@ -1,4 +1,4 @@
-import { findAudits, findAudit, insertAudit, updateAudit, deleteAudit, appendAuditScannedBoxes, deleteAuditScan, evaluateAuditLocationProgress, syncAuditMasterStatus, getAuditComparisonReport, reopenAuditLocation, reassignAuditLocation, applyAuditComparisonAdjustment, completeAuditLocation, getAuditLocationScores } from "../models/audit.model.js";
+import { findAudits, findAudit, insertAudit, updateAudit, deleteAudit, appendAuditScannedBoxes, deleteAuditScan, evaluateAuditLocationProgress, syncAuditMasterStatus, getAuditComparisonReport, reopenAuditLocation, reassignAuditLocation, applyAuditComparisonAdjustment, completeAuditLocation, getAuditLocationScores, ensureExpectedBoxesAtScanStart } from "../models/audit.model.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -328,6 +328,65 @@ export const submitAuditScan = async (req, res) => {
       success: true,
       message,
       data: progress,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** Freeze live expected boxes when assignee starts location scan (location QR). */
+export const startAuditLocationController = async (req, res) => {
+  try {
+    const { audit_id, location_id } = req.body;
+    const userId = req.user.id;
+
+    if (!audit_id) return res.status(400).json({ success: false, message: "audit_id required" });
+    if (!location_id) return res.status(400).json({ success: false, message: "location_id required" });
+
+    const audit = await findAudit({ audit_id });
+    if (!audit) return res.status(404).json({ success: false, message: "Audit not found" });
+
+    const locRow = findActiveAuditLocation(audit, location_id);
+    if (!locRow) {
+      return res.status(404).json({ success: false, message: "Audit location not found" });
+    }
+
+    if (req.user.type !== "super_admin") {
+      if (Number(locRow.assigned_user_id) !== Number(userId)) {
+        return res.status(403).json({ success: false, message: "You are not assigned to this audit location" });
+      }
+    }
+
+    if (!audit.approved && req.user.type !== "super_admin") {
+      return res.status(403).json({ success: false, message: "Audit must be active before it can be started" });
+    }
+
+    if (!isWithinAuditDateRange(audit) && req.user.type !== "super_admin") {
+      return res.status(403).json({ success: false, message: "Audit is outside of allowed date range" });
+    }
+
+    if ((audit.status === "submitted" || audit.status === "verified") && req.user.type !== "super_admin") {
+      return res.status(403).json({ success: false, message: "Cannot modify a submitted or verified audit" });
+    }
+
+    if (req.user.type !== "super_admin" && isLocationClosed(locRow)) {
+      return res.status(403).json({
+        success: false,
+        message: "This location is completed and cannot be edited",
+      });
+    }
+
+    const expectedBoxes = await withTransaction(async (client) =>
+      ensureExpectedBoxesAtScanStart(audit_id, location_id, { client })
+    );
+
+    return res.json({
+      success: true,
+      message: "Expected boxes locked from current inventory",
+      data: {
+        expected_boxes: expectedBoxes,
+        expected_count: expectedBoxes.length,
+      },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

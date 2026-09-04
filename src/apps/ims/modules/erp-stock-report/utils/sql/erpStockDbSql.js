@@ -1,13 +1,13 @@
 /**
- * Lightweight DB stock query for ERP stock report — fg sellable qty only (no locations/QC breakdown).
+ * Lightweight DB stock query for ERP stock report — in-hand FG qty (includes QC hold).
  * Groups by packing + doc_dt + job_card + item + customer (same reused-packing rule as inventory report).
  */
 
-import { sqlBoxSellable, sqlDocDtFromDailyprod, sqlDocDtText, sqlBoxCustomerCodeReport } from "../../../box/utils/inventory/boxInventorySql.js";
+import { sqlBoxInHand, sqlDocDtFromDailyprod, sqlDocDtText, sqlBoxCustomerCodeReport } from "../../../box/utils/inventory/boxInventorySql.js";
 
 const PN = (alias) => `NULLIF(TRIM(${alias}.packing_number::text), '')`;
 const TRIM_TXT = (expr) => `NULLIF(TRIM((${expr})::text), '')`;
-const SELLABLE = sqlBoxSellable("b");
+const IN_HAND = sqlBoxInHand("b");
 
 /** SA boxes: meta from linked SA only (safe when packing number is reused across years). */
 const BOX_ITEM_DCODE = `COALESCE(
@@ -56,7 +56,7 @@ export function sqlErpStockDbRows() {
       ${BOX_JOB_CARD} AS job_card_no,
       ${BOX_CUSTOMER_CODE} AS customer_code,
       NULLIF(TRIM(COALESCE(MAX(${BOX_CUSTOMER_NAME}), '')), '') AS customer_name,
-      SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${SELLABLE}))::bigint AS db_stock
+      SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${IN_HAND}))::bigint AS db_stock
     FROM ims_box_table b
     LEFT JOIN ims_stock_adjustment sa
       ON sa.adjustment_id = b.sa_id
@@ -68,6 +68,6 @@ export function sqlErpStockDbRows() {
     WHERE b.is_deleted = false
       AND ${PN("b")} IS NOT NULL
     GROUP BY ${PN("b")}, ${BOX_DOC_DT}, ${BOX_JOB_CARD}, ${BOX_ITEM_DCODE}, ${BOX_CUSTOMER_CODE}
-    HAVING SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${SELLABLE})) > 0
+    HAVING SUM(COALESCE(b.qty, 0)) FILTER (WHERE (${IN_HAND})) > 0
        AND TRIM(COALESCE(${BOX_ITEM_DCODE}, '')) NOT IN ('', '—')`;
 }

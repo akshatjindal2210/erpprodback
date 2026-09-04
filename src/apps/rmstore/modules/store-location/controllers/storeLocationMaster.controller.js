@@ -427,7 +427,6 @@ export const getLocationsViews = async (req, res) => {
       page: page || 1,
       limit: limit || 5000,
       fields,
-      permission: req.permission
     });
 
     const rows = await enrichLocationRows(result.data || []);
@@ -442,7 +441,7 @@ export const getLocationsViews = async (req, res) => {
           success: true,
           data: [],
           message: "No approved locations found. Please ensure locations are authorized in RM Store Location Master.",
-          _debug_info: "Locations exist but might be unapproved or restricted by date."
+          _debug_info: "Locations exist but might be unapproved.",
         });
       }
     }

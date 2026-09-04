@@ -90,7 +90,7 @@ export const findAllActiveMrnByUid = async () => {
   return map;
 };
 
-export const findGeneratedMrns = async ({ search, page = 1, limit = 1000, from_date, to_date } = {}) => {
+export const findGeneratedMrns = async ({ search, page = 1, limit = 1000, from_date, to_date, permission = {} } = {}) => {
   const values = [];
   let i = 1;
   const conditions = [
@@ -102,6 +102,10 @@ export const findGeneratedMrns = async ({ search, page = 1, limit = 1000, from_d
         AND ${portalMrnCoilSql("c")}
     )`,
   ];
+
+  if (permission?.can_view_days > 0) {
+    conditions.push(`m.mrn_dt >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+  }
 
   if (from_date) {
     values.push(from_date);

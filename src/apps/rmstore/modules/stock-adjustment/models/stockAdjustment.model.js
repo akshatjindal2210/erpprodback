@@ -67,10 +67,14 @@ function assertFields(obj, whitelist, label) {
   }
 }
 
-export async function findAdjustments({ filters = {}, search, page = 1, limit = 100 } = {}) {
+export async function findAdjustments({ filters = {}, search, page = 1, limit = 100, permission = {} } = {}) {
   const values = [];
   let i = 1;
   const conditions = ["s.is_deleted = false"];
+
+  if (permission?.can_view_days > 0) {
+    conditions.push(`s.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+  }
 
   if (filters.adjustment_id != null && filters.adjustment_id !== "") {
     values.push(Number(filters.adjustment_id));

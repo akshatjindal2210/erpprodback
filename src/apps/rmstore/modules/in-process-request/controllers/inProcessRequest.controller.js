@@ -13,6 +13,7 @@ import { hasInProcessRejectionPermission } from "../../../lib/utils/rmstoreSpeci
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { isCoilEligibleForIprRejection, iprRejectionIneligibleMessage } from "../../../lib/utils/iprRejectionEligibility.js";
 import { isIssuedToShopFloor, isSaMinusWriteOff } from "../../../lib/utils/saMinusInventory.js";
+import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 
 const MODULE = "rm_in_process_request";
 const log = createRmstoreActivityLogger(MODULE);
@@ -966,6 +967,7 @@ export const getInProcessRequests = async (req, res) => {
       search: sanitizeSearch(search),
       page,
       limit,
+      permission: req.permission,
     });
     return res.json({ success: true, ...result });
   } catch (err) {
@@ -1300,6 +1302,11 @@ export const updateInProcessRequestCtrl = async (req, res) => {
 
     const existing = await findInProcessRequest(id);
     if (!existing) return res.status(404).json({ success: false, message: "In-process request not found." });
+
+    const editBlocked = assertWithinEditDays(req, existing.created_at, "edit");
+    if (editBlocked) {
+      return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
+    }
 
     const user = auditUserName(req);
     const body = { ...req.body };

@@ -14,6 +14,7 @@ import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js"
 import { assertIssueRequestCoilsAvailable, buildAvailableCoilsForIssue, lockCoilUidsForReserve } from "../utils/stock/issueRequestCoilReserve.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { withTransaction } from "../../../../../config/db/db.js";
+import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 
 const MODULE = "rm_issue_request";
 const log = createRmstoreActivityLogger(MODULE);
@@ -476,6 +477,7 @@ export const getIssueRequests = async (req, res) => {
       search: sanitizeSearch(search),
       page,
       limit,
+      permission: req.permission,
     });
     return res.json({ success: true, ...result });
   } catch (err) {
@@ -495,6 +497,7 @@ export const getIssueRequestJobCardRows = async (req, res) => {
       search: sanitizeSearch(search),
       page,
       limit,
+      permission: req.permission,
     });
     return res.json({ success: true, ...result });
   } catch (err) {
@@ -754,6 +757,11 @@ export const updateIssueRequestCtrl = async (req, res) => {
         success: false,
         message: "This issue request is locked for store out.",
       });
+    }
+
+    const editBlocked = assertWithinEditDays(req, existing.created_at, "edit");
+    if (editBlocked) {
+      return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
     }
 
     const user = auditUserName(req);

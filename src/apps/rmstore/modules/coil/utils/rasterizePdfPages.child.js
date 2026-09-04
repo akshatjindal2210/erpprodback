@@ -70,7 +70,7 @@ async function rasterizePdfPagesInProcess(diskPath) {
     standardFontDataUrl: STANDARD_FONT_DATA_URL,
     wasmUrl: WASM_URL,
     disableFontFace: true,
-    isEvalSupported: false,
+    enableScripting: false,
     useSystemFonts: false,
     useWasm: true,
     isOffscreenCanvasSupported: false,
@@ -100,7 +100,7 @@ async function rasterizePdfPagesInProcess(diskPath) {
       page.cleanup();
     }
   } finally {
-    await pdf.destroy?.();
+    // pdfjs v6 removed PDFDocumentProxy.destroy(); tear down via loadingTask
     await loadingTask.destroy?.();
   }
 

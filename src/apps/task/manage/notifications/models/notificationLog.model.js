@@ -165,10 +165,13 @@ const NotificationLog = {
           NULL AS read_at,
           NULL AS received_client_ip,
           NULL AS received_on_company_network,
-          l.entity_id AS task_id
+          CASE
+            WHEN l.entity_id ~ '^[0-9]+$' THEN l.entity_id::integer
+            ELSE NULL
+          END AS task_id
         FROM ${M.ACTIVITY_LOGS} l
         LEFT JOIN ${M.USERS} u ON u.id = l.user_id
-        LEFT JOIN ${T.TASKS} t ON t.task_id = l.entity_id
+        LEFT JOIN ${T.TASKS} t ON t.task_id::text = l.entity_id
         WHERE ${actWhereSql}
       `);
     }

@@ -1,5 +1,5 @@
 import express from "express";
-import { getAudits, getAuditById, createAudit, updateAuditController, deleteAuditController, submitAuditScan, verifyAudit, removeAuditScan, getAuditComparisonReportController, applyAuditComparisonAdjustmentController, completeAuditLocationController, getAuditScoresController, reopenAuditLocationController, reassignAuditLocationController } from "../controllers/audit.controller.js";
+import { getAudits, getAuditById, createAudit, updateAuditController, deleteAuditController, submitAuditScan, startAuditLocationController, verifyAudit, removeAuditScan, getAuditComparisonReportController, applyAuditComparisonAdjustmentController, completeAuditLocationController, getAuditScoresController, reopenAuditLocationController, reassignAuditLocationController } from "../controllers/audit.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl, superAdminOnly } from "../../../../core/lib/middleware/accessControl.js";
 
@@ -13,6 +13,7 @@ router.post("/create", accessControl("audit", "authorize"), createAudit);
 router.post("/update", accessControl("audit", ["edit", "authorize"]), updateAuditController);
 router.post("/delete", accessControl("audit", "delete"), deleteAuditController);
 router.post("/submit-scan", accessControl("audit", "add"), submitAuditScan);
+router.post("/start-location", accessControl("audit", "add"), startAuditLocationController);
 router.post("/remove-scan", accessControl("audit", "add"), removeAuditScan);
 router.post("/scores", accessControl("audit", "view"), getAuditScoresController);
 router.post("/reopen-location", accessControl("audit", ["edit", "authorize"]), reopenAuditLocationController);

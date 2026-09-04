@@ -359,14 +359,14 @@ function absorbFrequentInstance(group, inst, review, today) {
   group.recurrence_year_dates = inst.recurrence_year_dates ?? group.recurrence_year_dates;
   group.include_sunday = inst.include_sunday === true;
 
-  if (!group.minDay || day < group.minDay) group.minDay = day;
-  if (!group.maxDay || day > group.maxDay) group.maxDay = day;
-
-  /** Upcoming schedule — keep row span, do not score as missed 0%. */
+  /** Upcoming schedule — do not score or extend row span until due. */
   if (day > today) {
     trackLatestInstance(group, inst, review, day);
     return;
   }
+
+  if (!group.minDay || day < group.minDay) group.minDay = day;
+  if (!group.maxDay || day > group.maxDay) group.maxDay = day;
 
   const doneVerified = isDoneVerified(inst, today);
   const notDone = isNotDone(inst, today);
@@ -652,6 +652,8 @@ export async function getDailyReport(req, res) {
       search: search || undefined,
       /** Report uses explicit date range — do not also clamp by view_days. */
       view_days: undefined,
+      /** Only show tasks when occurrence day is due (not future schedule). */
+      report_due_only: true,
     });
 
     const date_columns = buildDateColumns(date_from, date_to);
@@ -715,8 +717,8 @@ export async function getDailyReport(req, res) {
       }
 
       if (group.attempt_count <= 0 && !group.awaiting) {
-        /** Future-only schedule in range — still show the row (blank cells until due). */
-        if (!group.minDay && !group.maxDay) return;
+        /** No due/past instance yet — hide until occurrence day (cron spawns when due). */
+        return;
       }
 
       let scoreRaw = compiled?.adjusted ?? 0;

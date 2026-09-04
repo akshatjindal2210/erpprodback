@@ -441,7 +441,6 @@ export const getLocationsViews = async (req, res) => {
       page: page || 1,
       limit: limit || 5000,
       fields,
-      permission: req.permission
     });
 
     const enrichedRows = await enrichLocationRows(result.data || []);

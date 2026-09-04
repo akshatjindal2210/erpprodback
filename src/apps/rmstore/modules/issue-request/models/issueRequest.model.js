@@ -203,10 +203,14 @@ function mapMasterRow(row) {
 }
 
 export const findIssueRequests = async (options = {}) => {
-  const { filters = {}, search, page = 1, limit = 100 } = options;
+  const { filters = {}, search, page = 1, limit = 100, permission = {} } = options;
   const values = [];
   const iRef = { value: 1 };
   const conditions = ["r.is_deleted = false"];
+
+  if (permission?.can_view_days > 0) {
+    conditions.push(`r.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+  }
 
   applyIssueRequestListFilters(filters, conditions, values, { iRef, statsAlias: "st" });
   let i = iRef.value;
@@ -282,10 +286,14 @@ export const findIssueRequests = async (options = {}) => {
 
 /** Job-card-wise rows — one row per job card on each issue request (like FN item-wise). */
 export const findIssueRequestJobCardRows = async (options = {}) => {
-  const { filters = {}, search, page = 1, limit = 100 } = options;
+  const { filters = {}, search, page = 1, limit = 100, permission = {} } = options;
   const values = [];
   const iRef = { value: 1 };
   const conditions = ["r.is_deleted = false"];
+
+  if (permission?.can_view_days > 0) {
+    conditions.push(`r.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+  }
 
   applyIssueRequestListFilters(filters, conditions, values, { iRef, statsAlias: "jst" });
   let i = iRef.value;

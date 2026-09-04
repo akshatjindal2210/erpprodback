@@ -315,10 +315,16 @@ export const findInProcessRequests = async (options = {}) => {
     limit = 100,
     includeAutoStoreInFromConsume = false,
     pendingStoreInQueue = false,
+    permission = {},
   } = options;
   const values = [];
   let i = 1;
   const conditions = ["r.is_deleted = false"];
+
+  if (permission?.can_view_days > 0) {
+    conditions.push(`r.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+  }
+
   if (pendingStoreInQueue) {
     conditions.push(`(
       (

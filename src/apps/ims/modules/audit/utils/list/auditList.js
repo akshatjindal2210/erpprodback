@@ -180,6 +180,11 @@ function buildListWhere({ filters = {}, search, permission = {}, user = {} }) {
   const values = [];
   const conditions = ["am.is_deleted = false"];
 
+  // Permission-based date restriction (can_view_days)
+  if (permission?.can_view_days > 0) {
+    conditions.push(`am.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+  }
+
   applyVisibility(user, permission, conditions, values);
   applyFilters(filters, conditions, values);
   applySearch(search, conditions, values);

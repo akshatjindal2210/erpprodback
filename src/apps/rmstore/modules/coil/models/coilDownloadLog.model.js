@@ -119,7 +119,7 @@ export async function insertCoilDownloadLog({
 }
 
 export async function listCoilDownloadLogs(options = {}) {
-  const { filters = {}, search, page = 1, limit = 100, user_id = null } = options;
+  const { filters = {}, search, page = 1, limit = 100, user_id = null, permission = {} } = options;
   const values = [];
   let i = 1;
   const conditions = [`l.transaction_type = $${i++}`];
@@ -140,6 +140,9 @@ export async function listCoilDownloadLogs(options = {}) {
       i = values.length + 1;
     }
   } else {
+    if (permission?.can_view_days > 0) {
+      conditions.push(`l.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+    }
     if (filters.from_date) {
       values.push(filters.from_date);
       conditions.push(`l.created_at >= $${i++}::timestamp`);

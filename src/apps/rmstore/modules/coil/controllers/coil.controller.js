@@ -39,6 +39,7 @@ export const getCoils = async (req, res) => {
       limit,
       sortBy,
       order,
+      permission: req.permission,
     });
     return res.json({ success: true, ...result });
   } catch (err) {
