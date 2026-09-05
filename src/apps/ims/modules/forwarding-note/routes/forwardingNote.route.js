@@ -38,7 +38,7 @@ router.post("/create", authenticate, accessControl("forwarding_note_master", "ad
 router.post("/update", authenticate, accessControl("forwarding_note_master", ["edit", "authorize"]), updateForwardingNote);
 
 // Assign bill to item-wise line(s)
-router.post("/assign-item-bill", authenticate, accessControl("forwarding_note_master", "edit"), assignForwardingNoteItemBill);
+router.post("/assign-item-bill", authenticate, accessControl("forwarding_note_master", "view"), assignForwardingNoteItemBill);
 
 // Delete
 router.post("/delete", authenticate, accessControl("forwarding_note_master", "delete"), deleteForwardingNote);

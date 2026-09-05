@@ -81,6 +81,7 @@ const INSTANT_TEMPLATE_KEYS = [
   "personal_reminder",
   "target_date_set",
   "status_changed",
+  "chat_message",
 ];
 
 export async function sendInstantNotification(req, res) {

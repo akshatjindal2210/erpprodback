@@ -1,11 +1,53 @@
 import Task from "../models/task.model.js";
 import TargetDate from "../../reminders/models/targetDate.model.js";
 import { isChatLockedForUser } from "../../../lib/shared/utils/targetDateHelper.js";
+import { sendTaskNotification } from "../../../manage/notifications/services/notification.service.js";
 import fs   from "fs";
 import path from "path";
 import config from "../../../../../config/app/config.js";
 
 const log = (task_id, user_id, performed_by, action, action_detail = null, assignment_id = null) => Task.addLog(task_id, user_id, performed_by, action, action_detail, assignment_id);
+
+function buildMessagePreview(message, attachments) {
+  const text = String(message ?? "").trim();
+  if (text) return text.length > 200 ? `${text.slice(0, 197)}...` : text;
+  if (attachments?.length) return `[${attachments.length} attachment(s)]`;
+  return "";
+}
+
+async function getTaskChatRecipientIds(task_id, senderId) {
+  const [task, chain] = await Promise.all([
+    Task.getById(task_id),
+    Task.getAssignmentChain(task_id),
+  ]);
+  const ids = new Set();
+
+  if (task?.created_by_id) ids.add(Number(task.created_by_id));
+  if (task?.assigned_by_id) ids.add(Number(task.assigned_by_id));
+
+  for (const a of chain) {
+    if (a.is_active === 1 || a.is_active === true) {
+      if (a.assigned_to_id) ids.add(Number(a.assigned_to_id));
+    }
+  }
+
+  ids.delete(Number(senderId));
+  return [...ids].filter((id) => Number.isFinite(id) && id > 0);
+}
+
+async function notifyTaskChatParticipants(task_id, senderId, senderName, messagePreview) {
+  const recipientIds = await getTaskChatRecipientIds(task_id, senderId);
+  if (!recipientIds.length) return;
+
+  const vars = {
+    sender_name: senderName,
+    message_preview: messagePreview,
+  };
+
+  for (const recipientId of recipientIds) {
+    void sendTaskNotification("chat_message", recipientId, vars, Number(task_id));
+  }
+}
 
 // GET CHAT — all messages for a task
 export async function getChat(req, res) {
@@ -84,6 +126,13 @@ export async function sendMessage(req, res) {
 
     const result  = await Task.sendChatMessage(id, user_id, message, reply_to_id, attachments);
     const chat_id = result.insertId;
+
+    const senderName = req.user.name ?? "Someone";
+    const messagePreview = buildMessagePreview(message, attachments);
+
+    await log(id, user_id, senderName, "chat_message_sent", messagePreview, null);
+
+    void notifyTaskChatParticipants(id, user_id, senderName, messagePreview);
 
     if (task && task.status === "pending") {
       await Task.updateStatus(id, "in_progress", user_id);

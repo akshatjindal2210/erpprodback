@@ -17,8 +17,8 @@ const pad = (n) => String(n).padStart(2, "0");
 
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Matches any hourly backup: `db_2026-06-01_14.dump` or legacy `db_2026-06-01_14-30-45.dump`. */
-const anyHourlyFilePattern = (db) => new RegExp(`^${escapeRegex(db)}_\\d{4}-\\d{2}-\\d{2}_\\d{2}(?:-\\d{2}-\\d{2})?\\.dump$`);
+/** Matches `db_2026-06-01_14.dump`, `db_2026-06-01_14-15.dump`, or legacy `db_2026-06-01_14-30-45.dump`. */
+const anyHourlyFilePattern = (db) => new RegExp(`^${escapeRegex(db)}_\\d{4}-\\d{2}-\\d{2}_\\d{2}(?:-\\d{2}(?:-\\d{2})?)?\\.dump$`);
 
 const formatSize = (bytes) => {
   const mb = bytes / 1024 / 1024;
@@ -135,7 +135,8 @@ const buildPlans = (root, cronMode) => {
     const weeklyDir = path.join(root, config.dbBackup.weeklyDir);
 
     // Manual `npm run backup` skips weekly — otherwise a mid-day partial run could overwrite the weekly slot.
-    if (cronMode && h === WEEKLY_SNAPSHOT_HOUR) {
+    // Minute check keeps weekly on the :00 tick after cron moved to */15.
+    if (cronMode && h === WEEKLY_SNAPSHOT_HOUR && now.getMinutes() < 15) {
       const snapshotDay = new Date(now);
       snapshotDay.setDate(snapshotDay.getDate() - 1);
       const weekday = WEEKDAYS[snapshotDay.getDay()];
@@ -155,14 +156,15 @@ const buildPlans = (root, cronMode) => {
     const { hourlyStartHour: start, hourlyEndHour: end } = config.dbBackup;
     if (!cronMode || (h >= start && h <= end)) {
       const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-      const name = `${db}_${day}_${pad(h)}.dump`;
+      const slot = Math.floor(now.getMinutes() / 15) * 15;
+      const name = `${db}_${day}_${pad(h)}-${pad(slot)}.dump`;
       plans.push({
         targetDir: path.join(root, config.dbBackup.hourlyDir),
         fileName: name,
         hourSlot: { db, day, hour: h },
         label: `hourly/${name}`,
       });
-    } else {
+    } else if (now.getMinutes() < 15) {
       logger.info(`DB backup: hourly skipped (work hours ${pad(start)}:00–${pad(end)}:00)`);
     }
   }

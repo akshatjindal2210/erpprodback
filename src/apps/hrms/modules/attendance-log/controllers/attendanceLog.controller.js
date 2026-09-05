@@ -2,7 +2,7 @@ import dbQuery from "../../../../../config/db/db.js";
 import { HRMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { extractHrmsListParams } from "../../../lib/listParams.js";
 import { formatHrmsDateTime } from "../../../lib/hrmsFormat.js";
-import { saveHikvisionEventsFromBody, hikvisionWebhookAuthorized, EVENT_TS_SQL, CREATED_AT_SQL } from "../../../lib/attendanceEvents.js";
+import { saveHikvisionEventsFromBody, EVENT_TS_SQL, CREATED_AT_SQL } from "../../../lib/attendanceEvents.js";
 import { HRMS_ATTENDANCE_TZ } from "../../../lib/attendanceDaily.js";
 
 const LOG_DATE_SQL = `(event_timestamp AT TIME ZONE '${HRMS_ATTENDANCE_TZ}')::date`;
@@ -18,37 +18,41 @@ function formatLogRow(row) {
 }
 
 export async function ingestHikvisionEvents(req, res) {
-  if (!hikvisionWebhookAuthorized(req)) {
-    return res.status(401).json({ success: false, message: "Invalid webhook secret." });
-  }
-
-  // Device ko turant 200 — warna retry / offline mark karega
+  if (req.headers.key !== "DUMMY_LIVE_KEY") return res.status(401).json({ success: false, message: "Invalid key." });
   res.sendStatus(200);
+  console.log("[HRMS LIVE]", req.body);
+  saveHikvisionEventsFromBody(req.body)
+    .then((saved) => console.log("[HRMS LIVE] saved", saved))
+    .catch((err) => console.log("[HRMS LIVE] fail", err.message));
+}
 
-  console.log(`\n--- [${new Date().toLocaleTimeString()}] New Event Received ---`);
-
-  if (req.body) {
-    Object.keys(req.body).forEach((key) => {
-      console.log(`Field Name: ${key}`);
-      console.log("Payload Data:\n", req.body[key]);
-    });
-  }
-
-  if (req.files?.length > 0) {
-    req.files.forEach((file) => {
-      console.log(`Attachment Found: ${file.fieldname}`);
-      console.log(`MimeType: ${file.mimetype} | Size: ${file.size} bytes`);
-    });
-  }
-
+export async function syncAttendanceLogs(req, res) {
   try {
-    const saved = await saveHikvisionEventsFromBody(req.body);
-    if (saved.length) {
-      console.log(`Inserted ${saved.length} attendance row(s)`);
-      saved.forEach((row) => console.log(row));
-    }
+    const from = req.body?.from || "";
+    const to = req.body?.to || "";
+    const pull = await fetch("http://192.168.1.100:3200/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to }),
+    });
+    const json = await pull.json();
+    console.log("[HRMS SYNC]", json);
+    if (json?.success === false) return res.status(502).json({ success: false, message: json?.message || "request failed." });
+
+    const events = json?.data?.AcsEvent?.InfoList || [];
+    if (!events.length) return res.json({ success: true, message: "No live events.", total: 0, data: [] });
+
+    const saved = await saveHikvisionEventsFromBody({ EventList: events });
+    console.log("[HRMS SYNC] saved", saved);
+    return res.json({
+      success: true,
+      message: `Synced ${saved.length} new, skipped ${events.length - saved.length} existing.`,
+      total: saved.length,
+      data: saved,
+    });
   } catch (err) {
-    console.error("[HRMS] Insert failed:", err.message);
+    console.error("[HRMS] syncAttendanceLogs:", err);
+    return res.status(500).json({ success: false, message: err.message || "Server error." });
   }
 }
 

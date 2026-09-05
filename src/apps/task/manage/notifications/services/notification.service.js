@@ -16,6 +16,7 @@ const FALLBACK_SUBJECT = {
   daily_reminder: "Daily task reminder",
   personal_reminder: "Personal reminder: {{task_title}}",
   status_changed: "Task status updated: {{task_title}}",
+  chat_message: "New message on {{task_title}}",
 };
 
 const FALLBACK_BODY = {

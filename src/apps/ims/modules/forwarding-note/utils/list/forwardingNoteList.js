@@ -1,13 +1,14 @@
 /**
  * Forwarding Note — list/detail enrich for API responses.
  *
- * Live invfnote merge unchanged.
+ * Live invfnote bills are exclusive: a bill merged from live IMS is not copied
+ * onto another row. A bill saved on a row (DB `bill_no`) always shows on that row.
  * When both live + DB bill exist, winner = BILL_SOURCE_PREFER ("db" | "live").
  * Summary billno = unique item bills joined "1, 2, 3".
  */
 
 import { enrichRowsWithIMS } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
-import { buildCompositeKey, mergeRowsWithExternalData } from "../../../../lib/utils/erp-api/lookup/externalDataMerge.js";
+import { buildCompositeKey, fetchExternalRecords } from "../../../../lib/utils/erp-api/lookup/externalDataMerge.js";
 import { resolvePackingStickerMetaForPrint } from "../../../box/utils/stickers/stickerPrintMeta.js";
 import dbQuery from "../../../../../../config/db/db.js";
 
@@ -86,8 +87,21 @@ export function normalizeInvfnoteBillNo(rec = {}) {
   return String(rec?.prnbillno ?? rec?.PrnBillNo ?? rec?.bill_no ?? rec?.billno ?? rec?.DocNo ?? "").trim();
 }
 
+function normalizeClaimedBillKey(bill) {
+  return String(bill ?? "").trim().toLowerCase();
+}
+
+/** Simple dropdown sub-line from uid `acc-item-packing-qty`. */
+function billHintFromInvfnote(rec = {}) {
+  const p = String(rec?.uid || rec?.muid || "").split("-").filter(Boolean);
+  const item = rec?.item_code || rec?.itemdcode || rec?.item_dcode || p[1];
+  const pack = rec?.packing_number || rec?.packing || p[2];
+  const qty = rec?.qty ?? rec?.total_qty ?? p[3];
+  return [item && `Item ${item}`, pack && `Pack ${pack}`, qty !== "" && qty != null && `Qty ${qty}`].filter(Boolean).join(" · ");
+}
+
 /** Bill dropdown rows: all matching bills; green flag marks what can be saved. */
-export function buildInvfnoteBillOptions(records = [], { keySet, matchMode, search = "" } = {}) {
+export function buildInvfnoteBillOptions(records = [], { keySet, matchMode, search = "", excludeBillNos } = {}) {
   const keys = keySet instanceof Set ? keySet : new Set(keySet || []);
   if (!keys.size) return [];
 
@@ -100,11 +114,11 @@ export function buildInvfnoteBillOptions(records = [], { keySet, matchMode, sear
 
     const billNo = normalizeInvfnoteBillNo(rec);
     if (!billNo) continue;
+    if (excludeBillNos instanceof Set && excludeBillNos.has(normalizeClaimedBillKey(billNo))) continue;
 
+    const bill_hint = billHintFromInvfnote(rec);
     const dedupeKey = `${billNo}::${matchKey}`;
-    if (needle && !billNo.toLowerCase().includes(needle) && !matchKey.toLowerCase().includes(needle)) {
-      continue;
-    }
+    if (needle && ![billNo, matchKey, bill_hint].join(" ").toLowerCase().includes(needle)) continue;
 
     const status = String(rec?.status ?? "").trim() || null;
     const green = isGreenInvfnoteRecord(rec);
@@ -122,6 +136,7 @@ export function buildInvfnoteBillOptions(records = [], { keySet, matchMode, sear
         match_key: matchKey,
         status,
         is_green: green,
+        bill_hint,
       });
       continue;
     }
@@ -130,6 +145,7 @@ export function buildInvfnoteBillOptions(records = [], { keySet, matchMode, sear
     if (!prev.status && status) prev.status = status;
     if (!prev.billdt && billdt) prev.billdt = billdt;
     if (!prev.uid && rec?.uid) prev.uid = String(rec.uid).trim();
+    if (!prev.bill_hint && bill_hint) prev.bill_hint = bill_hint;
   }
 
   const rows = [...byKey.values()].map((row) => ({
@@ -205,16 +221,149 @@ function resolveBillFromLiveAndDb(row = {}) {
   return row;
 }
 
+const EMPTY_INVFNOTE_FIELDS = { uid: null, billno: null, billdt: null, status: null };
+
+function isForwardingInvfnoteEligible(row = {}) {
+  return row?.out_entry_complete === undefined && row?.out_entry_approved === undefined
+    ? true
+    : shouldMergeForwardingInvfnote(row);
+}
+
+function mapInvfnoteRecordToRow(rec = {}) {
+  return {
+    uid: String(rec?.uid ?? "").trim() || null,
+    billno: normalizeInvfnoteBillNo(rec) || String(rec?.billno ?? "").trim() || null,
+    billdt: String(rec?.billdt ?? rec?.bill_dt ?? rec?.DocDt ?? "").trim() || null,
+    status: String(rec?.status ?? "").trim() || null,
+  };
+}
+
+function calendarDateKey(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const ist = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
+    return ist; // YYYY-MM-DD
+  }
+  const s = String(value ?? "").trim();
+  if (!s) return "";
+  // IMS invfnote: "03-09-2026 16:57" (DD-MM-YYYY + optional time)
+  const dmy = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if (dmy && dmy[1].length <= 2 && Number(dmy[1]) <= 31) {
+    return `${dmy[3]}-${String(dmy[2]).padStart(2, "0")}-${String(dmy[1]).padStart(2, "0")}`;
+  }
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const parsed = new Date(s);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return calendarDateKey(parsed);
+}
+
+function sameCalendarDay(a, b) {
+  const left = calendarDateKey(a);
+  const right = calendarDateKey(b);
+  return Boolean(left && right && left === right);
+}
+
+async function loadForwardingBillClaimStubs() {
+  return dbQuery(
+    `SELECT fi.id, fi.fuid, fnm.acc_code, fi.item_dcode, fi.packing_number, fi.total_qty,
+            fi.bill_no AS line_bill_no, fi.bill_dt AS line_bill_dt,
+            to_char(COALESCE(fnm.timestamp, fnm.created_at)::date, 'YYYY-MM-DD') AS fn_date,
+            COALESCE(fnm.timestamp, fnm.created_at) AS timestamp
+     FROM ims_forwarding_note_item_wise fi
+     INNER JOIN ims_forwarding_note_master fnm ON fnm.fuid = fi.fuid AND fnm.is_deleted = false
+     WHERE fi.is_deleted = false
+     ORDER BY fi.id ASC`
+  );
+}
+
+/**
+ * Live merge: bill date must match FN date; one live bill → one unsaved row.
+ * Saved DB bills always display on their own row and reserve that bill.
+ */
+export function assignExclusiveLiveInvfnoteBills(stubs = [], externalRecords = []) {
+  const queues = new Map();
+  for (const rec of externalRecords || []) {
+    const key = String(rec?.uid ?? "").trim();
+    const mapped = mapInvfnoteRecordToRow(rec);
+    if (!key || !mapped.billno) continue;
+    if (!queues.has(key)) queues.set(key, []);
+    queues.get(key).push(mapped);
+  }
+
+  const claimedByBill = new Map();
+  const liveById = new Map();
+  const rows = Array.isArray(stubs) ? stubs : [];
+
+  for (const stub of rows) {
+    const id = Number(stub?.id);
+    const saved = String(stub?.line_bill_no ?? stub?.bill_no ?? "").trim();
+    if (!Number.isFinite(id) || id <= 0 || !saved) continue;
+    const billKey = normalizeClaimedBillKey(saved);
+    if (billKey && !claimedByBill.has(billKey)) claimedByBill.set(billKey, id);
+  }
+
+  for (const stub of rows) {
+    const id = Number(stub?.id);
+    if (!Number.isFinite(id) || id <= 0 || !isForwardingInvfnoteEligible(stub)) continue;
+    const saved = String(stub?.line_bill_no ?? stub?.bill_no ?? "").trim();
+    if (saved) continue;
+
+    const key = buildForwardingInvfnoteRowKey(stub);
+    const queue = key ? queues.get(key) : null;
+    if (!queue?.length) continue;
+    const fnDate = stub.fn_date || stub.timestamp || stub.created_at;
+
+    for (let i = 0; i < queue.length; i++) {
+      const mapped = queue[i];
+      const billKey = normalizeClaimedBillKey(mapped?.billno);
+      if (!billKey || claimedByBill.has(billKey)) continue;
+      if (!sameCalendarDay(mapped.billdt, fnDate)) continue;
+      claimedByBill.set(billKey, id);
+      liveById.set(id, mapped);
+      queue.splice(i, 1);
+      break;
+    }
+  }
+
+  return { liveById, claimedByBill };
+}
+
+export async function resolveForwardingBillClaims() {
+  const [externalRecords, stubs] = await Promise.all([
+    fetchExternalRecords("invfnote"),
+    loadForwardingBillClaimStubs(),
+  ]);
+  return assignExclusiveLiveInvfnoteBills(stubs, externalRecords);
+}
+
+/** Bills already attached (saved in DB) on another item-wise row. */
+export async function getUsedForwardingBillNos({ exceptItemIds = [] } = {}) {
+  const except = [...new Set((exceptItemIds || []).map(Number).filter((id) => id > 0))];
+  const rows = await dbQuery(
+    `SELECT DISTINCT LOWER(TRIM(fi.bill_no)) AS bill_key
+     FROM ims_forwarding_note_item_wise fi
+     INNER JOIN ims_forwarding_note_master fnm ON fnm.fuid = fi.fuid AND fnm.is_deleted = false
+     WHERE fi.is_deleted = false
+       AND fi.bill_no IS NOT NULL AND TRIM(fi.bill_no) <> ''
+       AND NOT (fi.id = ANY($1::int[]))`,
+    [except]
+  );
+  return new Set((rows || []).map((row) => String(row.bill_key || "").trim()).filter(Boolean));
+}
+
 async function mergeForwardingInvfnoteFields(rows = []) {
-  const merged = await mergeRowsWithExternalData(rows, {
-    requestedData: "invfnote",
-    shouldMergeRow: (row) =>
-      row?.out_entry_complete === undefined && row?.out_entry_approved === undefined
-        ? true
-        : shouldMergeForwardingInvfnote(row),
-    buildRowKey: buildForwardingInvfnoteRowKey,
+  if (!Array.isArray(rows) || !rows.length) return Array.isArray(rows) ? rows : [];
+
+  const { liveById } = await resolveForwardingBillClaims();
+  return rows.map((row) => {
+    if (!isForwardingInvfnoteEligible(row)) {
+      return { ...row, ...EMPTY_INVFNOTE_FIELDS };
+    }
+    const id = Number(row?.id);
+    const live = Number.isFinite(id) && id > 0 ? liveById.get(id) : null;
+    // Saved `line_bill_no` / `bill_no` always shows, even if live already used that bill elsewhere.
+    return resolveBillFromLiveAndDb({ ...row, ...EMPTY_INVFNOTE_FIELDS, ...(live || {}) });
   });
-  return merged.map(resolveBillFromLiveAndDb);
 }
 
 async function mergeForwardingSummaryInvfnoteByParent(rows = []) {
@@ -228,7 +377,7 @@ async function mergeForwardingSummaryInvfnoteByParent(rows = []) {
   if (!eligibleFuids.length) return baseRows;
 
   const itemRows = await dbQuery(
-    `SELECT fi.fuid, fnm.acc_code, fi.item_dcode, fi.packing_number, fi.total_qty,
+    `SELECT fi.id, fi.fuid, fnm.acc_code, fi.item_dcode, fi.packing_number, fi.total_qty,
             fi.bill_no AS line_bill_no, fi.bill_dt AS line_bill_dt,
             fi.bill_updated_by AS line_bill_updated_by,
             fi.bill_updated_at AS line_bill_updated_at

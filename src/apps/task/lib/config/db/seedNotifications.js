@@ -56,6 +56,17 @@ const DEFAULT_TEMPLATES = {
     send_via: "none",
     trigger_time: null,
   },
+  chat_message: {
+    template_key: "chat_message",
+    label: "Task Chat Message",
+    subject: "New message on {{task_title}}",
+    body: "Hi {{user_name}},\n\n{{sender_name}} sent a message on task: {{task_title}} (#{{task_id}})\n\n{{message_preview}}\n\nPlease check the Task app to view and reply.",
+    is_enabled: false,
+    pwa_enabled: false,
+    api_enabled: false,
+    send_via: "none",
+    trigger_time: null,
+  },
   manual_instant: {
     template_key: "manual_instant",
     label: "Instant / Manual Message",
@@ -110,6 +121,11 @@ export async function seedTaskNotificationTemplates() {
 
   if (!existing.manual_instant) {
     existing.manual_instant = DEFAULT_TEMPLATES.manual_instant;
+    changed = true;
+  }
+
+  if (!existing.chat_message) {
+    existing.chat_message = DEFAULT_TEMPLATES.chat_message;
     changed = true;
   }
 

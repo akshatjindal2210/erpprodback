@@ -19,6 +19,8 @@ export const TASK_NOTIFY_VARIABLE_KEYS = [
   "created_at",
   "completed_at",
   "task_type",
+  "sender_name",
+  "message_preview",
   ...DASHBOARD_STAT_KEYS,
 ];
 

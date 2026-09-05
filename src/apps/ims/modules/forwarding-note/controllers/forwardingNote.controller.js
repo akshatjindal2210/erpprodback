@@ -2,7 +2,7 @@ import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertFor
 import { buildForwardingAvailableBoxes, findItemDcodesWithForwardingAvailableStock } from "../utils/stock/forwardingAvailableStock.js";
 import { buildPackingNumberSet, filterForwardingBoxesByCategoryId, filterErpStockByCategory } from "../utils/packing/forwardingPackingCategory.js";
 import { enrichRowsWithIMS } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
-import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo, buildBillDropdownMatchKey, buildInvfnoteBillOptions, invfnoteHasGreenBillForItems, resolveBillDropdownMatchForUser } from "../utils/list/forwardingNoteList.js";
+import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo, buildBillDropdownMatchKey, buildInvfnoteBillOptions, invfnoteHasGreenBillForItems, resolveBillDropdownMatchForUser, getUsedForwardingBillNos } from "../utils/list/forwardingNoteList.js";
 import { saveForwardingNoteItems, replaceForwardingNoteItems, validateExistingForwardingNoteItems } from "../utils/items/forwardingNoteItemsWrite.js";
 import { buildForwardingLockMessage } from "../utils/messages/forwardingNoteMessages.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
@@ -172,25 +172,26 @@ export const createForwardingNote = async (req, res) => {
 
 /**
  * Assign bill onto item-wise line(s).
- * Requires special permission manage_forwarding_bill (or super_admin).
- * Body: { item_ids: number[], billno, billdt? }
+ * Attach: manage_forwarding_bill. Update / clear saved bill: also needs edit.
+ * Body: { item_ids: number[], billno, billdt? } or { item_ids, clear: true }
  */
 export const assignForwardingNoteItemBill = async (req, res) => {
   try {
     const body = req.body || {};
     const itemIds = Array.isArray(body.item_ids) ? body.item_ids : body.item_id != null ? [body.item_id] : [];
     const billno = String(body.billno ?? body.bill_no ?? "").trim();
+    const isClear = body.clear === true || body.clear === "true";
     if (!itemIds.length) {
       return res.status(400).json({ success: false, message: "At least one item line is required." });
     }
-    if (!billno) {
+    if (!billno && !isClear) {
       return res.status(400).json({ success: false, message: "Bill number is required." });
     }
 
     if (!hasManageForwardingBillPermission(req.user)) {
       return res.status(403).json({
         success: false,
-        message: "You do not have permission to assign or change forwarding note bills.",
+        message: "You do not have permission to assign forwarding note bills.",
       });
     }
 
@@ -214,15 +215,45 @@ export const assignForwardingNoteItemBill = async (req, res) => {
       return res.status(404).json({ success: false, message: "No item lines were found." });
     }
 
-    // Future: require store-out complete before bill assign
-    // for (const row of lineRows) {
-    //   if (!row.out_entry_complete) {
-    //     return res.status(409).json({
-    //       success: false,
-    //       message: "A bill can only be assigned after store-out is complete for this line.",
-    //     });
-    //   }
-    // }
+    const isUpdate = lineRows.some((row) => String(row.bill_no || "").trim());
+    const canEdit = String(req.user?.type || "").toLowerCase() === "super_admin" || req.permission?.can_edit === true;
+    if ((isUpdate || isClear) && !canEdit) {
+      return res.status(403).json({
+        success: false,
+        message: "You need edit permission to update or clear an attached bill.",
+      });
+    }
+
+    if (isClear) {
+      if (!isUpdate) {
+        return res.status(400).json({ success: false, message: "No saved bill to clear on this item line." });
+      }
+      const cleared = await assignForwardingNoteItemBills({
+        itemIds: ids,
+        bill_no: null,
+        bill_dt: null,
+        userName: auditUserName(req),
+      });
+      if (!cleared?.length) {
+        return res.status(404).json({ success: false, message: "No item lines were updated." });
+      }
+      await logActivity(req, {
+        action: "update",
+        entity: "forwarding_note_item_wise",
+        entity_id: cleared.map((r) => r.id).join(","),
+        meta: { field: "bill_no", cleared: true, item_ids: cleared.map((r) => r.id) },
+      });
+      const refreshed = [];
+      for (const u of cleared) {
+        const row = await findForwardingNoteItem({ id: u.id });
+        if (row) refreshed.push(row);
+      }
+      return res.json({
+        success: true,
+        message: "Bill cleared successfully.",
+        data: await enrichForwardingItemRows(refreshed),
+      });
+    }
 
     const matchMode = resolveBillDropdownMatchForUser(req.user);
     const invfnoteRecords = await fetchFromIMS("invfnote");
@@ -242,6 +273,14 @@ export const assignForwardingNoteItemBill = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: `Bill "${billno}" cannot be assigned on this item line.`,
+      });
+    }
+
+    const usedBills = await getUsedForwardingBillNos({ exceptItemIds: ids });
+    if (usedBills.has(billno.toLowerCase())) {
+      return res.status(409).json({
+        success: false,
+        message: `Bill "${billno}" is already used on another item line.`,
       });
     }
 
@@ -491,7 +530,7 @@ export const getForwardingNoteVehiclesViews = async (req, res) => {
  * Live invfnote bills for item-wise assign dropdown.
  * Match mode: super_admin → acc_item · others → acc_item_packing.
  * Only green-status bills can be saved; all matching bills are listed with status.
- * Request body: `items: [{ acc_code, item_dcode, packing_number, total_qty? }]`.
+ * Request body: `items: [{ id?, acc_code, item_dcode, packing_number, total_qty? }]`.
  */
 export const getForwardingNoteBillNumbersViews = async (req, res) => {
   try {
@@ -512,8 +551,18 @@ export const getForwardingNoteBillNumbersViews = async (req, res) => {
       return res.json({ success: true, data: [], total: 0 });
     }
 
-    const records = await fetchFromIMS("invfnote");
-    const rows = buildInvfnoteBillOptions(records, { keySet, matchMode, search });
+    const exceptItemIds = [];
+    if (Array.isArray(req.body?.items)) {
+      for (const item of req.body.items) {
+        const n = Number(item?.id ?? item?.item_id);
+        if (Number.isFinite(n) && n > 0) exceptItemIds.push(n);
+      }
+    }
+    const [records, excludeBillNos] = await Promise.all([
+      fetchFromIMS("invfnote"),
+      getUsedForwardingBillNos({ exceptItemIds }),
+    ]);
+    const rows = buildInvfnoteBillOptions(records, { keySet, matchMode, search, excludeBillNos });
 
     const total = rows.length;
     const start = (page - 1) * limit;
@@ -736,6 +785,9 @@ export const printForwardingNoteBill = async (req, res) => {
 
     const data = await findForwardingNote({ fuid });
     if (!data) return res.status(404).json({ success: false, message: "Not found" });
+    if (!data.approved) {
+      return res.status(409).json({ success: false, message: "Approve the forwarding note before printing." });
+    }
 
     const enriched = await enrichForwardingNoteDetail(data);
     await enrichBillPackingDates(enriched);

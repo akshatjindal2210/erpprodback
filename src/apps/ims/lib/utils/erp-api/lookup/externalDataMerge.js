@@ -68,6 +68,18 @@ async function withTimeout(promise, timeoutMs) {
   ]);
 }
 
+/** Same IMS cache + timeout as mergeRowsWithExternalData. */
+export async function fetchExternalRecords(requestedData, timeoutMs = 2000) {
+  const key = String(requestedData || "").trim();
+  if (!key) return [];
+  try {
+    return await withTimeout(getExternalRequestedData(key), timeoutMs);
+  } catch (err) {
+    console.warn("[FORWARDING][EXTERNAL] fetchExternalRecords error:", err?.message || err);
+    return [];
+  }
+}
+
 /**
  * Reusable display-only row merge:
  * - fetches external dataset once

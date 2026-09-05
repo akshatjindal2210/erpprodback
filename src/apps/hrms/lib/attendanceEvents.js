@@ -1,4 +1,3 @@
-import config from "../../../config/app/config.js";
 import dbQuery from "../../../config/db/db.js";
 import { HRMS_TABLES as T } from "../../../config/db/dbTables.js";
 import { HRMS_ATTENDANCE_TZ } from "./attendanceDaily.js";
@@ -18,7 +17,6 @@ const EVENT_CODES = {
 };
 
 const ATTENDANCE = { checkIn: "In", checkOut: "Out", breakIn: "Gatepass In", breakOut: "Gatepass Out" };
-const WEBHOOK_SECRET = String(process.env.HRMS_DEVICE_WEBHOOK_SECRET || "").trim();
 
 function parseJson(value) {
   if (value == null) return null;
@@ -45,42 +43,45 @@ function statusOf(acs, code) {
 
 export function deviceEventToRecord(event) {
   if (!event || String(event.eventType || "").toLowerCase() === "heartbeat") return null;
-  const acs = event.AccessControllerEvent;
-  if (!acs) return null;
+  const acs = event.AccessControllerEvent || event;
   const employeeCode = acs.employeeNoString ?? acs.employeeNo;
   const name = acs.name;
   if (!employeeCode && !name) return null;
-  const code = EVENT_CODES[Number(acs.subEventType)] || null;
+  const subEventType = acs.subEventType ?? acs.minor;
+  const code = EVENT_CODES[Number(subEventType)] || null;
   return {
     employee_code: String(employeeCode ?? ""),
     name: String(name ?? ""),
-    sub_event_type: acs.subEventType ?? null,
-    event_name: code?.name || `Unknown Code ${acs.subEventType}`,
+    sub_event_type: subEventType ?? null,
+    event_name: code?.name || `Unknown Code ${subEventType}`,
     card_reader_no: acs.cardReaderNo ?? null,
-    auth_method: code?.auth || `Access Event (${acs.subEventType})`,
+    auth_method: code?.auth || `Access Event (${subEventType})`,
     attendance_status: acs.attendanceStatus || null,
     label: String(acs.label ?? "").trim() || null,
     status: statusOf(acs, code),
     device_name: acs.deviceName || null,
-    // Hikvision payload.dateTime = punch / event timestamp
-    event_timestamp: event.dateTime || acs.dateTime || null,
+    event_timestamp: event.dateTime || acs.dateTime || acs.time || event.time || null,
     source: "device",
   };
 }
 
 export function extractDeviceEvents(body) {
+  const parsed = parseJson(body) || body;
+  if (parsed?.AccessControllerEvent && !Array.isArray(parsed.AccessControllerEvent)) return [parsed];
   const out = [];
   function push(value) {
-    const parsed = parseJson(value);
-    if (!parsed) return;
-    if (Array.isArray(parsed)) return parsed.forEach(push);
-    if (Array.isArray(parsed.EventList)) return parsed.EventList.forEach(push);
-    if (Array.isArray(parsed.AccessControllerEvent)) {
-      return parsed.AccessControllerEvent.forEach((acs) => push({ ...parsed, AccessControllerEvent: acs }));
+    const item = parseJson(value);
+    if (!item) return;
+    if (Array.isArray(item)) return item.forEach(push);
+    if (item.AcsEvent) return push(item.AcsEvent);
+    if (Array.isArray(item.EventList)) return item.EventList.forEach(push);
+    if (Array.isArray(item.InfoList)) return item.InfoList.forEach(push);
+    if (Array.isArray(item.AccessControllerEvent)) {
+      return item.AccessControllerEvent.forEach((acs) => push({ ...item, AccessControllerEvent: acs }));
     }
-    if (parsed.AccessControllerEvent || parsed.eventType) out.push(parsed);
+    if (item.AccessControllerEvent || item.eventType || item.employeeNoString) out.push(item);
   }
-  if (body && typeof body === "object") Object.keys(body).forEach((key) => push(body[key]));
+  if (parsed && typeof parsed === "object") Object.keys(parsed).forEach((key) => push(parsed[key]));
   return out;
 }
 
@@ -108,11 +109,6 @@ export function manualMarkToRecord({ employee_code, name, mark_type, device_name
   };
 }
 
-export function hikvisionWebhookAuthorized(req) {
-  if (!WEBHOOK_SECRET) return config.node_env !== "production";
-  return String(req.headers["x-hrms-webhook-secret"] || "").trim() === WEBHOOK_SECRET;
-}
-
 const INSERT_RETURNING = `
   RETURNING id, employee_code, name, sub_event_type, event_name, card_reader_no,
     auth_method, attendance_status, label, status, device_name, source, created_by,
@@ -121,6 +117,15 @@ const INSERT_RETURNING = `
 `;
 
 export async function insertAttendanceLogRecord(record) {
+  const exists = await dbQuery(
+    `SELECT id FROM ${T.ATTENDANCE_LOG}
+     WHERE employee_code = $1
+       AND event_timestamp = $2::timestamptz
+       AND COALESCE(sub_event_type, 0) = COALESCE($3, 0)
+     LIMIT 1`,
+    [record.employee_code, record.event_timestamp, record.sub_event_type]
+  );
+  if (exists.length) return null;
   const rows = await dbQuery(
     `INSERT INTO ${T.ATTENDANCE_LOG} (
       employee_code, name, sub_event_type, event_name, card_reader_no,
@@ -143,7 +148,9 @@ export async function saveHikvisionEventsFromBody(body) {
   const saved = [];
   for (const event of extractDeviceEvents(body)) {
     const record = deviceEventToRecord(event);
-    if (record) saved.push(await insertAttendanceLogRecord(record));
+    if (!record) continue;
+    const row = await insertAttendanceLogRecord(record);
+    if (row) saved.push(row);
   }
   return saved;
 }

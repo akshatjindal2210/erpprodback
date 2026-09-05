@@ -22,6 +22,14 @@ function createFileTransports() {
   ];
 }
 
+/** Keeps winston from buffering logs when file handles are closed for retention on Windows. */
+function createPauseFallbackTransport() {
+  return new winston.transports.Console({
+    format: LOG_FORMAT,
+    silent: true,
+  });
+}
+
 function closeFileTransport(transport) {
   return new Promise((resolve) => {
     let settled = false;
@@ -71,13 +79,18 @@ const logger = winston.createLogger({
 /** Close winston file handles so retention can replace logs on Windows. */
 export async function withFileLoggingPaused(fn) {
   const current = fileTransports;
+  const fallbackTransport = createPauseFallbackTransport();
+
   for (const transport of current) {
     logger.remove(transport);
   }
+  logger.add(fallbackTransport);
+
   await Promise.all(current.map(closeFileTransport));
   try {
     return await fn();
   } finally {
+    logger.remove(fallbackTransport);
     fileTransports = createFileTransports();
     for (const transport of fileTransports) {
       logger.add(transport);

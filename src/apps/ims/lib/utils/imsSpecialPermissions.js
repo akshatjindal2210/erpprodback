@@ -33,7 +33,7 @@ export function hasDirectForwardingNotePermission(user) {
   return Boolean(perms?.ims?.direct_forwarding_note);
 }
 
-/** Assign / change item-wise bill on forwarding note (super_admin always). */
+/** Attach item-wise bill on forwarding note (super_admin always). Update also needs edit. */
 export function hasManageForwardingBillPermission(user) {
   if (isSuperAdminUser(user)) return true;
   const perms = parseSpecialPermissions(user?.special_permissions);

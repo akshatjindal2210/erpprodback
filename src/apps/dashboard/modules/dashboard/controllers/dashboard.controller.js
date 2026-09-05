@@ -802,6 +802,89 @@ export const deleteWidgetHandler = async (req, res) => {
   }
 };
 
+async function resolveAuthorizedDrawerWidget(req) {
+  const body = req.body || {};
+  const appKey = normalizeAppKey(body.app_key);
+  const viewPageKey = String(body.page_key || "dashboard").trim().toLowerCase() || "dashboard";
+  const requestedDashboardKey = normalizeDashboardKey(body.dashboard_key || "default");
+  const parentWidgetId = String(body.parent_widget_id || "").trim();
+  const userType = String(req.user?.type || "").toLowerCase().trim();
+  const isSuperAdmin = userType === "super_admin" || userType === "super admin";
+
+  if (!parentWidgetId) {
+    const error = new Error("parent_widget_id is required.");
+    error.status = 400;
+    throw error;
+  }
+
+  const configRow = await resolveRuntimeDashboardConfig(appKey, req.user?.id, requestedDashboardKey, { isSuperAdmin });
+  if (!configRow) {
+    const error = new Error("You do not have access to this dashboard.");
+    error.status = 403;
+    throw error;
+  }
+  if (!isAppMainDashboardView(appKey, viewPageKey)) {
+    const error = new Error("Dashboard view is not available.");
+    error.status = 403;
+    throw error;
+  }
+
+  const parsedConfig = normalizeDashboardJson(configRow.dashboard_json);
+  const allWidgets = parsedConfig.widgets.map((widget, idx) => widgetToRuntimeRow(widget, idx));
+  const parent = allWidgets.find((widget) => String(widget.id) === parentWidgetId);
+  if (!parent) {
+    const error = new Error("Widget not found.");
+    error.status = 404;
+    throw error;
+  }
+  if (String(parent?.chart_config?.link_type || "").toUpperCase() !== "DRAWER") {
+    const error = new Error("Widget does not open a drawer.");
+    error.status = 400;
+    throw error;
+  }
+  if (!canUserSeeWidgetByAudience(parent, req.user?.id, isSuperAdmin)) {
+    const error = new Error("You do not have access to this widget.");
+    error.status = 403;
+    throw error;
+  }
+  if (!(await userCanViewPageModule(req.user, parent?.target_page_module))) {
+    const error = new Error("You do not have access to this module.");
+    error.status = 403;
+    throw error;
+  }
+
+  const drawerRaw = parent?.chart_config?.drawer_widget;
+  if (!drawerRaw || typeof drawerRaw !== "object") {
+    const error = new Error("Drawer widget is not configured.");
+    error.status = 404;
+    throw error;
+  }
+
+  return widgetToRuntimeRow({ ...drawerRaw, id: drawerRaw.id || `drawer_${parent.id}` }, 0);
+}
+
+async function executeRuntimeWidgetQuery(widget, runtimeFilters) {
+  const widgetSource = normalizeDbSource(widget?.chart_config?.data_source || "ims_postgresql");
+  const isHybridWidget = widget?.chart_config?.is_hybrid === true || widgetSource === "hybrid";
+  const hybridExternalSource = normalizeDbSource(
+    widget?.chart_config?.hybrid_external_source
+      || (isExternalMssqlSource(widgetSource) ? widgetSource : "erp_mssql"),
+  );
+  return executeReadOnlyWidgetQuery(widget.query, {
+    source: widgetSource,
+    filters: runtimeFilters,
+    is_hybrid: isHybridWidget,
+    hybrid_mssql_query: widget?.chart_config?.hybrid_mssql_query,
+    hybrid_external_source: hybridExternalSource,
+    hybrid_url: widget?.chart_config?.hybrid_url,
+    hybrid_url_method: widget?.chart_config?.hybrid_url_method,
+    hybrid_url_body: widget?.chart_config?.hybrid_url_body,
+    url_method: widget?.chart_config?.url_method,
+    url_body: widget?.chart_config?.url_body,
+    url_excluded_columns: widget?.chart_config?.url_excluded_columns,
+  });
+}
+
 export const previewWidgetHandler = async (req, res) => {
   try {
     const body = req.body || {};
@@ -1364,6 +1447,21 @@ export const getDashboardFilterUsersHandler = async (req, res) => {
 
 export const getDashboardWidgetsHandler = async (req, res) => {
   try {
+    const parentWidgetId = String(req.body?.parent_widget_id || "").trim();
+    if (parentWidgetId) {
+      try {
+        const drawer = await resolveAuthorizedDrawerWidget(req);
+        const runtimeFilters = await resolveWidgetFiltersForUser(req, req.body?.filters || {});
+        if (!isConfiguredWidgetQuery(drawer.query) && drawer.type !== "heading") {
+          return res.json({ success: true, data: [] });
+        }
+        const result = await executeRuntimeWidgetQuery(drawer, runtimeFilters);
+        return res.json({ success: true, data: result.rows || [] });
+      } catch (error) {
+        return res.status(error.status || 400).json({ success: false, message: error.message });
+      }
+    }
+
     const appKey = normalizeAppKey(req.body?.app_key);
     const viewPageKey = String(req.body?.page_key || "dashboard").trim().toLowerCase() || "dashboard";
     const requestedDashboardKey = normalizeDashboardKey(req.body?.dashboard_key || "default");
