@@ -1,11 +1,3 @@
-import dbQuery from "../../../config/db/db.js";
-import { HRMS_TABLES as T } from "../../../config/db/dbTables.js";
-import { HRMS_ATTENDANCE_TZ } from "./attendanceDaily.js";
-
-/** Device wall-clock (IST) — matches Hikvision dateTime. */
-export const EVENT_TS_SQL = `(to_char(event_timestamp AT TIME ZONE '${HRMS_ATTENDANCE_TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30')`;
-export const CREATED_AT_SQL = `(to_char(created_at AT TIME ZONE '${HRMS_ATTENDANCE_TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30')`;
-
 const EVENT_CODES = {
   1: { auth: "Authenticated via Card", name: "Valid Card Authentication Completed", ok: true },
   38: { auth: "Authenticated via Fingerprint", name: "Fingerprint Matched", ok: true },
@@ -65,6 +57,29 @@ export function deviceEventToRecord(event) {
   };
 }
 
+export function extractDeviceEventImage(event) {
+  const acs = event?.AccessControllerEvent || event || {};
+  const candidates = [
+    acs.pictureURL,
+    acs.picURL,
+    acs.snapURL,
+    acs.faceURL,
+    acs.captureURL,
+    acs.imageURL,
+    acs.imageUrl,
+    acs.photoURL,
+    acs.bkgUrl,
+    event?.pictureURL,
+    event?.picURL,
+    event?.snapURL,
+  ];
+  for (const v of candidates) {
+    const url = String(v ?? "").trim();
+    if (url) return url;
+  }
+  return "";
+}
+
 export function extractDeviceEvents(body) {
   const parsed = parseJson(body) || body;
   if (parsed?.AccessControllerEvent && !Array.isArray(parsed.AccessControllerEvent)) return [parsed];
@@ -84,75 +99,3 @@ export function extractDeviceEvents(body) {
   if (parsed && typeof parsed === "object") Object.keys(parsed).forEach((key) => push(parsed[key]));
   return out;
 }
-
-export function manualMarkToRecord({ employee_code, name, mark_type, device_name, marked_by }) {
-  const code = String(employee_code ?? "").trim();
-  if (!code) return null;
-  const iso = new Date().toISOString();
-  const mark = String(mark_type ?? "").toLowerCase();
-  const attendanceStatus = mark === "out" || mark === "checkout" ? "checkOut" : "checkIn";
-  const status = attendanceStatus === "checkOut" ? ATTENDANCE.checkOut : ATTENDANCE.checkIn;
-  return {
-    employee_code: code,
-    name: String(name ?? "").trim(),
-    sub_event_type: null,
-    event_name: "Manual Mark",
-    card_reader_no: null,
-    auth_method: "Manual",
-    attendance_status: attendanceStatus,
-    label: status,
-    status,
-    device_name: device_name ? String(device_name).trim() : "Portal",
-    event_timestamp: iso,
-    source: "manual",
-    created_by: marked_by || null,
-  };
-}
-
-const INSERT_RETURNING = `
-  RETURNING id, employee_code, name, sub_event_type, event_name, card_reader_no,
-    auth_method, attendance_status, label, status, device_name, source, created_by,
-    ${EVENT_TS_SQL} AS event_timestamp,
-    ${CREATED_AT_SQL} AS created_at
-`;
-
-export async function insertAttendanceLogRecord(record) {
-  const exists = await dbQuery(
-    `SELECT id FROM ${T.ATTENDANCE_LOG}
-     WHERE employee_code = $1
-       AND event_timestamp = $2::timestamptz
-       AND COALESCE(sub_event_type, 0) = COALESCE($3, 0)
-     LIMIT 1`,
-    [record.employee_code, record.event_timestamp, record.sub_event_type]
-  );
-  if (exists.length) return null;
-  const rows = await dbQuery(
-    `INSERT INTO ${T.ATTENDANCE_LOG} (
-      employee_code, name, sub_event_type, event_name, card_reader_no,
-      auth_method, attendance_status, label, status, device_name,
-      event_timestamp, source, created_by
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::timestamptz,$12,$13)
-    ${INSERT_RETURNING}`,
-    [
-      record.employee_code, record.name, record.sub_event_type, record.event_name,
-      record.card_reader_no, record.auth_method, record.attendance_status, record.label,
-      record.status, record.device_name, record.event_timestamp,
-      record.source || "device", record.created_by || null,
-    ]
-  );
-  // Automatic / device punches live only in attendance-log — do not mirror into hrms_attendance.
-  return rows[0];
-}
-
-export async function saveHikvisionEventsFromBody(body) {
-  const saved = [];
-  for (const event of extractDeviceEvents(body)) {
-    const record = deviceEventToRecord(event);
-    if (!record) continue;
-    const row = await insertAttendanceLogRecord(record);
-    if (row) saved.push(row);
-  }
-  return saved;
-}
-
-export { ATTENDANCE };

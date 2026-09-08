@@ -1,4 +1,3 @@
-/** HRMS display formatting — no timezone shift. */
 export function formatHrmsDate(value) {
   if (value == null || String(value).trim() === "") return null;
   const s = String(value).trim();
@@ -46,5 +45,3 @@ export function formatHrmsDateTime(value) {
   if (dateOnly && dateOnly !== s) return dateOnly;
   return s;
 }
-
-export const formatAttendanceTime = formatHrmsDateTime;

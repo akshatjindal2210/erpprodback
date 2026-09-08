@@ -439,30 +439,27 @@ const parseBillNoList = (raw) => {
 };
 
 /**
- * Print footer bill meta.
- * Prefer note-level rollup from enrich; walk breakdowns only when blank.
+ * Print footer bill meta — DB saved bill only (ims_forwarding_note_item_wise.bill_no / bill_dt).
+ * Live invfnote list merge (billno) is ignored on print.
  */
 const collectPrintBillMeta = (note = {}) => {
-  const bills = parseBillNoList(note.billno || note.bill_no);
-  const dates = parseBillNoList(note.billdt || note.bill_dt);
-  let maker = String(note.bill_made_by || note.bill_updated_by || "").trim() || null;
-  let at = note.bill_updated_at || null;
-
-  if (bills.length) return { bills, dates, maker, at };
-
+  const bills = [];
+  const dates = [];
+  let maker = null;
+  let at = null;
   const billSeen = new Set();
   const dateSeen = new Set();
   let atMs = 0;
 
   for (const grp of note.items || []) {
     for (const line of grp.breakdowns || []) {
-      const bill = String(line?.billno || line?.line_bill_no || line?.bill_no || "").trim();
+      const bill = String(line?.line_bill_no || line?.bill_no || "").trim();
       if (bill && !billSeen.has(bill)) {
         billSeen.add(bill);
         bills.push(bill);
       }
 
-      const dt = String(line?.billdt || line?.line_bill_dt || line?.bill_dt || "").trim();
+      const dt = String(line?.line_bill_dt || line?.bill_dt || "").trim();
       if (dt && !dateSeen.has(dt)) {
         dateSeen.add(dt);
         dates.push(dt);

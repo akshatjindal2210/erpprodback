@@ -1,44 +1,98 @@
-import dbQuery from "../../../../../config/db/db.js";
+import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { HRMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { extractHrmsListParams } from "../../../lib/listParams.js";
-import { formatHrmsDate, formatHrmsTime } from "../../../lib/hrmsFormat.js";
+import { formatHrmsDate, formatHrmsDateTime } from "../../../lib/hrmsFormat.js";
 import { fetchEmpMaster } from "../../../lib/erpApi.js";
-import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
+import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
-import { manualMarkToRecord, insertAttendanceLogRecord } from "../../../lib/attendanceEvents.js";
-import { upsertAttendanceRow, normalizeShift, shiftDisplay } from "../../../lib/attendanceDaily.js";
-import { ingestHikvisionEvents } from "../../attendance-log/controllers/attendanceLog.controller.js";
+import { istTs, LOG_DATE_SQL, LOG_VALID_PUNCH_SQL, normalizeShift, shiftDisplay, countPunches, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate } from "../../../lib/attendanceCommon.js";
 
-const TZ = "Asia/Kolkata";
 const ENTITY = "hrms_attendance";
+const ATT = T.ATTENDANCE;
 
-function ymd(value) {
-  const s = String(value ?? "").trim().slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : "";
-}
+const ATT_RETURN = `
+  id, employee_code, name, shift,
+  to_char(attendance_date, 'YYYY-MM-DD') AS attendance_date,
+  ${istTs(ATT_COL_IN)} AS "in",
+  ${istTs(ATT_COL_OUT)} AS "out",
+  punch_count, entry_type, approval_status
+`;
 
-function timeKey(value) {
-  if (value == null || String(value).trim() === "") return "";
-  const s = String(value).trim();
-  const iso = s.match(/T(\d{2}):(\d{2})/i);
-  if (iso) return `${iso[1]}:${iso[2]}`;
-  const plain = s.match(/^(\d{1,2}):(\d{2})/);
-  if (plain) return `${String(plain[1]).padStart(2, "0")}:${plain[2]}`;
-  return s;
-}
+const UPSERT_ATTENDANCE_SQL = `
+  WITH updated AS (
+    UPDATE ${ATT}
+    SET
+      name = COALESCE($2, name),
+      shift = $4,
+      ${ATT_COL_IN} = $5::timestamptz,
+      ${ATT_COL_OUT} = $6::timestamptz,
+      punch_count = $7,
+      entry_type = $8,
+      approval_status = $9,
+      created_by = COALESCE(created_by, $10),
+      updated_by = $11,
+      approved_by = $12,
+      approved_at = $13::timestamptz,
+      updated_at = NOW()
+    WHERE employee_code = $1
+      AND attendance_date = $3::date
+    RETURNING ${ATT_RETURN}
+  ),
+  inserted AS (
+    INSERT INTO ${ATT} (
+      employee_code, name, attendance_date, shift, ${ATT_COL_IN}, ${ATT_COL_OUT}, punch_count,
+      entry_type, approval_status, created_by, updated_by,
+      approved_by, approved_at, updated_at
+    )
+    SELECT
+      $1, $2, $3::date, $4, $5::timestamptz, $6::timestamptz, $7,
+      $8, $9, $10, $11, $12, $13::timestamptz, NOW()
+    WHERE NOT EXISTS (SELECT 1 FROM updated)
+    RETURNING ${ATT_RETURN}
+  )
+  SELECT * FROM updated
+  UNION ALL
+  SELECT * FROM inserted
+`;
 
-function toIstTimestamp(date, time) {
-  if (time == null || String(time).trim() === "") return null;
-  const raw = String(time).trim();
-  if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) return raw;
-  const hm = raw.match(/^(\d{1,2}):(\d{2})/);
-  if (!hm || !date) return null;
-  return `${date}T${String(hm[1]).padStart(2, "0")}:${hm[2]}:00+05:30`;
-}
+const INSERT_ATTENDANCE_SQL = `
+  INSERT INTO ${ATT} (
+    employee_code, name, attendance_date, shift, ${ATT_COL_IN}, ${ATT_COL_OUT}, punch_count,
+    entry_type, approval_status, created_by, updated_by,
+    approved_by, approved_at, updated_at
+  ) VALUES (
+    $1, $2, $3::date, $4, $5::timestamptz, $6::timestamptz, $7,
+    $8, $9, $10, $11, $12, $13::timestamptz, NOW()
+  )
+  RETURNING ${ATT_RETURN}
+`;
 
-function fingerprint(row) {
-  return [timeKey(row?.check_in), timeKey(row?.check_out), String(row?.status ?? "Present").trim().toLowerCase()].join("|");
-}
+const LOG_DAILY_PUNCH_SQL = `
+  WITH day_logs AS (
+    SELECT employee_code, name, event_timestamp
+    FROM ${T.ATTENDANCE_LOG}
+    WHERE ${LOG_VALID_PUNCH_SQL}
+      AND ${LOG_DATE_SQL} = $1::date
+  ),
+  next_day_first AS (
+    SELECT employee_code, MIN(event_timestamp) AS first_out
+    FROM ${T.ATTENDANCE_LOG}
+    WHERE ${LOG_VALID_PUNCH_SQL}
+      AND ${LOG_DATE_SQL} = ($1::date + INTERVAL '1 day')::date
+      AND (event_timestamp AT TIME ZONE 'Asia/Kolkata')::time <= TIME '08:00:00'
+    GROUP BY employee_code
+  )
+  SELECT
+    d.employee_code,
+    MAX(d.name) FILTER (WHERE d.name IS NOT NULL AND TRIM(d.name) <> '') AS name,
+    ${istTs("MIN(d.event_timestamp)")} AS "in",
+    ${istTs("CASE WHEN COUNT(*) > 1 THEN MAX(d.event_timestamp) ELSE n.first_out END")} AS "out",
+    (COUNT(*) + CASE WHEN COUNT(*) = 1 AND n.first_out IS NOT NULL THEN 1 ELSE 0 END)::int AS punch_count,
+    CASE WHEN COUNT(*) = 1 AND n.first_out IS NOT NULL THEN 'B' ELSE 'A' END AS shift
+  FROM day_logs d
+  LEFT JOIN next_day_first n ON n.employee_code = d.employee_code
+  GROUP BY d.employee_code, n.first_out
+`;
 
 function titleCase(value, fallback = "") {
   const s = String(value ?? "").trim();
@@ -46,17 +100,20 @@ function titleCase(value, fallback = "") {
   return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
 }
 
-/** Display fields only — formulas stay in the handler below. */
 function formatRow(row) {
   const approval = String(row.approval_status ?? "").trim();
+  const inTs = rowInTime(row);
+  const outTs = rowOutTime(row);
   return {
     ...row,
+    in: inTs,
+    out: outTs,
     punch_count: row.punch_count != null ? Number(row.punch_count) : undefined,
     attendance_date_display: formatHrmsDate(row.attendance_date),
-    check_in_display: row.check_in ? formatHrmsTime(row.check_in) : null,
-    check_out_display: row.check_out ? formatHrmsTime(row.check_out) : null,
+    in_display: formatHrmsDateTime(inTs),
+    out_display: formatHrmsDateTime(outTs),
     shift_display: shiftDisplay(row.shift) || row.shift_display || "",
-    entry_type_display: titleCase(row.entry_type, "Automatic"),
+    entry_type_display: entryTypeDisplay(row.entry_type),
     approval_status_display: approval ? titleCase(approval) : "Pending",
   };
 }
@@ -65,8 +122,59 @@ function logAttendance(req, payload) {
   return logActivity(req, { ...payload, entity: ENTITY, appType: "hrms" });
 }
 
-export async function ingestDeviceEvents(req, res) {
-  return ingestHikvisionEvents(req, res);
+function addOneDayYmd(date) {
+  const d = new Date(`${date}T12:00:00+05:30`);
+  if (Number.isNaN(d.getTime())) return date;
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function isDateTimeAllowedForAttendanceDate(attendanceDate, inTime, outTime) {
+  const date = ymd(attendanceDate);
+  if (!date) return false;
+  const start = Date.parse(`${date}T00:00:00+05:30`);
+  const dayEnd = Date.parse(`${date}T23:59:59+05:30`);
+  const nextDayEightAm = Date.parse(`${addOneDayYmd(date)}T08:00:00+05:30`);
+
+  const inMs = inTime ? Date.parse(inTime) : NaN;
+  const outMs = outTime ? Date.parse(outTime) : NaN;
+
+  if (inTime && (!Number.isFinite(inMs) || inMs < start || inMs > dayEnd)) return false;
+  if (outTime && (!Number.isFinite(outMs) || outMs < start || outMs > nextDayEightAm)) return false;
+  return true;
+}
+
+async function saveAttendanceRow(client, row, manual = false) {
+  const params = buildAttendanceParams(row);
+  if (!params) return null;
+  const sql = manual ? INSERT_ATTENDANCE_SQL : UPSERT_ATTENDANCE_SQL;
+  const result = client ? await client.query(sql, params) : await dbQuery(sql, params);
+  const saved = client ? result.rows[0] : result[0];
+  return saved ? formatRow(saved) : null;
+}
+
+function resolveApproval({ req, previous, hasBusinessChanges, incomingApproved }) {
+  const canAuthorize = Boolean(req?.permission?.can_authorize) || req?.user?.type === "super_admin";
+  const userName = auditUserName(req);
+
+  if (incomingApproved === true) {
+    if (!canAuthorize) {
+      const err = new Error("Forbidden.");
+      err.statusCode = 403;
+      throw err;
+    }
+    return { approval_status: "approved", approved_by: userName, approved_at: new Date() };
+  }
+
+  if (incomingApproved === false || hasBusinessChanges) {
+    return { approval_status: "unapproved", approved_by: null, approved_at: null };
+  }
+
+  return {
+    approval_status: previous.approval_status || "unapproved",
+    approved_by: isApprovedStatus(previous.approval_status) ? previous.approved_by ?? null : null,
+    approved_at: isApprovedStatus(previous.approval_status) ? previous.approved_at ?? null : null,
+  };
 }
 
 export async function listAttendance(req, res) {
@@ -78,11 +186,6 @@ export async function listAttendance(req, res) {
     const search = String(filters?.search ?? bodySearch ?? "").trim();
     const shiftRaw = String(filters?.shift ?? "").trim().toUpperCase();
     const shift = shiftRaw === "A" || shiftRaw === "B" ? shiftRaw : "";
-    const statusRaw = String(filters?.status ?? "").trim();
-    const status =
-      /^(present|absent)$/i.test(statusRaw)
-        ? statusRaw.charAt(0).toUpperCase() + statusRaw.slice(1).toLowerCase()
-        : "";
     const approvalRaw = String(filters?.approval_status ?? filters?.approval ?? "").trim().toLowerCase();
     const approval =
       approvalRaw === "approved" || approvalRaw === "unapproved" || approvalRaw === "pending"
@@ -111,10 +214,6 @@ export async function listAttendance(req, res) {
       where.push(`a.shift = $${p++}`);
       params.push(shift);
     }
-    if (status) {
-      where.push(`a.status ILIKE $${p++}`);
-      params.push(status);
-    }
     if (approval === "approved") {
       where.push(`LOWER(COALESCE(a.approval_status, '')) = $${p++}`);
       params.push("approved");
@@ -126,7 +225,6 @@ export async function listAttendance(req, res) {
       where.push(`(
         a.employee_code ILIKE $${p}
         OR a.name ILIKE $${p}
-        OR a.status ILIKE $${p}
         OR a.shift ILIKE $${p}
         OR a.entry_type ILIKE $${p}
         OR COALESCE(a.approval_status, '') ILIKE $${p}
@@ -136,32 +234,19 @@ export async function listAttendance(req, res) {
     }
 
     const whereSql = where.length ? where.join(" AND ") : "TRUE";
-
-    const countRows = await dbQuery(
-      `SELECT COUNT(*)::int AS total FROM ${T.ATTENDANCE} a WHERE ${whereSql}`,
-      params
-    );
-
+    const countRows = await dbQuery(`SELECT COUNT(*)::int AS total FROM ${T.ATTENDANCE} a WHERE ${whereSql}`, params);
     const rows = await dbQuery(
       `
       SELECT
-        a.id,
-        a.employee_code,
-        a.name,
+        a.id, a.employee_code, a.name,
         to_char(a.attendance_date, 'YYYY-MM-DD') AS attendance_date,
-        (to_char(a.check_in AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_in,
-        (to_char(a.check_out AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_out,
-        a.punch_count,
-        a.status,
-        a.shift,
-        a.entry_type,
-        a.approval_status,
-        a.created_by,
-        a.updated_by,
-        a.approved_by,
-        (to_char(a.approved_at AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS approved_at,
-        (to_char(a.created_at AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS created_at,
-        (to_char(a.updated_at AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS updated_at
+        ${istTs(`a.${ATT_COL_IN}`)} AS "in",
+        ${istTs(`a.${ATT_COL_OUT}`)} AS "out",
+        a.punch_count, a.shift, a.entry_type, a.approval_status,
+        a.created_by, a.updated_by, a.approved_by,
+        ${istTs("a.approved_at")} AS approved_at,
+        ${istTs("a.created_at")} AS created_at,
+        ${istTs("a.updated_at")} AS updated_at
       FROM ${T.ATTENDANCE} a
       WHERE ${whereSql}
       ORDER BY a.attendance_date DESC, a.employee_code ASC
@@ -183,117 +268,85 @@ export async function listAttendance(req, res) {
   }
 }
 
-export async function markAttendance(req, res) {
-  try {
-    const body = req.body || {};
-    const employee_code = String(body.employee_code ?? "").trim();
-    const mark_type = String(body.mark_type ?? body.type ?? "in").trim();
-    if (!employee_code) return res.status(400).json({ success: false, message: "Employee code is required." });
-    if (!["in", "out", "checkin", "checkout"].includes(mark_type.toLowerCase())) {
-      return res.status(400).json({ success: false, message: "mark_type must be in or out." });
-    }
-    const record = manualMarkToRecord({
-      employee_code,
-      name: body.name != null ? String(body.name).trim() : "",
-      mark_type,
-      device_name: body.device_name,
-      marked_by: auditUserName(req),
-    });
-    if (!record) return res.status(400).json({ success: false, message: "Could not build attendance record." });
-    const data = await insertAttendanceLogRecord(record);
-    return res.status(201).json({ success: true, message: `${record.status} marked for ${employee_code}.`, data });
-  } catch (err) {
-    console.error("[HRMS] markAttendance:", err);
-    return res.status(500).json({ success: false, message: err.message || "Server error." });
-  }
-}
-
 export async function previewAttendance(req, res) {
   try {
     const date = ymd(req.body?.date ?? req.body?.attendance_date);
     if (!date) return res.status(400).json({ success: false, message: "Date is required." });
+    if (isFutureAttendanceDate(date)) {
+      return res.status(400).json({ success: false, message: "Future date is not allowed." });
+    }
 
-    const punches = await dbQuery(
-      `
-      SELECT
-        employee_code,
-        MAX(name) FILTER (WHERE name IS NOT NULL AND TRIM(name) <> '') AS name,
-        to_char((event_timestamp AT TIME ZONE '${TZ}')::date, 'YYYY-MM-DD') AS attendance_date,
-        (to_char(MIN(event_timestamp) AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_in,
-        (to_char(
-          CASE WHEN COUNT(*) > 1 THEN MAX(event_timestamp) ELSE NULL END
-          AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS'
-        ) || '+05:30') AS check_out,
-        COUNT(*)::int AS punch_count,
-        CASE WHEN COUNT(DISTINCT source) > 1 THEN 'mixed' ELSE MAX(source) END AS source
-      FROM ${T.ATTENDANCE_LOG}
-      WHERE employee_code IS NOT NULL AND TRIM(employee_code) <> ''
-        AND event_timestamp IS NOT NULL
-        AND COALESCE(status, '') NOT ILIKE '%failed%'
-        AND COALESCE(status, '') NOT ILIKE '%mismatch%'
-        AND COALESCE(event_name, '') NOT ILIKE '%failed%'
-        AND COALESCE(event_name, '') NOT ILIKE '%mismatch%'
-        AND (event_timestamp AT TIME ZONE '${TZ}')::date = $1::date
-      GROUP BY employee_code, (event_timestamp AT TIME ZONE '${TZ}')::date
-      `,
-      [date]
-    );
+    const previewType = normalizeEntryType(req.body?.entry_type ?? req.body?.type ?? "automatic") === "manual" ? "manual" : "automatic";
 
     const savedRows = await dbQuery(
       `
-      SELECT
-        a.id,
-        a.employee_code,
-        a.name,
+      SELECT a.id, a.employee_code, a.name,
         to_char(a.attendance_date, 'YYYY-MM-DD') AS attendance_date,
-        (to_char(a.check_in AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_in,
-        (to_char(a.check_out AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_out,
-        a.punch_count,
-        a.status,
-        a.shift,
-        a.entry_type,
-        a.approval_status
+        ${istTs(`a.${ATT_COL_IN}`)} AS "in",
+        ${istTs(`a.${ATT_COL_OUT}`)} AS "out",
+        a.punch_count, a.shift, a.entry_type, a.approval_status
       FROM ${T.ATTENDANCE} a
       WHERE a.attendance_date = $1::date
       `,
       [date]
     );
 
-    const employees = await fetchEmpMaster();
-    const punchMap = new Map(punches.map((row) => [String(row.employee_code || "").trim(), row]));
-    const savedMap = new Map(savedRows.map((row) => [String(row.employee_code || "").trim(), row]));
-    const seen = new Set();
-    const data = [];
+    if (previewType === "manual") {
+      const data = savedRows
+        .map((saved) =>
+          formatRow({
+            id: saved.id,
+            employee_code: saved.employee_code,
+            name: saved.name || "",
+            attendance_date: date,
+            in: rowInTime(saved),
+            out: rowOutTime(saved),
+            punch_count: saved.punch_count ?? 0,
+            shift: saved.shift === "B" || saved.shift === "A" ? saved.shift : "A",
+            entry_type: saved.entry_type || "manual",
+            approval_status: saved.approval_status || null,
+          })
+        )
+        .sort((a, b) => String(a.employee_code).localeCompare(String(b.employee_code)));
+      return res.json({ success: true, date, data, total: data.length });
+    }
 
-    const addRow = (code, name) => {
-      const key = String(code || "").trim();
-      if (!key || seen.has(key)) return;
-      seen.add(key);
-      const punch = punchMap.get(key);
-      const saved = savedMap.get(key);
-      const hasPunch = Boolean(punch);
-      const status = saved?.status || (hasPunch ? "Present" : "Absent");
-      data.push(
-        formatRow({
+    const punches = await dbQuery(
+      `
+      SELECT
+        employee_code, name, "in", "out", punch_count, shift,
+        'device' AS source
+      FROM (${LOG_DAILY_PUNCH_SQL}) p
+      `,
+      [date]
+    );
+
+    const employees = await fetchEmpMaster();
+    const empNameMap = new Map(employees.map((row) => [String(row.emp_code || "").trim(), row.emp_name]));
+    const masterCodes = new Set(employees.map((row) => String(row.emp_code || "").trim()).filter(Boolean));
+    const savedMap = new Map(savedRows.map((row) => [String(row.employee_code || "").trim(), row]));
+    const data = punches
+      .map((punch) => {
+        const key = String(punch.employee_code || "").trim();
+        if (!key) return null;
+        if (!masterCodes.has(key)) return null;
+        const saved = savedMap.get(key);
+        return formatRow({
           id: saved?.id || null,
           employee_code: key,
-          name: saved?.name || name || punch?.name || "",
+          name: saved?.name || punch.name || empNameMap.get(key) || "",
           attendance_date: date,
-          check_in: saved?.check_in || punch?.check_in || null,
-          check_out: saved?.check_out || punch?.check_out || null,
-          punch_count: saved?.punch_count ?? punch?.punch_count ?? 0,
-          status,
-          shift: saved?.shift === "B" || saved?.shift === "A" ? saved.shift : "A",
-          entry_type: saved?.entry_type || (hasPunch ? "automatic" : "manual"),
+          in: rowInTime(punch) || rowInTime(saved) || null,
+          out: rowOutTime(punch) || rowOutTime(saved) || null,
+          punch_count: punch.punch_count ?? saved?.punch_count ?? 0,
+          shift: saved?.shift === "B" || saved?.shift === "A" ? saved.shift : normalizeShift(punch?.shift) || "A",
+          entry_type: saved?.entry_type || "automatic",
           approval_status: saved?.approval_status || null,
-        })
-      );
-    };
+        });
+      })
+      .filter(Boolean)
+      .sort((a, b) => String(a.employee_code).localeCompare(String(b.employee_code)));
 
-    for (const emp of employees) addRow(emp.emp_code, emp.emp_name);
-    for (const punch of punches) addRow(punch.employee_code, punch.name);
-
-    data.sort((a, b) => String(a.employee_code).localeCompare(String(b.employee_code)));
     return res.json({ success: true, date, data, total: data.length });
   } catch (err) {
     console.error("[HRMS] previewAttendance:", err);
@@ -308,131 +361,114 @@ export async function submitAttendance(req, res) {
     const entryType = String(body.entry_type ?? body.type ?? "automatic").toLowerCase() === "manual" ? "manual" : "automatic";
     const list = Array.isArray(body.rows) ? body.rows : body.employee_code ? [body] : [];
     if (!date) return res.status(400).json({ success: false, message: "Date is required." });
-    if (!list.length) return res.status(400).json({ success: false, message: "At least one attendance row is required." });
+    if (isFutureAttendanceDate(date)) {
+      return res.status(400).json({ success: false, message: "Future date is not allowed." });
+    }
+    if (!list.length) return res.status(400).json({ success: false, message: "Rows required." });
 
     const userName = auditUserName(req);
-    const saved = [];
-    const editedCodes = [];
-    let approvedCount = 0;
-    let unapprovedCount = 0;
-    let skippedNoShift = 0;
-
+    const employees = await fetchEmpMaster();
+    const masterCodes = new Set(employees.map((row) => String(row.emp_code || "").trim()).filter(Boolean));
     let baselineMap = new Map();
+
     if (entryType === "automatic") {
-      const punches = await dbQuery(
-        `
-        SELECT
-          employee_code,
-          (to_char(MIN(event_timestamp) AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_in,
-          (to_char(
-            CASE WHEN COUNT(*) > 1 THEN MAX(event_timestamp) ELSE NULL END
-            AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS'
-          ) || '+05:30') AS check_out,
-          CASE WHEN COUNT(*) > 0 THEN 'Present' ELSE 'Absent' END AS status
-        FROM ${T.ATTENDANCE_LOG}
-        WHERE employee_code IS NOT NULL AND TRIM(employee_code) <> ''
-          AND event_timestamp IS NOT NULL
-          AND COALESCE(status, '') NOT ILIKE '%failed%'
-          AND COALESCE(status, '') NOT ILIKE '%mismatch%'
-          AND COALESCE(event_name, '') NOT ILIKE '%failed%'
-          AND COALESCE(event_name, '') NOT ILIKE '%mismatch%'
-          AND (event_timestamp AT TIME ZONE '${TZ}')::date = $1::date
-        GROUP BY employee_code
-        `,
-        [date]
-      );
+      const punches = await dbQuery(`SELECT employee_code, "in", "out", shift FROM (${LOG_DAILY_PUNCH_SQL}) p`, [date]);
       baselineMap = new Map(
         punches.map((row) => [
           String(row.employee_code || "").trim(),
-          fingerprint({ check_in: row.check_in, check_out: row.check_out, status: "Present" }),
+          punchFingerprint({ in: rowInTime(row), out: rowOutTime(row), shift: normalizeShift(row?.shift) || "A" }),
         ])
       );
     }
 
+    const normalizedRows = [];
+    const seenKeys = new Set();
+
     for (const raw of list) {
       const code = String(raw.employee_code ?? "").trim();
-      if (!code) continue;
-      const checkIn = toIstTimestamp(date, raw.check_in ?? raw.check_in_time);
-      const checkOut = toIstTimestamp(date, raw.check_out ?? raw.check_out_time);
-      const status = String(raw.status ?? "").trim() || (checkIn ? "Present" : "Absent");
-      const rowShift = normalizeShift(raw.shift);
-      if (!rowShift) {
-        skippedNoShift += 1;
-        continue;
-      }
+      if (!code || !normalizeShift(raw.shift) || seenKeys.has(code)) continue;
+      if (!masterCodes.has(code)) continue;
+      seenKeys.add(code);
 
-      // Automatic from device/log:
-      // - unchanged vs attendance-log → approved
-      // - any change (time / status / shift / absent with no punch) → unapproved (needs Approve)
-      // Manual always needs Approve.
-      const logFingerprint = baselineMap.has(code) ? baselineMap.get(code) : null;
-      const submittedFingerprint = fingerprint({ check_in: checkIn, check_out: checkOut, status });
-      const matchesDeviceLog = logFingerprint != null && logFingerprint === submittedFingerprint;
+      const { in: inTime, out: outTime } = parseAttendanceInOut(raw, null, date);
+      if (!inTime || !outTime) {
+        return res.status(400).json({ success: false, message: `In and Out both required for ${code}.` });
+      }
+      if (!isDateTimeAllowedForAttendanceDate(date, inTime, outTime)) {
+        return res.status(400).json({ success: false, message: `Invalid in/out datetime for ${code}.` });
+      }
       const clientChanged = raw.edited === true || raw.edited === 1 || raw.edited === "true" || raw.edited === "1";
-      const needsApproval =
-        entryType === "manual" ||
-        !matchesDeviceLog ||
-        clientChanged;
+
+      const logFp = baselineMap.get(code);
+      const submittedFp = punchFingerprint({ in: inTime, out: outTime, shift: raw.shift });
+      const matchesLog = logFp != null && logFp === submittedFp;
+      const rowEntryType =
+        entryType === "manual" ? "manual" : clientChanged ? "automatic_edit" : "automatic";
+      const needsApproval = entryType === "manual" || !matchesLog || clientChanged;
       const approvalStatus = needsApproval ? "unapproved" : "approved";
 
-      if (needsApproval) editedCodes.push(code);
-      if (approvalStatus === "approved") approvedCount += 1;
-      else unapprovedCount += 1;
-
-      const row = await upsertAttendanceRow({
+      normalizedRows.push({
         employee_code: code,
         name: String(raw.name ?? "").trim() || null,
         attendance_date: date,
-        shift: rowShift,
-        check_in: checkIn,
-        check_out: checkOut,
-        punch_count: Number(raw.punch_count) || 0,
-        status,
-        entry_type: entryType,
+        shift: normalizeShift(raw.shift),
+        in: inTime,
+        out: outTime,
+        punch_count: Number(raw.punch_count) > 0 ? Number(raw.punch_count) : countPunches(inTime, outTime),
+        entry_type: rowEntryType,
         approval_status: approvalStatus,
         created_by: userName,
         updated_by: userName,
         approved_by: approvalStatus === "approved" ? userName : null,
         approved_at: approvalStatus === "approved" ? new Date() : null,
+        needsApproval,
       });
-      if (row) saved.push({ ...formatRow(row), edited: needsApproval, needs_approval: needsApproval });
     }
 
-    if (!saved.length && skippedNoShift > 0) {
+    if (!normalizedRows.length) {
       return res.status(400).json({
         success: false,
-        message: "Shift is required for each employee (A = Day, B = Night).",
+        message: entryType === "automatic" ? "No present records to save." : "Nothing to save.",
       });
     }
+
+    if (entryType === "manual") {
+      const existingRows = await dbQuery(
+        `SELECT employee_code FROM ${T.ATTENDANCE}
+         WHERE attendance_date = $1::date AND employee_code = ANY($2::text[])`,
+        [date, normalizedRows.map((row) => row.employee_code)]
+      );
+      if (existingRows.length) {
+        const existingCodes = existingRows.map((row) => String(row.employee_code || "").trim()).filter(Boolean);
+        return res.status(409).json({ success: false, message: `Already exists: ${existingCodes.join(", ")}`, existing_codes: existingCodes });
+      }
+    }
+
+    const result = await withTransaction(async (client) => {
+      const saved = [];
+      for (const row of normalizedRows) {
+        const stored = await saveAttendanceRow(client, row, entryType === "manual");
+        if (stored) saved.push({ ...stored, needs_approval: row.needsApproval });
+      }
+      return saved;
+    });
+
+    if (!result.length) return res.status(400).json({ success: false, message: "Save failed." });
 
     await logAttendance(req, {
       action: "create",
       entity_id: date,
       record: { attendance_date: date, entry_type: entryType },
-      details: {
-        entry_type: entryType,
-        attendance_date: date,
-        total: saved.length,
-        approved_count: approvedCount,
-        unapproved_count: unapprovedCount,
-        edited_codes: editedCodes,
-        skipped_no_shift: skippedNoShift,
-      },
+      details: { total: result.length },
     });
 
     return res.status(201).json({
       success: true,
-      message:
-        entryType === "manual"
-          ? "Manual attendance submitted for approval."
-          : `Saved ${saved.length} row(s) — ${approvedCount} approved (unchanged device/log), ${unapprovedCount} pending approval (changed / absent / manual).`,
+      message: "Saved.",
       date,
       entry_type: entryType,
-      data: saved,
-      total: saved.length,
-      approved_count: approvedCount,
-      unapproved_count: unapprovedCount,
-      edited_codes: editedCodes,
+      data: result,
+      total: result.length,
     });
   } catch (err) {
     console.error("[HRMS] submitAttendance:", err);
@@ -447,78 +483,89 @@ export async function updateAttendance(req, res) {
 
     const found = await dbQuery(
       `
-      SELECT
-        id, employee_code, name, shift,
+      SELECT id, employee_code, name, shift,
         to_char(attendance_date, 'YYYY-MM-DD') AS attendance_date,
-        (to_char(check_in AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_in,
-        (to_char(check_out AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_out,
-        punch_count, status, entry_type, approval_status
-      FROM ${T.ATTENDANCE}
+        ${istTs(ATT_COL_IN)} AS "in",
+        ${istTs(ATT_COL_OUT)} AS "out",
+        punch_count, entry_type, approval_status,
+        approved_by, ${istTs("approved_at")} AS approved_at
+      FROM ${ATT}
       WHERE id = $1
       `,
       [id]
     );
     const previous = found[0];
-    if (!previous) return res.status(404).json({ success: false, message: "Attendance row not found." });
+    if (!previous) return res.status(404).json({ success: false, message: "Not found." });
 
     const date = ymd(req.body.attendance_date) || previous.attendance_date;
+    if (isFutureAttendanceDate(date)) {
+      return res.status(400).json({ success: false, message: "Future date is not allowed." });
+    }
     const shift = normalizeShift(req.body.shift) || normalizeShift(previous.shift) || "A";
-    const checkIn = toIstTimestamp(date, req.body.check_in ?? req.body.check_in_time ?? previous.check_in);
-    const checkOut = toIstTimestamp(date, req.body.check_out ?? req.body.check_out_time ?? previous.check_out);
-    const status = String(req.body.status ?? previous.status ?? "").trim() || (checkIn ? "Present" : "Absent");
-    const changed = fingerprint(previous) !== fingerprint({ check_in: checkIn, check_out: checkOut, status }) || normalizeShift(previous.shift) !== shift;
-    const approvalStatus = changed ? "unapproved" : previous.approval_status || "unapproved";
+    const { in: inTime, out: outTime } = parseAttendanceInOut(req.body, previous, date);
+    if (!inTime || !outTime) {
+      return res.status(400).json({ success: false, message: "In and Out both are required." });
+    }
+    if (!isDateTimeAllowedForAttendanceDate(date, inTime, outTime)) {
+      return res.status(400).json({ success: false, message: "Invalid in/out datetime for selected date." });
+    }
+    const changed =
+      punchFingerprint(previous) !== punchFingerprint({ in: inTime, out: outTime, shift }) ||
+      normalizeShift(previous.shift) !== shift;
+    const incomingApproved = normalizeApprovedInput(req.body?.approved ?? req.body?.approval_status);
+    const approval = resolveApproval({ req, previous, hasBusinessChanges: changed, incomingApproved });
     const userName = auditUserName(req);
+    const nextEntryType = resolveEntryTypeOnUpdate(previous, changed);
 
     const rows = await dbQuery(
       `
-      UPDATE ${T.ATTENDANCE}
+      UPDATE ${ATT}
       SET
         name = COALESCE($2, name),
         shift = $3,
-        check_in = $4::timestamptz,
-        check_out = $5::timestamptz,
-        status = $6,
-        entry_type = CASE WHEN $7 THEN 'manual' ELSE COALESCE(entry_type, 'manual') END,
+        ${ATT_COL_IN} = $4::timestamptz,
+        ${ATT_COL_OUT} = $5::timestamptz,
+        punch_count = $6,
+        entry_type = $7,
         approval_status = $8,
         updated_by = $9,
-        approved_by = CASE WHEN $8 = 'approved' THEN approved_by ELSE NULL END,
-        approved_at = CASE WHEN $8 = 'approved' THEN approved_at ELSE NULL END,
+        approved_by = $10,
+        approved_at = $11::timestamptz,
         updated_at = NOW()
       WHERE id = $1
-      RETURNING
-        id, employee_code, name, shift,
-        to_char(attendance_date, 'YYYY-MM-DD') AS attendance_date,
-        (to_char(check_in AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_in,
-        (to_char(check_out AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_out,
-        punch_count, status, entry_type, approval_status, updated_by
+      RETURNING ${ATT_RETURN}, updated_by, approved_by
       `,
-      [id, String(req.body.name ?? previous.name ?? "").trim() || null, shift, checkIn, checkOut, status, changed, approvalStatus, userName]
+      [
+        id,
+        String(req.body.name ?? previous.name ?? "").trim() || null,
+        shift,
+        inTime,
+        outTime,
+        countPunches(inTime, outTime),
+        nextEntryType,
+        approval.approval_status,
+        userName,
+        approval.approved_by,
+        approval.approved_at,
+      ]
     );
 
     const data = formatRow(rows[0] || previous);
     await logAttendance(req, {
-      action: "update",
+      action: incomingApproved === true ? "approve" : "update",
       entity_id: data.id,
       record: data,
-      details: {
-        changed,
-        previous: {
-          check_in: previous.check_in,
-          check_out: previous.check_out,
-          status: previous.status,
-          approval_status: previous.approval_status,
-        },
-      },
+      details: { changed },
     });
 
     return res.json({
       success: true,
-      message: changed ? "Attendance updated and marked unapproved." : "No changes saved.",
+      message: "Saved.",
       data,
     });
   } catch (err) {
     console.error("[HRMS] updateAttendance:", err);
+    if (err.statusCode === 403) return res.status(403).json({ success: false, message: err.message || "Forbidden." });
     return res.status(500).json({ success: false, message: err.message || "Server error." });
   }
 }
@@ -529,60 +576,20 @@ export async function deleteAttendance(req, res) {
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ success: false, message: "id is required." });
 
     const found = await dbQuery(
-      `
-      SELECT
-        id, employee_code, name, shift,
+      `SELECT id, employee_code, name, shift,
         to_char(attendance_date, 'YYYY-MM-DD') AS attendance_date,
-        status, entry_type, approval_status
-      FROM ${T.ATTENDANCE}
-      WHERE id = $1
-      `,
+        entry_type, approval_status
+       FROM ${T.ATTENDANCE} WHERE id = $1`,
       [id]
     );
     const existing = found[0];
-    if (!existing) return res.status(404).json({ success: false, message: "Attendance row not found." });
+    if (!existing) return res.status(404).json({ success: false, message: "Not found." });
 
     await dbQuery(`DELETE FROM ${T.ATTENDANCE} WHERE id = $1`, [id]);
     await logAttendance(req, { action: "delete", entity_id: existing.id, record: existing });
-    return res.json({ success: true, message: "Attendance row deleted.", data: existing });
+    return res.json({ success: true, message: "Deleted.", data: existing });
   } catch (err) {
     console.error("[HRMS] deleteAttendance:", err);
-    return res.status(500).json({ success: false, message: err.message || "Server error." });
-  }
-}
-
-export async function approveAttendance(req, res) {
-  try {
-    const id = Number(req.body?.id);
-    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ success: false, message: "id is required." });
-    const userName = auditUserName(req);
-
-    const rows = await dbQuery(
-      `
-      UPDATE ${T.ATTENDANCE}
-      SET
-        approval_status = 'approved',
-        approved_by = $2,
-        approved_at = NOW(),
-        updated_by = $2,
-        updated_at = NOW()
-      WHERE id = $1
-      RETURNING
-        id, employee_code, name, shift,
-        to_char(attendance_date, 'YYYY-MM-DD') AS attendance_date,
-        (to_char(check_in AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_in,
-        (to_char(check_out AT TIME ZONE '${TZ}', 'YYYY-MM-DD"T"HH24:MI:SS') || '+05:30') AS check_out,
-        punch_count, status, entry_type, approval_status, approved_by
-      `,
-      [id, userName]
-    );
-    if (!rows[0]) return res.status(404).json({ success: false, message: "Attendance row not found." });
-
-    const data = formatRow(rows[0]);
-    await logAttendance(req, { action: "approve", entity_id: data.id, record: data });
-    return res.json({ success: true, message: "Attendance approved.", data });
-  } catch (err) {
-    console.error("[HRMS] approveAttendance:", err);
     return res.status(500).json({ success: false, message: err.message || "Server error." });
   }
 }

@@ -2,7 +2,7 @@ import { findForwardingNotes, findForwardingNote, parseForwardingFuid, insertFor
 import { buildForwardingAvailableBoxes, findItemDcodesWithForwardingAvailableStock } from "../utils/stock/forwardingAvailableStock.js";
 import { buildPackingNumberSet, filterForwardingBoxesByCategoryId, filterErpStockByCategory } from "../utils/packing/forwardingPackingCategory.js";
 import { enrichRowsWithIMS } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
-import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo, buildBillDropdownMatchKey, buildInvfnoteBillOptions, invfnoteHasGreenBillForItems, resolveBillDropdownMatchForUser, getUsedForwardingBillNos } from "../utils/list/forwardingNoteList.js";
+import { enrichBillPackingDates, enrichForwardingItemRows, enrichForwardingNoteDetail, enrichForwardingSummaryRows, sanitizePrintCompanyInfo, buildBillDropdownMatchKey, buildInvfnoteBillOptions, invfnoteHasGreenBillForItems, resolveBillDropdownMatchForUser, loadBillDropdownFnContext } from "../utils/list/forwardingNoteList.js";
 import { saveForwardingNoteItems, replaceForwardingNoteItems, validateExistingForwardingNoteItems } from "../utils/items/forwardingNoteItemsWrite.js";
 import { buildForwardingLockMessage } from "../utils/messages/forwardingNoteMessages.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
@@ -276,14 +276,6 @@ export const assignForwardingNoteItemBill = async (req, res) => {
       });
     }
 
-    const usedBills = await getUsedForwardingBillNos({ exceptItemIds: ids });
-    if (usedBills.has(billno.toLowerCase())) {
-      return res.status(409).json({
-        success: false,
-        message: `Bill "${billno}" is already used on another item line.`,
-      });
-    }
-
     const updated = await assignForwardingNoteItemBills({
       itemIds: ids,
       bill_no: billno,
@@ -374,6 +366,10 @@ export const updateForwardingNote = async (req, res) => {
     delete fields.bill_updated_at;
     
     applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges, auditAsName: true });
+    // Approved timestamp follows the save/edit time — not a separate approval click time.
+    if (normalizedApproved === true) {
+      fields.approved_at = fields.updated_at;
+    }
 
     const isNewApproval =
       normalizedApproved === true &&
@@ -528,9 +524,7 @@ export const getForwardingNoteVehiclesViews = async (req, res) => {
 
 /**
  * Live invfnote bills for item-wise assign dropdown.
- * Match mode: super_admin → acc_item · others → acc_item_packing.
- * Only green-status bills can be saved; all matching bills are listed with status.
- * Request body: `items: [{ id?, acc_code, item_dcode, packing_number, total_qty? }]`.
+ * Live bills: on/after FN creation only. Attached DB bills always listed.
  */
 export const getForwardingNoteBillNumbersViews = async (req, res) => {
   try {
@@ -558,17 +552,29 @@ export const getForwardingNoteBillNumbersViews = async (req, res) => {
         if (Number.isFinite(n) && n > 0) exceptItemIds.push(n);
       }
     }
-    const [records, excludeBillNos] = await Promise.all([
+    const [records, fnCtx] = await Promise.all([
       fetchFromIMS("invfnote"),
-      getUsedForwardingBillNos({ exceptItemIds }),
+      loadBillDropdownFnContext(exceptItemIds),
     ]);
-    const rows = buildInvfnoteBillOptions(records, { keySet, matchMode, search, excludeBillNos });
+    const rows = buildInvfnoteBillOptions(records, {
+      keySet,
+      matchMode,
+      search,
+      fnCreatedAtMs: fnCtx.fnCreatedAtMs,
+      attachedBills: fnCtx.attachedBills,
+    });
 
     const total = rows.length;
     const start = (page - 1) * limit;
     const data = rows.slice(start, start + limit);
 
-    res.json({ success: true, data, total });
+    res.json({
+      success: true,
+      data,
+      total,
+      match_mode: matchMode,
+      match_keys: [...keySet],
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

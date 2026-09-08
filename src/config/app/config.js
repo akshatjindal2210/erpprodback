@@ -91,9 +91,10 @@ const config = {
     url: process.env.ERP_IMS_API_URL || "http://192.168.1.100:3200/data/imsdata",
     timeoutMs: 60000,
   },
-  /** HRMS ERP internal API — same POST { requestedData, filter } pattern as IMS */
+  /** HRMS ERP — imsdata: hrmsempmaster | hikconnect: UserInfo search / machine sync */
   hrmsErpApi: {
     url: process.env.HRMS_ERP_API_URL || "http://192.168.1.100:3200/data/imsdata",
+    hikconnectUrl: process.env.HRMS_HIKCONNECT_API_URL || "http://192.168.1.100:3200/data/hikconnect",
     timeoutMs: 60000,
   },
   /** WhatsApp message API — task/template notifications (requestedData: swa | swpa) */

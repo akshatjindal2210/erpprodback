@@ -122,12 +122,16 @@ export async function dropColumnIfExists(query, tableName, columnName) {
   await query(`ALTER TABLE ${tableName} DROP COLUMN ${columnName}`);
 }
 
+function sqlColumnIdent(name) {
+  return `"${String(name).replace(/"/g, '""')}"`;
+}
+
 /** Rename column if old exists and new does not (safe for prod restarts). */
 export async function renameColumnIfExists(query, tableName, fromName, toName) {
   if (!tableName || !fromName || !toName || fromName === toName) return;
   if (!(await columnExists(query, tableName, fromName))) return;
   if (await columnExists(query, tableName, toName)) return;
-  await query(`ALTER TABLE ${tableName} RENAME COLUMN ${fromName} TO ${toName}`);
+  await query(`ALTER TABLE ${tableName} RENAME COLUMN ${sqlColumnIdent(fromName)} TO ${sqlColumnIdent(toName)}`);
 }
 
 /** Rename table if old exists and new does not (safe for prod restarts). */

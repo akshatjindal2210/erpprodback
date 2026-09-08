@@ -3,6 +3,7 @@ import { shortageCrudConfig, normalizeShortageMonth, SHORTAGE_BULK_IMPORT_TYPES 
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { canCreatePackingDeviation } from "../../../lib/utils/imsSpecialPermissions.js";
+import { getItemsMonthlyPackingUsedBatch } from "../../../lib/utils/inventory/monthlyPackingLimit.js";
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 
@@ -355,6 +356,160 @@ export const bulkCreateShortages = async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || "Import failed." });
+  }
+};
+
+/**
+ * Calendar YYYY-MM values covered by from/to (inclusive), capped to 24 months.
+ * Falls back to current month when both are empty.
+ */
+function yearMonthsFromDateFilter(fromDate, toDate) {
+  const fromRaw = String(fromDate ?? "").trim().slice(0, 10);
+  const toRaw = String(toDate ?? "").trim().slice(0, 10);
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const currentYm = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+
+  let startYm = /^\d{4}-\d{2}-\d{2}/.test(fromRaw) ? fromRaw.slice(0, 7) : "";
+  let endYm = /^\d{4}-\d{2}-\d{2}/.test(toRaw) ? toRaw.slice(0, 7) : "";
+  if (!startYm && !endYm) return [currentYm];
+  if (!startYm) startYm = endYm;
+  if (!endYm) endYm = startYm;
+  if (startYm > endYm) {
+    const t = startYm;
+    startYm = endYm;
+    endYm = t;
+  }
+
+  const out = [];
+  let [y, m] = startYm.split("-").map(Number);
+  const [ey, em] = endYm.split("-").map(Number);
+  while (out.length < 24 && (y < ey || (y === ey && m <= em))) {
+    out.push(`${y}-${pad(m)}`);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return out.length ? out : [currentYm];
+}
+
+/**
+ * POST /shortage/master-list
+ * One row per unique itemdcode within the same filters as item-wise list.
+ * Columns: total shortage qty, produced so far (packing stickers), remaining balance.
+ */
+export const getShortageMasterList = async (req, res) => {
+  try {
+    const filters = req.body?.filters && typeof req.body.filters === "object" ? req.body.filters : {};
+    const type = filters.type != null && String(filters.type).trim() !== "" && String(filters.type).toLowerCase() !== "all"
+      ? String(filters.type).trim()
+      : null;
+    const approved =
+      filters.approved === true || filters.approved === "true" || filters.approved === 1 || filters.approved === "1"
+        ? true
+        : filters.approved === false || filters.approved === "false" || filters.approved === 0 || filters.approved === "0"
+          ? false
+          : null;
+    const fromDate = String(filters.from_date ?? "").trim();
+    const toDate = String(filters.to_date ?? "").trim();
+    const itemdcodeFilter = filters.itemdcode != null && String(filters.itemdcode).trim() !== ""
+      ? parseInt(String(filters.itemdcode), 10)
+      : null;
+
+    const values = [];
+    const where = [`s.is_deleted = false`];
+
+    if (type) {
+      values.push(type);
+      where.push(`s.type = $${values.length}`);
+    }
+    if (approved === true) {
+      where.push(`s.approved = true`);
+    } else if (approved === false) {
+      where.push(`(s.approved = false OR s.approved IS NULL)`);
+    }
+    if (fromDate) {
+      values.push(fromDate.slice(0, 10));
+      where.push(`s.month::date >= $${values.length}::date`);
+    }
+    if (toDate) {
+      values.push(toDate.slice(0, 10));
+      where.push(`s.month::date <= $${values.length}::date`);
+    }
+    if (Number.isFinite(itemdcodeFilter) && itemdcodeFilter > 0) {
+      values.push(itemdcodeFilter);
+      where.push(`s.itemdcode = $${values.length}`);
+    }
+
+    const rows = await dbQuery(
+      `SELECT
+         s.itemdcode,
+         MAX(NULLIF(TRIM(s.itemcode), '')) AS itemcode,
+         COUNT(*)::int AS entry_count,
+         COALESCE(SUM(COALESCE(s.qty, 0)), 0)::float AS total_shortage_qty,
+         COALESCE(SUM(CASE WHEN s.approved = true THEN COALESCE(s.qty, 0) ELSE 0 END), 0)::float AS approved_qty,
+         COALESCE(SUM(CASE WHEN s.approved IS DISTINCT FROM true THEN COALESCE(s.qty, 0) ELSE 0 END), 0)::float AS pending_qty,
+         MIN(s.month)::date AS month_from,
+         MAX(s.month)::date AS month_to,
+         ARRAY_AGG(DISTINCT s.type) AS types,
+         ARRAY_AGG(DISTINCT to_char(s.month, 'YYYY-MM')) AS year_months
+       FROM ${T.SHORTAGE} s
+       WHERE ${where.join(" AND ")}
+       GROUP BY s.itemdcode
+       ORDER BY s.itemdcode ASC`,
+      values
+    );
+
+    const list = rows || [];
+    const yearMonths = yearMonthsFromDateFilter(fromDate, toDate);
+    const producedMap = await getItemsMonthlyPackingUsedBatch(
+      list.map((r) => r.itemdcode),
+      yearMonths
+    );
+
+    const enrichedBase = await enrichShortageRows(
+      list.map((r) => {
+        const types = Array.isArray(r.types) ? [...new Set(r.types.filter(Boolean))].sort() : [];
+        const yms = Array.isArray(r.year_months)
+          ? [...new Set(r.year_months.filter(Boolean))].sort()
+          : yearMonths;
+        return {
+          id: `master-${r.itemdcode}`,
+          itemdcode: r.itemdcode,
+          itemcode: r.itemcode || String(r.itemdcode),
+          entry_count: Number(r.entry_count) || 0,
+          total_shortage_qty: Number(r.total_shortage_qty) || 0,
+          approved_qty: Number(r.approved_qty) || 0,
+          pending_qty: Number(r.pending_qty) || 0,
+          month_from: r.month_from,
+          month_to: r.month_to,
+          types,
+          year_months: yms,
+          produced_qty: Number(producedMap.get(String(r.itemdcode).trim()) || 0),
+        };
+      })
+    );
+
+    const data = enrichedBase.map((row) => {
+      const total = Number(row.total_shortage_qty) || 0;
+      const produced = Number(row.produced_qty) || 0;
+      return {
+        ...row,
+        remaining_balance: total - produced,
+      };
+    });
+
+    return res.json({
+      success: true,
+      data,
+      total: data.length,
+      meta: { year_months: yearMonths },
+    });
+  } catch (err) {
+    console.error("getShortageMasterList Error:", err);
+    return res.status(500).json({ success: false, message: err.message || "Failed to load master shortage report." });
   }
 };
 

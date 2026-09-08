@@ -53,7 +53,7 @@ const DEFAULT_FIELDS = [
   "fnm.vehicle_number",
   "fnm.cartage",
   "fnm.total_items",
-  "fnm.timestamp AS timestamp",
+  "fnm.created_at AS timestamp",
   "fnm.approved",
   "fnm.approved_by",
   "fnm.approved_at",
@@ -96,12 +96,12 @@ export const findForwardingNoteItems = async (options = {}) => {
 
     if (key === "from_date") {
       values.push(val);
-      conditions.push(`COALESCE(fnm.timestamp, fnm.created_at, fi.created_at) >= $${i++}`);
+      conditions.push(`COALESCE(fnm.created_at, fi.created_at) >= $${i++}`);
       continue;
     }
     if (key === "to_date") {
       values.push(val);
-      conditions.push(`COALESCE(fnm.timestamp, fnm.created_at, fi.created_at) <= $${i++}`);
+      conditions.push(`COALESCE(fnm.created_at, fi.created_at) <= $${i++}`);
       continue;
     }
 

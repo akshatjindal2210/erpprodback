@@ -106,6 +106,85 @@ export async function getItemMonthlyPackingUsed(
 }
 
 /**
+ * Batch packing-used for many items × months.
+ * Returns Map<itemdcode string, totalUsed> where totalUsed = sum over months of
+ * GREATEST(dailyprod, boxes) for that item+month.
+ */
+export async function getItemsMonthlyPackingUsedBatch(itemdcodes = [], yearMonths = []) {
+  const codes = [
+    ...new Set(
+      (itemdcodes || [])
+        .map((c) => String(c ?? "").trim())
+        .filter(Boolean)
+    ),
+  ];
+  const months = [
+    ...new Set(
+      (yearMonths || [])
+        .map((m) => String(m ?? "").trim().slice(0, 7))
+        .filter((m) => /^\d{4}-\d{2}$/.test(m))
+    ),
+  ];
+  const out = new Map(codes.map((c) => [c, 0]));
+  if (!codes.length || !months.length) return out;
+
+  const monthExpr = `to_char(
+    COALESCE(dp.doc_dt, dp.system_generate_date::date, CURRENT_DATE),
+    'YYYY-MM'
+  )`;
+
+  const [dpRows, boxRows] = await Promise.all([
+    dbQuery(
+      `SELECT TRIM(dp.item_dcode::text) AS itemdcode,
+              ${monthExpr} AS ym,
+              COALESCE(SUM(COALESCE(dp.total_qty, 0)), 0)::float AS used_qty
+       FROM ims_dailyprod dp
+       WHERE dp.sticker_generated = true
+         AND TRIM(dp.item_dcode::text) = ANY($1::text[])
+         AND ${monthExpr} = ANY($2::text[])
+       GROUP BY 1, 2`,
+      [codes, months]
+    ),
+    dbQuery(
+      `SELECT TRIM(dp.item_dcode::text) AS itemdcode,
+              ${monthExpr} AS ym,
+              COALESCE(SUM(COALESCE(b.qty, 0)), 0)::float AS used_qty
+       FROM ims_box_table b
+       INNER JOIN ims_dailyprod dp
+         ON TRIM(b.packing_number::text) = TRIM(dp.doc_no::text)
+       WHERE b.is_deleted = false
+         AND b.sa_id IS NULL
+         AND dp.sticker_generated = true
+         AND TRIM(dp.item_dcode::text) = ANY($1::text[])
+         AND ${monthExpr} = ANY($2::text[])
+       GROUP BY 1, 2`,
+      [codes, months]
+    ),
+  ]);
+
+  const perKey = new Map();
+  for (const row of dpRows || []) {
+    const key = `${String(row.itemdcode).trim()}|${String(row.ym).trim()}`;
+    const prev = perKey.get(key) || { dp: 0, box: 0 };
+    prev.dp = Number(row.used_qty) || 0;
+    perKey.set(key, prev);
+  }
+  for (const row of boxRows || []) {
+    const key = `${String(row.itemdcode).trim()}|${String(row.ym).trim()}`;
+    const prev = perKey.get(key) || { dp: 0, box: 0 };
+    prev.box = Number(row.used_qty) || 0;
+    perKey.set(key, prev);
+  }
+
+  for (const [key, vals] of perKey.entries()) {
+    const itemdcode = key.split("|")[0];
+    if (!out.has(itemdcode)) continue;
+    out.set(itemdcode, (out.get(itemdcode) || 0) + Math.max(vals.dp, vals.box));
+  }
+  return out;
+}
+
+/**
  * All approved shortage qty for item/month (PPC + WIP + Additional + Deviation).
  * This is the monthly packing budget for Packing Entry stickers.
  */

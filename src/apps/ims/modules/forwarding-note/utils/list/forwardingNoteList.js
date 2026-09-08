@@ -1,10 +1,7 @@
 /**
  * Forwarding Note — list/detail enrich for API responses.
  *
- * Live invfnote bills are exclusive: a bill merged from live IMS is not copied
- * onto another row. A bill saved on a row (DB `bill_no`) always shows on that row.
- * When both live + DB bill exist, winner = BILL_SOURCE_PREFER ("db" | "live").
- * Summary billno = unique item bills joined "1, 2, 3".
+ * Live invfnote: bill on/after FN created_at. Saved DB bill always shows on its row.
  */
 
 import { enrichRowsWithIMS } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
@@ -23,10 +20,10 @@ export const BILL_DROPDOWN_MATCH = "acc_item";
 
 export const BILL_SOURCE_PREFER = "db";     // When live invfnote + DB saved bill both exist, which one to show. Change this only: "db" | "live"
 
-/** Super admin uses broader match; normal users match packing too. */
+/** Super admin: acc-item (3016-19232). Others: acc-item-packing (3016-19232-40359). */
 export function resolveBillDropdownMatchForUser(user = {}) {
   const type = String(user?.type ?? user?.role ?? "").trim().toLowerCase();
-  if (type === "super_admin") return "acc_item";
+  if (type === "super_admin" || type === "super admin") return "acc_item";
   return "acc_item_packing";
 }
 
@@ -53,27 +50,23 @@ export function buildBillDropdownMatchKey(row = {}, matchMode = BILL_DROPDOWN_MA
 }
 
 export function invfnoteBillDropdownMatchKey(rec = {}, matchMode = BILL_DROPDOWN_MATCH) {
-  // uid example: 2003-17831-37010-9600 · muid example: 2003-17831-37010
+  // uid example: 3016-19232-40359-17270 · muid example: 3016-19232-40359
   const raw = String(rec?.uid ?? "").trim() || String(rec?.muid ?? "").trim();
   if (!raw) return "";
 
   const parts = raw.split("-").filter(Boolean);
 
   if (matchMode === "acc") {
-    if (parts.length < 1) return "";
-    return parts[0];
+    return buildCompositeKey([parts[0]]);
   }
   if (matchMode === "acc_item") {
-    if (parts.length < 2) return "";
-    return parts[0] + "-" + parts[1];
+    return buildCompositeKey([parts[0], parts[1]]);
   }
   if (matchMode === "acc_item_packing") {
-    if (parts.length < 3) return "";
-    return parts[0] + "-" + parts[1] + "-" + parts[2];
+    return buildCompositeKey([parts[0], parts[1], parts[2]]);
   }
   if (matchMode === "acc_item_packing_qty") {
-    if (parts.length < 4) return "";
-    return parts[0] + "-" + parts[1] + "-" + parts[2] + "-" + parts[3];
+    return buildCompositeKey([parts[0], parts[1], parts[2], parts[3]]);
   }
   return "";
 }
@@ -91,6 +84,14 @@ function normalizeClaimedBillKey(bill) {
   return String(bill ?? "").trim().toLowerCase();
 }
 
+function expandAttachedBillEntries(rawBill, billdt = null) {
+  return String(rawBill ?? "")
+    .split(/,\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((billNo) => ({ bill_no: billNo, billno: billNo, billdt: billdt || null }));
+}
+
 /** Simple dropdown sub-line from uid `acc-item-packing-qty`. */
 function billHintFromInvfnote(rec = {}) {
   const p = String(rec?.uid || rec?.muid || "").split("-").filter(Boolean);
@@ -100,13 +101,18 @@ function billHintFromInvfnote(rec = {}) {
   return [item && `Item ${item}`, pack && `Pack ${pack}`, qty !== "" && qty != null && `Qty ${qty}`].filter(Boolean).join(" · ");
 }
 
-/** Bill dropdown rows: all matching bills; green flag marks what can be saved. */
-export function buildInvfnoteBillOptions(records = [], { keySet, matchMode, search = "", excludeBillNos } = {}) {
+/** Bill dropdown rows: matching bills; green flag marks what can be saved. */
+export function buildInvfnoteBillOptions(
+  records = [],
+  { keySet, matchMode, search = "", fnCreatedAtMs, attachedBills = [] } = {}
+) {
   const keys = keySet instanceof Set ? keySet : new Set(keySet || []);
   if (!keys.size) return [];
 
   const needle = String(search ?? "").trim().toLowerCase();
   const byKey = new Map();
+  const fnMs = Number(fnCreatedAtMs);
+  const attachedKeys = new Set(attachedBills.map((row) => normalizeClaimedBillKey(row?.bill_no ?? row?.billno)).filter(Boolean));
 
   for (const rec of records || []) {
     const matchKey = invfnoteBillDropdownMatchKey(rec, matchMode);
@@ -114,7 +120,10 @@ export function buildInvfnoteBillOptions(records = [], { keySet, matchMode, sear
 
     const billNo = normalizeInvfnoteBillNo(rec);
     if (!billNo) continue;
-    if (excludeBillNos instanceof Set && excludeBillNos.has(normalizeClaimedBillKey(billNo))) continue;
+    const billKey = normalizeClaimedBillKey(billNo);
+
+    const billdt = String(rec?.billdt ?? rec?.bill_dt ?? rec?.DocDt ?? "").trim() || null;
+    if (Number.isFinite(fnMs) && !attachedKeys.has(billKey) && !liveBillAfterFn(billdt, fnMs)) continue;
 
     const bill_hint = billHintFromInvfnote(rec);
     const dedupeKey = `${billNo}::${matchKey}`;
@@ -122,7 +131,6 @@ export function buildInvfnoteBillOptions(records = [], { keySet, matchMode, sear
 
     const status = String(rec?.status ?? "").trim() || null;
     const green = isGreenInvfnoteRecord(rec);
-    const billdt = String(rec?.billdt ?? "").trim() || null;
 
     const prev = byKey.get(dedupeKey);
     if (!prev) {
@@ -152,6 +160,27 @@ export function buildInvfnoteBillOptions(records = [], { keySet, matchMode, sear
     ...row,
     selectable: row.is_green === true,
   }));
+
+  for (const saved of attachedBills) {
+    for (const entry of expandAttachedBillEntries(
+      saved?.bill_no ?? saved?.billno,
+      saved?.billdt ?? saved?.bill_dt
+    )) {
+      const billNo = entry.bill_no;
+      const billKey = normalizeClaimedBillKey(billNo);
+      if (rows.some((row) => normalizeClaimedBillKey(row.bill_no) === billKey)) continue;
+      if (needle && !billNo.toLowerCase().includes(needle)) continue;
+      rows.push({
+        id: `attached::${billKey}`,
+        bill_no: billNo,
+        billno: billNo,
+        billdt: entry.billdt,
+        is_green: true,
+        selectable: true,
+        bill_source: "db",
+      });
+    }
+  }
 
   rows.sort((a, b) => {
     if (a.is_green !== b.is_green) return a.is_green ? -1 : 1;
@@ -238,37 +267,36 @@ function mapInvfnoteRecordToRow(rec = {}) {
   };
 }
 
-function calendarDateKey(value) {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    const ist = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
-    return ist; // YYYY-MM-DD
+function parseBillMs(value) {
+  if (value == null || value === "") return NaN;
+  if (value instanceof Date) return value.getTime();
+  const s = String(value).trim();
+  const dmy = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:\s+(\d{1,2}):(\d{2}))?/);
+  if (dmy) {
+    return new Date(
+      Number(dmy[3]),
+      Number(dmy[2]) - 1,
+      Number(dmy[1]),
+      Number(dmy[4] ?? 0),
+      Number(dmy[5] ?? 0)
+    ).getTime();
   }
-  const s = String(value ?? "").trim();
-  if (!s) return "";
-  // IMS invfnote: "03-09-2026 16:57" (DD-MM-YYYY + optional time)
-  const dmy = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
-  if (dmy && dmy[1].length <= 2 && Number(dmy[1]) <= 31) {
-    return `${dmy[3]}-${String(dmy[2]).padStart(2, "0")}-${String(dmy[1]).padStart(2, "0")}`;
-  }
-  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-  const parsed = new Date(s);
-  if (Number.isNaN(parsed.getTime())) return "";
-  return calendarDateKey(parsed);
+  const t = new Date(s).getTime();
+  return Number.isNaN(t) ? NaN : t;
 }
 
-function sameCalendarDay(a, b) {
-  const left = calendarDateKey(a);
-  const right = calendarDateKey(b);
-  return Boolean(left && right && left === right);
+/** fnMs = FN created_at ms; billDt = IMS billdt string/Date */
+function liveBillAfterFn(billDt, fnMs) {
+  if (!Number.isFinite(fnMs)) return true;
+  const billMs = parseBillMs(billDt);
+  return Number.isFinite(billMs) && billMs >= fnMs;
 }
 
 async function loadForwardingBillClaimStubs() {
   return dbQuery(
     `SELECT fi.id, fi.fuid, fnm.acc_code, fi.item_dcode, fi.packing_number, fi.total_qty,
             fi.bill_no AS line_bill_no, fi.bill_dt AS line_bill_dt,
-            to_char(COALESCE(fnm.timestamp, fnm.created_at)::date, 'YYYY-MM-DD') AS fn_date,
-            COALESCE(fnm.timestamp, fnm.created_at) AS timestamp
+            fnm.created_at AS timestamp
      FROM ims_forwarding_note_item_wise fi
      INNER JOIN ims_forwarding_note_master fnm ON fnm.fuid = fi.fuid AND fnm.is_deleted = false
      WHERE fi.is_deleted = false
@@ -277,8 +305,9 @@ async function loadForwardingBillClaimStubs() {
 }
 
 /**
- * Live merge: bill date must match FN date; one live bill → one unsaved row.
- * Saved DB bills always display on their own row and reserve that bill.
+ * Live merge: bill on/after FN creation; one invfnote uid → one unsaved row.
+ * Same billno may appear on multiple FN lines (multi-item bill).
+ * Saved DB bills always display on their own row.
  */
 export function assignExclusiveLiveInvfnoteBills(stubs = [], externalRecords = []) {
   const queues = new Map();
@@ -290,17 +319,9 @@ export function assignExclusiveLiveInvfnoteBills(stubs = [], externalRecords = [
     queues.get(key).push(mapped);
   }
 
-  const claimedByBill = new Map();
+  const claimedLiveUid = new Set();
   const liveById = new Map();
   const rows = Array.isArray(stubs) ? stubs : [];
-
-  for (const stub of rows) {
-    const id = Number(stub?.id);
-    const saved = String(stub?.line_bill_no ?? stub?.bill_no ?? "").trim();
-    if (!Number.isFinite(id) || id <= 0 || !saved) continue;
-    const billKey = normalizeClaimedBillKey(saved);
-    if (billKey && !claimedByBill.has(billKey)) claimedByBill.set(billKey, id);
-  }
 
   for (const stub of rows) {
     const id = Number(stub?.id);
@@ -311,21 +332,21 @@ export function assignExclusiveLiveInvfnoteBills(stubs = [], externalRecords = [
     const key = buildForwardingInvfnoteRowKey(stub);
     const queue = key ? queues.get(key) : null;
     if (!queue?.length) continue;
-    const fnDate = stub.fn_date || stub.timestamp || stub.created_at;
+    const fnMs = parseBillMs(stub.timestamp || stub.created_at);
 
     for (let i = 0; i < queue.length; i++) {
       const mapped = queue[i];
-      const billKey = normalizeClaimedBillKey(mapped?.billno);
-      if (!billKey || claimedByBill.has(billKey)) continue;
-      if (!sameCalendarDay(mapped.billdt, fnDate)) continue;
-      claimedByBill.set(billKey, id);
+      const liveUid = String(mapped?.uid ?? key ?? "").trim();
+      if (!liveUid || claimedLiveUid.has(liveUid)) continue;
+      if (!liveBillAfterFn(mapped.billdt, fnMs)) continue;
+      claimedLiveUid.add(liveUid);
       liveById.set(id, mapped);
       queue.splice(i, 1);
       break;
     }
   }
 
-  return { liveById, claimedByBill };
+  return { liveById };
 }
 
 export async function resolveForwardingBillClaims() {
@@ -336,19 +357,26 @@ export async function resolveForwardingBillClaims() {
   return assignExclusiveLiveInvfnoteBills(stubs, externalRecords);
 }
 
-/** Bills already attached (saved in DB) on another item-wise row. */
-export async function getUsedForwardingBillNos({ exceptItemIds = [] } = {}) {
-  const except = [...new Set((exceptItemIds || []).map(Number).filter((id) => id > 0))];
+/** FN created_at + saved bills on selected item lines (bill dropdown). */
+export async function loadBillDropdownFnContext(itemIds = []) {
+  const ids = [...new Set((itemIds || []).map(Number).filter((id) => id > 0))];
+  if (!ids.length) return { fnCreatedAtMs: NaN, attachedBills: [] };
+
   const rows = await dbQuery(
-    `SELECT DISTINCT LOWER(TRIM(fi.bill_no)) AS bill_key
+    `SELECT fi.bill_no, fi.bill_dt, fnm.created_at AS fn_created_at
      FROM ims_forwarding_note_item_wise fi
      INNER JOIN ims_forwarding_note_master fnm ON fnm.fuid = fi.fuid AND fnm.is_deleted = false
-     WHERE fi.is_deleted = false
-       AND fi.bill_no IS NOT NULL AND TRIM(fi.bill_no) <> ''
-       AND NOT (fi.id = ANY($1::int[]))`,
-    [except]
+     WHERE fi.is_deleted = false AND fi.id = ANY($1::int[])`,
+    [ids]
   );
-  return new Set((rows || []).map((row) => String(row.bill_key || "").trim()).filter(Boolean));
+
+  let fnCreatedAtMs = NaN;
+  const attachedBills = [];
+  for (const row of rows || []) {
+    fnCreatedAtMs = parseBillMs(row.fn_created_at);
+    attachedBills.push(...expandAttachedBillEntries(row.bill_no, row.bill_dt));
+  }
+  return { fnCreatedAtMs, attachedBills };
 }
 
 async function mergeForwardingInvfnoteFields(rows = []) {

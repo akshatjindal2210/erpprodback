@@ -13,7 +13,7 @@ import { fetchImsDataRaw } from "../../../../ims/lib/services/ims.service.js";
 import { clearImsMetaForResponse } from "../../../../ims/lib/utils/erp-api/lookup/imsMeta.js";
 import { findUsers } from "../../../../core/identity/users/models/user.model.js";
 
-const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings", "rmstore"]);
+const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings", "rmstore", "hrms"]);
 const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql", "hybrid", "url_json"]);
 const ALLOWED_AUDIENCE_SCOPES = new Set(["global", "users"]);
 const APP_TABLE_PREFIX = {
@@ -22,6 +22,7 @@ const APP_TABLE_PREFIX = {
   settings: ["mst_", "sys_"],
   home: [],
   rmstore: ["rmstore_"],
+  hrms: ["hrms_"],
 };
 
 const TABLE_MODULE_OVERRIDES = {
@@ -43,6 +44,8 @@ const TABLE_MODULE_OVERRIDES = {
   ims_audit_master: "audit",
   ims_audit_locations: "audit",
   ims_audit_scans: "audit",
+  hrms_attendance: "hrms_attendance",
+  hrms_attendance_log: "hrms_attendance_log",
 };
 
 function extractReferencedTables(rawSql = "") {
@@ -68,7 +71,7 @@ function modulesFromQuery(rawSql = "") {
       modules.add(TABLE_MODULE_OVERRIDES[table]);
       continue;
     }
-    const stem = table.replace(/^(ims_|mst_|task_)/, "");
+    const stem = table.replace(/^(ims_|mst_|task_|rmstore_|hrms_)/, "");
     modules.add(stem);
     if (stem.endsWith("s")) modules.add(stem.slice(0, -1));
   }
