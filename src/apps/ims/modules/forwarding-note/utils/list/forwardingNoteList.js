@@ -1,7 +1,8 @@
 /**
  * Forwarding Note — list/detail enrich for API responses.
  *
- * Live invfnote: bill on/after FN created_at. Saved DB bill always shows on its row.
+ * Live invfnote: bill calendar day on/after FN created day.
+ * Saved DB bill always shows on its row.
  */
 
 import { enrichRowsWithIMS } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
@@ -285,11 +286,23 @@ function parseBillMs(value) {
   return Number.isNaN(t) ? NaN : t;
 }
 
-/** fnMs = FN created_at ms; billDt = IMS billdt string/Date */
+/** Local calendar day start (ms) — ignore time-of-day for bill vs FN. */
+function startOfLocalDayMs(ms) {
+  if (!Number.isFinite(ms)) return NaN;
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+/**
+ * Live bill allowed when bill day >= FN created day.
+ * Same day OK (even if bill time is before FN create time).
+ * Earlier day (e.g. bill 20th, FN 25th) blocked.
+ */
 function liveBillAfterFn(billDt, fnMs) {
   if (!Number.isFinite(fnMs)) return true;
   const billMs = parseBillMs(billDt);
-  return Number.isFinite(billMs) && billMs >= fnMs;
+  if (!Number.isFinite(billMs)) return false;
+  return startOfLocalDayMs(billMs) >= startOfLocalDayMs(fnMs);
 }
 
 async function loadForwardingBillClaimStubs() {
@@ -305,9 +318,12 @@ async function loadForwardingBillClaimStubs() {
 }
 
 /**
- * Live merge: bill on/after FN creation; one invfnote uid → one unsaved row.
+ * Live merge: bill day on/after FN created day; one invfnote uid → one unsaved row.
  * Same billno may appear on multiple FN lines (multi-item bill).
  * Saved DB bills always display on their own row.
+ *
+ * When the same packing/qty appears on multiple FUIDs, prefer the newest FN row
+ * so an older forwarding note does not keep claiming the live bill.
  */
 export function assignExclusiveLiveInvfnoteBills(stubs = [], externalRecords = []) {
   const queues = new Map();
@@ -321,7 +337,14 @@ export function assignExclusiveLiveInvfnoteBills(stubs = [], externalRecords = [
 
   const claimedLiveUid = new Set();
   const liveById = new Map();
-  const rows = Array.isArray(stubs) ? stubs : [];
+  const rows = (Array.isArray(stubs) ? stubs : []).slice().sort((a, b) => {
+    const aMs = parseBillMs(a.timestamp || a.created_at);
+    const bMs = parseBillMs(b.timestamp || b.created_at);
+    if (Number.isFinite(bMs) && Number.isFinite(aMs) && bMs !== aMs) return bMs - aMs;
+    if (Number.isFinite(bMs) && !Number.isFinite(aMs)) return -1;
+    if (!Number.isFinite(bMs) && Number.isFinite(aMs)) return 1;
+    return Number(b?.id ?? 0) - Number(a?.id ?? 0);
+  });
 
   for (const stub of rows) {
     const id = Number(stub?.id);

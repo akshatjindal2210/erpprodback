@@ -524,7 +524,7 @@ export const getForwardingNoteVehiclesViews = async (req, res) => {
 
 /**
  * Live invfnote bills for item-wise assign dropdown.
- * Live bills: on/after FN creation only. Attached DB bills always listed.
+ * Live bills: calendar day on/after FN created day. Attached DB bills always listed.
  */
 export const getForwardingNoteBillNumbersViews = async (req, res) => {
   try {
