@@ -28,6 +28,12 @@ async function postJson(url, requestedData, filter = null) {
     } catch {
       return { ok: res.ok, json: { success: false, message: "Non-JSON API response" } };
     }
+  } catch (err) {
+    const reason = err?.name === "AbortError" ? "timeout" : err?.message || "fetch failed";
+    return {
+      ok: false,
+      json: { success: false, message: `Cannot reach Hikvision API (${url}): ${reason}`, messagesystem: reason },
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -65,9 +71,9 @@ export async function postHrmsErpApi(requestedData, filter = null) {
 
 export async function postHikconnectApi(requestedData, filter = null) {
   const payload = { requestedData, ...(filter != null && String(filter).trim() !== "" ? { filter } : {}) };
-  console.log("[HRMS][Hikvision][Request]", JSON.stringify(payload));
+  // console.log("[HRMS][Hikvision][Request]", JSON.stringify(payload));
   const response = await postJson(HIK_URL, requestedData, filter);
-  console.log("[HRMS][Hikvision][Response]", JSON.stringify(response?.json ?? {}));
+  // console.log("[HRMS][Hikvision][Response]", JSON.stringify(response?.json ?? {}));
   return response;
 }
 
@@ -188,8 +194,12 @@ export async function fetchAcsEvents({ from = "", to = "" } = {}) {
   const events = [];
   const first = await hikvisionListLogs(hikEventFilter(0, from, to));
   if (!first.ok || !first.json?.success) {
-    const msg = first.json?.data?.errorMsg || first.json?.message || "hikconnect AcsEvent list failed";
-    throw new Error(msg);
+    const sys = first.json?.messagesystem ? ` (${first.json.messagesystem})` : "";
+    const msg =
+      first.json?.data?.errorMsg ||
+      first.json?.message ||
+      "hikconnect AcsEvent list failed";
+    throw new Error(`${msg}${sys}`);
   }
   const acs0 = hikReadAcs(first.json);
   if (acs0?.InfoList?.length) events.push(...acs0.InfoList);

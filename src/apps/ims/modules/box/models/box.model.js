@@ -2276,6 +2276,9 @@ const FIND_BOX_DETAILED_SELECT = `
       NULL::text AS item_code,
       NULL::text AS itemdesc,
       NULL::text AS acc_name,
+      io.fuid,
+      io.entry_type AS out_entry_type,
+      fnm.acc_code AS forward_acc_code,
       j.job_card_no AS job_no,
       j.doc_dt,
       COALESCE(
@@ -2293,6 +2296,12 @@ const FIND_BOX_DETAILED_SELECT = `
       ps.unit,
       NULL::text AS party_rate_cust_code
     FROM ims_box_table b
+    LEFT JOIN ims_out_entry io
+      ON b.out_uid = io.out_uid
+     AND io.is_deleted = false
+    LEFT JOIN ims_forwarding_note_master fnm
+      ON fnm.fuid = io.fuid
+     AND fnm.is_deleted = false
     LEFT JOIN ims_dailyprod j ON b.packing_number = j.doc_no::text
     LEFT JOIN ims_stock_adjustment sa_adj
       ON b.sa_id = sa_adj.adjustment_id
@@ -2417,7 +2426,7 @@ export const findBoxesDetailed = async ({ box_uids, packing_number }) => {
     params.push(String(packing_number));
   }
 
-  query += ` AND b.is_deleted = false AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')`;
+  query += ` AND b.is_deleted = false AND (b.sa_entry_type IS DISTINCT FROM 'stock_out') ORDER BY COALESCE(NULLIF(regexp_replace(b.box_no_uid, '^.*_', ''), '')::int, b.box_uid) ASC`;
 
   const rows = await dbQuery(query, params);
   return rows || [];

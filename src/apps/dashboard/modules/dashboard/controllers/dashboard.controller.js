@@ -7,7 +7,7 @@ import { executeReadOnlyWidgetQuery } from "../../../lib/utils/query/queryExecut
 import { HybridQueryEngine, resolveHybridPgSql } from "../../../lib/utils/query/hybridQueryEngine.js";
 import { validateErpMssqlWidgetQuery, resolveErpMssqlSqlFromRequest, resolveErpMssqlRuntimeFilters, isErpMssqlDirectRequest, parseErpMssqlDirectRequest, isExternalMssqlSource, resolveExternalMssqlConfig, validateExternalMssqlWidgetQuery } from "../../../lib/utils/mssql/erpMssqlQuery.js";
 import { validateSelectSql } from "../../../lib/utils/query/sqlGenerator.js";
-import { isConfiguredWidgetQuery, DASHBOARD_QUERY_TIMEOUT_MS } from "../../../lib/utils/query/widgetQuery.js";
+import { isConfiguredWidgetQuery, DASHBOARD_QUERY_TIMEOUT_MS, sessionIdentityFilterValues } from "../../../lib/utils/query/widgetQuery.js";
 import { normalizeUrlRequestOptions, validateJsonUrl } from "../../../lib/utils/query/urlJsonQuery.js";
 import { fetchImsDataRaw } from "../../../../ims/lib/services/ims.service.js";
 import { clearImsMetaForResponse } from "../../../../ims/lib/utils/erp-api/lookup/imsMeta.js";
@@ -345,51 +345,51 @@ async function resolveWidgetFiltersForUser(req, rawFilters = {}) {
   const normalized = normalizeWidgetFilters(rawFilters);
   const actor = req.user;
   const scope = getDashboardUserFilterScope(actor);
+  let resolved;
 
   if (scope === "all") {
-    return {
+    resolved = {
       ...normalized,
       matchAllUsers: !normalized.userId && !normalized.username,
       matchTeamUsers: false,
     };
-  }
-
-  if (scope === "department") {
+  } else if (scope === "department") {
     const deptId = Number(actor?.department_id ?? actor?.department?.id) || null;
     const team = await listActiveDashboardFilterUsers({ departmentId: deptId });
     const picked = findAllowedDashboardFilterUser(team, normalized);
-    if (picked) {
-      return {
-        ...normalized,
-        matchAllUsers: false,
-        matchTeamUsers: false,
-        userId: picked.id,
-        username: picked.username,
-        name: picked.name,
-      };
-    }
-    return {
+    resolved = picked
+      ? {
+          ...normalized,
+          matchAllUsers: false,
+          matchTeamUsers: false,
+          userId: picked.id,
+          username: picked.username,
+          name: picked.name,
+        }
+      : {
+          ...normalized,
+          matchAllUsers: false,
+          matchTeamUsers: true,
+          teamUserIds: team.map((u) => u.id),
+          teamUsernames: team.map((u) => u.username),
+          teamNames: team.map((u) => u.name),
+          userId: null,
+          username: null,
+          name: null,
+        };
+  } else {
+    const self = loggedInDashboardUserFilter(actor);
+    resolved = {
       ...normalized,
       matchAllUsers: false,
-      matchTeamUsers: true,
-      teamUserIds: team.map((u) => u.id),
-      teamUsernames: team.map((u) => u.username),
-      teamNames: team.map((u) => u.name),
-      userId: null,
-      username: null,
-      name: null,
+      matchTeamUsers: false,
+      userId: self.userId,
+      username: self.username,
+      name: self.name,
     };
   }
 
-  const self = loggedInDashboardUserFilter(actor);
-  return {
-    ...normalized,
-    matchAllUsers: false,
-    matchTeamUsers: false,
-    userId: self.userId,
-    username: self.username,
-    name: self.name,
-  };
+  return { ...resolved, ...sessionIdentityFilterValues(actor) };
 }
 
 

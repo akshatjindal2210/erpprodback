@@ -80,6 +80,7 @@ export const MODULES = {
     { name: "hrms_attendance_log", label: "Attendance Log" },
     { name: "hrms_attendance", label: "Attendance" },
     { name: "hrms_employee", label: "Employee Master" },
+    { name: "hrms_activity_logs", label: "Activity Logs" },
   ],
 };
 
@@ -137,4 +138,5 @@ export const SEED_MODULES = [
   { name: "hrms_attendance_log",          label: "Attendance Log",                  sort_order: 48,       app_type: "hrms" },
   { name: "hrms_attendance",              label: "Attendance",                      sort_order: 49,       app_type: "hrms" },
   { name: "hrms_employee",                label: "Employee Master",                 sort_order: 50,       app_type: "hrms" },
+  { name: "hrms_activity_logs",           label: "Activity Logs",                   sort_order: 51,       app_type: "hrms" },
 ];

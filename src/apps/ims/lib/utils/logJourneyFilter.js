@@ -21,7 +21,6 @@ journey_boxes AS (
     AND (
       b.box_no_uid = $1
       OR b.box_no_uid ILIKE $2
-      OR b.box_uid::text = $1
       OR TRIM(b.packing_number::text) = $1
       OR b.packing_number ILIKE $2
       OR TRIM(b.packing_number::text) IN (
@@ -56,7 +55,6 @@ journey_boxes AS (
     AND (
       b.box_no_uid = $1
       OR b.box_no_uid ILIKE $2
-      OR b.box_uid::text = $1
       OR TRIM(b.packing_number::text) = $1
       OR b.packing_number ILIKE $2
       OR TRIM(b.packing_number::text) IN (SELECT packing_number FROM journey_item_packings)
@@ -169,7 +167,6 @@ export function appendBoxJourneyCondition(conditions, values, journey, startInde
   conditions.push(`(
     b.box_no_uid = $${exactIdx}
     OR b.box_no_uid ILIKE $${prefixIdx}
-    OR b.box_uid::text = $${exactIdx}
     OR TRIM(b.packing_number::text) = $${exactIdx}
     OR b.packing_number ILIKE $${prefixIdx}
     OR TRIM(dp.item_code::text) ILIKE $${exactIdx}

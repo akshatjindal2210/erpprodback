@@ -1,7 +1,7 @@
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { HRMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { extractHrmsListParams } from "../../../lib/listParams.js";
-import { formatHrmsDate, formatHrmsDateTime } from "../../../lib/hrmsFormat.js";
+import { formatHrmsDate, formatHrmsDateTime, formatHrmsTime } from "../../../lib/hrmsFormat.js";
 import { fetchEmpMaster } from "../../../lib/erpApi.js";
 import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
@@ -79,7 +79,7 @@ const LOG_DAILY_PUNCH_SQL = `
     FROM ${T.ATTENDANCE_LOG}
     WHERE ${LOG_VALID_PUNCH_SQL}
       AND ${LOG_DATE_SQL} = ($1::date + INTERVAL '1 day')::date
-      AND (event_timestamp AT TIME ZONE 'Asia/Kolkata')::time <= TIME '08:00:00'
+      AND (event_timestamp AT TIME ZONE 'Asia/Kolkata')::time <= TIME '08:30:00'
     GROUP BY employee_code
   )
   SELECT
@@ -98,6 +98,30 @@ function titleCase(value, fallback = "") {
   const s = String(value ?? "").trim();
   if (!s) return fallback;
   return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+/** Employee master time → HH:mm 24h (avoids "05:00 PM" being read as 05:00). */
+function toHHmm24(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const s = String(value).trim();
+  const iso = s.match(/(?:T|\s)(\d{2}):(\d{2})(?::\d{2})?/);
+  if (iso && !/\b(AM|PM)\b/i.test(s)) return `${iso[1]}:${iso[2]}`;
+  const display = formatHrmsTime(value) || s;
+  const ampm = String(display).match(/(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)\b/i);
+  if (ampm) {
+    let h = parseInt(ampm[1], 10);
+    const m = ampm[2];
+    const mer = ampm[3].toUpperCase();
+    if (mer === "AM") {
+      if (h === 12) h = 0;
+    } else if (h !== 12) {
+      h += 12;
+    }
+    return `${String(h).padStart(2, "0")}:${m}`;
+  }
+  const plain = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (plain) return `${String(parseInt(plain[1], 10)).padStart(2, "0")}:${plain[2]}`;
+  return null;
 }
 
 function formatRow(row) {
@@ -134,13 +158,14 @@ function isDateTimeAllowedForAttendanceDate(attendanceDate, inTime, outTime) {
   if (!date) return false;
   const start = Date.parse(`${date}T00:00:00+05:30`);
   const dayEnd = Date.parse(`${date}T23:59:59+05:30`);
-  const nextDayEightAm = Date.parse(`${addOneDayYmd(date)}T08:00:00+05:30`);
+  const nextDayCutoff = Date.parse(`${addOneDayYmd(date)}T08:30:00+05:30`);
 
   const inMs = inTime ? Date.parse(inTime) : NaN;
   const outMs = outTime ? Date.parse(outTime) : NaN;
 
   if (inTime && (!Number.isFinite(inMs) || inMs < start || inMs > dayEnd)) return false;
-  if (outTime && (!Number.isFinite(outMs) || outMs < start || outMs > nextDayEightAm)) return false;
+  if (outTime && (!Number.isFinite(outMs) || outMs < start || outMs > nextDayCutoff)) return false;
+  if (inTime && outTime && Number.isFinite(inMs) && Number.isFinite(outMs) && outMs < inMs) return false;
   return true;
 }
 
@@ -323,6 +348,15 @@ export async function previewAttendance(req, res) {
 
     const employees = await fetchEmpMaster();
     const empNameMap = new Map(employees.map((row) => [String(row.emp_code || "").trim(), row.emp_name]));
+    const empTimeMap = new Map(
+      employees.map((row) => [
+        String(row.emp_code || "").trim(),
+        {
+          default_in: toHHmm24(row.emp_intime) || toHHmm24(row.emp_intime_display),
+          default_out: toHHmm24(row.emp_outtime) || toHHmm24(row.emp_outtime_display),
+        },
+      ])
+    );
     const masterCodes = new Set(employees.map((row) => String(row.emp_code || "").trim()).filter(Boolean));
     const savedMap = new Map(savedRows.map((row) => [String(row.employee_code || "").trim(), row]));
     const data = punches
@@ -331,17 +365,22 @@ export async function previewAttendance(req, res) {
         if (!key) return null;
         if (!masterCodes.has(key)) return null;
         const saved = savedMap.get(key);
+        const alreadyExists = Boolean(saved?.id);
+        const times = empTimeMap.get(key) || {};
         return formatRow({
           id: saved?.id || null,
           employee_code: key,
           name: saved?.name || punch.name || empNameMap.get(key) || "",
           attendance_date: date,
-          in: rowInTime(punch) || rowInTime(saved) || null,
-          out: rowOutTime(punch) || rowOutTime(saved) || null,
-          punch_count: punch.punch_count ?? saved?.punch_count ?? 0,
-          shift: saved?.shift === "B" || saved?.shift === "A" ? saved.shift : normalizeShift(punch?.shift) || "A",
+          in: rowInTime(punch) || null,
+          out: rowOutTime(punch) || null,
+          punch_count: punch.punch_count ?? 0,
+          shift: normalizeShift(punch?.shift) || (saved?.shift === "B" ? "B" : "A"),
           entry_type: saved?.entry_type || "automatic",
           approval_status: saved?.approval_status || null,
+          already_exists: alreadyExists,
+          default_in: times.default_in || null,
+          default_out: times.default_out || null,
         });
       })
       .filter(Boolean)
@@ -383,12 +422,29 @@ export async function submitAttendance(req, res) {
 
     const normalizedRows = [];
     const seenKeys = new Set();
+    let skippedExisting = 0;
+
+    let existingSet = new Set();
+    if (entryType === "automatic") {
+      const codes = list.map((raw) => String(raw.employee_code ?? "").trim()).filter(Boolean);
+      if (codes.length) {
+        const existingRows = await dbQuery(`SELECT employee_code FROM ${T.ATTENDANCE} WHERE attendance_date = $1::date AND employee_code = ANY($2::text[])`, [date, codes]);
+        existingSet = new Set(existingRows.map((row) => String(row.employee_code || "").trim()).filter(Boolean));
+      }
+    }
 
     for (const raw of list) {
       const code = String(raw.employee_code ?? "").trim();
       if (!code || !normalizeShift(raw.shift) || seenKeys.has(code)) continue;
       if (!masterCodes.has(code)) continue;
       seenKeys.add(code);
+
+      const exists = existingSet.has(code);
+      const override = raw.override === true || raw.override === 1 || raw.override === "true" || raw.override === "1";
+      if (entryType === "automatic" && exists && !override) {
+        skippedExisting += 1;
+        continue;
+      }
 
       const { in: inTime, out: outTime } = parseAttendanceInOut(raw, null, date);
       if (!inTime || !outTime) {
@@ -428,7 +484,13 @@ export async function submitAttendance(req, res) {
     if (!normalizedRows.length) {
       return res.status(400).json({
         success: false,
-        message: entryType === "automatic" ? "No present records to save." : "Nothing to save.",
+        message:
+          skippedExisting > 0
+            ? `Nothing to save — ${skippedExisting} already exist (tick Override to replace).`
+            : entryType === "automatic"
+              ? "No present records to save."
+              : "Nothing to save.",
+        skipped_existing: skippedExisting,
       });
     }
 
@@ -459,16 +521,18 @@ export async function submitAttendance(req, res) {
       action: "create",
       entity_id: date,
       record: { attendance_date: date, entry_type: entryType },
-      details: { total: result.length },
+      details: { total: result.length, skipped_existing: skippedExisting },
     });
 
+    const skipMsg = skippedExisting > 0 ? ` Skipped ${skippedExisting} existing (no override).` : "";
     return res.status(201).json({
       success: true,
-      message: "Saved.",
+      message: `Saved.${skipMsg}`,
       date,
       entry_type: entryType,
       data: result,
       total: result.length,
+      skipped_existing: skippedExisting,
     });
   } catch (err) {
     console.error("[HRMS] submitAttendance:", err);
