@@ -16,6 +16,7 @@ export const IMS_APP_CONFIG_KEYS = Object.freeze({
   BOX_QR_PUBLIC_BASE_URL: "box_qr_public_base_url",
   BOX_NO_UID_PREFIX: "box_no_uid_prefix",
   SHORTAGE_QTY_PERCENTAGE: "shortage_qty_percentage",
+  FORWARDING_SHORTAGE_QTY_PERCENTAGE: "forwarding_shortage_qty_percentage",
 });
 
 export const IMS_APP_CONFIG_SECTION = Object.freeze({
@@ -70,6 +71,16 @@ export const IMS_APP_CONFIG_DEFINITIONS = Object.freeze([
     max: 100,
     description: "Allowed over-qty % on Packing Entry stickers vs approved shortage total (same item/month). Base 2000 + 10% ⇒ max 2200.",
   },
+  {
+    key: IMS_APP_CONFIG_KEYS.FORWARDING_SHORTAGE_QTY_PERCENTAGE,
+    scope: "ims",
+    section: "application",
+    label: "Forwarding over-dispatch tolerance (%)",
+    value_type: "number",
+    min: 0,
+    max: 100,
+    description: "Allowed extra dispatch over schedule balance in Forwarding Note. Example: balance 1000 + 10% ⇒ max 1100.",
+  },
 ]);
 
 export const IMS_APP_CONFIG_SEEDS = Object.freeze({
@@ -79,4 +90,5 @@ export const IMS_APP_CONFIG_SEEDS = Object.freeze({
   [IMS_APP_CONFIG_KEYS.BOX_QR_PUBLIC_BASE_URL]: "https://jflindia.com/",
   [IMS_APP_CONFIG_KEYS.BOX_NO_UID_PREFIX]: "2026",
   [IMS_APP_CONFIG_KEYS.SHORTAGE_QTY_PERCENTAGE]: "0",
+  [IMS_APP_CONFIG_KEYS.FORWARDING_SHORTAGE_QTY_PERCENTAGE]: "0",
 });

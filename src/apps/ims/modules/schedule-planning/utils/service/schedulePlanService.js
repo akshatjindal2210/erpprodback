@@ -6,6 +6,7 @@ import { SCHEDULE_PLAN_STATUS, SCHEDULE_PLAN_ACTION, canCompleteFrom, canHoldFro
 import { insertScheduleTransaction, loadActionDates, loadActionReasons, loadItemTransactionHistory, loadLastTransactionMap, loadPlanDateHistoryMap, deletePlanTransactions } from "../db/schedulePlanTransactionDb.js";
 import { buildScheduleComparison, hasScheduleComparisonMismatch } from "../compare/schedulePlanCompare.js";
 import { toPublicImsMessage } from "../../../../lib/utils/erp-api/lookup/imsMeta.js";
+import { getForwardingShortageQtyPercentage } from "../../../../../core/configuration/models/appConfig.model.js";
 
 const IMS_SCHEDULE_LIST = "schdule";
 
@@ -469,6 +470,24 @@ async function enrichScheduleDispatchBalances(records, { excludeFuid = null } = 
       return { ...r, schedule_qty: scheduleQty, dispatch_qty: 0, balance_qty: scheduleQty };
     });
   }
+}
+
+async function loadShortageQtyPercentage() {
+  try {
+    const n = Number(await getForwardingShortageQtyPercentage());
+    if (Number.isFinite(n)) return Math.max(0, Math.min(100, n));
+  } catch {
+    /* fallback below */
+  }
+  return 0;
+}
+
+function attachShortageQtyPercentage(records = [], pct = 0) {
+  const safePct = Math.max(0, Math.min(100, Number(pct) || 0));
+  return (records || []).map((row) => ({
+    ...row,
+    shortage_qty_percentage: safePct,
+  }));
 }
 
 function currentScheduleMonth() {
@@ -1453,7 +1472,8 @@ export async function listCustomerMonthSchedules(body = {}) {
     Number.isFinite(excludeFuidRaw) && excludeFuidRaw > 0 ? excludeFuidRaw : null;
 
   try {
-    const imsFilter = buildImsScheduleFilterSql({ month: currentScheduleMonth() }, fy.finYearId);
+    // schmonth=current; docdt Jan→month-end (not month-only — Aug-dated Sep rows otherwise drop)
+    const imsFilter = buildImsScheduleFilterSql({ month: String(month), fromDate: `${new Date().getFullYear()}-01-01`, toDate: monthDocdtBounds(month).to }, fy.finYearId);
     const [imsResult, planMap, lastTxnMap] = await Promise.all([
       fetchImsDataRaw(IMS_SCHEDULE_LIST, imsFilter),
       loadAllPlanMap(fy.finYearId),
@@ -1473,7 +1493,7 @@ export async function listCustomerMonthSchedules(body = {}) {
       if (Number(plan.acc_code) !== accCode) continue;
       if (Number(plan.schmonth) !== month) continue;
       const st = Number(plan.is_planned);
-      if (st !== SCHEDULE_PLAN_STATUS.PLANNED && st !== SCHEDULE_PLAN_STATUS.RUNNING) continue;
+      if (st !== SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH && st !== SCHEDULE_PLAN_STATUS.PLANNED && st !== SCHEDULE_PLAN_STATUS.RUNNING) continue;
       const k = planKey(plan.schno, plan.itemdcode);
       if (seen.has(k)) continue;
       seen.add(k);
@@ -1508,12 +1528,13 @@ export async function listCustomerMonthSchedules(body = {}) {
       });
     });
 
+    const shortagePct = await loadShortageQtyPercentage();
     const enriched = await enrichFgStock(records);
     // Edit/approve: exclude this FN so balance includes qty already on the note.
     const withBalances = await enrichScheduleDispatchBalances(enriched, { excludeFuid });
     // Picker: skip fully dispatched / complete lines (Bal 0).
     const openBalance = withBalances.filter((r) => Number(r.balance_qty ?? 0) > 0);
-    return { success: true, records: openBalance };
+    return { success: true, records: attachShortageQtyPercentage(openBalance, shortagePct) };
   } catch (err) {
     console.error("[schedule-planning] customer-month schedules error:", err?.message || err);
     // Fallback: DB-only same-month Plan/Hold if IMS fails.
@@ -1523,11 +1544,12 @@ export async function listCustomerMonthSchedules(body = {}) {
         SCHEDULE_PLAN_STATUS.PLANNED,
         SCHEDULE_PLAN_STATUS.RUNNING,
       ]);
+      const shortagePct = await loadShortageQtyPercentage();
       const records = (rows || []).map(mapDispatchPlanRecord);
       const enriched = await enrichFgStock(records);
       const withBalances = await enrichScheduleDispatchBalances(enriched, { excludeFuid });
       const openBalance = withBalances.filter((r) => Number(r.balance_qty ?? 0) > 0);
-      return { success: true, records: openBalance };
+      return { success: true, records: attachShortageQtyPercentage(openBalance, shortagePct) };
     } catch (fallbackErr) {
       console.error("[schedule-planning] customer-month DB fallback error:", fallbackErr?.message || fallbackErr);
       return { success: false, records: [], message: "Could not load customer schedules." };
@@ -1552,6 +1574,7 @@ export async function listScheduleDispatchPlan(body = {}) {
   const finYearId = String(body?.fin_year_id ?? "").trim() || null;
 
   try {
+    const shortagePct = await loadShortageQtyPercentage();
     if (recommended) {
       if (!finYearId) {
         return { success: false, status: 400, records: [], message: "fin_year_id is required." };
@@ -1568,7 +1591,7 @@ export async function listScheduleDispatchPlan(body = {}) {
       }));
       records = await enrichRecommendedDispatchBoxes(records);
       records.sort(compareRecommendedDispatchRows);
-      return { success: true, records };
+      return { success: true, records: attachShortageQtyPercentage(records, shortagePct) };
     }
 
     let rows;
@@ -1584,7 +1607,7 @@ export async function listScheduleDispatchPlan(body = {}) {
     records = filterScheduleRowsByBalanceTab(records, { complete: showComplete });
     records.sort((a, b) => Number(b.balance_qty ?? 0) - Number(a.balance_qty ?? 0));
 
-    return { success: true, records };
+    return { success: true, records: attachShortageQtyPercentage(records, shortagePct) };
   } catch (err) {
     console.error("[schedule-planning] dispatch helper error:", err?.message || err);
     return { success: false, records: [], message: "Could not load dispatch plan data." };

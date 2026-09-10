@@ -110,7 +110,7 @@ export async function getItemMonthlyPackingUsed(
  * Returns Map<itemdcode string, totalUsed> where totalUsed = sum over months of
  * GREATEST(dailyprod, boxes) for that item+month.
  */
-export async function getItemsMonthlyPackingUsedBatch(itemdcodes = [], yearMonths = []) {
+export async function getItemsMonthlyPackingUsedBatch(itemdcodes = [], yearMonths = [], { byMonth = false } = {}) {
   const codes = [
     ...new Set(
       (itemdcodes || [])
@@ -125,7 +125,7 @@ export async function getItemsMonthlyPackingUsedBatch(itemdcodes = [], yearMonth
         .filter((m) => /^\d{4}-\d{2}$/.test(m))
     ),
   ];
-  const out = new Map(codes.map((c) => [c, 0]));
+  const out = byMonth ? new Map() : new Map(codes.map((c) => [c, 0]));
   if (!codes.length || !months.length) return out;
 
   const monthExpr = `to_char(
@@ -177,9 +177,12 @@ export async function getItemsMonthlyPackingUsedBatch(itemdcodes = [], yearMonth
   }
 
   for (const [key, vals] of perKey.entries()) {
-    const itemdcode = key.split("|")[0];
-    if (!out.has(itemdcode)) continue;
-    out.set(itemdcode, (out.get(itemdcode) || 0) + Math.max(vals.dp, vals.box));
+    const used = Math.max(vals.dp, vals.box);
+    if (byMonth) out.set(key, used);
+    else {
+      const itemdcode = key.split("|")[0];
+      if (out.has(itemdcode)) out.set(itemdcode, (out.get(itemdcode) || 0) + used);
+    }
   }
   return out;
 }

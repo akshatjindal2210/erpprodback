@@ -12,8 +12,9 @@ import { findBoxesByNoUids } from "../../../box/models/box.model.js";
 import { deleteForwardingNoteItems, findActiveForwardingNoteItemsByFuid, insertForwardingNoteItem } from "../../models/forwardingNoteItem.model.js";
 import { docNoFromStandardBoxNoUid } from "../../../../lib/stickerUidHelpers.js";
 import { buildForwardingAvailableBoxes, enrichForwardingBoxesWithPackingStd, inferForwardingPackingStandardQty, isForwardingLooseBox, sumBoxQty } from "../stock/forwardingAvailableStock.js";
-import { loadScheduleQtyForKeys, planKey } from "../../../schedule-planning/utils/db/schedulePlanDb.js";
+import { loadScheduleDispatchQtyMap, loadScheduleQtyForKeys, planKey } from "../../../schedule-planning/utils/db/schedulePlanDb.js";
 import { fetchImsDataRaw } from "../../../../lib/services/ims.service.js";
+import { getForwardingShortageQtyPercentage } from "../../../../../core/configuration/models/appConfig.model.js";
 
 const FN_RESERVE_LOCK_NS = 71;
 const IMS_SCHEDULE_LIST = "schdule";
@@ -131,7 +132,6 @@ async function fillScheduleQtyFromIms(qtyMap, pairs = []) {
 
 /** Schedule-linked FN lines must exist on plan DB or IMS Ready schedule. */
 export async function assertScheduleDispatchWithinBalance(items = [], exclude_fuid = null) {
-  void exclude_fuid;
   const demandByKey = buildScheduleDemandByKey(items);
   if (!demandByKey.size) return;
 
@@ -143,6 +143,12 @@ export async function assertScheduleDispatchWithinBalance(items = [], exclude_fu
   let scheduleQtyMap = await loadScheduleQtyForKeys(pairs);
   scheduleQtyMap = await fillScheduleQtyFromIms(scheduleQtyMap, pairs);
 
+  const [dispatchMap, shortagePctRaw] = await Promise.all([
+    loadScheduleDispatchQtyMap({ excludeFuid: exclude_fuid }),
+    getForwardingShortageQtyPercentage(),
+  ]);
+  const shortagePct = Math.max(0, Math.min(100, Number(shortagePctRaw) || 0));
+
   for (const [key, demand] of demandByKey.entries()) {
     const scheduleQty = Number(scheduleQtyMap.get(key) ?? 0);
     if (!(scheduleQty > 0)) {
@@ -150,6 +156,23 @@ export async function assertScheduleDispatchWithinBalance(items = [], exclude_fu
       const itemLabel = String(demand?.item_code ?? "").trim() || itemdcode;
       throw reserveValidationError(
         `Schedule Sch ${schno} item ${itemLabel} is not on the current schedule.`
+      );
+    }
+
+    // % = 0 / unset → old FIFO full-box overshoot OK. % > 0 → hard cap.
+    if (!(shortagePct > 0)) continue;
+
+    const dispatchedQty = Number(dispatchMap.get(key) ?? 0);
+    const balanceQty = Math.max(0, scheduleQty - dispatchedQty);
+    const maxExtraQty = Math.floor((balanceQty * shortagePct) / 100);
+    const maxAllowedQty = balanceQty + maxExtraQty;
+    const demandQty = Number(demand?.qty) || 0;
+
+    if (demandQty > maxAllowedQty + 0.0001) {
+      const [schno, itemdcode] = key.split("|");
+      const itemLabel = String(demand?.item_code ?? "").trim() || itemdcode;
+      throw reserveValidationError(
+        `Cannot exceed maximum allowed quantity for Sch ${schno} item ${itemLabel}.`
       );
     }
   }

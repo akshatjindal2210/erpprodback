@@ -66,6 +66,7 @@ const ENTITY_LABELS = {
   ims_box_override_request: "customer override",
   qc_hold_material: "QC hold",
   hrms_attendance: "daily attendance",
+  hrms_attendance_log: "attendance log",
 };
 
 const ACTION_VERBS = {
@@ -128,6 +129,10 @@ const FIELD_LABELS = {
   unapproved_count: "Unapproved rows",
   edited_codes: "Edited employees",
   updated_fields: "Changed fields",
+  total: "New logs",
+  fetched: "Fetched events",
+  from: "From",
+  to: "To",
   from_customer: "From customer",
   to_customer: "To customer",
   old_cust: "From customer",
@@ -501,21 +506,31 @@ function buildStockAdjustmentDescription(actionType, ref, record, extra) {
   return bits.length ? `${verb} adjustment, ${bits.join(", ")}` : `${verb} adjustment`;
 }
 
-function qcHoldEventLabel(event, submissionType) {
+function qcHoldPassRejectLabel(source, { partial = false } = {}) {
+  const pass = Number(source?.completed_qty) || 0;
+  const reject = Number(source?.rejected_qty) || 0;
+  const suffix = partial ? " (partial)" : "";
+  if (pass > 0 && reject > 0) return `Passed ${pass.toLocaleString()} · rejected ${reject.toLocaleString()}${suffix}`;
+  if (pass > 0) return `Passed ${pass.toLocaleString()} qty${suffix}`;
+  if (reject > 0) return `Rejected ${reject.toLocaleString()} qty${suffix}`;
+  return partial ? "Passed (partial)" : "Passed";
+}
+
+function qcHoldEventLabel(event, submissionType, source = {}) {
   const e = String(event || "").toLowerCase();
-  if (e === "qc_hold_created") return "QC hold created";
-  if (e === "partial_submit") return "Partial submit awaiting approval";
-  if (e === "full_submit") return "Full submit awaiting approval";
-  if (e === "revert_submit") return "Revert submit awaiting approval";
-  if (e === "partial_approved") return "Partial submit approved";
-  if (e === "hold_completed") return "QC hold completed";
-  if (e === "revert_approved") return "QC hold reverted";
-  if (e === "qc_hold_updated") return "QC hold updated";
-  if (e === "qc_hold_deleted") return "QC hold deleted";
+  if (e === "qc_hold_created") return "Put on hold";
+  if (e === "partial_submit") return "Submitted — awaiting approval (partial)";
+  if (e === "full_submit") return "Submitted — awaiting approval (full)";
+  if (e === "revert_submit") return "Release requested — awaiting approval";
+  if (e === "partial_approved") return qcHoldPassRejectLabel(source, { partial: true });
+  if (e === "hold_completed") return qcHoldPassRejectLabel(source);
+  if (e === "revert_approved") return "Released";
+  if (e === "qc_hold_updated") return "Hold updated";
+  if (e === "qc_hold_deleted") return "Hold deleted";
   const t = String(submissionType || "").toLowerCase();
   if (t === "partial") return "Partial submit";
   if (t === "full") return "Full submit";
-  if (t === "revert") return "Revert submit";
+  if (t === "revert") return "Release requested";
   return null;
 }
 
@@ -560,7 +575,7 @@ function buildQcHoldLog(extra, record) {
   const info = {};
   const more = {};
 
-  const eventLabel = qcHoldEventLabel(source.event, source.submission_type);
+  const eventLabel = qcHoldEventLabel(source.event, source.submission_type, source);
   if (eventLabel) info["Event"] = eventLabel;
   if (source.submission_type) {
     const t = String(source.submission_type).toLowerCase();

@@ -145,6 +145,23 @@ export async function getShortageQtyPercentage() {
   return 0;
 }
 
+/**
+ * Allowed extra dispatch % over schedule balance for Forwarding Note.
+ * Example: balance 1000, 10% => max allowed 1100.
+ */
+export async function getForwardingShortageQtyPercentage() {
+  try {
+    const raw = await getAppConfigValue(APP_CONFIG_KEYS.FORWARDING_SHORTAGE_QTY_PERCENTAGE);
+    if (raw != null && String(raw).trim() !== "") {
+      const n = Number(String(raw).trim());
+      if (Number.isFinite(n)) return Math.max(0, Math.min(100, n));
+    }
+  } catch {
+    /* table missing */
+  }
+  return 0;
+}
+
 /** Upsert; `config_value` stored as text (e.g. "true", "false"). */
 export async function getAllAppConfig() {
   const rows = await dbQuery(

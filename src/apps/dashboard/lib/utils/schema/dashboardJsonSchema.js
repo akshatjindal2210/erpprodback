@@ -201,12 +201,15 @@ function readTableWidgetOptions(widget = {}, chartConfig = {}) {
   const rawPos = String(widget.tableSearchPosition ?? cfg.table_search_position ?? "right").trim().toLowerCase();
   const tableSearchPosition =
     rawPos === "left" || rawPos === "center" || rawPos === "full" ? rawPos : "right";
+  const rawMode = String(widget.tableSearchMode ?? cfg.table_search_mode ?? "global").trim().toLowerCase();
+  const tableSearchMode = rawMode === "columns" || rawMode === "both" ? rawMode : "global";
   const widthRaw = Number(widget.tableSearchWidth ?? cfg.table_search_width);
   const tableSearchWidth = Number.isFinite(widthRaw)
     ? Math.max(160, Math.min(600, Math.round(widthRaw)))
     : 280;
   return {
     tableSearchEnabled: widget.tableSearchEnabled === true || cfg.table_search_enabled === true,
+    tableSearchMode,
     tableSearchPlaceholder: String(
       widget.tableSearchPlaceholder ?? cfg.table_search_placeholder ?? "",
     ).trim(),
@@ -224,12 +227,15 @@ function tableWidgetOptionsToChartConfig(options = {}) {
   const rawPos = String(options.tableSearchPosition || "right").trim().toLowerCase();
   const tableSearchPosition =
     rawPos === "left" || rawPos === "center" || rawPos === "full" ? rawPos : "right";
+  const rawMode = String(options.tableSearchMode || "global").trim().toLowerCase();
+  const tableSearchMode = rawMode === "columns" || rawMode === "both" ? rawMode : "global";
   const widthRaw = Number(options.tableSearchWidth);
   const tableSearchWidth = Number.isFinite(widthRaw)
     ? Math.max(160, Math.min(600, Math.round(widthRaw)))
     : 280;
   return {
     table_search_enabled: options.tableSearchEnabled === true,
+    table_search_mode: tableSearchMode,
     table_search_placeholder: String(options.tableSearchPlaceholder || "").trim(),
     table_search_position: tableSearchPosition,
     table_search_width: tableSearchWidth,

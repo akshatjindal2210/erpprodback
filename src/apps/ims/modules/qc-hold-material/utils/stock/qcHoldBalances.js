@@ -41,6 +41,8 @@ export function attachQcHoldBalances(row, pendingTotals = {}) {
 
   const pending = { ...pendingFromJson, ...pendingTotals };
 
+  const lastApproved = approvedSubs.length ? approvedSubs[approvedSubs.length - 1] : null;
+
   const withBalances = {
     ...flat,
     scanned_box_uids_list: heldUids,
@@ -59,12 +61,14 @@ export function attachQcHoldBalances(row, pendingTotals = {}) {
     pending_submission_id: pendingSubs[0]?.submission_id ?? null,
     approved_submissions: approvedSubs,
     approved_submission_count: approvedSubs.length,
-    last_approved_submission: approvedSubs.length ? approvedSubs[approvedSubs.length - 1] : null,
+    last_approved_submission: lastApproved,
     pending_submission: pendingSubs[0] || null,
+    // Approved By/At = last submission approver (not create-time hold.approved_by).
+    approved_by_name: lastApproved?.approved_by || null,
+    approved_by: lastApproved?.approved_by || null,
+    approved_at: lastApproved?.approved_at || null,
   };
 
-  // Source of truth = hold_data qty rollup (not a possibly-stale status column).
-  // Once balance is cleared, never surface as "partial".
   return {
     ...withBalances,
     status: deriveQcHoldStatus(withBalances),

@@ -40,6 +40,15 @@ const SORT_EXPR = {
 
 const JOINS = ``;
 
+/** Complete tab uses last activity so recently finished older holds still appear. */
+function resolveDateExpr(dateOn) {
+  const mode = String(dateOn ?? "").trim().toLowerCase();
+  if (mode === "activity" || mode === "updated_at") {
+    return "COALESCE(q.updated_at, q.created_at)";
+  }
+  return "q.created_at";
+}
+
 /** Tab filters use hold_data balances so cleared holds never stay under Partial. */
 function statusFilterSql(status) {
   const s = String(status ?? "").trim().toLowerCase();
@@ -74,6 +83,8 @@ const DEFAULT_FIELDS = [
   "q.deleted_by AS deleted_by_name",
 ];
 
+const TX_LOG_FIELDS = [...DEFAULT_FIELDS, "q.is_deleted"];
+
 const assertField = (key, whitelist, context = "field") => {
   if (!whitelist.includes(key)) throw new Error(`Invalid ${context}: "${key}"`);
 };
@@ -103,22 +114,24 @@ export const findQcHoldMaterials = async (options = {}) => {
   const values = [];
   let i = 1;
   const conditions = ["q.is_deleted = false"];
+  const dateExpr = resolveDateExpr(filters.date_on);
 
   if (permission?.can_view_days > 0) {
-    conditions.push(`q.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
+    conditions.push(`${dateExpr} >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
   }
 
   for (const [key, val] of Object.entries(filters)) {
     if (val === undefined || val === null || val === "") continue;
+    if (key === "date_on") continue;
 
     if (key === "from_date" || key === "fromDate") {
       values.push(val);
-      conditions.push(`q.created_at >= $${i++}`);
+      conditions.push(`${dateExpr} >= $${i++}`);
       continue;
     }
     if (key === "to_date" || key === "toDate") {
       values.push(val);
-      conditions.push(`q.created_at <= $${i++}`);
+      conditions.push(`${dateExpr} <= $${i++}`);
       continue;
     }
     if (key === "open_only") {
@@ -193,6 +206,60 @@ export const findQcHoldMaterialById = async (hold_id) => {
     [hold_id]
   );
   return rows[0] || null;
+};
+
+/** Soft-deleted holds included. */
+export const findQcHoldMaterialByIdForTxLog = async (hold_id) => {
+  const rows = await dbQuery(
+    `SELECT ${TX_LOG_FIELDS.join(", ")}
+     FROM ${TABLE} q
+     WHERE q.hold_id = $1
+     LIMIT 1`,
+    [hold_id]
+  );
+  return rows[0] || null;
+};
+
+export const findQcHoldMaterialsForTxLog = async ({
+  from_date = null,
+  to_date = null,
+  search = null,
+  limit = 2000,
+} = {}) => {
+  const values = [];
+  let i = 1;
+  const conditions = ["1=1"];
+
+  if (from_date) {
+    values.push(from_date);
+    conditions.push(`COALESCE(q.deleted_at, q.updated_at, q.created_at) >= $${i++}`);
+  }
+  if (to_date) {
+    values.push(to_date);
+    conditions.push(`q.created_at <= $${i++}`);
+  }
+  if (search) {
+    values.push(`%${search}%`);
+    conditions.push(`(
+      CAST(q.hold_id AS TEXT) ILIKE $${i} OR
+      COALESCE(q.packing_number::text, '') ILIKE $${i} OR
+      CAST(q.item_dcode AS TEXT) ILIKE $${i} OR
+      COALESCE(q.reason, '') ILIKE $${i} OR
+      COALESCE(q.created_by::text, '') ILIKE $${i}
+    )`);
+    i++;
+  }
+
+  const safeLimit = Math.min(5000, Math.max(1, parseInt(limit, 10) || 2000));
+  values.push(safeLimit);
+  return dbQuery(
+    `SELECT ${TX_LOG_FIELDS.join(", ")}
+     FROM ${TABLE} q
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY COALESCE(q.updated_at, q.created_at) DESC
+     LIMIT $${i}`,
+    values
+  );
 };
 
 export const insertQcHoldMaterial = async (data) => {

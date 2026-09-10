@@ -35,9 +35,35 @@ function norm(v) {
   return s && s !== "—" ? s : "";
 }
 
-/** Identity: packing + doc_dt + job_card + item + customer */
-function rowKey({ packing, itemDcode, docDt, jobCard, customer }) {
-  return [packing, docDt, jobCard, itemDcode, customer].map(norm).join("::");
+/** Identity: packing + doc_dt + job_card + item (no customer — stock is not split by customer). */
+function rowKey({ packing, itemDcode, docDt, jobCard }) {
+  return [packing, docDt, jobCard, itemDcode].map(norm).join("::");
+}
+
+/** Comma-join distinct customer labels on the same report row. */
+function joinCustomerNames(a, b) {
+  const names = new Set();
+  for (const raw of [a, b]) {
+    if (!raw) continue;
+    for (const part of String(raw).split(",")) {
+      const t = part.trim();
+      if (t) names.add(t);
+    }
+  }
+  return names.size ? [...names].sort().join(", ") : null;
+}
+
+/** Resolve numeric acc codes to ledger names (SQL already returns names when available). */
+function resolveCustomerNames(raw, ledgerMap) {
+  if (!raw || !ledgerMap?.get) return raw ?? null;
+  const names = new Set();
+  for (const part of String(raw).split(",")) {
+    const t = part.trim();
+    if (!t) continue;
+    const code = canonicalCode(t);
+    names.add(/^\d+$/.test(t) && code && ledgerMap.get(code) ? ledgerMap.get(code) : t);
+  }
+  return names.size ? [...names].sort().join(", ") : null;
 }
 
 function erpMatchScore(row, erpDocDt, erpJob) {
@@ -177,10 +203,17 @@ function mergeDbAndErpRows(dbRows, erpByItem) {
     const itemDcode = norm(db.item_dcode);
     const docDt = norm(db.doc_dt) || null;
     const jobCard = norm(db.job_card_no) || null;
-    const customer = norm(db.customer_code) || null;
-    const key = rowKey({ packing, itemDcode, docDt, jobCard, customer });
+    const key = rowKey({ packing, itemDcode, docDt, jobCard });
     const dbStock = toQty(db.db_stock);
-
+    const existing = merged.get(key);
+    if (existing) {
+      existing.db_stock += dbStock;
+      existing.customer_name = joinCustomerNames(existing.customer_name, db.customer_name);
+      existing.stock_diff = existing.db_stock - toQty(existing.erp_stock);
+      existing.mismatch = mismatchKind(existing.db_stock, existing.erp_stock);
+      if (!existing.item_desc && db.item_desc) existing.item_desc = db.item_desc;
+      continue;
+    }
     merged.set(key, {
       packing_number: packing,
       item_dcode: itemDcode,
@@ -188,7 +221,6 @@ function mergeDbAndErpRows(dbRows, erpByItem) {
       item_desc: db.item_desc ?? null,
       doc_dt: docDt,
       job_card_no: jobCard,
-      customer_code: customer,
       customer_name: db.customer_name ?? null,
       erp_stock: 0,
       db_stock: dbStock,
@@ -219,7 +251,6 @@ function mergeDbAndErpRows(dbRows, erpByItem) {
           itemDcode,
           docDt: erpDocDt,
           jobCard: erpJob,
-          customer: null,
         });
         merged.set(key, {
           packing_number: packing,
@@ -228,8 +259,6 @@ function mergeDbAndErpRows(dbRows, erpByItem) {
           item_desc: null,
           doc_dt: erpDocDt,
           job_card_no: erpJob,
-          customer_code: null,
-          customer_name: null,
           erp_stock: erpStock,
           db_stock: 0,
           stock_diff: 0 - erpStock,
@@ -275,6 +304,13 @@ async function buildMergedRows({ refresh = false, refreshErp = false } = {}) {
     rows = enrichRowsWithItemMaster(rows, itemLookup);
   }
 
+  const ledgerMap = imsMaps?.ledgerMap;
+  if (ledgerMap?.get) {
+    for (let i = 0; i < rows.length; i++) {
+      const name = resolveCustomerNames(rows[i].customer_name, ledgerMap);
+      if (name !== rows[i].customer_name) rows[i] = { ...rows[i], customer_name: name };
+    }
+  }
   return rows;
 }
 

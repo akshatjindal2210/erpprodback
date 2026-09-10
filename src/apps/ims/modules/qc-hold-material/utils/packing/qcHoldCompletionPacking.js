@@ -314,74 +314,109 @@ export async function ensureQcHoldSubmissionCompletionBoxesTx(client, { hold, su
 export async function consumeQcHoldSourceQtyTx(client, { holdId, sourceBoxUids = [], completedQty, userId, userName = null }) {
   const pk = Number(holdId);
   const targetQty = Math.max(0, parseInt(String(completedQty), 10) || 0);
-  const uids = [...new Set((sourceBoxUids || []).map((v) => String(v).trim()).filter(Boolean))];
-  if (!Number.isFinite(pk) || pk < 1 || targetQty <= 0 || !uids.length) {
+  if (!Number.isFinite(pk) || pk < 1 || targetQty <= 0) {
     return { deleted: 0, consumedUids: [], consumedQty: 0 };
   }
 
-  const numericOnly = uids.filter((c) => /^\d+$/.test(c));
-  const { rows: candidates } = await client.query(
+  const { rows: allOnHold } = await client.query(
     `SELECT b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose
      FROM ims_box_table b
-     WHERE b.is_deleted = false
-       AND b.qc_hold_id = $1::integer
-       AND (
-         b.box_no_uid::text = ANY($2::text[])
-         OR (cardinality($3::text[]) > 0 AND b.box_uid::text = ANY($3::text[]))
-       )
-     ORDER BY b.box_uid ASC`,
-    [pk, uids, numericOnly]
+     WHERE b.is_deleted = false AND b.qc_hold_id = $1::integer
+     ORDER BY b.qty ASC, b.box_uid ASC`,
+    [pk]
   );
+  const listed = new Set((sourceBoxUids || []).map((v) => String(v).trim()).filter(Boolean));
+  let candidates = allOnHold || [];
+  if (listed.size) {
+    const scoped = candidates.filter(
+      (b) => listed.has(String(b.box_no_uid)) || listed.has(String(b.box_uid))
+    );
+    if (scoped.length) candidates = scoped;
+  }
+  if (!candidates.length) return { deleted: 0, consumedUids: [], consumedQty: 0, noSourceBoxes: true };
 
   let need = targetQty;
-  const toConsume = [];
-  for (const box of candidates || []) {
+  const toDelete = [];
+  const used = new Set();
+  for (const box of candidates) {
     if (need <= 0) break;
-    toConsume.push(box);
-    need -= Number(box.qty) || 0;
-  }
-  if (!toConsume.length) {
-    return { deleted: 0, consumedUids: [], consumedQty: 0 };
-  }
-
-  const consumeUids = toConsume.map((b) => String(b.box_no_uid).trim()).filter(Boolean);
-  const consumeNumeric = consumeUids.filter((c) => /^\d+$/.test(c));
-  const { rows } = await client.query(
-    `UPDATE ims_box_table b
-     SET is_deleted = true,
-         deleted_at = NOW(),
-         deleted_by = $4,
-         qc_hold_id = NULL,
-         updated_at = NOW()
-     WHERE b.is_deleted = false
-       AND b.qc_hold_id = $1::integer
-       AND (
-         b.box_no_uid::text = ANY($2::text[])
-         OR (cardinality($3::text[]) > 0 AND b.box_uid::text = ANY($3::text[]))
-       )
-     RETURNING b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose`,
-    [pk, consumeUids, consumeNumeric, userName ?? null]
-  );
-
-  if (rows?.length) {
-    await logBoxTransaction({
-      client,
-      transaction_type: BOX_TX_TYPES.QC_HOLD_SOURCE_CONSUME,
-      source_module: "qc_hold_material",
-      source_id: String(pk),
-      packing_number: rows[0]?.packing_number,
-      user_id: userId,
-      user_name: userName ?? null,
-      rows,
-      details: { source_box_uids: consumeUids, completed_qty: targetQty, partial: true },
-    });
+    const q = Number(box.qty) || 0;
+    if (q <= 0 || q > need) continue;
+    toDelete.push(box);
+    used.add(String(box.box_no_uid));
+    need -= q;
   }
 
-  const consumedQty = (rows || []).reduce((sum, row) => sum + (Number(row.qty) || 0), 0);
+  let reduceBox = null;
+  let reduceTake = 0;
+  if (need > 0) {
+    reduceBox = candidates.find((b) => !used.has(String(b.box_no_uid)) && (Number(b.qty) || 0) > need) || null;
+    if (reduceBox) reduceTake = need;
+  }
+  if (!toDelete.length && !reduceBox) {
+    return { deleted: 0, consumedUids: [], consumedQty: 0, noSourceBoxes: true };
+  }
+
+  let deletedRows = [];
+  const consumeUids = toDelete.map((b) => String(b.box_no_uid).trim()).filter(Boolean);
+  if (consumeUids.length) {
+    const consumeNumeric = consumeUids.filter((c) => /^\d+$/.test(c));
+    const { rows } = await client.query(
+      `UPDATE ims_box_table b
+       SET is_deleted = true, deleted_at = NOW(), deleted_by = $4, qc_hold_id = NULL, updated_at = NOW()
+       WHERE b.is_deleted = false AND b.qc_hold_id = $1::integer
+         AND (b.box_no_uid::text = ANY($2::text[]) OR (cardinality($3::text[]) > 0 AND b.box_uid::text = ANY($3::text[])))
+       RETURNING b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose`,
+      [pk, consumeUids, consumeNumeric, userName ?? null]
+    );
+    deletedRows = rows || [];
+    if (deletedRows.length) {
+      await logBoxTransaction({
+        client,
+        transaction_type: BOX_TX_TYPES.QC_HOLD_SOURCE_CONSUME,
+        source_module: "qc_hold_material",
+        source_id: String(pk),
+        packing_number: deletedRows[0]?.packing_number,
+        user_id: userId,
+        user_name: userName ?? null,
+        rows: deletedRows,
+        details: { source_box_uids: consumeUids, completed_qty: targetQty, partial: true },
+      });
+    }
+  }
+
+  let reducedQty = 0;
+  if (reduceBox && reduceTake > 0) {
+    const beforeQty = Number(reduceBox.qty) || 0;
+    const afterQty = Math.max(0, beforeQty - reduceTake);
+    const { rows: reducedRows } = await client.query(
+      `UPDATE ims_box_table b
+       SET qty = $2::integer, is_loose = true, updated_at = NOW()
+       WHERE b.is_deleted = false AND b.qc_hold_id = $1::integer AND b.box_no_uid::text = $3::text
+       RETURNING b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose`,
+      [pk, afterQty, String(reduceBox.box_no_uid).trim()]
+    );
+    if (reducedRows?.length) {
+      reducedQty = reduceTake;
+      await logBoxTransaction({
+        client,
+        transaction_type: BOX_TX_TYPES.QC_HOLD_SOURCE_CONSUME,
+        source_module: "qc_hold_material",
+        source_id: String(pk),
+        packing_number: reducedRows[0]?.packing_number,
+        user_id: userId,
+        user_name: userName ?? null,
+        rows: reducedRows,
+        details: { qty_reduce: true, from_qty: beforeQty, to_qty: afterQty, consumed_qty: reduceTake, partial: true },
+      });
+    }
+  }
+
   return {
-    deleted: rows?.length || 0,
+    deleted: deletedRows.length,
     consumedUids: consumeUids,
-    consumedQty,
+    consumedQty: deletedRows.reduce((s, r) => s + (Number(r.qty) || 0), 0) + reducedQty,
+    qtyReduced: reducedQty > 0,
   };
 }
 

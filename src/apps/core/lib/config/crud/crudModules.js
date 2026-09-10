@@ -213,7 +213,7 @@ export const CRUD_MODULES = {
       "q.approved", "q.approved_by", "q.approved_at", "q.created_by", "q.created_at", "q.updated_by", "q.updated_at",
       "q.created_by AS created_by_name", "q.updated_by AS updated_by_name", "q.approved_by AS approved_by_name"
     ],
-    filterFields: ["hold_id", "packing_number", "item_dcode", "status", "approved", "from_date", "to_date", "open_only"],
+    filterFields: ["hold_id", "packing_number", "item_dcode", "status", "approved", "from_date", "to_date", "open_only", "date_on"],
     searchFields: ["q.packing_number", "q.remarks", "q.reason", "q.status", "q.created_by"]
   },
   shortage: {

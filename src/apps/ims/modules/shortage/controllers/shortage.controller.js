@@ -1,5 +1,5 @@
 import { createCrud } from "../../../lib/crud/genericCrud.js";
-import { shortageCrudConfig, normalizeShortageMonth, SHORTAGE_BULK_IMPORT_TYPES } from "./../shortage.config.js";
+import { shortageCrudConfig, normalizeShortageMonth, SHORTAGE_BULK_IMPORT_TYPES, SHORTAGE_TYPES } from "./../shortage.config.js";
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { canCreatePackingDeviation } from "../../../lib/utils/imsSpecialPermissions.js";
@@ -8,6 +8,8 @@ import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 
 const BULK_INSERT_CHUNK = 400;
+
+const MASTER_TYPE_QTY_KEYS = ["qty_ppc", "qty_wip", "qty_deviation", "qty_additional"];
 
 function monthYmKey(monthYmd) {
   const s = normalizeShortageMonth(monthYmd, null);
@@ -360,45 +362,8 @@ export const bulkCreateShortages = async (req, res) => {
 };
 
 /**
- * Calendar YYYY-MM values covered by from/to (inclusive), capped to 24 months.
- * Falls back to current month when both are empty.
- */
-function yearMonthsFromDateFilter(fromDate, toDate) {
-  const fromRaw = String(fromDate ?? "").trim().slice(0, 10);
-  const toRaw = String(toDate ?? "").trim().slice(0, 10);
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const currentYm = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
-
-  let startYm = /^\d{4}-\d{2}-\d{2}/.test(fromRaw) ? fromRaw.slice(0, 7) : "";
-  let endYm = /^\d{4}-\d{2}-\d{2}/.test(toRaw) ? toRaw.slice(0, 7) : "";
-  if (!startYm && !endYm) return [currentYm];
-  if (!startYm) startYm = endYm;
-  if (!endYm) endYm = startYm;
-  if (startYm > endYm) {
-    const t = startYm;
-    startYm = endYm;
-    endYm = t;
-  }
-
-  const out = [];
-  let [y, m] = startYm.split("-").map(Number);
-  const [ey, em] = endYm.split("-").map(Number);
-  while (out.length < 24 && (y < ey || (y === ey && m <= em))) {
-    out.push(`${y}-${pad(m)}`);
-    m += 1;
-    if (m > 12) {
-      m = 1;
-      y += 1;
-    }
-  }
-  return out.length ? out : [currentYm];
-}
-
-/**
  * POST /shortage/master-list
- * One row per unique itemdcode within the same filters as item-wise list.
- * Columns: total shortage qty, produced so far (packing stickers), remaining balance.
+ * One row per itemdcode + calendar month (YYYY-MM). Type qty sums only that month.
  */
 export const getShortageMasterList = async (req, res) => {
   try {
@@ -446,67 +411,53 @@ export const getShortageMasterList = async (req, res) => {
     const rows = await dbQuery(
       `SELECT
          s.itemdcode,
+         to_char(s.month, 'YYYY-MM') AS year_month,
          MAX(NULLIF(TRIM(s.itemcode), '')) AS itemcode,
          COUNT(*)::int AS entry_count,
          COALESCE(SUM(COALESCE(s.qty, 0)), 0)::float AS total_shortage_qty,
-         COALESCE(SUM(CASE WHEN s.approved = true THEN COALESCE(s.qty, 0) ELSE 0 END), 0)::float AS approved_qty,
-         COALESCE(SUM(CASE WHEN s.approved IS DISTINCT FROM true THEN COALESCE(s.qty, 0) ELSE 0 END), 0)::float AS pending_qty,
-         MIN(s.month)::date AS month_from,
-         MAX(s.month)::date AS month_to,
-         ARRAY_AGG(DISTINCT s.type) AS types,
-         ARRAY_AGG(DISTINCT to_char(s.month, 'YYYY-MM')) AS year_months
+         COALESCE(SUM(CASE WHEN s.type = 'PPC' THEN COALESCE(s.qty, 0) ELSE 0 END), 0)::float AS qty_ppc,
+         COALESCE(SUM(CASE WHEN s.type = 'WIP' THEN COALESCE(s.qty, 0) ELSE 0 END), 0)::float AS qty_wip,
+         COALESCE(SUM(CASE WHEN s.type = 'Deviation' THEN COALESCE(s.qty, 0) ELSE 0 END), 0)::float AS qty_deviation,
+         COALESCE(SUM(CASE WHEN s.type = 'Additional' THEN COALESCE(s.qty, 0) ELSE 0 END), 0)::float AS qty_additional
        FROM ${T.SHORTAGE} s
        WHERE ${where.join(" AND ")}
-       GROUP BY s.itemdcode
-       ORDER BY s.itemdcode ASC`,
+       GROUP BY s.itemdcode, to_char(s.month, 'YYYY-MM')
+       ORDER BY s.itemdcode ASC, year_month ASC`,
       values
     );
 
     const list = rows || [];
-    const yearMonths = yearMonthsFromDateFilter(fromDate, toDate);
+    const yearMonths = [...new Set(list.map((r) => r.year_month).filter(Boolean))];
     const producedMap = await getItemsMonthlyPackingUsedBatch(
       list.map((r) => r.itemdcode),
-      yearMonths
+      yearMonths,
+      { byMonth: true }
     );
 
-    const enrichedBase = await enrichShortageRows(
+    const data = (await enrichShortageRows(
       list.map((r) => {
-        const types = Array.isArray(r.types) ? [...new Set(r.types.filter(Boolean))].sort() : [];
-        const yms = Array.isArray(r.year_months)
-          ? [...new Set(r.year_months.filter(Boolean))].sort()
-          : yearMonths;
+        const ym = String(r.year_month || "").trim();
+        const code = String(r.itemdcode).trim();
+        const total = Number(r.total_shortage_qty) || 0;
+        const produced = Number(producedMap.get(`${code}|${ym}`) || 0);
         return {
-          id: `master-${r.itemdcode}`,
+          id: `master-${r.itemdcode}-${ym}`,
           itemdcode: r.itemdcode,
           itemcode: r.itemcode || String(r.itemdcode),
+          year_month: ym,
           entry_count: Number(r.entry_count) || 0,
-          total_shortage_qty: Number(r.total_shortage_qty) || 0,
-          approved_qty: Number(r.approved_qty) || 0,
-          pending_qty: Number(r.pending_qty) || 0,
-          month_from: r.month_from,
-          month_to: r.month_to,
-          types,
-          year_months: yms,
-          produced_qty: Number(producedMap.get(String(r.itemdcode).trim()) || 0),
+          total_shortage_qty: total,
+          type_qty: SHORTAGE_TYPES.map((type, i) => ({
+            type,
+            qty: Number(r[MASTER_TYPE_QTY_KEYS[i]]) || 0,
+          })).filter((x) => x.qty > 0),
+          produced_qty: produced,
+          remaining_balance: total - produced,
         };
       })
-    );
+    ));
 
-    const data = enrichedBase.map((row) => {
-      const total = Number(row.total_shortage_qty) || 0;
-      const produced = Number(row.produced_qty) || 0;
-      return {
-        ...row,
-        remaining_balance: total - produced,
-      };
-    });
-
-    return res.json({
-      success: true,
-      data,
-      total: data.length,
-      meta: { year_months: yearMonths },
-    });
+    return res.json({ success: true, data, total: data.length });
   } catch (err) {
     console.error("getShortageMasterList Error:", err);
     return res.status(500).json({ success: false, message: err.message || "Failed to load master shortage report." });

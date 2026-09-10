@@ -143,6 +143,26 @@ export function sqlBoxCustomerCodeReport(boxAlias = "b", saAlias = "sa", dpAlias
   )`;
 }
 
+/** Customer identity for report row split — code first, name when code is missing. */
+export function sqlBoxCustomerKeyReport(boxAlias = "b", saAlias = "sa", dpAlias = "dp") {
+  return `COALESCE(
+    NULLIF(TRIM(${boxAlias}.override_cust::text), ''),
+    NULLIF(TRIM(${saAlias}.acc_code::text), ''),
+    NULLIF(TRIM(${dpAlias}.acc_code::text), ''),
+    NULLIF(TRIM(${saAlias}.acc_name::text), ''),
+    NULLIF(TRIM(${dpAlias}.acc_name::text), '')
+  )`;
+}
+
+/** Customer display name — SA / dailyprod name first, then per-box override text. */
+export function sqlBoxCustomerNameReport(boxAlias = "b", saAlias = "sa", dpAlias = "dp") {
+  return `COALESCE(
+    NULLIF(TRIM(${saAlias}.acc_name::text), ''),
+    NULLIF(TRIM(${dpAlias}.acc_name::text), ''),
+    NULLIF(TRIM(${boxAlias}.override_cust::text), '')
+  )`;
+}
+
 /** PostgreSQL DATE → `YYYY-MM-DD` text (avoids node-pg timezone shift on JS Date). */
 export function sqlDocDtText(dateExpr) {
   return `CASE WHEN ${dateExpr} IS NULL THEN NULL::text ELSE to_char(${dateExpr}::date, 'YYYY-MM-DD') END`;
@@ -195,6 +215,7 @@ export function sqlDailyprodLateralForBox(boxAlias = "b", saAlias = "sa", pnExpr
       dp2.item_code,
       dp2.item_desc,
       dp2.acc_code,
+      dp2.acc_name,
       dp2.total_qty
     FROM ims_dailyprod dp2
     WHERE ${sqlDailyprodDocNoMatch("dp2.doc_no", pn)}

@@ -5,6 +5,9 @@ import { formatHrmsDateTime } from "../../../lib/hrmsFormat.js";
 import { istTs, LOG_DATE_SQL } from "../../../lib/attendanceCommon.js";
 import { fetchAcsEvents, fetchEmpMaster, hikvisionFetchImageBinary } from "../../../lib/erpApi.js";
 import { deviceEventToRecord, extractDeviceEventImage, extractDeviceEvents } from "../../../lib/hikvisionEvents.js";
+import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
+
+const ENTITY = "hrms_attendance_log";
 
 async function getMasterEmployeeCodes() {
   const employees = await fetchEmpMaster();
@@ -91,14 +94,27 @@ export async function syncAttendanceLogs(req, res) {
     const from = req.body?.from ?? req.body?.fromDate ?? "";
     const to = req.body?.to ?? req.body?.toDate ?? "";
     const events = await fetchAcsEvents({ from, to });
-    if (!events.length) return res.json({ success: true, message: "Done.", total: 0, data: [] });
+    if (!events.length) {
+      return res.json({ success: true, message: "No machine events.", total: 0, data: [] });
+    }
 
     const saved = await saveEventsFromBody({ InfoList: events });
+    const data = saved.map(formatLogRow);
+    if (data.length) {
+      await logActivity(req, {
+        action: "create",
+        entity: ENTITY,
+        entity_id: from || to || "sync",
+        appType: "hrms",
+        record: { from: from || null, to: to || null },
+        details: { total: data.length, fetched: events.length },
+      });
+    }
     return res.json({
       success: true,
-      message: "Done.",
-      total: saved.length,
-      data: saved,
+      message: data.length ? `Synced ${data.length} new log(s).` : "No new logs (already synced).",
+      total: data.length,
+      data,
     });
   } catch (err) {
     console.error("[HRMS] syncAttendanceLogs:", err);

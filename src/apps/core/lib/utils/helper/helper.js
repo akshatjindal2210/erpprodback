@@ -587,6 +587,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
   const docDateShort = fmtBillShortDate(note.timestamp || note.created_at);
   const challanNo = String(note.fuid ?? "");
   const partyName = escapeHtml(note.acc_name || "—");
+  const poNumber = escapeHtml(String(note.po_number ?? "").trim() || "—");
   const { bills: printBills, dates: printDates, maker: printMaker, at: printAt } = collectPrintBillMeta(note);
   const billNoHtml = formatBillNosPrintHtml(printBills);
   const billDateHtml = formatBillNosPrintHtml(printDates);
@@ -891,6 +892,10 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
             <tr>
               <td class="fn-fl">CARTAGE</td>
               <td class="fn-fv fn-fv-last" colspan="3"><span class="fn-under">${escapeHtml(cartageStr) || "&#160;"}</span></td>
+            </tr>
+            <tr>
+              <td class="fn-fl">PO NUMBER</td>
+              <td class="fn-fv fn-fv-last" colspan="3"><span class="fn-under">${poNumber}</span></td>
             </tr>
             <tr>
               <td class="fn-fl">TRANSPORTER NAME</td>

@@ -1,13 +1,12 @@
-import { findQcHoldMaterials, findQcHoldMaterialById, findActiveQcHoldParents, insertQcHoldMaterial, updateQcHoldMaterial, softDeleteQcHoldMaterial, findDistinctQcHoldReasons } from "../models/qcHoldMaterial.model.js";
+import { findQcHoldMaterials, findQcHoldMaterialById, findQcHoldMaterialByIdForTxLog, findQcHoldMaterialsForTxLog, findActiveQcHoldParents, insertQcHoldMaterial, updateQcHoldMaterial, softDeleteQcHoldMaterial, findDistinctQcHoldReasons } from "../models/qcHoldMaterial.model.js";
 import { withTransaction } from "../../../../../config/db/db.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
-import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
-import ActivityLog from "../../../../core/activity-logs/models/activityLog.model.js";
 import { resolveQcHoldPackingMeta } from "../utils/packing/qcHoldPackingMeta.js";
 import { enrichHoldScannedBoxes, enrichQcHoldListRows } from "../utils/list/qcHoldList.js";
+import { buildQcHoldTransactionLog } from "../utils/list/qcHoldTransactionLog.js";
 import { VALID_SUBMISSION_TYPES, normalizeSubmissionType, validateSubmissionQuantities } from "../utils/submission/qcHoldSubmission.js";
 import { findBoxByUidOrNoUid } from "../../box/models/box.model.js";
 import { isBoxSellable, isBoxOnQcHold } from "../../box/utils/inventory/boxInventory.js";
@@ -19,15 +18,6 @@ import { QC_HOLD_MSG, qcHoldBoxBelongsToPacking } from "../../../lib/constants/q
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 
 const CFG = getCrudModuleConfig("qc_hold_material");
-
-function qcHoldLogDetails(extra = {}) {
-  const out = {};
-  for (const [k, v] of Object.entries(extra)) {
-    if (v === undefined || v === null || v === "") continue;
-    out[k] = v;
-  }
-  return out;
-}
 
 function mapCompletionStickers(completionBoxes = []) {
   return (completionBoxes || []).map((row, idx) => ({
@@ -255,33 +245,14 @@ export const createQcHoldMaterial = async (req, res) => {
       status: "pending",
       hold_data: buildPendingHoldData({ boxes: boxUids, qty: qtyNum, hold_scan_mode: scanMode }),
       approved: true,
-      approved_by: userName,
-      approved_at: new Date(),
+      approved_by: null,
+      approved_at: null,
       created_by: userName,
     };
 
     const created = await insertQcHoldMaterial(payload);
     await applyQcHoldToBoxes(created.hold_id, boxUids, { userId });
 
-    await logActivity(req, {
-      action: "create",
-      entity: "qc_hold_material",
-      entity_id: created.hold_id,
-      record: created,
-      details: qcHoldLogDetails({
-        event: "qc_hold_created",
-        packing_number: created.packing_number,
-        item_dcode: created.item_dcode,
-        qty: qtyNum,
-        reason: created.reason,
-        remarks: created.remarks,
-        hold_scan_mode: scanMode,
-        box_count: boxUids.length,
-        status: "pending",
-        hold_data: parseHoldData(created.hold_data),
-      }),
-    });
-    
     const [enriched] = await enrichQcHoldListRows([created]);
     res.json({ success: true, data: enriched, message: QC_HOLD_MSG.PENDING_HOLD_SAVED });
   } catch (err) {
@@ -376,32 +347,6 @@ export const submitQcHoldMaterial = async (req, res) => {
     });
 
     const apiSubmission = submissionToApi(submission, pk);
-    await logActivity(req, {
-      action: "submit",
-      entity: "qc_hold_material",
-      entity_id: pk,
-      record: apiSubmission,
-      details: qcHoldLogDetails({
-        event:
-          type === "partial"
-            ? "partial_submit"
-            : type === "full"
-              ? "full_submit"
-              : "revert_submit",
-        submission_type: type,
-        submission_id: apiSubmission?.submission_id ?? submission?.submission_id,
-        packing_number: hold.packing_number,
-        item_dcode: hold.item_dcode,
-        completed_qty: finalCompletedQty,
-        rejected_qty: rejectedQtyNum,
-        balance_qty: balanceQty,
-        reason: String(reason).trim(),
-        remarks: remarks != null ? String(remarks).trim() : null,
-        status: hold.status || "pending",
-        hold_data: parseHoldData(nextHoldData),
-      }),
-    });
-
     res.json({
       success: true,
       data: apiSubmission,
@@ -564,6 +509,8 @@ export const approveQcHoldSubmissionController = async (req, res) => {
           const row = await updateQcHoldMaterial(hold.hold_id, {
             hold_data: nextHoldData,
             status: "complete",
+            approved_by: userName,
+            approved_at: new Date(),
             updated_by: userName,
             updated_at: new Date(),
           });
@@ -637,18 +584,28 @@ export const approveQcHoldSubmissionController = async (req, res) => {
             userId,
             userName,
           });
-          if (!consumeResult.consumedUids?.length) {
+          if (!consumeResult.consumedUids?.length && !consumeResult.qtyReduced && !consumeResult.noSourceBoxes) {
             const err = new Error(
               "Approved quantity could not be removed from QC hold source boxes. Check hold box list and try again."
             );
             err.statusCode = 400;
             throw err;
           }
-          nextHoldData = removeBoxesFromHoldData(nextHoldData, consumeResult.consumedUids);
+          if (consumeResult.consumedUids?.length) {
+            nextHoldData = removeBoxesFromHoldData(nextHoldData, consumeResult.consumedUids);
+          }
         }
 
         if (status === "complete") {
-          const remainingUids = parseHoldData(nextHoldData).boxes;
+          let remainingUids = parseHoldData(nextHoldData).boxes;
+          if (!remainingUids.length) {
+            const { rows: leftover } = await client.query(
+              `SELECT b.box_no_uid FROM ims_box_table b
+               WHERE b.is_deleted = false AND b.qc_hold_id = $1::integer`,
+              [hold.hold_id]
+            );
+            remainingUids = (leftover || []).map((r) => String(r.box_no_uid).trim()).filter(Boolean);
+          }
           if (remainingUids.length) {
             await consumeQcHoldSourceBoxesTx(client, {
               holdId: hold.hold_id,
@@ -663,6 +620,8 @@ export const approveQcHoldSubmissionController = async (req, res) => {
         const row = await updateQcHoldMaterial(hold.hold_id, {
           hold_data: nextHoldData,
           status,
+          approved_by: userName,
+          approved_at: new Date(),
           updated_by: userName,
           updated_at: new Date(),
         });
@@ -680,33 +639,6 @@ export const approveQcHoldSubmissionController = async (req, res) => {
     }
 
     const apiSubmission = submissionToApi(approvedSubmission, hold.hold_id);
-    const holdStatus = String(updatedHold?.status || "").toLowerCase();
-    await logActivity(req, {
-      action: "approve",
-      entity: "qc_hold_material",
-      entity_id: hold.hold_id,
-      record: apiSubmission,
-      details: qcHoldLogDetails({
-        event:
-          type === "revert"
-            ? "revert_approved"
-            : holdStatus === "complete"
-              ? "hold_completed"
-              : "partial_approved",
-        submission_type: type,
-        submission_id: apiSubmission?.submission_id ?? approvedSubmission?.submission_id,
-        packing_number: updatedHold?.packing_number || hold.packing_number,
-        item_dcode: updatedHold?.item_dcode || hold.item_dcode,
-        completed_qty: apiSubmission?.completed_qty ?? approvedSubmission?.completed_qty,
-        rejected_qty: apiSubmission?.rejected_qty ?? approvedSubmission?.rejected_qty,
-        status: holdStatus || updatedHold?.status,
-        completion_sticker_count: Array.isArray(completionBoxes) ? completionBoxes.length : 0,
-        reason: finalReason,
-        remarks: finalRemarks,
-        hold_data: parseHoldData(updatedHold?.hold_data ?? hold.hold_data),
-      }),
-    });
-
     const [enriched] = await enrichQcHoldListRows([updatedHold]);
     const completion_stickers = mapCompletionStickers(completionBoxes);
 
@@ -910,24 +842,6 @@ export const updateQcHoldMaterialController = async (req, res) => {
       await releaseQcHoldFromBoxes(pk);
     }
 
-    await logActivity(req, {
-      action: "update",
-      entity: "qc_hold_material",
-      entity_id: pk,
-      record: updated,
-      details: qcHoldLogDetails({
-        event: "qc_hold_updated",
-        packing_number: updated.packing_number,
-        item_dcode: updated.item_dcode,
-        qty: parseHoldData(updated.hold_data).qty,
-        box_count: parseHoldData(updated.hold_data).boxes?.length ?? 0,
-        reason: updated.reason,
-        remarks: updated.remarks,
-        status: updated.status,
-        hold_scan_mode: parseHoldData(updated.hold_data).hold_scan_mode,
-        hold_data: parseHoldData(updated.hold_data),
-      }),
-    });
     const [enriched] = await enrichQcHoldListRows([updated]);
     res.json({ success: true, data: enriched, message: QC_HOLD_MSG.QC_HOLD_UPDATED });
   } catch (err) {
@@ -953,21 +867,6 @@ export const deleteQcHoldMaterialController = async (req, res) => {
     });
     await releaseQcHoldFromBoxes(pk);
 
-    await logActivity(req, {
-      action: "delete",
-      entity: "qc_hold_material",
-      entity_id: pk,
-      record: deleted,
-      details: qcHoldLogDetails({
-        event: "qc_hold_deleted",
-        packing_number: deleted.packing_number,
-        item_dcode: deleted.item_dcode,
-        qty: parseHoldData(deleted.hold_data).qty,
-        box_count: parseHoldData(deleted.hold_data).boxes?.length ?? 0,
-        reason: deleted.reason,
-        status: deleted.status,
-      }),
-    });
     res.json({ success: true, message: QC_HOLD_MSG.QC_HOLD_DELETED });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -991,39 +890,40 @@ export const getQcHoldReasonsViews = async (req, res) => {
   }
 };
 
-/** POST { hold_id } — activity timeline for one QC hold (all users). Separate from core activity-logs GET. */
-export const getQcHoldActivityLog = async (req, res) => {
+export const getQcHoldTransactionLog = async (req, res) => {
   try {
     const holdId = parsePositiveIntId(req.body?.hold_id ?? req.body?.id);
-    if (!holdId) {
-      return res.status(400).json({ success: false, message: QC_HOLD_MSG.HOLD_ID_REQUIRED });
+    const fromDate = req.body?.from_date || req.body?.date_from || undefined;
+    const toDate = req.body?.to_date || req.body?.date_to || undefined;
+    const search = sanitizeSearch(req.body?.search) || undefined;
+    const page = Math.max(parseInt(req.body?.page, 10) || 1, 1);
+    const limit = Math.min(
+      Math.max(parseInt(req.body?.limit, 10) || (holdId ? 200 : 1000), 1),
+      holdId ? 500 : 1000
+    );
+
+    if (holdId) {
+      const hold = await findQcHoldMaterialByIdForTxLog(holdId);
+      if (!hold) return res.status(404).json({ success: false, message: QC_HOLD_MSG.NOT_FOUND });
+      const { data } = await buildQcHoldTransactionLog({ holds: [hold], page: 1, limit });
+      return res.json({ success: true, data });
     }
 
-    const hold = await findQcHoldMaterialById(holdId);
-    if (!hold) {
-      return res.status(404).json({ success: false, message: QC_HOLD_MSG.NOT_FOUND });
-    }
-
-    const limit = Math.min(Math.max(parseInt(req.body?.limit, 10) || 200, 1), 500);
-    const { data } = await ActivityLog.getAll({
-      user_id: null,
-      app_type: "ims",
-      module: "qc_hold_material",
-      entity: "qc_hold_material",
-      entity_id: String(holdId),
-      page: 1,
+    const holds = await findQcHoldMaterialsForTxLog({
+      from_date: fromDate || null,
+      to_date: toDate || null,
+      search: search || null,
+      limit: 5000,
+    });
+    const { data, total } = await buildQcHoldTransactionLog({
+      holds,
+      fromDate,
+      toDate,
+      search,
+      page,
       limit,
-      skipCount: true,
     });
-
-    const list = Array.isArray(data) ? [...data] : [];
-    list.sort((a, b) => {
-      const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
-      const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
-      return tb - ta;
-    });
-
-    res.json({ success: true, data: list });
+    res.json({ success: true, data, total });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
