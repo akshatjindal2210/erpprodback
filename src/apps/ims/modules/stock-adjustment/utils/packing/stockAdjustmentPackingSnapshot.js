@@ -21,12 +21,6 @@ export function packingMetaToSaDbFields(meta, { existing = null } = {}) {
   const acc = trimOrNull(meta.acc_code);
   if (acc && !trimOrNull(existing?.acc_code)) fields.acc_code = acc;
 
-  const itemCode = trimOrNull(meta.item_code);
-  if (itemCode && !trimOrNull(existing?.item_code)) fields.item_code = itemCode;
-
-  const itemDesc = trimOrNull(meta.item_desc ?? meta.itemdesc);
-  if (itemDesc && !trimOrNull(existing?.item_desc)) fields.item_desc = itemDesc;
-
   const existingAcc = trimOrNull(existing?.acc_code);
   const metaAcc = trimOrNull(meta.acc_code);
   const accName = trimOrNull(meta.acc_name);

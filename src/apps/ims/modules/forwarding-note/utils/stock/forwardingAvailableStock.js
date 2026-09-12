@@ -109,6 +109,39 @@ export function sumBoxQty(boxes = []) {
   return (boxes || []).reduce((s, b) => s + (Number(b.qty) || 0), 0);
 }
 
+/** Full-box FIFO pick — same rules as frontend `calculateFifoBoxes`. */
+export function calculateFifoBoxes(boxes = [], requestedQty) {
+  const needed = Number(requestedQty);
+  if (!boxes?.length || !Number.isFinite(needed) || needed <= 0) {
+    return { selectedBoxes: [], allocatedQty: 0, remainingQty: needed || 0 };
+  }
+
+  const selectedBoxes = [];
+  let allocated = 0;
+
+  for (const box of boxes) {
+    if (allocated >= needed) break;
+    const boxQty = Number(box.qty) || 0;
+    selectedBoxes.push({ ...box });
+    allocated += boxQty;
+    if (allocated >= needed) break;
+  }
+
+  return {
+    selectedBoxes,
+    allocatedQty: allocated,
+    remainingQty: needed - allocated,
+  };
+}
+
+/** Std qty from FIFO at schedule balance (full-box overshoot — case 1 baseline). */
+export function standardFifoQtyAtBalance(boxes = [], balanceQty) {
+  const balance = Number(balanceQty);
+  if (!(balance > 0) || !boxes?.length) return 0;
+  const sorted = sortBoxesForForwardingFifo(boxes);
+  return sumBoxQty(calculateFifoBoxes(sorted, balance).selectedBoxes);
+}
+
 function buildForwardedMapByItem(rows = []) {
   const byItem = new Map();
   for (const row of rows || []) {

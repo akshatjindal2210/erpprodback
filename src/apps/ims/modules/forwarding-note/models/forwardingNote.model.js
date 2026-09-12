@@ -272,7 +272,6 @@ export const updateForwardingNotes = async (fields = {}, filters = {}, { client 
     if (k === "fuid" || ALLOWED_FILTER_FIELDS.includes(k)) safeFilters[k] = filters[k];
   }
 
-  safeFields.updated_at = new Date();
   const fieldKeys = Object.keys(safeFields);
   const filterKeys = Object.keys(safeFilters);
 

@@ -7,8 +7,9 @@ import { getImsMapsSafe } from "../../../../lib/utils/erp-api/lookup/imsLookup.j
 
 /**
  * Pending edit: update adjustment row only — ims_box_table changes on approve.
+ * Audit timestamps (updated_by/at) are set by the controller via applyApprovalUpdateFields.
  */
-export async function syncAdjustmentMetadataOnly(client, { existing, body, userId, userName = null }) {
+export async function syncAdjustmentMetadataOnly(client, { existing, body }) {
   if (!existing) return false;
   const entryType = existing.entry_type;
   const fields = {};
@@ -121,8 +122,6 @@ export async function syncAdjustmentMetadataOnly(client, { existing, body, userI
 
   if (!touched) return false;
 
-  fields.updated_by = userName != null && String(userName).trim() !== "" ? String(userName).trim() : userId;
-  fields.updated_at = new Date();
   await updateAdjustmentsTx(client, fields, { adjustment_id: existing.adjustment_id });
   return true;
 }

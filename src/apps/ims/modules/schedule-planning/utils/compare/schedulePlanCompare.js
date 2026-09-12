@@ -42,6 +42,12 @@ function compareDateField(imsVal, localVal) {
   };
 }
 
+/** Empty DB snapshot field → treat as IMS (avoids false mismatch after shortage-only plan create). */
+function planSnapVal(planVal, imsVal) {
+  if (planVal == null || planVal === "") return imsVal;
+  return planVal;
+}
+
 /** Fields shown in Comparison tab mismatch (party name/code excluded). */
 export function comparisonFieldMismatch(fields, { ignoreCustomer = true } = {}) {
   if (!fields || typeof fields !== "object") return false;
@@ -56,18 +62,15 @@ export function buildScheduleComparison(imsRow, planRow) {
   if (!imsRow || !planRow) {
     return { has_mismatch: false, fields: {} };
   }
+  const imsQty = imsRow.totalqty ?? imsRow.total_qty;
   const fields = {
-    schmonth: compareField(imsRow.schmonth, planRow.schmonth, normMonth),
-    schdt: compareDateField(imsRow.schdt, planRow.schdt),
-    acc_code: compareField(imsRow.acc_code, planRow.acc_code, normText),
-    acc_name: compareField(imsRow.acc_name, planRow.acc_name, normText),
-    item_code: compareField(imsRow.item_code, planRow.item_code, normText),
-    itemdesc: compareField(imsRow.itemdesc, planRow.itemdesc, normText),
-    totalqty: compareField(
-      imsRow.totalqty ?? imsRow.total_qty,
-      planRow.totalqty,
-      normQty
-    ),
+    schmonth: compareField(imsRow.schmonth, planSnapVal(planRow.schmonth, imsRow.schmonth), normMonth),
+    schdt: compareDateField(imsRow.schdt, planSnapVal(planRow.schdt, imsRow.schdt)),
+    acc_code: compareField(imsRow.acc_code, planSnapVal(planRow.acc_code, imsRow.acc_code), normText),
+    acc_name: compareField(imsRow.acc_name, planSnapVal(planRow.acc_name, imsRow.acc_name), normText),
+    item_code: compareField(imsRow.item_code, planSnapVal(planRow.item_code, imsRow.item_code), normText),
+    itemdesc: compareField(imsRow.itemdesc, planSnapVal(planRow.itemdesc, imsRow.itemdesc), normText),
+    totalqty: compareField(imsQty, planSnapVal(planRow.totalqty, imsQty), normQty),
   };
   return {
     has_mismatch: comparisonFieldMismatch(fields),

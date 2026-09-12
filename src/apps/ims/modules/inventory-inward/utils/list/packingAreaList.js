@@ -204,10 +204,13 @@ export async function attachPackingDisplayMeta(rows = []) {
 async function attachPackingCreatedByMeta(rows = []) {
   if (!rows?.length) return rows;
   // ims_box_table.created_by stores name snapshot (not user id).
-  return rows.map((row) => ({
-    ...row,
-    created_by_name: row?.created_by != null ? String(row.created_by) : null,
-  }));
+  return rows.map((row) => {
+    const { created_by, ...rest } = row || {};
+    return {
+      ...rest,
+      created_by_name: created_by != null ? String(created_by) : null,
+    };
+  });
 }
 
 /** Latest approved SA + dailyprod meta per packing (single round-trip). */
@@ -633,6 +636,7 @@ export async function findPackingAreaBoxes(options = {}) {
        ${sourceExpr}::varchar AS source,
        COALESCE(b.qty, 0)::int AS qty,
        COALESCE(b.is_loose, false) AS is_loose,
+       b.created_by AS created_by_name,
        b.created_at,
        sa.financial_year AS sa_financial_year,
        sa.doc_dt,

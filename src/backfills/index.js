@@ -87,3 +87,5 @@ export async function runStartupBackfills() {
     await runBoxIsLooseBackfillOnStartup();
   });
 }
+
+export { default as backfillShortageGrpname } from "../migrations/v4.1.5/shortageGrpname.mjs";

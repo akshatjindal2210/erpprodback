@@ -4,6 +4,8 @@ export const APP_GATES = {
   rmstore: "app_rmstore",
   task: "app_task",
   hrms: "app_hrms",
+  purchase: "app_purchase",
+  production: "app_production",
 };
 
 export const APP_META = {
@@ -12,9 +14,11 @@ export const APP_META = {
   rmstore: { label: "RM Store", permissions: true },
   task: { label: "Task", permissions: true },
   hrms: { label: "HRMS", permissions: true },
+  purchase: { label: "Purchase", permissions: true },
+  production: { label: "Production", permissions: true },
 };
 
-export const PORTAL_APP_KEYS = ["core", "ims", "rmstore", "task", "hrms"];
+export const PORTAL_APP_KEYS = ["core", "ims", "rmstore", "task", "hrms", "purchase", "production"];
 
 export const SETTINGS_MODULES = ["users", "modules", "training_videos", "departments", "designations"];
 
@@ -82,6 +86,16 @@ export const MODULES = {
     { name: "hrms_employee", label: "Employee Master" },
     { name: "hrms_activity_logs", label: "Activity Logs" },
   ],
+  purchase: [
+    { name: "purchase_master", label: "Product Master" },
+    { name: "purchase_shortage", label: "Shortage" },
+    { name: "purchase_activity_logs", label: "Activity Logs" },
+  ],
+  production: [
+    { name: "production_master", label: "Product Master" },
+    { name: "production_shortage", label: "Shortage" },
+    { name: "production_activity_logs", label: "Activity Logs" },
+  ],
 };
 
 export const SEED_MODULES = [
@@ -139,4 +153,10 @@ export const SEED_MODULES = [
   { name: "hrms_attendance",              label: "Attendance",                      sort_order: 49,       app_type: "hrms" },
   { name: "hrms_employee",                label: "Employee Master",                 sort_order: 50,       app_type: "hrms" },
   { name: "hrms_activity_logs",           label: "Activity Logs",                   sort_order: 51,       app_type: "hrms" },
+  { name: "purchase_master",              label: "Product Master",                  sort_order: 52,       app_type: "purchase" },
+  { name: "purchase_shortage",            label: "Shortage",                        sort_order: 53,       app_type: "purchase" },
+  { name: "production_master",            label: "Product Master",                  sort_order: 54,       app_type: "production" },
+  { name: "production_shortage",          label: "Shortage",                        sort_order: 55,       app_type: "production" },
+  { name: "purchase_activity_logs",       label: "Activity Logs",                   sort_order: 56,       app_type: "purchase" },
+  { name: "production_activity_logs",     label: "Activity Logs",                   sort_order: 57,       app_type: "production" },
 ];

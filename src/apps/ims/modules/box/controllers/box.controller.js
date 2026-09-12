@@ -1797,7 +1797,7 @@ export const createOverrideRequest = async (req, res) => {
     const { status, body } = await createOverrideCustomerRequest(req);
     res.status(status).json(body);
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
 };
 

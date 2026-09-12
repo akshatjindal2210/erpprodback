@@ -1,4 +1,4 @@
-import { flattenHoldRow, listSubmissions, parseHoldData, submissionToApi } from "../list/qcHoldData.js";
+import { flattenHoldRow, isSubmissionApprovalRequired, listSubmissions, parseHoldData, submissionToApi } from "../list/qcHoldData.js";
 
 export function parseBoxUidList(raw) {
   if (raw == null || raw === "") return [];
@@ -28,15 +28,16 @@ export function attachQcHoldBalances(row, pendingTotals = {}) {
   const pendingSubs = listSubmissions(row.hold_data, { pendingOnly: true }).map((s) =>
     submissionToApi(s, row.hold_id)
   );
+  const approvalPendingSubs = pendingSubs.filter(isSubmissionApprovalRequired);
   const approvedSubs = listSubmissions(row.hold_data, { approvedOnly: true }).map((s) =>
     submissionToApi(s, row.hold_id)
   );
   const pendingFromJson = {
-    pending_count: pendingSubs.length,
-    pending_completed_qty: pendingSubs.reduce((s, x) => s + (Number(x.completed_qty) || 0), 0),
-    pending_completed_boxes: pendingSubs.reduce((s, x) => s + (Number(x.completed_boxes) || 0), 0),
-    pending_rejected_qty: pendingSubs.reduce((s, x) => s + (Number(x.rejected_qty) || 0), 0),
-    pending_rejected_boxes: pendingSubs.reduce((s, x) => s + (Number(x.rejected_boxes) || 0), 0),
+    pending_count: approvalPendingSubs.length,
+    pending_completed_qty: approvalPendingSubs.reduce((s, x) => s + (Number(x.completed_qty) || 0), 0),
+    pending_completed_boxes: approvalPendingSubs.reduce((s, x) => s + (Number(x.completed_boxes) || 0), 0),
+    pending_rejected_qty: approvalPendingSubs.reduce((s, x) => s + (Number(x.rejected_qty) || 0), 0),
+    pending_rejected_boxes: approvalPendingSubs.reduce((s, x) => s + (Number(x.rejected_boxes) || 0), 0),
   };
 
   const pending = { ...pendingFromJson, ...pendingTotals };
@@ -57,15 +58,14 @@ export function attachQcHoldBalances(row, pendingTotals = {}) {
     pending_rejected_boxes: Number(pending.pending_rejected_boxes) || 0,
     pending_submission_count: Number(pending.pending_count) || 0,
     has_pending_submission: (Number(pending.pending_count) || 0) > 0,
-    pending_submissions: pendingSubs,
-    pending_submission_id: pendingSubs[0]?.submission_id ?? null,
+    pending_submissions: approvalPendingSubs,
+    pending_submission_id: approvalPendingSubs[0]?.submission_id ?? null,
     approved_submissions: approvedSubs,
     approved_submission_count: approvedSubs.length,
     last_approved_submission: lastApproved,
-    pending_submission: pendingSubs[0] || null,
+    pending_submission: approvalPendingSubs[0] || null,
     // Approved By/At = last submission approver (not create-time hold.approved_by).
     approved_by_name: lastApproved?.approved_by || null,
-    approved_by: lastApproved?.approved_by || null,
     approved_at: lastApproved?.approved_at || null,
   };
 

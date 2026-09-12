@@ -22,13 +22,15 @@ export function expandHoldToTransactionRows(hold, itemCode = null) {
   if (!hold?.hold_id) return [];
   const d = parseHoldData(hold.hold_data);
   const qty = Number(d.qty) || 0;
+  const createdBy = hold.created_by_name || hold.created_by || null;
+  const deletedBy = hold.deleted_by_name || hold.deleted_by || null;
   const base = {
     entity_id: String(hold.hold_id),
     packing_number: hold.packing_number || null,
     item_dcode: hold.item_dcode ?? null,
     item_code: itemCode || hold.item_code || (hold.item_dcode != null ? String(hold.item_dcode) : null),
     qty: qty || null,
-    created_by_name: hold.created_by || null,
+    created_by_name: createdBy,
     hold_created_at: hold.created_at || null,
     updated_by_name: null,
     hold_updated_at: null,
@@ -40,7 +42,7 @@ export function expandHoldToTransactionRows(hold, itemCode = null) {
       ...base,
       id: `qch-${hold.hold_id}-create`,
       action_type: "CREATE",
-      user_name: hold.created_by || null,
+      user_name: createdBy,
       created_at: hold.created_at || null,
       description: hold.reason || hold.remarks || "Put on hold",
       log_data: event("Put on hold", { Qty: qty || undefined, Reason: hold.reason || undefined }),
@@ -51,8 +53,16 @@ export function expandHoldToTransactionRows(hold, itemCode = null) {
     const sid = Number(sub.submission_id) || 0;
     const done = (Number(sub.completed_qty) || 0) + (Number(sub.rejected_qty) || 0);
     const revert = String(sub.submission_type || "").toLowerCase() === "revert";
+    const partial = String(sub.submission_type || "").toLowerCase() === "partial";
+    const autoAppliedPartial = partial && !sub.requires_approval;
     const subQty = done > 0 ? done : qty || null;
-    const submitLabel = revert ? "Release requested" : "Submitted — awaiting approval";
+    const submitLabel = revert
+      ? "Release requested"
+      : partial
+        ? sub.requires_approval && !sub.approved
+          ? "Partial submitted — awaiting approval"
+          : "Partial submitted"
+        : "Submitted — awaiting approval";
 
     rows.push({
       ...base,
@@ -67,14 +77,23 @@ export function expandHoldToTransactionRows(hold, itemCode = null) {
       log_data: event(submitLabel, {
         "Completed qty": Number(sub.completed_qty) || undefined,
         "Rejected qty": Number(sub.rejected_qty) || undefined,
+        Reason: sub.reason || undefined,
+        Remark: sub.remarks || undefined,
       }),
     });
 
-    if (!sub.approved) continue;
+    // For non-final partial (auto applied), keep only one SUBMIT row in transaction list.
+    if (!sub.approved || autoAppliedPartial) continue;
     const complete =
       String(hold.status || "").toLowerCase() === "complete" ||
       Math.max(0, qty - (Number(d.completed_qty) || 0) - (Number(d.rejected_qty) || 0)) <= 0;
-    const label = revert ? "Released" : complete ? "Passed" : "Partial progress approved";
+    const label = revert
+      ? "Released"
+      : partial
+        ? "Partial approved"
+        : complete
+          ? "Passed"
+          : "Partial progress approved";
 
     rows.push({
       ...base,
@@ -89,6 +108,8 @@ export function expandHoldToTransactionRows(hold, itemCode = null) {
       log_data: event(label, {
         "Completed qty": Number(sub.completed_qty) || undefined,
         "Rejected qty": Number(sub.rejected_qty) || undefined,
+        Reason: sub.reason || undefined,
+        Remark: sub.remarks || undefined,
       }),
     });
   }
@@ -98,10 +119,10 @@ export function expandHoldToTransactionRows(hold, itemCode = null) {
       ...base,
       id: `qch-${hold.hold_id}-delete`,
       action_type: "DELETE",
-      user_name: hold.deleted_by || null,
+      user_name: deletedBy,
       created_at: hold.deleted_at || hold.updated_at || null,
       description: "Hold deleted",
-      updated_by_name: hold.deleted_by || null,
+      updated_by_name: deletedBy,
       hold_updated_at: hold.deleted_at || null,
       log_data: event("Hold deleted"),
     });

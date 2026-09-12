@@ -69,13 +69,9 @@ const DEFAULT_FIELDS = [
   "q.remarks",
   "q.hold_data",
   "q.approved",
-  "q.approved_by",
   "q.approved_at",
-  "q.created_by",
   "q.created_at",
-  "q.updated_by",
   "q.updated_at",
-  "q.deleted_by",
   "q.deleted_at",
   "q.created_by AS created_by_name",
   "q.updated_by AS updated_by_name",
@@ -300,7 +296,6 @@ export const findActiveQcHoldParents = async (search = null, { requireInStoreBox
   let i = 1;
   const conditions = [
     "q.is_deleted = false",
-    "q.approved = true",
     "COALESCE(q.hold_data->>'hold_type', 'pending_hold') = 'pending_hold'",
     `(
       COALESCE((q.hold_data->>'qty')::int, 0)

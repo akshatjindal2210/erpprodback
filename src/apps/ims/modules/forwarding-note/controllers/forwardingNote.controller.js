@@ -8,7 +8,7 @@ import { buildForwardingLockMessage } from "../utils/messages/forwardingNoteMess
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalWorkflow, applyApprovalUpdateFields, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { findForwardingNoteItems, findForwardingNoteItem, assignForwardingNoteItemBills } from "../models/forwardingNoteItem.model.js";
 import { sanitizeSearch, buildForwardingNoteBillDocument } from "../../../../core/lib/utils/helper/helper.js";
@@ -124,17 +124,6 @@ export const createForwardingNote = async (req, res) => {
       });
     }
 
-    const approvalFields = {};
-    if (normalizedApproved === true) {
-      applyApprovalWorkflow({
-        req,
-        fields: approvalFields,
-        incomingApproved: true,
-        hasBusinessChanges: false,
-        auditAsName: true,
-      });
-    }
-
     const row = await withTransaction(async (client) => {
       const inserted = await insertForwardingNote(
         { ...rest, schno, created_by: auditUserName(req) },
@@ -146,8 +135,19 @@ export const createForwardingNote = async (req, res) => {
         userName: auditUserName(req),
         client,
       });
-      if (normalizedApproved === true && Object.keys(approvalFields).length) {
-        await updateForwardingNotes(approvalFields, { fuid: inserted.fuid }, { client });
+      if (normalizedApproved === true) {
+        const approvalFields = {};
+        applyApprovalWorkflow({
+          req,
+          fields: approvalFields,
+          incomingApproved: true,
+          hasBusinessChanges: false,
+          auditAsName: true,
+          approvalTimestamp: inserted?.created_at || new Date(),
+        });
+        if (Object.keys(approvalFields).length) {
+          await updateForwardingNotes(approvalFields, { fuid: inserted.fuid }, { client });
+        }
       }
       return inserted;
     });
@@ -343,33 +343,48 @@ export const updateForwardingNote = async (req, res) => {
       }
     }
 
-    // Check if any business fields changed (excluding approval fields)
-    const businessFields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage", "total_items"];
-    let hasBusinessChanges = businessFields.some(f => updateData[f] !== undefined && updateData[f] != existing[f]);
+    const coreBusinessFields = ["acc_code", "po_number", "remarks", "transporter_name", "transporter_id", "vehicle_number", "cartage"];
+    const extraHeaderFields = ["packing_category_id", "schno"];
+    const trackFields = items.length > 0 ? [...coreBusinessFields, "total_items", ...extraHeaderFields] : [...coreBusinessFields, ...extraHeaderFields];
 
-    // Check if items changed
-    if (items.length > 0) {
-      // For simplicity, we assume any item update is a business change
-      // In a more complex scenario, we'd compare item arrays
-      hasBusinessChanges = true; 
-    }
-
-    const fields = {
-      ...updateData,
-      updated_by: auditUserName(req),
-      updated_at: new Date()
+    const normalizeFnField = (field, value) => {
+      if (value === undefined || value === null || value === "") {
+        if (field === "cartage" || field === "total_items") return 0;
+        if (field === "packing_category_id") return null;
+        return "";
+      }
+      if (field === "acc_code" || field === "total_items") return Number(value) || 0;
+      if (field === "packing_category_id") return Number(value) || null;
+      if (field === "cartage") return Number(parseFloat(value)) || 0;
+      return String(value).trim();
     };
+    const fieldChanged = (field) =>
+      updateData[field] !== undefined &&
+      normalizeFnField(field, updateData[field]) !== normalizeFnField(field, existing[field]);
+
+    let hasBusinessChanges = trackFields.some(fieldChanged);
+    if (items.length > 0) hasBusinessChanges = true;
+
+    const fields = items.length > 0
+      ? { ...updateData }
+      : trackFields.reduce((acc, field) => {
+          if (fieldChanged(field)) acc[field] = updateData[field];
+          return acc;
+        }, {});
 
     // Strip legacy master bill fields if client still sends them
     delete fields.bill_no;
     delete fields.bill_updated_by;
     delete fields.bill_updated_at;
-    
-    applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges, auditAsName: true });
-    // Approved timestamp follows the save/edit time — not a separate approval click time.
-    if (normalizedApproved === true) {
-      fields.approved_at = fields.updated_at;
-    }
+
+    applyApprovalUpdateFields({
+      req,
+      fields,
+      incomingApproved: normalizedApproved,
+      hasBusinessChanges,
+      alreadyApproved: existing.approved === true,
+      auditAsName: true,
+    });
 
     const isNewApproval =
       normalizedApproved === true &&

@@ -9,7 +9,18 @@ import { getOverrideRequestById, insertOverrideRequest, updateOverrideRequest as
 import { isBoxEligibleForOverrideCustomer, overrideCustomerScanRejectMessage } from "../inventory/boxInventory.js";
 import { logOverrideCustomerBatch } from "../transactions/logBoxTransaction.js";
 import { logActivity } from "../../../../../core/lib/utils/activity/logActivity.js";
-import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalUpdateFields, normalizeApprovedInput, auditUserName } from "../../../../../core/lib/utils/auth/approval.js";
+
+const equalUidLists = (left = [], right = []) => {
+  const norm = (arr) => [...(arr || [])].map((u) => String(u).trim()).filter(Boolean).sort();
+  const a = norm(left);
+  const b = norm(right);
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+};
 
 export const OVERRIDE_ACTIVITY_ENTITY = "change_override_customer";
 
@@ -82,6 +93,7 @@ export async function createOverrideCustomerRequest(req) {
   }
   const { boxes } = validation;
 
+  const userName = auditUserName(req);
   const requestRow = await insertOverrideRequest({
     packing_number: boxes[0].packing_number,
     itemdcode: boxes[0].itemdcode,
@@ -89,7 +101,7 @@ export async function createOverrideCustomerRequest(req) {
     from_customer: boxes[0]?.override_cust || boxes[0]?.prod_acc_code || null,
     to_customer,
     remarks,
-    requested_by: auditUserName(req),
+    requested_by: userName,
     approved: normalizedApproved === true,
   });
 
@@ -148,35 +160,31 @@ export async function updateOverrideCustomerRequest(req) {
     return { status: 404, body: { success: false, message: "Request not found." } };
   }
 
-  const hasBusinessChanges =
-    (box_uids !== undefined && JSON.stringify(box_uids) !== JSON.stringify(existingReq.box_uids)) ||
-    (to_customer !== undefined && to_customer !== existingReq.to_customer) ||
-    (remarks !== undefined && remarks !== existingReq.remarks);
+  const existingStatus = existingReq.status || (existingReq.approved ? "approved" : "pending");
+  const wasApproved = existingStatus === "approved" || existingReq.approved === true;
+
+  const boxUidsChanged =
+    box_uids !== undefined && !equalUidLists(box_uids, existingReq.box_uids);
+  const toCustomerChanged =
+    to_customer !== undefined &&
+    String(to_customer ?? "").trim() !== String(existingReq.to_customer ?? "").trim();
+  const remarksChanged =
+    remarks !== undefined &&
+    String(remarks ?? "").trim() !== String(existingReq.remarks ?? "").trim();
+  const hasBusinessChanges = boxUidsChanged || toCustomerChanged || remarksChanged;
 
   const fields = {
-    ...(box_uids !== undefined && { box_uids }),
-    ...(to_customer !== undefined && { to_customer }),
-    ...(remarks !== undefined && { remarks }),
-    updated_by: auditUserName(req),
-    updated_at: new Date(),
+    ...(boxUidsChanged && box_uids !== undefined && { box_uids }),
+    ...(toCustomerChanged && to_customer !== undefined && { to_customer }),
+    ...(remarksChanged && remarks !== undefined && { remarks }),
   };
 
-  const existingStatus = existingReq.status || (existingReq.approved ? "approved" : "pending");
-  if (existingStatus === "approved" && normalizedApproved === false && !hasBusinessChanges) {
-    return {
-      status: 400,
-      body: {
-        success: false,
-        message: "This request is already approved. Use Edit to change it (will reset to pending).",
-      },
-    };
-  }
-
-  applyApprovalWorkflow({
+  applyApprovalUpdateFields({
     req,
     fields,
     incomingApproved: normalizedApproved,
     hasBusinessChanges,
+    alreadyApproved: wasApproved,
     auditAsName: true,
   });
 

@@ -219,6 +219,21 @@ export async function getApprovedShortageQty(itemdcode, yearMonth = currentYearM
   };
 }
 
+async function sumItemScheduleQty(itemdcode, schmonth, docDt) {
+  const code = Number(itemdcode);
+  const month = Number(schmonth);
+  const asOf = docDt ? String(docDt).trim().slice(0, 10) : null;
+  if (!Number.isFinite(code) || month < 1 || month > 12) return 0;
+  const [row] = await dbQuery(
+    `SELECT COALESCE(SUM(COALESCE(totalqty, 0)), 0)::float AS qty
+     FROM ${T.SCHEDULE_PLAN}
+     WHERE itemdcode = $1 AND schmonth = $2 AND is_planned NOT IN (4, 5)
+       AND ($3::text IS NULL OR COALESCE(schdt::date, $3::date) <= $3::date)`,
+    [code, month, asOf]
+  );
+  return Number(row?.qty) || 0;
+}
+
 /**
  * Evaluate monthly packing limit (Packing Entry / Daily Production only).
  * Base = approved shortage sum only; then + config tolerance %.
@@ -232,6 +247,7 @@ export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing
     getApprovedShortageQty(itemdcode, yearMonth),
     getShortageQtyPercentage(),
   ]);
+  const scheduleQty = await sumItemScheduleQty(itemdcode, month, doc_dt);
 
   const baseQty = shortage.total;
   const toleranceQty = Math.floor(baseQty * (pct / 100));
@@ -247,6 +263,7 @@ export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing
     month_used_qty: monthUsedQty,
     projected_total: projectedTotal,
     monthly_requirement: 0,
+    schedule_qty: scheduleQty,
     base_qty: baseQty,
     base_allowed_limit: baseQty,
     tolerance_qty: toleranceQty,

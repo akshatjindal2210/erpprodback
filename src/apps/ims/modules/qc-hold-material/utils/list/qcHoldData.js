@@ -79,6 +79,7 @@ export function serializeHoldData(data) {
     submissions: (d.submissions || []).map((s) => ({
       submission_id: Number(s.submission_id) || 0,
       submission_type: String(s.submission_type || "").trim(),
+      requires_approval: !!s.requires_approval,
       completed_box_uids: Array.isArray(s.completed_box_uids)
         ? s.completed_box_uids.map((v) => String(v).trim()).filter(Boolean)
         : parseLegacyBoxList(s),
@@ -156,8 +157,14 @@ export function listSubmissions(holdDataRaw, { pendingOnly = false, approvedOnly
   });
 }
 
+export function isSubmissionApprovalRequired(submission) {
+  const type = String(submission?.submission_type || "").trim().toLowerCase();
+  if (type !== "partial") return true;
+  return !!submission?.requires_approval;
+}
+
 export function hasPendingSubmission(holdDataRaw) {
-  return listSubmissions(holdDataRaw, { pendingOnly: true }).length > 0;
+  return listSubmissions(holdDataRaw, { pendingOnly: true }).some(isSubmissionApprovalRequired);
 }
 
 export function submissionToApi(sub, holdId) {
@@ -167,6 +174,7 @@ export function submissionToApi(sub, holdId) {
     submission_id: sub.submission_id,
     hold_id: holdId,
     submission_type: sub.submission_type,
+    requires_approval: !!sub.requires_approval,
     completed_box_uids: boxUids.length ? JSON.stringify(boxUids) : null,
     completed_qty: Number(sub.completed_qty) || 0,
     completed_boxes: Number(sub.completed_boxes) || 0,
@@ -201,6 +209,7 @@ export function appendSubmission(holdDataRaw, submission, userId) {
   const entry = {
     submission_id: nextSubmissionId(d.submissions),
     submission_type: String(submission.submission_type || "").trim(),
+    requires_approval: !!submission.requires_approval,
     completed_box_uids: boxUids,
     completed_qty: Number(submission.completed_qty) || 0,
     completed_boxes: Number(submission.completed_boxes) || 0,

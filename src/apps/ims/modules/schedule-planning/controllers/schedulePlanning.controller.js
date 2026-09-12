@@ -175,7 +175,7 @@ export const getScheduleItemTransactions = async (req, res) => {
 export const submitScheduleShortagePlanning = async (req, res) => {
   try {
     // console.log("[schedule-planning] shortage request", req.body);
-    const out = await submitScheduleShortage(req.body || {}, req.user?.id ?? null, auditUserName(req));
+    const out = await submitScheduleShortage(req.body || {}, req.user?.id ?? null, auditUserName(req), req);
 
     if (out?.success === false) {
       return sendSimple(res, {

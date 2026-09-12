@@ -4,6 +4,7 @@ import { forwardedTotalQtyForPacking } from "../../../forwarding-note/utils/stoc
 import { resolveStockAdjustmentPackingMeta } from "../../../stock-adjustment/utils/packing/stockAdjustmentPacking.js";
 import { isBoxOnQcHold } from "../../../box/utils/inventory/boxInventory.js";
 import { enrichRowsWithIMS } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
+import dbQuery from "../../../../../../config/db/db.js";
 
 function sumQty(boxes = []) {
   return boxes.reduce((s, b) => s + (Number(b.qty) || 0), 0);
@@ -78,10 +79,18 @@ export async function resolveQcHoldPackingMeta(packing_number) {
   const pn = String(packing_number ?? "").trim();
   if (!pn) return null;
 
-  const [packingMeta, inHandBoxes, dispatchRaw] = await Promise.all([
+  const [packingMeta, inHandBoxes, dispatchRaw, jobCardRows] = await Promise.all([
     resolveStockAdjustmentPackingMeta(pn, {}),
     findInHandBoxesByPackingNumber(pn),
     findDispatchedOutwardLinesByPacking(pn),
+    dbQuery(
+      `SELECT DISTINCT NULLIF(TRIM(job_card_no::text), '') AS job_card_no
+       FROM ims_dailyprod
+       WHERE NULLIF(TRIM(doc_no::text), '') = NULLIF(TRIM($1::text), '')
+         AND NULLIF(TRIM(job_card_no::text), '') IS NOT NULL
+       ORDER BY 1`,
+      [pn]
+    ),
   ]);
 
   const sellableBoxes = (inHandBoxes || []).filter((b) => !isBoxOnQcHold(b));
@@ -99,6 +108,8 @@ export async function resolveQcHoldPackingMeta(packing_number) {
   const dispatchCustomerCount = new Set(
     dispatchLines.map((row) => String(row.acc_name ?? row.customer_key ?? "").trim().toLowerCase()).filter(Boolean)
   ).size;
+  const jobCardNos = (jobCardRows || []).map((r) => (r?.job_card_no != null ? String(r.job_card_no).trim() : "")).filter(Boolean);
+  const primaryJobCard = jobCardNos[0] || packingMeta?.job_card_no || null;
 
   return {
     packing_number: pn,
@@ -118,7 +129,9 @@ export async function resolveQcHoldPackingMeta(packing_number) {
     in_hand_qty: sellableQty,
     qc_hold_qty: qcHoldQty,
     store_in_location: primaryStoreLocation(sellableBoxes.length ? sellableBoxes : inHandBoxes),
-    job_card_no: packingMeta?.job_card_no ?? null,
+    job_card_no: primaryJobCard,
+    job_card_nos: jobCardNos,
+    job_card_text: jobCardNos.join(" | ") || primaryJobCard || null,
     standard_qty_per_box: packingMeta?.standard_qty_per_box ?? null,
     in_hand_box_count: sellableBoxes.length,
     qc_hold_box_count: heldBoxes.length,

@@ -3,7 +3,7 @@ import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js"
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalWorkflow, applyApprovalUpdateFields, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { withTransaction } from "../../../../../config/db/db.js";
 import { canAccessAuditRecord, filterAuditLocationsForUser, isWithinAuditDateRange, isAuditCreator } from "../utils/access/auditAccess.js";
 import { isLocationClosed } from "../utils/snapshot/auditBoxSnapshot.js";
@@ -60,6 +60,44 @@ function validateAuditAssignments(assignments) {
   }
 
   return { ok: true };
+}
+
+function normalizeDateOnly(value) {
+  if (value == null || value === "") return "";
+  const s = String(value).trim();
+  return s.includes("T") ? s.split("T")[0] : s.slice(0, 10);
+}
+
+function normalizeAssignmentsForCompare(assignments = []) {
+  return (Array.isArray(assignments) ? assignments : [])
+    .map((row) => ({
+      assigned_user_id: Number(row?.assigned_user_id),
+      location_ids: [...(Array.isArray(row?.location_ids) ? row.location_ids : [])]
+        .map((id) => Number(id))
+        .filter((n) => Number.isFinite(n))
+        .sort((a, b) => a - b),
+    }))
+    .filter((row) => Number.isFinite(row.assigned_user_id) && row.location_ids.length)
+    .sort((a, b) => a.assigned_user_id - b.assigned_user_id);
+}
+
+function assignmentsFromExistingAudit(audit) {
+  const byUser = new Map();
+  for (const loc of audit?.locations || []) {
+    if (loc?.is_active === false) continue;
+    const locId = Number(loc?.location_id);
+    if (!Number.isFinite(locId)) continue;
+    const userId = Number(loc?.plan_assigned_user_id ?? loc?.assigned_user_id);
+    if (!Number.isFinite(userId)) continue;
+    const key = String(userId);
+    if (!byUser.has(key)) byUser.set(key, { assigned_user_id: userId, location_ids: [] });
+    byUser.get(key).location_ids.push(locId);
+  }
+  return normalizeAssignmentsForCompare([...byUser.values()]);
+}
+
+function assignmentsEqual(left = [], right = []) {
+  return JSON.stringify(normalizeAssignmentsForCompare(left)) === JSON.stringify(normalizeAssignmentsForCompare(right));
 }
 
 export const getAudits = async (req, res) => {
@@ -125,15 +163,6 @@ export const createAudit = async (req, res) => {
       return res.status(400).json({ success: false, message: validation.message });
     }
 
-    const approvalFields = {};
-    applyApprovalWorkflow({
-      req,
-      fields: approvalFields,
-      incomingApproved: normalizedApproved,
-      hasBusinessChanges: false,
-      auditAsName: true,
-    });
-
     const row = await withTransaction(async (client) => {
       const audit = await insertAudit({
         start_date,
@@ -141,10 +170,23 @@ export const createAudit = async (req, res) => {
         remarks,
         assignments,
         created_by: auditUserName(req),
-        approved: approvalFields.approved ?? false,
-        approved_by: approvalFields.approved_by ?? null,
-        approved_at: approvalFields.approved_at ?? null,
+        approved: false,
+        approved_by: null,
+        approved_at: null,
       }, { client });
+
+      if (normalizedApproved === true) {
+        const approvalFields = {};
+        applyApprovalWorkflow({
+          req,
+          fields: approvalFields,
+          incomingApproved: true,
+          hasBusinessChanges: false,
+          auditAsName: true,
+          approvalTimestamp: audit.created_at,
+        });
+        await updateAudit(approvalFields, { audit_id: audit.audit_id }, { client });
+      }
 
       return audit;
     });
@@ -176,35 +218,44 @@ export const updateAuditController = async (req, res) => {
       }
     }
 
-    const fields = {
-      ...(start_date !== undefined && { start_date }),
-      ...(end_date !== undefined && { end_date }),
-      ...(remarks !== undefined && { remarks }),
-      ...(hasAssignments && { assignments }),
-      updated_by: auditUserName(req),
-      updated_at: new Date(),
-    };
-
     if (existing.status === 'verified' && req.user.type !== 'super_admin') {
       return res.status(403).json({ success: false, message: "Verified audits cannot be edited" });
     }
 
     if (existing.approved === true) {
+      if (normalizedApproved === true) {
+        return res.status(409).json({
+          success: false,
+          message: "This audit is already active. Edit it before activating again.",
+        });
+      }
       return res.status(403).json({
         success: false,
         message: "Active audits cannot be edited. Delete and recreate if changes are needed.",
       });
     }
 
-    if (normalizedApproved !== undefined) {
-      applyApprovalWorkflow({
-        req,
-        fields,
-        incomingApproved: normalizedApproved,
-        hasBusinessChanges: false,
-        auditAsName: true,
-      });
-    }
+    const startChanged = start_date !== undefined && normalizeDateOnly(start_date) !== normalizeDateOnly(existing.start_date);
+    const endChanged = end_date !== undefined && normalizeDateOnly(end_date) !== normalizeDateOnly(existing.end_date);
+    const remarksChanged = remarks !== undefined && String(remarks ?? "").trim() !== String(existing.remarks ?? "").trim();
+    const assignmentsChanged = hasAssignments && !assignmentsEqual(assignments, assignmentsFromExistingAudit(existing));
+
+    const hasBusinessChanges = startChanged || endChanged || remarksChanged || assignmentsChanged;
+
+    const fields = {};
+    if (startChanged) fields.start_date = start_date;
+    if (endChanged) fields.end_date = end_date;
+    if (remarksChanged) fields.remarks = remarks;
+    if (assignmentsChanged) fields.assignments = assignments;
+
+    applyApprovalUpdateFields({
+      req,
+      fields,
+      incomingApproved: normalizedApproved,
+      hasBusinessChanges,
+      alreadyApproved: !!existing.approved,
+      auditAsName: true,
+    });
 
     if (fields.approved === true && existing.status === "approved") {
       fields.status = "pending";
@@ -212,8 +263,12 @@ export const updateAuditController = async (req, res) => {
       fields.status = status;
     }
 
+    if (!Object.keys(fields).length) {
+      return res.json({ success: true, data: existing, message: "No changes" });
+    }
+
     const updated = await updateAudit(fields, { audit_id: id });
-    await log(req, "update", id, { updated_fields: fields });
+    await log(req, fields.approved === true ? "approve" : "update", id, { updated_fields: fields });
 
     const data = await findAudit({ audit_id: id });
     return res.json({ success: true, data, message: "Audit updated successfully" });

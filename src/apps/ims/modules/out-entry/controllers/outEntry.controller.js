@@ -4,7 +4,7 @@ import { findAvailableBoxes, findForwardingNote, lockForwardingNoteForOutEntry, 
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalWorkflow, applyApprovalUpdateFields, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { findScannedBoxUidsForOutEntry, getOutEntryScanSummary, getOutEntryOtherScanSummary, getOutEntryQcAreaScanSummary, resolveOutEntryBatchScan, resolveOutEntryOtherBatchScan, resolveOutEntryInventoryOutBatchScan, resolveOutEntryQcAreaBatchScan } from "../utils/fulfillment/outEntryFulfillment.js";
 import { enrichOutEntryItems, enrichOutEntryListRows, enrichOutEntryNote, isOutEntryAutoAuthorized, isOutEntryInventoryOut, isOutEntryPackingArea, isOutEntryQcArea, normalizeOutEntryReasonInput, normalizeOutEntryType, OUT_ENTRY_TYPE, scannedListForOut, syncOutEntryBoxLinks, validateOutEntryInventoryOutScannedBoxes, validateOutEntryOtherScannedBoxes, validateOutEntryQcAreaScannedBoxes, validateOutEntryScannedBoxes } from "../utils/index.js";
@@ -24,6 +24,17 @@ function requireOutUid(res, raw) {
   }
   return out_uid;
 }
+
+const equalUidLists = (left = [], right = []) => {
+  const norm = (arr) => [...arr].map((u) => String(u).trim()).filter(Boolean).sort();
+  const a = norm(left);
+  const b = norm(right);
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+};
 
 export const getOutEntries = async (req, res) => {
   try {
@@ -265,8 +276,6 @@ export const createOutEntry = async (req, res) => {
         item_codes: listMeta.item_codes,
         qtys: listMeta.qtys,
         total_qty: listMeta.total_qty,
-        updated_by: userName,
-        updated_at: new Date(),
         scan_complete: summary.scan_complete,
         boxes_required: summary.boxes_required,
         boxes_scanned: summary.boxes_scanned,
@@ -274,8 +283,17 @@ export const createOutEntry = async (req, res) => {
       };
 
       if (willApprove) {
-        patchFields.approved = true;
-        applyApprovalWorkflow({ req, fields: patchFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true });
+        applyApprovalWorkflow({
+          req,
+          fields: patchFields,
+          incomingApproved: true,
+          hasBusinessChanges: false,
+          auditAsName: true,
+          approvalTimestamp: row.created_at,
+        });
+      } else {
+        patchFields.updated_by = userName;
+        patchFields.updated_at = new Date();
       }
 
       await updateOutEntries(patchFields, { out_uid: outUid }, { client });
@@ -330,11 +348,7 @@ export const updateOutEntry = async (req, res) => {
         nextReason = normalizedReason;
       }
 
-      const hasBusinessChanges =
-        remarks !== undefined ||
-        scanned_boxes !== undefined ||
-        reason !== undefined ||
-        reason_text !== undefined;
+      const existingScanned = await findScannedBoxUidsForOutEntry(out_uid);
 
       let finalScanned = await scannedListForOut({
         out_uid,
@@ -365,8 +379,13 @@ export const updateOutEntry = async (req, res) => {
 
       const willApprove = summary.scan_complete && normalizedApproved === true;
       const wasApproved = Boolean(existing.approved);
-      const scansChanged = scanned_boxes !== undefined;
+      const scansChanged = scanned_boxes !== undefined && !equalUidLists(finalScanned, existingScanned);
       const approvalChanged = willApprove !== wasApproved;
+      const remarksChanged =
+        remarks !== undefined && String(remarks ?? "").trim() !== String(existing.remarks ?? "").trim();
+      const reasonChanged =
+        (reason !== undefined || reason_text !== undefined) && nextReason !== existing.reason;
+      const hasBusinessChanges = remarksChanged || reasonChanged || scansChanged;
 
       if (willApprove && !hasInventoryOutApprovePermission(req.user)) {
         return res.status(403).json({
@@ -405,16 +424,14 @@ export const updateOutEntry = async (req, res) => {
             : null;
 
         const fields = {
-          ...(remarks !== undefined && { remarks }),
-          reason: nextReason,
+          ...(remarksChanged && { remarks }),
+          ...(reasonChanged && { reason: nextReason }),
           ...(listMeta && {
             packing_numbers: listMeta.packing_numbers,
             item_codes: listMeta.item_codes,
             qtys: listMeta.qtys,
             total_qty: listMeta.total_qty,
           }),
-          updated_by: userName,
-          updated_at: new Date(),
           scan_complete: summary.scan_complete,
           boxes_required: summary.boxes_required,
           boxes_scanned: summary.boxes_scanned,
@@ -426,11 +443,12 @@ export const updateOutEntry = async (req, res) => {
           fields.approved_at = null;
         }
 
-        applyApprovalWorkflow({
+        applyApprovalUpdateFields({
           req,
           fields,
           incomingApproved: summary.scan_complete ? normalizedApproved : false,
           hasBusinessChanges,
+          alreadyApproved: wasApproved,
           canAuthorize: hasInventoryOutApprovePermission(req.user),
           auditAsName: true,
         });
@@ -491,8 +509,8 @@ export const updateOutEntry = async (req, res) => {
       }
     }
 
-    const hasBusinessChanges = fuid !== undefined || remarks !== undefined || scanned_boxes !== undefined;
     const effectiveFuid = fuid !== undefined ? fuid : existing.fuid;
+    const existingScanned = await findScannedBoxUidsForOutEntry(out_uid);
 
     let finalScanned = await scannedListForOut({
       out_uid,
@@ -519,8 +537,12 @@ export const updateOutEntry = async (req, res) => {
 
     const willApprove = summary.scan_complete && normalizedApproved === true;
     const wasApproved = Boolean(existing.approved);
-    const scansChanged = scanned_boxes !== undefined;
+    const scansChanged = scanned_boxes !== undefined && !equalUidLists(finalScanned, existingScanned);
     const approvalChanged = willApprove !== wasApproved;
+    const fuidChanged = fuid !== undefined && Number(fuid) !== Number(existing.fuid);
+    const remarksChanged =
+      remarks !== undefined && String(remarks ?? "").trim() !== String(existing.remarks ?? "").trim();
+    const hasBusinessChanges = fuidChanged || remarksChanged || scansChanged;
 
     const result = await withTransaction(async (client) => {
       if (scansChanged || approvalChanged) {
@@ -538,16 +560,14 @@ export const updateOutEntry = async (req, res) => {
         : null;
 
       const fields = {
-        ...(fuid !== undefined && { fuid }),
-        ...(remarks !== undefined && { remarks }),
+        ...(fuidChanged && { fuid }),
+        ...(remarksChanged && { remarks }),
         ...(listMeta && {
           packing_numbers: listMeta.packing_numbers,
           item_codes: listMeta.item_codes,
           qtys: listMeta.qtys,
           total_qty: listMeta.total_qty,
         }),
-        updated_by: userName,
-        updated_at: new Date(),
         scan_complete: summary.scan_complete,
         boxes_required: summary.boxes_required,
         boxes_scanned: summary.boxes_scanned,
@@ -559,11 +579,12 @@ export const updateOutEntry = async (req, res) => {
         fields.approved_at = null;
       }
 
-      applyApprovalWorkflow({
+      applyApprovalUpdateFields({
         req,
         fields,
         incomingApproved: summary.scan_complete ? normalizedApproved : false,
         hasBusinessChanges,
+        alreadyApproved: wasApproved,
         auditAsName: true,
       });
 

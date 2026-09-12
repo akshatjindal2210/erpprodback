@@ -5,8 +5,10 @@ import { initCoreDB } from "../../apps/core/lib/config/db/initDB.js";
 import { initDashboardDB } from "../../apps/dashboard/lib/config/db/initDB.js";
 import { initRmStoreDB } from "../../apps/rmstore/lib/config/db/initDB.js";
 import { initHrmsDB } from "../../apps/hrms/lib/config/db/initDB.js";
+import { initPurchaseDB } from "../../apps/purchase/lib/config/db/initDB.js";
+import { initProductionDB } from "../../apps/production/lib/config/db/initDB.js";
 import { runVersionMigrations } from "../../migrations/index.js";
-import { runStartupBackfills } from "../../backfills/index.js";
+import { runStartupBackfills, backfillShortageGrpname } from "../../backfills/index.js";
 import { syncSerialSequences } from "./syncSequences.js";
 
 /** Boot: structure (tables) → one-shot migrations → sequences. */
@@ -21,6 +23,8 @@ export const initDB = async () => {
     await initTaskDB();
     await initRmStoreDB();
     await initHrmsDB();
+    await initPurchaseDB();
+    await initProductionDB();
     await initDashboardDB();
 
     // One-shot migrations.
@@ -29,6 +33,7 @@ export const initDB = async () => {
     await syncSerialSequences();
     console.log("✅ All Tables Ready");
 
+    await backfillShortageGrpname();  // v4.1.5 backfill Shortage.grpname from IMS.
     // await runStartupBackfills();
     // console.log("✅ Startup backfills finished");
   } catch (err) {

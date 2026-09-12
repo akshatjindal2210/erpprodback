@@ -16,10 +16,10 @@ const JOINS = ``;
 
 const DEFAULT_FIELDS = [
   "i.in_uid", "i.packing_number", "i.item_codes", "i.qtys", "i.total_qty", "i.remarks",
-  "i.approved", "i.approved_by", "i.approved_at",
-  "i.created_by", "i.created_at",
-  "i.updated_by", "i.updated_at",
-  "i.is_deleted", "i.deleted_by", "i.deleted_at",
+  "i.approved", "i.approved_at",
+  "i.created_at",
+  "i.updated_at",
+  "i.is_deleted", "i.deleted_at",
   "i.created_by AS created_by_name",
   "i.updated_by AS updated_by_name",
   "i.deleted_by AS deleted_by_name",

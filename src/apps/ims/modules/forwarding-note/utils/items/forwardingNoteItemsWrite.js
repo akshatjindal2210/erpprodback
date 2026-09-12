@@ -11,7 +11,7 @@ import { findAvailableBoxes } from "../../models/forwardingNote.model.js";
 import { findBoxesByNoUids } from "../../../box/models/box.model.js";
 import { deleteForwardingNoteItems, findActiveForwardingNoteItemsByFuid, insertForwardingNoteItem } from "../../models/forwardingNoteItem.model.js";
 import { docNoFromStandardBoxNoUid } from "../../../../lib/stickerUidHelpers.js";
-import { buildForwardingAvailableBoxes, enrichForwardingBoxesWithPackingStd, inferForwardingPackingStandardQty, isForwardingLooseBox, sumBoxQty } from "../stock/forwardingAvailableStock.js";
+import { buildForwardingAvailableBoxes, enrichForwardingBoxesWithPackingStd, inferForwardingPackingStandardQty, isForwardingLooseBox, standardFifoQtyAtBalance, sumBoxQty } from "../stock/forwardingAvailableStock.js";
 import { loadScheduleDispatchQtyMap, loadScheduleQtyForKeys, planKey } from "../../../schedule-planning/utils/db/schedulePlanDb.js";
 import { fetchImsDataRaw } from "../../../../lib/services/ims.service.js";
 import { getForwardingShortageQtyPercentage } from "../../../../../core/configuration/models/appConfig.model.js";
@@ -131,7 +131,7 @@ async function fillScheduleQtyFromIms(qtyMap, pairs = []) {
 }
 
 /** Schedule-linked FN lines must exist on plan DB or IMS Ready schedule. */
-export async function assertScheduleDispatchWithinBalance(items = [], exclude_fuid = null) {
+export async function assertScheduleDispatchWithinBalance(items = [], exclude_fuid = null, { client } = {}) {
   const demandByKey = buildScheduleDemandByKey(items);
   if (!demandByKey.size) return;
 
@@ -159,14 +159,27 @@ export async function assertScheduleDispatchWithinBalance(items = [], exclude_fu
       );
     }
 
-    // % = 0 / unset → old FIFO full-box overshoot OK. % > 0 → hard cap.
+    // % = 0 / unset → old FIFO full-box overshoot OK. % > 0 → max(tolerance cap, standard FIFO at balance).
     if (!(shortagePct > 0)) continue;
 
     const dispatchedQty = Number(dispatchMap.get(key) ?? 0);
     const balanceQty = Math.max(0, scheduleQty - dispatchedQty);
     const maxExtraQty = Math.floor((balanceQty * shortagePct) / 100);
-    const maxAllowedQty = balanceQty + maxExtraQty;
+    const toleranceCapQty = balanceQty + maxExtraQty;
     const demandQty = Number(demand?.qty) || 0;
+
+    const [, itemdcodeRaw] = key.split("|");
+    const itemDcode = Number(itemdcodeRaw);
+    let standardCapQty = 0;
+    if (Number.isFinite(itemDcode) && itemDcode > 0 && balanceQty > 0) {
+      const physical = await findAvailableBoxes(itemDcode, { client });
+      const allowed = await buildForwardingAvailableBoxes(physical, itemDcode, exclude_fuid, {
+        approvedOnly: false,
+        client,
+      });
+      standardCapQty = standardFifoQtyAtBalance(allowed, balanceQty);
+    }
+    const maxAllowedQty = Math.max(toleranceCapQty, standardCapQty);
 
     if (demandQty > maxAllowedQty + 0.0001) {
       const [schno, itemdcode] = key.split("|");
@@ -393,7 +406,7 @@ export async function validateExistingForwardingNoteItems({ fuid, excludeFuid = 
   }));
 
   await lockItemDcodes(client, items.map((i) => i.item_dcode));
-  await assertScheduleDispatchWithinBalance(items, excludeFuid ?? fuid);
+  await assertScheduleDispatchWithinBalance(items, excludeFuid ?? fuid, { client });
   await assertForwardingItemsWithinRemaining(items, excludeFuid ?? fuid, { client, approvedOnly: false });
 }
 
@@ -405,7 +418,7 @@ async function persistForwardingNoteItems({ fuid, items, userName, excludeFuid, 
   const itemDcodes = enrichedItems.map((i) => i.item_dcode);
 
   await lockItemDcodes(client, itemDcodes);
-  await assertScheduleDispatchWithinBalance(enrichedItems, excludeFuid);
+  await assertScheduleDispatchWithinBalance(enrichedItems, excludeFuid, { client });
   await assertForwardingItemsWithinRemaining(enrichedItems, excludeFuid, { client, approvedOnly: false });
 
   if (replaceExisting) {

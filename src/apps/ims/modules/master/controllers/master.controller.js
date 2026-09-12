@@ -42,37 +42,6 @@ function mapLedgerRecord(r) {
   };
 }
 
-function sortItems(arr, sortBy = "item_code", order = "ASC") {
-  const key = String(sortBy).toLowerCase();
-  const mul = String(order).toUpperCase() === "DESC" ? -1 : 1;
-  const pick = (row) => {
-    const v = row[key];
-    if (v == null) return "";
-    return typeof v === "number" ? v : String(v).toLowerCase();
-  };
-  return [...arr].sort((a, b) => {
-    const va = pick(a);
-    const vb = pick(b);
-    if (va < vb) return -1 * mul;
-    if (va > vb) return 1 * mul;
-    return 0;
-  });
-}
-
-function sortLedgers(arr, sortBy = "acc_name", order = "DESC") {
-  const key = String(sortBy).toLowerCase();
-  const mul = String(order).toUpperCase() === "ASC" ? 1 : -1;
-  const norm = { acc_code: "acc_code", acc_name: "acc_name" };
-  const field = norm[key] || "acc_code";
-  return [...arr].sort((a, b) => {
-    const va = a[field] == null ? "" : String(a[field]).toLowerCase();
-    const vb = b[field] == null ? "" : String(b[field]).toLowerCase();
-    if (va < vb) return -1 * mul;
-    if (va > vb) return 1 * mul;
-    return 0;
-  });
-}
-
 function filterBySearch(rows, search, pickFields) {
   if (!search) return rows;
   const s = String(search).toLowerCase();
@@ -86,6 +55,19 @@ function filterBySearch(rows, search, pickFields) {
 
 /** IMS rows are already in memory; allow one response with the full catalog for client search. */
 const IMS_IN_MEMORY_MAX_LIMIT = 100000;
+
+function itemFetchIsFg(filters) {
+  if (filters === "fg") return true;
+  if (filters && typeof filters === "object") {
+    return filters.type === "fg" || filters.fg === true;
+  }
+  return false;
+}
+
+function itemGrpnameNeedle(filters, bodyGrpname) {
+  const fromFilters = filters && typeof filters === "object" ? filters.grpname : "";
+  return String(fromFilters || bodyGrpname || "").trim().toLowerCase();
+}
 
 function slicePage(rows, page = 1, limit = 50) {
   const total = rows.length;
@@ -149,23 +131,9 @@ function parseCustCodeRow(r, ledger, item) {
 
 export const getItems = async (req, res) => {
   try {
-    const { search, page, limit, sortBy, order } = req.body;
-    const sortByProvided = sortBy != null && String(sortBy).trim() !== "";
-    const orderProvided = order != null && String(order).trim() !== "";
-    const shouldSort = sortByProvided || orderProvided;
-
     const records = await fetchFromIMS("item");
-    let rows = (records || []).map(mapItemRecord);
-    rows = filterBySearch(rows, sanitizeSearch(search), [
-      (r) => r.item_code,
-      (r) => r.itemdesc,
-      (r) => r.grpname
-    ]);
-    if (shouldSort) {
-      rows = sortItems(rows, sortBy, order);
-    }
-    const out = slicePage(rows, page, limit || rows.length || 1000);
-    res.json({ success: true, ...out });
+    const rows = Array.isArray(records) ? records : [];
+    res.json({ success: true, data: rows, total: rows.length });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -174,70 +142,21 @@ export const getItems = async (req, res) => {
 export const getItemById = async (req, res) => {
   try {
     const { id } = req.body;
-    if (!id) return res.status(400).json({ success: false, message: "ItemDcode required" });
+    if (!id) return res.json({ success: true, data: null });
     const records = await fetchFromIMS("item");
     const raw = (records || []).find((r) => String(r.ItemDcode) === String(id));
-    if (!raw) return res.status(404).json({ success: false, message: "Item not found" });
-    const item = mapItemRecord(raw);
-    res.json({
-      success: true,
-      data: { ...item, ims_category: raw.Grpname ?? item.grpname }
-    });
+    if (!raw) return res.json({ success: true, data: null });
+    res.json({ success: true, data: raw });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-function filterImsCustRows(rawRows, search) {
-  const s = sanitizeSearch(search);
-  if (!s) return rawRows || [];
-  const low = s.toLowerCase();
-  return (rawRows || []).filter((r) => {
-    const code = r.Acc_Code ?? r.Acc_code ?? r.acc_code;
-    const name = String(r.Acc_Name ?? r.Acc_name ?? r.acc_name ?? "");
-    return (String(code ?? "").toLowerCase().includes(low) || name.toLowerCase().includes(low));
-  });
-}
-
 export const getLedgers = async (req, res) => {
   try {
-    const { search, page, limit, sortBy, order } = req.body;
-    const imsRows = await fetchFromIMS("cust");
-    let orderedRaw = filterImsCustRows(imsRows, search);
-
-    // Keep IMS row order unless client explicitly requests sort
-    const sortByProvided = sortBy != null && String(sortBy).trim() !== "";
-    const orderProvided = order != null && String(order).trim() !== "";
-    const shouldSort = sortByProvided || orderProvided;
-
-    if (shouldSort) {
-      const norm = orderedRaw.map(mapLedgerRecord);
-      const sortedNorm = sortLedgers(norm, sortBy, order);
-      const byCode = new Map(
-        orderedRaw.map((r) => [String(r.Acc_Code ?? r.Acc_code ?? r.acc_code), r])
-      );
-      orderedRaw = sortedNorm
-        .map((n) => byCode.get(String(n.acc_code)))
-        .filter(Boolean);
-    }
-
-    const normalized = orderedRaw.map(mapLedgerRecord);
-    const pageLimit =
-      limit != null && limit !== "" ? limit : normalized.length || 1000;
-    const out = slicePage(normalized, page, pageLimit);
-    const start = (out.page - 1) * out.limit;
-    const pageRaw = orderedRaw.slice(start, start + out.data.length);
-
-    const records = pageRaw.map((r) => ({
-      Acc_Code: r.Acc_Code ?? r.Acc_code ?? r.acc_code,
-      Acc_Name: r.Acc_Name ?? r.Acc_name ?? r.acc_name ?? "",
-    }));
-
-    res.json({
-      success: true,
-      records,
-      ...out,
-    });
+    const records = await fetchFromIMS("cust");
+    const rows = Array.isArray(records) ? records : [];
+    res.json({ success: true, data: rows, total: rows.length, records: rows });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -246,11 +165,11 @@ export const getLedgers = async (req, res) => {
 export const getLedgerById = async (req, res) => {
   try {
     const { id } = req.body;
-    if (!id) return res.status(400).json({ success: false, message: "Acc_Code required" });
+    if (!id) return res.json({ success: true, data: null });
     const records = await fetchFromIMS("cust");
     const raw = (records || []).find((r) => String(r.Acc_Code) === String(id));
-    if (!raw) return res.status(404).json({ success: false, message: "Customer not found" });
-    res.json({ success: true, data: { acc_code: raw.Acc_Code, acc_name: raw.Acc_Name } });
+    if (!raw) return res.json({ success: true, data: null });
+    res.json({ success: true, data: raw });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -258,58 +177,9 @@ export const getLedgerById = async (req, res) => {
 
 export const getPartyRates = async (req, res) => {
   try {
-    const { search, page, limit, sortBy, order } = req.body || {};
-    const [records, ledgers, items] = await Promise.all([
-      fetchFromIMS("custcode"),
-      fetchFromIMS("cust"),
-      fetchFromIMS("item")
-    ]);
-
-    const ledgerByCode = buildLedgerMap(ledgers);
-    const itemByDCode = buildItemMap(items);
-
-    let data = (records || []).map((r) => {
-      const acc = r.Acc_code ?? r.Acc_Code ?? r.acc_code;
-      const idcode = r.ItemDcode ?? r.Itemdcode ?? r.itemdcode;
-      const ledger = acc != null ? ledgerByCode.get(String(acc)) : null;
-      const item = idcode != null ? itemByDCode.get(String(idcode)) : null;
-      return parseCustCodeRow(r, ledger, item);
-    });
-
-    const s = sanitizeSearch(search);
-    if (s) {
-      const low = s.toLowerCase();
-      data = data.filter((row) =>
-        [
-          row.acc_code,
-          row.itemdcode,
-          row.narr1,
-          row.itapv,
-          row.acc_name,
-          row.itemdesc,
-          row.item_code,
-          row.grpname
-        ].some((v) => v != null && String(v).toLowerCase().includes(low))
-      );
-    }
-
-    const sortByProvided = req.body?.sortBy != null && String(req.body.sortBy).trim() !== "";
-    const orderProvided = req.body?.order != null && String(req.body.order).trim() !== "";
-    const shouldSort = sortByProvided || orderProvided;
-    if (shouldSort) {
-      const sortKey = String(sortBy || "acc_name").toLowerCase();
-      const mul = String(order || "ASC").toUpperCase() === "DESC" ? -1 : 1;
-      data.sort((a, b) => {
-        const va = a[sortKey] == null ? "" : String(a[sortKey]).toLowerCase();
-        const vb = b[sortKey] == null ? "" : String(b[sortKey]).toLowerCase();
-        if (va < vb) return -1 * mul;
-        if (va > vb) return 1 * mul;
-        return 0;
-      });
-    }
-
-    const out = slicePage(data, page, limit || data.length || 1000);
-    res.json({ success: true, ...out });
+    const records = await fetchFromIMS("custcode");
+    const rows = Array.isArray(records) ? records : [];
+    res.json({ success: true, data: rows, total: rows.length });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -397,7 +267,7 @@ export const getItemsViews = async (req, res) => {
     const { id, permission_module, permission_action } = req.body;
     const { page, limit, search, filters } = extractListParams(req.body);
 
-    const records = await fetchFromIMS("item", filters === "fg" ? { type: "fg" } : null);
+    const records = await fetchFromIMS("item", itemFetchIsFg(filters) ? { type: "fg" } : null);
     const rows = (records || []).map(mapItemRecord);
 
     if (id) {
@@ -409,7 +279,8 @@ export const getItemsViews = async (req, res) => {
           id: item.itemdcode,
           itemdcode: item.itemdcode,
           item_code: item.item_code,
-          itemdesc: item.itemdesc
+          itemdesc: item.itemdesc,
+          grpname: item.grpname ?? null,
         }
       });
     }
@@ -425,6 +296,10 @@ export const getItemsViews = async (req, res) => {
         (r) => r.itemdesc,
         (r) => r.grpname
       ]);
+    }
+    const grpNeedle = itemGrpnameNeedle(filters, req.body?.grpname);
+    if (grpNeedle) {
+      filtered = filtered.filter((r) => String(r.grpname ?? "").trim().toLowerCase() === grpNeedle);
     }
     const onlyStickerGenerated =
       filters?.sticker_generated === true ||
@@ -470,6 +345,7 @@ export const getItemsViews = async (req, res) => {
     const wantUnit = fields.some((f) => String(f).includes("unit"));
     const wantCategory = fields.some((f) => String(f).includes("category_id"));
     const wantWeight = fields.some((f) => String(f).includes("weight"));
+    const wantGrpname = fields.some((f) => String(f).includes("grpname"));
     const miniData = out.data.map((item) => {
       const row = {
         id: item.itemdcode,
@@ -480,6 +356,7 @@ export const getItemsViews = async (req, res) => {
       if (wantUnit) row.unit = item.unit;
       if (wantCategory) row.category_id = item.category_id;
       if (wantWeight) row.weight = item.weight;
+      if (wantGrpname) row.grpname = item.grpname ?? null;
       return row;
     });
 
@@ -504,6 +381,7 @@ export const getItemViewById = async (req, res) => {
         itemdcode: item.itemdcode,
         item_code: item.item_code,
         itemdesc: item.itemdesc,
+        grpname: item.grpname ?? null,
         weight: item.weight,
       }
     });

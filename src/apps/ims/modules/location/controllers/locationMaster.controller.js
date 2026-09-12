@@ -4,7 +4,7 @@ import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModule
 import { resolveViewsFields } from "../../../lib/config/views/helperViews.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
-import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput, applyApprovalUpdateFields, prepareUpdateByRules, equalIntLists } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 
@@ -17,6 +17,19 @@ function parseMultiIds(body, arrayKey, singleKey) {
   if (body?.[arrayKey] !== undefined) return normalizeIntIds(body[arrayKey]);
   if (body?.[singleKey] !== undefined) return normalizeIntIds(body[singleKey]);
   return undefined;
+}
+
+function prepareLocationUpdate(existing, next = {}) {
+  const rules = [
+    { field: "rack_no", normalize: (v) => String(v ?? "").trim() },
+    { field: "shelf_no", normalize: normalizeShelfNo },
+    { field: "location_description", normalize: (v) => v?.toString().trim() },
+    { field: "total_capacity", normalize: (v) => Number(v || 0) },
+    { field: "acc_codes", normalize: normalizeIntIds, isEqual: (a, b) => equalIntLists(a, b) },
+    { field: "item_dcodes", normalize: normalizeIntIds, isEqual: (a, b) => equalIntLists(a, b) },
+    { field: "rule", normalize: normalizeLocationRule },
+  ];
+  return prepareUpdateByRules({ existing, input: next, rules });
 }
 
 async function enrichLocationRows(rows = []) {
@@ -210,7 +223,7 @@ export const createLocation = async (req, res) => {
 
     if (normalizedApproved === true) {
       const approvalFields = {};
-      applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true, });
+      applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true, approvalTimestamp: row?.created_at || new Date() });
       await updateLocations(approvalFields, { location_id: row.location_id });
     }
 
@@ -265,14 +278,7 @@ export const updateLocation = async (req, res) => {
       }
     }
 
-    const hasBusinessChanges =
-      rack_no !== undefined ||
-      shelf_no !== undefined ||
-      location_description !== undefined ||
-      total_capacity !== undefined ||
-      acc_codes !== undefined ||
-      item_dcodes !== undefined ||
-      rule !== undefined;
+    const { hasChanges: hasBusinessChanges, fields: preparedFields } = prepareLocationUpdate(existing, { rack_no, shelf_no, location_description, total_capacity, acc_codes, item_dcodes, rule });
 
     if (!hasBusinessChanges && normalizedApproved === undefined) {
       return res.status(400).json({ success: false, message: "No fields to update" });
@@ -291,24 +297,9 @@ export const updateLocation = async (req, res) => {
       }
     }
 
-    const fields = {
-      ...(rack_no !== undefined && { rack_no: rack_no?.toString().trim() }),
-      ...(shelf_no !== undefined && { shelf_no: normalizeShelfNo(shelf_no) }),
-      type: APP_TYPE,
-      ...(location_description !== undefined && { location_description: location_description?.toString().trim() }),
-      ...(total_capacity !== undefined && { total_capacity }),
-      updated_by: auditUserName(req),
-      updated_at: new Date(),
-    };
-
-    if (acc_codes !== undefined) {
-      fields.acc_codes = acc_codes;
-    }
-    if (item_dcodes !== undefined) {
-      fields.item_dcodes = item_dcodes;
-    }
-    const resolvedItems = item_dcodes !== undefined
-      ? item_dcodes
+    const fields = { ...preparedFields, type: APP_TYPE };
+    const resolvedItems = fields.item_dcodes !== undefined
+      ? fields.item_dcodes
       : normalizeIntIds(
           Array.isArray(existing.item_dcodes) && existing.item_dcodes.length
             ? existing.item_dcodes
@@ -318,19 +309,19 @@ export const updateLocation = async (req, res) => {
         );
     if (resolvedItems.length === 0) {
       fields.rule = "include";
-    } else if (rule !== undefined) {
-      fields.rule = rule;
+    } else if (fields.rule !== undefined) {
+      fields.rule = normalizeLocationRule(fields.rule);
     }
 
-    const nextRackNo = fields.rack_no ?? existing.rack_no;
-    const nextShelfNo = fields.shelf_no ?? existing.shelf_no;
-    fields.location_no = buildLocationNo(nextRackNo, nextShelfNo);
+    const finalRackNo = fields.rack_no ?? existing.rack_no;
+    const finalShelfNo = fields.shelf_no ?? existing.shelf_no;
+    fields.location_no = buildLocationNo(finalRackNo, finalShelfNo);
     locationNo = fields.location_no;
 
-    if (rack_no !== undefined || shelf_no !== undefined) {
+    if (fields.rack_no !== undefined || fields.shelf_no !== undefined) {
       const duplicate = await findLocationDuplicate({
-        rack_no: nextRackNo,
-        shelf_no: nextShelfNo,
+        rack_no: finalRackNo,
+        shelf_no: finalShelfNo,
         type: APP_TYPE,
         excludeLocationId: id,
       });
@@ -342,13 +333,7 @@ export const updateLocation = async (req, res) => {
       }
     }
 
-    applyApprovalWorkflow({
-      req,
-      fields,
-      incomingApproved: normalizedApproved,
-      hasBusinessChanges,
-      auditAsName: true,
-    });
+    applyApprovalUpdateFields({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges, alreadyApproved: existing.approved === true, auditAsName: true });
 
     const updated = await updateLocations(fields, { location_id: id });
     const data = await findLocation({ location_id: id, type: APP_TYPE });

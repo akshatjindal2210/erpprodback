@@ -7,6 +7,8 @@ import { insertScheduleTransaction, loadActionDates, loadActionReasons, loadItem
 import { buildScheduleComparison, hasScheduleComparisonMismatch } from "../compare/schedulePlanCompare.js";
 import { toPublicImsMessage } from "../../../../lib/utils/erp-api/lookup/imsMeta.js";
 import { getForwardingShortageQtyPercentage } from "../../../../../core/configuration/models/appConfig.model.js";
+import { createShortageRecordInternal } from "../../../shortage/controllers/shortage.controller.js";
+import { normalizeShortageMonth } from "../../../shortage/shortage.config.js";
 
 const IMS_SCHEDULE_LIST = "schdule";
 
@@ -48,6 +50,27 @@ function normDate(v) {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
 }
 
+/** Shortage month = schedule MONTH column (schmonth), not schdt calendar month. Year rule matches plan target dates. */
+function scheduleShortageMonth(schmonth, schdt) {
+  const month = Number(schmonth);
+  if (!Number.isFinite(month) || month < 1 || month > 12) {
+    const dt = normDate(schdt);
+    return dt ? `${dt.slice(0, 7)}-01` : null;
+  }
+
+  let year = new Date().getFullYear();
+  const dt = normDate(schdt);
+  if (dt && /^\d{4}-\d{2}-\d{2}$/.test(dt)) {
+    year = parseInt(dt.slice(0, 4), 10);
+    const monthFromSchdt = parseInt(dt.slice(5, 7), 10);
+    if (Number.isFinite(monthFromSchdt) && month < monthFromSchdt) {
+      year += 1;
+    }
+  }
+
+  return `${year}-${String(month).padStart(2, "0")}-01`;
+}
+
 function localTodayYmd() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -81,7 +104,7 @@ function validateScheduleTargetDate(actionDateIso, schmonth, schdt) {
 }
 
 function pickSnap(src = {}) {
-  const q = src.totalqty ?? src.total_qty;
+  const q = src.totalqty ?? src.total_qty ?? src.original_qty;
   return {
     schmonth: src.schmonth != null ? Number(src.schmonth) : null,
     schdt: normDate(src.schdt),
@@ -1117,17 +1140,17 @@ export async function listScheduleItemTransactions(body = {}) {
   };
 }
 
-export async function submitScheduleShortage(body = {}, userId = null, userName = null) {
+export async function submitScheduleShortage(body = {}, userId = null, userName = null, req = null) {
   const fy = requireFinYear(body);
   if (fy.error) return fy.error;
 
   const schno = String(body?.schno ?? "").trim();
-  const shortageQty = Number(body.shortage_qty);
+  const shortageQty = Math.floor(Number(body.shortage_qty));
   if (!schno || body?.itemdcode == null) {
     return { success: false, status: 400, message: "schno and itemdcode are required." };
   }
-  if (!Number.isFinite(shortageQty) || shortageQty < 0) {
-    return { success: false, status: 400, message: "Enter a valid shortage quantity." };
+  if (!Number.isFinite(shortageQty) || shortageQty < 1) {
+    return { success: false, status: 400, message: "Shortage quantity must be at least 1." };
   }
 
   const existingRow = await loadPlanRow(fy.finYearId, schno, body.itemdcode);
@@ -1145,83 +1168,47 @@ export async function submitScheduleShortage(body = {}, userId = null, userName 
   const itemRemark = body.item_remark != null ? String(body.item_remark).trim() : "";
   const actionDateNorm = localTodayYmd();
 
-  const filter = {
+  const month = normalizeShortageMonth(scheduleShortageMonth(body.schmonth, body.schdt), normDate(body.schdt));
+  const outcome = await createShortageRecordInternal(
+    {
+      itemdcode: body.itemdcode,
+      itemcode: body.item_code || String(body.itemdcode),
+      type: "Additional",
+      qty: shortageQty,
+      month,
+      remarks: itemRemark || null,
+    },
+    req
+  );
+
+  if (!outcome.success) {
+    return {
+      success: false,
+      status: 400,
+      message: outcome.message || "Could not create shortage.",
+    };
+  }
+
+  const shortageNo = outcome.data?.id != null ? String(outcome.data.id).trim() : "";
+  if (!shortageNo) {
+    return { success: false, status: 500, message: "Shortage saved but id missing." };
+  }
+  const msg = "Shortage submitted successfully.";
+
+  const snap = pickSnap(body);
+  const planRow = await upsertPlan({
     fin_year_id: fy.finYearId,
     schno,
     itemdcode: body.itemdcode,
-    item_code: body.item_code,
-    itemdesc: body.itemdesc,
-    schmonth: body.schmonth,
-    schdt: normDate(body.schdt) ?? body.schdt,
-    acc_code: body.acc_code,
-    acc_name: body.acc_name,
-    original_qty: Number(body.original_qty) || 0,
-    shortage_qty: shortageQty,
-    user_id: userId,
+    snap,
     user_name: userName,
-  };
-
-  console.log("[schedule-planning] shortage request", filter);
-  // const ims = await fetchImsDataRaw("shortgoogle", filter);
-  
-  // TODO START: restore real IMS shortgoogle once API returns shortage_no reliably.
-  const dummyShortageNo = `SH-${schno}-${body.itemdcode}-${Date.now().toString().slice(-6)}`;
-  const ims = {
-    success: true,
-    id: dummyShortageNo,
-    shortage_no: dummyShortageNo,
-    records: [
-      {
-        id: dummyShortageNo,
-        shortage_no: dummyShortageNo,
-        schno,
-        itemdcode: body.itemdcode,
-        shortage_qty: shortageQty,
-      },
-    ],
-    message: "Data processed and forwarded successfully.",
-  };
-  // TODO END: restore real IMS shortgoogle once API returns shortage_no reliably.
-  
-  console.log("[schedule-planning] shortage response (dummy)", JSON.stringify(ims, null, 2));
-
-  const row = Array.isArray(ims?.records) ? ims.records[0] : ims?.records;
-  const id = ims?.id ?? row?.id ?? ims?.shortage_no ?? row?.shortage_no ?? null;
-  const msg = ims?.msg ?? ims?.message ?? row?.msg ?? row?.message ?? null;
-
-  if (ims?.success !== true) {
-    return {
-      success: false,
-      status: 400,
-      message: toPublicImsMessage(msg || ims?.message, "Could not submit shortage."),
-    };
+    is_planned: existingRow?.is_planned ?? SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH,
+  });
+  if (!planRow) {
+    return { success: false, status: 500, message: "Could not save schedule plan for shortage." };
   }
 
-  const shortageNo = id != null && String(id).trim() !== "" ? String(id).trim() : null;
-  if (!shortageNo) {
-    return {
-      success: false,
-      status: 400,
-      message: "IMS did not return a shortage id.",
-    };
-  }
-
-  const snap = pickSnap(body);
-  if (!existingRow) {
-    const created = await upsertPlan({
-      fin_year_id: fy.finYearId,
-      schno,
-      itemdcode: body.itemdcode,
-      snap,
-      user_name: userName,
-      is_planned: SCHEDULE_PLAN_STATUS.READY_TO_DISPATCH,
-    });
-    if (!created) {
-      return { success: false, status: 500, message: "Could not save schedule plan for shortage." };
-    }
-  }
-
-  const localRow = await setPlanShortageNo({fin_year_id: fy.finYearId, schno, itemdcode: body.itemdcode, shortage_no: shortageNo, user_name: userName });
+  const localRow = await setPlanShortageNo({ fin_year_id: fy.finYearId, schno, itemdcode: body.itemdcode, shortage_no: shortageNo, user_name: userName });
   if (!localRow) {
     return { success: false, status: 400, message: "Shortage already recorded for this item." };
   }

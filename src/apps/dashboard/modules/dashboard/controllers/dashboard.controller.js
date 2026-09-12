@@ -13,7 +13,7 @@ import { fetchImsDataRaw } from "../../../../ims/lib/services/ims.service.js";
 import { clearImsMetaForResponse } from "../../../../ims/lib/utils/erp-api/lookup/imsMeta.js";
 import { findUsers } from "../../../../core/identity/users/models/user.model.js";
 
-const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings", "rmstore", "hrms"]);
+const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings", "rmstore", "hrms", "purchase", "production"]);
 const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql", "hybrid", "url_json"]);
 const ALLOWED_AUDIENCE_SCOPES = new Set(["global", "users"]);
 const APP_TABLE_PREFIX = {
@@ -23,6 +23,8 @@ const APP_TABLE_PREFIX = {
   home: [],
   rmstore: ["rmstore_"],
   hrms: ["hrms_"],
+  purchase: ["purchase_"],
+  production: ["production_"],
 };
 
 const TABLE_MODULE_OVERRIDES = {
@@ -71,7 +73,7 @@ function modulesFromQuery(rawSql = "") {
       modules.add(TABLE_MODULE_OVERRIDES[table]);
       continue;
     }
-    const stem = table.replace(/^(ims_|mst_|task_|rmstore_|hrms_)/, "");
+    const stem = table.replace(/^(ims_|mst_|task_|rmstore_|hrms_|purchase_|production_)/, "");
     modules.add(stem);
     if (stem.endsWith("s")) modules.add(stem.slice(0, -1));
   }

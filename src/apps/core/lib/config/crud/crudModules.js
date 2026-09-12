@@ -218,14 +218,10 @@ export const CRUD_MODULES = {
   },
   shortage: {
     idField: "id",
-    listFields: [
-      "s.id", "s.itemdcode", "s.itemcode", "s.type", "s.qty",
-      "s.month", "s.remarks",
-      "s.approved", "s.approved_by", "s.approved_at",
-      "s.created_by", "s.created_at", "s.updated_by", "s.updated_at",
-    ],
-    filterFields: ["id", "itemdcode", "type", "approved", "month", "from_date", "to_date"],
-    searchFields: ["itemcode", "type", "itemdcode"],
+    // list SQL lives in shortage.model DEFAULT_FIELDS
+    listFields: [],
+    filterFields: ["id", "itemdcode", "type", "approved", "month", "grpname", "from_date", "to_date"],
+    searchFields: ["itemcode", "grpname", "type", "itemdcode"],
   },
 };
 

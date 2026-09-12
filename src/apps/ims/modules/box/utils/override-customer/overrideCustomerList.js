@@ -21,6 +21,8 @@ const SORT_COLUMNS = {
   status: "r.status",
   requested_by_name: "r.requested_by",
   approved_by_name: "r.approved_by",
+  updated_by_name: "r.updated_by",
+  updated_at: "r.updated_at",
   from_customer_name: "r.from_customer",
   to_customer_name: "r.to_customer",
   item_name: "r.itemdcode",
@@ -100,6 +102,7 @@ export async function listOverrideRequests(options = {}) {
        r.*,
        r.requested_by AS requested_by_name,
        r.approved_by AS approved_by_name,
+       r.updated_by AS updated_by_name,
        r.from_customer AS from_customer_name,
        r.to_customer AS to_customer_name,
        r.itemdcode AS item_name,
@@ -157,15 +160,16 @@ export async function insertOverrideRequest({
   requested_by,
   approved = false,
 }) {
+  const now = new Date();
   const approved_by = approved ? requested_by : null;
-  const approved_at = approved ? new Date() : null;
+  const approved_at = approved ? now : null;
   const status = approved ? "approved" : "pending";
 
   const [row] = await dbQuery(
     `INSERT INTO ims_box_override_request
        (packing_number, itemdcode, box_uids, from_customer, to_customer, remarks,
-        requested_by, approved, approved_by, approved_at, status)
-     VALUES ($1, $2, $3::text[], $4, $5, $6, $7, $8, $9, $10, $11)
+        requested_by, requested_at, approved, approved_by, approved_at, status)
+     VALUES ($1, $2, $3::text[], $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING *`,
     [
       String(packing_number),
@@ -175,6 +179,7 @@ export async function insertOverrideRequest({
       to_customer,
       remarks || null,
       requested_by,
+      now,
       approved,
       approved_by,
       approved_at,

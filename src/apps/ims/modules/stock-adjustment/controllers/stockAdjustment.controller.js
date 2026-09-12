@@ -7,13 +7,13 @@ import { fetchPackRowsForFinancialYearDoc, rowInIndianFinancialYear } from "../.
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
-import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalWorkflow, applyApprovalUpdateFields, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { getImsMapsSafe } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { syncAdjustmentMetadataOnly } from "../utils/apply/stockAdjustmentSync.js";
 import { resolveStockAdjustmentPackingMeta } from "../utils/packing/stockAdjustmentPacking.js";
 import { applyStockAdjustmentOnApproveTx, revertStockAdjustmentOnUnapproveTx } from "../utils/apply/stockAdjustmentApply.js";
-import { persistAdjustmentDocDtTx } from "../utils/doc/stockAdjustmentDocDt.js";
+import { persistAdjustmentDocDtTx, resolveSaItemFieldsFromMaster } from "../utils/doc/stockAdjustmentDocDt.js";
 import { isBoxAvailableForMinus, isBoxInHand } from "../../box/utils/inventory/boxInventory.js";
 import { enrichStockAdjustmentListRows } from "../utils/list/stockAdjustmentList.js";
 import { buildMinusRemovedBoxIdsJson, parseRemovedBoxIdsJson, buildAddPendingMetaJson, parseAddPendingMeta } from "../utils/minus/minusRemovedBoxPayload.js";
@@ -21,6 +21,17 @@ import { buildQtyUpdatePayload, parseQtyUpdatePayload } from "../utils/update/st
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 
 const STOCK_CFG = getCrudModuleConfig("stock_adjustment");
+
+const equalUidLists = (left = [], right = []) => {
+  const norm = (arr) => [...arr].map((u) => String(u).trim()).filter(Boolean).sort();
+  const a = norm(left);
+  const b = norm(right);
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+};
 
 /** Minus / box removal — add, edit, authorize, or delete on stock_adjustment (not delete-only). */
 function canUserRemoveInventoryBoxes(req) {
@@ -253,6 +264,8 @@ export const createAdjustment = async (req, res) => {
       }
     }
 
+    Object.assign(data, await resolveSaItemFieldsFromMaster(item_dcode));
+
     let adjustment;
     if (entry_type === "add" || entry_type === "minus" || entry_type === "update") {
       adjustment = await withTransaction(async (client) => {
@@ -260,7 +273,14 @@ export const createAdjustment = async (req, res) => {
         await persistAdjustmentDocDtTx(client, { ...adj, ...data });
         if (normalizedApproved === true) {
           const approvalFields = {};
-          applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true });
+          applyApprovalWorkflow({
+            req,
+            fields: approvalFields,
+            incomingApproved: true,
+            hasBusinessChanges: false,
+            auditAsName: true,
+            approvalTimestamp: adj.created_at,
+          });
           await updateAdjustmentsTx(client, approvalFields, { adjustment_id: adj.adjustment_id });
           const fresh = { ...adj, ...data, ...approvalFields, approved: true };
           await applyStockAdjustmentOnApproveTx(client, {
@@ -276,7 +296,14 @@ export const createAdjustment = async (req, res) => {
       adjustment = await insertAdjustment(data);
       if (normalizedApproved === true) {
         const approvalFields = {};
-        applyApprovalWorkflow({ req, fields: approvalFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true });
+        applyApprovalWorkflow({
+          req,
+          fields: approvalFields,
+          incomingApproved: true,
+          hasBusinessChanges: false,
+          auditAsName: true,
+          approvalTimestamp: adjustment.created_at,
+        });
         await updateAdjustments(approvalFields, { adjustment_id: adjustment.adjustment_id });
       }
     }
@@ -445,17 +472,6 @@ export const updateAdjustment = async (req, res) => {
       ...(all_boxes_loose !== undefined ? { all_boxes_loose } : {}),
     };
 
-    const fields = { 
-      ...incoming, 
-      updated_by: auditUserName(req), 
-      updated_at: new Date() 
-    };
-    if (acc_code !== undefined) {
-      fields.acc_code = acc_code;
-    }
-    if (acc_name !== undefined && acc_name !== null && String(acc_name).trim() !== "") {
-      fields.acc_name = String(acc_name).trim();
-    }
     const wasApproved = !!existing.approved;
     const storedAddLoose = parseAddPendingMeta(existing.removed_box_ids).all_boxes_loose;
     const allBoxesLoose =
@@ -465,33 +481,97 @@ export const updateAdjustment = async (req, res) => {
           ? !!storedAddLoose
           : false;
 
-    const hasBusinessChanges =
-      Object.keys(incoming).length > 0 ||
-      wantsPackingBoxSync ||
-      wantsQtyUpdateSync ||
-      all_boxes_loose !== undefined;
+    const accCodeChanged =
+      acc_code !== undefined && String(acc_code ?? "") !== String(existing.acc_code ?? "");
+    const accNameChanged =
+      acc_name !== undefined &&
+      String(acc_name ?? "").trim() !== String(existing.acc_name ?? "").trim();
+    const looseChanged =
+      all_boxes_loose !== undefined &&
+      allBoxesLoose !== (storedAddLoose !== undefined ? !!storedAddLoose : false);
+    const remarksChanged =
+      incoming.remarks !== undefined &&
+      String(incoming.remarks ?? "").trim() !== String(existing.remarks ?? "").trim();
+    const existingMinusUids =
+      existing.entry_type === "minus" ? parseRemovedBoxIdsJson(existing.removed_box_ids) : [];
+    const removedUidsChanged =
+      removed_box_uids !== undefined &&
+      !equalUidLists(
+        (Array.isArray(removed_box_uids) ? removed_box_uids : [])
+          .map((u) => Number(u))
+          .filter((n) => Number.isFinite(n)),
+        existingMinusUids
+      );
+    const existingAddPendingUids = parseAddPendingMeta(existing.removed_box_ids).uids || [];
+    const removeAddUidsChanged =
+      remove_add_box_uids !== undefined &&
+      !equalUidLists(
+        (Array.isArray(remove_add_box_uids) ? remove_add_box_uids : [])
+          .map((u) => Number(u))
+          .filter((n) => Number.isFinite(n)),
+        existingAddPendingUids
+      );
+    const noOfBoxesChanged =
+      no_of_boxes !== undefined &&
+      Number(no_of_boxes) !== Number(existing.no_of_boxes ?? existing.box_count_impact ?? 0);
+    const perBoxQtyChanged =
+      incoming.per_box_qty !== undefined &&
+      Number(incoming.per_box_qty) !== Number(existing.per_box_qty ?? 0);
+    const boxCountImpactChanged =
+      incoming.box_count_impact !== undefined &&
+      Number(incoming.box_count_impact) !== Number(existing.box_count_impact ?? 0);
+    const existingQtyPlan =
+      existing.entry_type === "update" ? parseQtyUpdatePayload(existing.removed_box_ids) || {} : {};
+    const qtyUpdateChanged =
+      wantsQtyUpdateSync &&
+      ((bodyBoxUid !== undefined &&
+        Number(bodyBoxUid) !== Number(existingQtyPlan.box_uid ?? 0)) ||
+        (bodyUpdateAction !== undefined &&
+          String(bodyUpdateAction) !== String(existingQtyPlan.update_action ?? "")) ||
+        (bodyUpdateQty !== undefined &&
+          Number(bodyUpdateQty) !== Number(existingQtyPlan.update_qty ?? 0)));
 
-    /** Approved row + any edit → pending only; Approve must be a separate action. */
-    if (wasApproved && hasBusinessChanges) {
-      if (normalizedApproved === true) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Save changes first (status will become pending), then use Approve to apply box changes."
-        });
-      }
-      fields.approved = false;
-      fields.approved_by = null;
-      fields.approved_at = null;
-    } else {
-      applyApprovalWorkflow({
-        req,
-        fields,
-        incomingApproved: normalizedApproved,
-        hasBusinessChanges,
-        auditAsName: true,
+    const hasBusinessChanges =
+      qtyUpdateChanged ||
+      accCodeChanged ||
+      accNameChanged ||
+      looseChanged ||
+      remarksChanged ||
+      removedUidsChanged ||
+      removeAddUidsChanged ||
+      noOfBoxesChanged ||
+      perBoxQtyChanged ||
+      boxCountImpactChanged ||
+      Object.entries(incoming).some(([key, val]) => {
+        if (val === undefined || key === "remarks" || key === "per_box_qty" || key === "box_count_impact") {
+          return false;
+        }
+        return JSON.stringify(val) !== JSON.stringify(existing[key]);
       });
+
+    const fields = {};
+    if (accCodeChanged) fields.acc_code = acc_code;
+    if (accNameChanged && acc_name !== null && String(acc_name).trim() !== "") {
+      fields.acc_name = String(acc_name).trim();
     }
+    if (remarksChanged) fields.remarks = incoming.remarks;
+    for (const [key, val] of Object.entries(incoming)) {
+      if (val === undefined || key === "remarks") continue;
+      if (JSON.stringify(val) !== JSON.stringify(existing[key])) {
+        fields[key] = val;
+      }
+    }
+
+    applyApprovalUpdateFields({
+      req,
+      fields,
+      incomingApproved: normalizedApproved,
+      hasBusinessChanges,
+      alreadyApproved: wasApproved,
+      auditAsName: true,
+    });
+
+    Object.assign(fields, await resolveSaItemFieldsFromMaster(existing.item_dcode));
 
     if (wantsQtyUpdateSync) {
       const existingPlan = parseQtyUpdatePayload(existing.removed_box_ids) || {};
@@ -558,12 +638,7 @@ export const updateAdjustment = async (req, res) => {
         });
       }
       if (wantsPackingBoxSync) {
-        await syncAdjustmentMetadataOnly(client, {
-          existing,
-          body: syncBody,
-          userId: req.user.id,
-          userName: auditUserName(req),
-        });
+        await syncAdjustmentMetadataOnly(client, { existing, body: syncBody });
       }
       [updated] = await updateAdjustmentsTx(client, fields, { adjustment_id: id });
 
@@ -572,7 +647,7 @@ export const updateAdjustment = async (req, res) => {
         [id]
       );
       const row = freshRows[0] || updated || { ...existing, ...fields };
-      if (fields.approved === true && !(wasApproved && hasBusinessChanges)) {
+      if (fields.approved === true) {
         await applyStockAdjustmentOnApproveTx(client, {
           adjustment: row,
           userId: req.user.id,

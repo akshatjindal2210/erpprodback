@@ -1,5 +1,5 @@
 import { updateAdjustmentsTx, findFinancialYearForPacking } from "../../models/stockAdjustment.model.js";
-import { getImsMapsSafe } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
+import { canonicalCode, getImsMapsSafe, resolveImsItemDisplay } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { resolvePackingCustomerName } from "../../../../lib/utils/packing-entry/customers/packingEntryCustomers.js";
 import { fetchSaPackingMetaFromIms } from "../packing/stockAdjustmentImsPacking.js";
 import { resolveStockAdjustmentPackingMeta } from "../packing/stockAdjustmentPacking.js";
@@ -72,16 +72,25 @@ async function resolveAdjustmentPackingMeta(adjustment) {
   return { ...merged, doc_no: pn };
 }
 
+/** Latest item_code / item_desc from product master (item_dcode), not stale packing snapshot. */
+export async function resolveSaItemFieldsFromMaster(itemDcode) {
+  const dcode = canonicalCode(itemDcode);
+  if (!dcode) return {};
+  const { itemMap } = await getImsMapsSafe();
+  const { item_code, item_desc } = resolveImsItemDisplay(itemMap, dcode);
+  const fields = {};
+  if (item_code) fields.item_code = item_code;
+  if (item_desc) fields.item_desc = item_desc;
+  return fields;
+}
+
 /** Resolve packing meta (date + display names) and save on the adjustment row (transaction). */
 export async function persistAdjustmentDocDtTx(client, adjustment) {
   const meta = await resolveAdjustmentPackingMeta(adjustment);
   const fields = packingMetaToSaDbFields(meta, { existing: adjustment });
   Object.assign(fields, await resolveAdjustmentAccNameFields({ ...adjustment, ...fields }));
+  Object.assign(fields, await resolveSaItemFieldsFromMaster(adjustment?.item_dcode));
   if (!Object.keys(fields).length) return meta;
-  await updateAdjustmentsTx(
-    client,
-    { ...fields, updated_at: new Date() },
-    { adjustment_id: adjustment.adjustment_id }
-  );
+  await updateAdjustmentsTx(client, fields, { adjustment_id: adjustment.adjustment_id });
   return meta;
 }

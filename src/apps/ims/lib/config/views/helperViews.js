@@ -37,8 +37,7 @@ function fieldsForItems(mod, act) {
 
   if (mod === "qc_hold_material" && (act === VIEW || isForm(act))) return [...itemPicker];
 
-  if (mod === "shortage" && act === VIEW) return [...itemPicker];
-  if (mod === "shortage" && isForm(act)) return [...itemModal];
+  if (mod === "shortage" && (act === VIEW || isForm(act))) return [...itemPicker, "grpname"];
 
   return null;
 }

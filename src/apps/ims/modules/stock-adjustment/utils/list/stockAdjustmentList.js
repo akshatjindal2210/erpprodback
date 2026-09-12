@@ -44,7 +44,6 @@ const USER_JOINS = ``;
 
 const DEFAULT_SELECT = [
   "s.*",
-  "s.item_dcode::text AS item_code",
   "s.created_by AS created_by_name",
   "s.updated_by AS updated_by_name",
   "s.approved_by AS approved_by_name",
@@ -106,7 +105,7 @@ function resolveSelectFields(fields = []) {
   if (!fields.length) return DEFAULT_SELECT.join(", ");
   return fields
     .map((f) => {
-      if (f === "item_code") return "s.item_dcode::text AS item_code";
+      if (f === "item_code") return "s.item_code";
       if (f === "created_by_name") return "s.created_by AS created_by_name";
       if (f === "updated_by_name") return "s.updated_by AS updated_by_name";
       if (f === "approved_by_name") return "s.approved_by AS approved_by_name";

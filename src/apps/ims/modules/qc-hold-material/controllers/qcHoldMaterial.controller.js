@@ -1,5 +1,6 @@
 import { findQcHoldMaterials, findQcHoldMaterialById, findQcHoldMaterialByIdForTxLog, findQcHoldMaterialsForTxLog, findActiveQcHoldParents, insertQcHoldMaterial, updateQcHoldMaterial, softDeleteQcHoldMaterial, findDistinctQcHoldReasons } from "../models/qcHoldMaterial.model.js";
 import { withTransaction } from "../../../../../config/db/db.js";
+import dbQuery from "../../../../../config/db/db.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
@@ -13,11 +14,14 @@ import { isBoxSellable, isBoxOnQcHold } from "../../box/utils/inventory/boxInven
 import { applyQcHoldToBoxes, countRevertableBoxesForHold, expandFullHoldBoxesForPacking, normalizeHoldScanMode, QC_HOLD_SCAN_FULL, QC_HOLD_SCAN_PARTIAL, releaseQcHoldFromBoxes, releaseQcHoldRevertTx, resolveHoldBoxUids, syncQcHoldBoxStock, validateBoxesForHold } from "../utils/stock/qcHoldBoxStock.js";
 import { createQcHoldCompletionBoxesTx, consumeQcHoldSourceBoxesTx, consumeQcHoldSourceQtyTx, listQcHoldCompletionBoxes, listQcHoldPrintStickers, activateQcHoldCompletionBoxesTx, softDeletePendingQcHoldCompletionBoxesTx, softDeleteQcHoldCompletionBoxesByHoldTx, ensureQcHoldSubmissionCompletionBoxesTx } from "../utils/packing/qcHoldCompletionPacking.js";
 import { parseBoxUidList } from "../utils/stock/qcHoldBalances.js";
-import { appendSubmission, approveSubmissionInData, buildHoldDataPatch, buildPendingHoldData, clearHoldBoxesFromHoldData, deriveStatusFromHoldData, findSubmissionById, hasPendingSubmission, listSubmissions, parseHoldData, patchSubmissionCompletedBoxes, removeBoxesFromHoldData, rollupHoldDataAfterApproval, submissionToApi } from "../utils/list/qcHoldData.js";
+import { appendSubmission, approveSubmissionInData, buildHoldDataPatch, buildPendingHoldData, clearHoldBoxesFromHoldData, deriveStatusFromHoldData, findSubmissionById, hasPendingSubmission, isSubmissionApprovalRequired, listSubmissions, parseHoldData, patchSubmissionCompletedBoxes, removeBoxesFromHoldData, rollupHoldDataAfterApproval, submissionToApi } from "../utils/list/qcHoldData.js";
 import { QC_HOLD_MSG, qcHoldBoxBelongsToPacking } from "../../../lib/constants/qcHoldMaterial.messages.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 
 const CFG = getCrudModuleConfig("qc_hold_material");
+// Keep deleted-hold transaction logs hidden by default.
+// Set true later if business wants deleted logs visible again.
+const SHOW_DELETED_HOLD_LOGS = false;
 
 function mapCompletionStickers(completionBoxes = []) {
   return (completionBoxes || []).map((row, idx) => ({
@@ -149,19 +153,69 @@ export const getQcHoldMaterialById = async (req, res) => {
 export const expandQcHoldFullBoxes = async (req, res) => {
   try {
     const { packing_number } = req.body || {};
-    const pn = String(packing_number ?? "").trim();
-    if (!pn) {
+    const raw = String(packing_number ?? "").trim();
+    if (!raw) {
       return res.status(400).json({ success: false, message: QC_HOLD_MSG.PACKING_NUMBER_REQUIRED });
     }
-    const boxes = await expandFullHoldBoxesForPacking(pn);
+
+    // Input supports either packing number or job card number.
+    let boxes = await expandFullHoldBoxesForPacking(raw);
+    let packingsForJobCard = [];
+    let resolvedPacking = raw;
+
+    if (!boxes.length) {
+      const jcRows = await dbQuery(
+        `SELECT DISTINCT NULLIF(TRIM(doc_no::text), '') AS packing_number
+         FROM ims_dailyprod
+         WHERE NULLIF(TRIM(job_card_no::text), '') = NULLIF(TRIM($1::text), '')
+           AND NULLIF(TRIM(doc_no::text), '') IS NOT NULL
+         ORDER BY 1`,
+        [raw]
+      );
+      packingsForJobCard = (jcRows || [])
+        .map((r) => (r?.packing_number != null ? String(r.packing_number).trim() : ""))
+        .filter(Boolean);
+
+      // Fallback: old/alternative job cards may exist only in stock adjustment.
+      if (!packingsForJobCard.length) {
+        const saRows = await dbQuery(
+          `SELECT DISTINCT NULLIF(TRIM(sa.packing_number::text), '') AS packing_number
+           FROM ims_stock_adjustment sa
+           WHERE sa.is_deleted = false
+             AND NULLIF(TRIM(sa.job_card_no::text), '') = NULLIF(TRIM($1::text), '')
+             AND NULLIF(TRIM(sa.packing_number::text), '') IS NOT NULL
+           ORDER BY 1`,
+          [raw]
+        );
+        packingsForJobCard = (saRows || [])
+          .map((r) => (r?.packing_number != null ? String(r.packing_number).trim() : ""))
+          .filter(Boolean);
+      }
+
+      if (packingsForJobCard.length) {
+        const perPacking = await Promise.all(packingsForJobCard.map((pn) => expandFullHoldBoxesForPacking(pn)));
+        const flat = perPacking.flat();
+        const seen = new Set();
+        boxes = flat.filter((b) => {
+          const key = String(b?.box_no_uid ?? "").trim();
+          if (!key || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        if (boxes.length) resolvedPacking = packingsForJobCard.join(" | ");
+      }
+    }
+
     if (!boxes.length) {
       return res.status(400).json({ success: false, message: QC_HOLD_MSG.NO_SELLABLE_BOXES_FOR_PACKING });
     }
-    const meta = await resolveQcHoldPackingMeta(pn);
+    const meta = await resolveQcHoldPackingMeta(packingsForJobCard[0] || resolvedPacking);
     res.json({
       success: true,
       data: {
-        packing_number: pn,
+        packing_number: resolvedPacking,
+        input_value: raw,
+        matched_packings: packingsForJobCard,
         boxes,
         packing_meta: meta,
         total_boxes: boxes.length,
@@ -221,7 +275,9 @@ export const createQcHoldMaterial = async (req, res) => {
       return res.status(400).json({ success: false, message: QC_HOLD_MSG.NO_BOXES_TO_HOLD });
     }
 
-    const validationError = await validateBoxesForHold(boxUids, { packingNumber: resolvedPackingForExpand });
+    const validationError = await validateBoxesForHold(boxUids, {
+      packingNumber: scanMode === QC_HOLD_SCAN_FULL ? null : resolvedPackingForExpand,
+    });
     if (validationError) {
       return res.status(400).json({ success: false, message: validationError });
     }
@@ -325,10 +381,13 @@ export const submitQcHoldMaterial = async (req, res) => {
       return res.status(400).json({ success: false, message: qtyError });
     }
 
+    const requiresApprovalForPartialClose = type === "partial" && finalCompletedQty >= balanceQty;
+
     const { holdData: nextHoldData, submission } = appendSubmission(
       hold.hold_data,
       {
         submission_type: type,
+        requires_approval: requiresApprovalForPartialClose,
         completed_box_uids: [],
         completed_qty: finalCompletedQty,
         completed_boxes: 0,
@@ -340,17 +399,44 @@ export const submitQcHoldMaterial = async (req, res) => {
       auditUserName(req)
     );
 
+    const userName = auditUserName(req);
+    let holdDataToSave = nextHoldData;
+    let apiSubmission = submissionToApi(submission, pk);
+    let statusPatch = {};
+    let message = QC_HOLD_MSG.SUBMITTED_AWAITING_APPROVAL;
+
+    // Partial submit applies directly, except the final closing partial which needs approval.
+    if (type === "partial" && !requiresApprovalForPartialClose) {
+      const approvedNow = approveSubmissionInData(nextHoldData, submission.submission_id, userName);
+      if (!approvedNow) {
+        return res.status(400).json({
+          success: false,
+          message: QC_HOLD_MSG.COULD_NOT_APPROVE_SUBMISSION,
+        });
+      }
+      holdDataToSave = rollupHoldDataAfterApproval(approvedNow.holdData, approvedNow.submission);
+      const nextStatus = deriveStatusFromHoldData(holdDataToSave);
+      statusPatch = {
+        status: nextStatus,
+        approved: true,
+        approved_by: userName,
+        approved_at: new Date(),
+      };
+      apiSubmission = submissionToApi(approvedNow.submission, pk);
+      message = "Partial submitted";
+    } else if (requiresApprovalForPartialClose) {
+      message = "Final partial submitted — waiting for super admin approval";
+    }
+
     await updateQcHoldMaterial(pk, {
-      hold_data: nextHoldData,
-      updated_by: auditUserName(req),
-      updated_at: new Date(),
+      hold_data: holdDataToSave,
+      ...statusPatch,
     });
 
-    const apiSubmission = submissionToApi(submission, pk);
     res.json({
       success: true,
       data: apiSubmission,
-      message: QC_HOLD_MSG.SUBMITTED_AWAITING_APPROVAL,
+      message,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -366,7 +452,7 @@ export const approveQcHoldSubmissionController = async (req, res) => {
     if (hold_id) {
       hold = await findQcHoldMaterialById(hold_id);
       if (hold) {
-        const pending = listSubmissions(hold.hold_data, { pendingOnly: true });
+        const pending = listSubmissions(hold.hold_data, { pendingOnly: true }).filter(isSubmissionApprovalRequired);
         submission = submission_id
           ? pending.find((s) => Number(s.submission_id) === Number(submission_id))
             || findSubmissionById(hold.hold_data, submission_id)
@@ -509,10 +595,9 @@ export const approveQcHoldSubmissionController = async (req, res) => {
           const row = await updateQcHoldMaterial(hold.hold_id, {
             hold_data: nextHoldData,
             status: "complete",
+            approved: true,
             approved_by: userName,
             approved_at: new Date(),
-            updated_by: userName,
-            updated_at: new Date(),
           });
 
           return {
@@ -591,6 +676,13 @@ export const approveQcHoldSubmissionController = async (req, res) => {
             err.statusCode = 400;
             throw err;
           }
+          // Guard: partial-consumption drift. If source boxes can't cover the approved qty
+          // (e.g. narrow scope in sourceBoxUids), fail loudly instead of silently understocking.
+          if (!consumeResult.noSourceBoxes && (Number(consumeResult.consumedQty) || 0) < finalCompletedQty) {
+            const err = new Error("Approved quantity exceeds what could be consumed from selected QC hold boxes. Adjust selection or qty.");
+            err.statusCode = 400;
+            throw err;
+          }
           if (consumeResult.consumedUids?.length) {
             nextHoldData = removeBoxesFromHoldData(nextHoldData, consumeResult.consumedUids);
           }
@@ -620,10 +712,9 @@ export const approveQcHoldSubmissionController = async (req, res) => {
         const row = await updateQcHoldMaterial(hold.hold_id, {
           hold_data: nextHoldData,
           status,
+          approved: true,
           approved_by: userName,
           approved_at: new Date(),
-          updated_by: userName,
-          updated_at: new Date(),
         });
 
         return {
@@ -707,8 +798,6 @@ export const getQcHoldCompletionBoxes = async (req, res) => {
         if (ensured.holdData) {
           hold = await updateQcHoldMaterial(pk, {
             hold_data: ensured.holdData,
-            updated_by: userName,
-            updated_at: new Date(),
           });
         }
       } catch (err) {
@@ -797,7 +886,10 @@ export const updateQcHoldMaterialController = async (req, res) => {
         scannedUids: boxUids,
         packingNumber: pn,
       });
-      const validationError = await validateBoxesForHold(boxUids, { holdId: pk, packingNumber: pn });
+      const validationError = await validateBoxesForHold(boxUids, {
+        holdId: pk,
+        packingNumber: scanMode === QC_HOLD_SCAN_FULL ? null : pn,
+      });
       if (validationError) {
         return res.status(400).json({ success: false, message: validationError });
       }
@@ -820,17 +912,16 @@ export const updateQcHoldMaterialController = async (req, res) => {
     // Always sync status from hold_data balances (cleared → complete, never stuck on partial).
     payload.status = deriveStatusFromHoldData(payload.hold_data ?? existing.hold_data);
 
-    if (approved !== undefined) {
-      const normalizedApproved = normalizeApprovedInput(approved);
-      payload.approved = normalizedApproved;
-      applyApprovalWorkflow({
-        req,
-        fields: payload,
-        incomingApproved: normalizedApproved,
-        hasBusinessChanges: true,
-        auditAsName: true,
-      });
-    }
+    const normalizedApproved = normalizeApprovedInput(approved);
+    if (normalizedApproved !== undefined) payload.approved = normalizedApproved;
+    applyApprovalWorkflow({
+      req,
+      fields: payload,
+      incomingApproved: normalizedApproved,
+      hasBusinessChanges: true,
+      alreadyApproved: !!existing?.approved,
+      auditAsName: true,
+    });
 
     const updated = await updateQcHoldMaterial(pk, payload);
 
@@ -905,16 +996,20 @@ export const getQcHoldTransactionLog = async (req, res) => {
     if (holdId) {
       const hold = await findQcHoldMaterialByIdForTxLog(holdId);
       if (!hold) return res.status(404).json({ success: false, message: QC_HOLD_MSG.NOT_FOUND });
+      if (!SHOW_DELETED_HOLD_LOGS && hold.is_deleted) {
+        return res.json({ success: true, data: [], total: 0 });
+      }
       const { data } = await buildQcHoldTransactionLog({ holds: [hold], page: 1, limit });
       return res.json({ success: true, data });
     }
 
-    const holds = await findQcHoldMaterialsForTxLog({
+    const holdsRaw = await findQcHoldMaterialsForTxLog({
       from_date: fromDate || null,
       to_date: toDate || null,
       search: search || null,
       limit: 5000,
     });
+    const holds = SHOW_DELETED_HOLD_LOGS ? holdsRaw : (holdsRaw || []).filter((h) => !h?.is_deleted);
     const { data, total } = await buildQcHoldTransactionLog({
       holds,
       fromDate,

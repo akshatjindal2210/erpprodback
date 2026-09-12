@@ -1,4 +1,5 @@
 import dbQuery from "../../../../../../config/db/db.js";
+import { patchTableSchema, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 import { IMS_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
 /**
@@ -11,6 +12,7 @@ export async function createShortageTable() {
       id              SERIAL PRIMARY KEY,
       itemdcode       INTEGER NOT NULL,
       itemcode        VARCHAR(50),
+      grpname         VARCHAR(120),
       type            VARCHAR(32) NOT NULL,
       qty             INTEGER NOT NULL CHECK (qty > 0),
       month           DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -33,4 +35,9 @@ export async function createShortageTable() {
   `);
 
   await dbQuery(`ALTER TABLE ${T.SHORTAGE} DROP CONSTRAINT IF EXISTS ims_shortage_type_check`);
+
+  // Use shared schema helper (single step) for existing DBs.
+  await patchTableSchema(dbQuery, T.SHORTAGE, {
+    columns: [patchCol("grpname", "VARCHAR(120)")],
+  });
 }

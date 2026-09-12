@@ -1,20 +1,422 @@
-import { createCrud } from "../../../lib/crud/genericCrud.js";
-import { shortageCrudConfig, normalizeShortageMonth, SHORTAGE_BULK_IMPORT_TYPES, SHORTAGE_TYPES } from "./../shortage.config.js";
+import { findShortages, findShortage, insertShortage, updateShortages, deleteShortages } from "../models/shortage.model.js";
+import { normalizeShortageMonth, SHORTAGE_BULK_IMPORT_TYPES, SHORTAGE_TYPES } from "../shortage.config.js";
+import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
+import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
+import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
+import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
+import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName, applyApprovalUpdateFields } from "../../../../core/lib/utils/auth/approval.js";
+import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
-import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { canCreatePackingDeviation } from "../../../lib/utils/imsSpecialPermissions.js";
 import { getItemsMonthlyPackingUsedBatch } from "../../../lib/utils/inventory/monthlyPackingLimit.js";
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 
+const CFG = getCrudModuleConfig("shortage");
 const BULK_INSERT_CHUNK = 400;
-
 const MASTER_TYPE_QTY_KEYS = ["qty_ppc", "qty_wip", "qty_deviation", "qty_additional"];
+
+const ENTITY = "shortage";
+
+/* ─────────────────────────────  helpers  ───────────────────────────── */
 
 function monthYmKey(monthYmd) {
   const s = normalizeShortageMonth(monthYmd, null);
   return s.slice(0, 7);
 }
+
+function normText(v) {
+  return String(v ?? "").trim();
+}
+
+function sameText(a, b) {
+  return normText(a) === normText(b);
+}
+
+function sameNum(a, b) {
+  const na = Number(a);
+  const nb = Number(b);
+  if (!Number.isFinite(na) && !Number.isFinite(nb)) return true;
+  return na === nb;
+}
+
+function sameMonth(a, b) {
+  return normalizeShortageMonth(a, null).slice(0, 7) === normalizeShortageMonth(b, null).slice(0, 7);
+}
+
+async function enrichShortageRows(rows = []) {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  const { itemMap } = await getImsMapsSafe();
+  const enriched = await enrichRowsWithIMS(rows, {
+    itemCodeField: "itemdcode",
+    itemCodeOut: "item_code",
+    itemDescOut: "item_desc",
+    maps: { itemMap },
+  });
+  // Saved shortage grpname wins over IMS item master (user may override group on form).
+  return enriched.map((row, i) => {
+    const saved = rows[i]?.grpname;
+    return saved != null && String(saved).trim() !== "" ? { ...row, grpname: String(saved).trim() } : row;
+  });
+}
+
+async function resolveShortageGroupName({ itemdcode, itemcode, fallback = null } = {}) {
+  const key = canonicalCode(itemdcode ?? itemcode);
+  if (!key) return fallback ?? null;
+  const { itemMap } = await getImsMapsSafe();
+  return itemMap.get(key)?.grpname ?? fallback ?? null;
+}
+
+/* ─────────────────────  payload validation & normalization  ───────────────────── */
+
+/**
+ * Extracts and validates business fields from request body for CREATE.
+ * Returns { ok, errors[], data{} } where data has the safe, typed values.
+ */
+function parseCreatePayload(body = {}) {
+  const errors = [];
+  const data = {};
+
+  const itemdcode = body.itemdcode !== undefined && body.itemdcode !== null && body.itemdcode !== ""
+    ? parseInt(String(body.itemdcode), 10)
+    : null;
+  if (!Number.isFinite(itemdcode) || itemdcode <= 0) {
+    errors.push("itemdcode is required");
+  } else {
+    data.itemdcode = itemdcode;
+  }
+
+  const rawType = body.type != null ? String(body.type).trim() : "";
+  if (!rawType) {
+    errors.push("type is required");
+  } else if (!SHORTAGE_TYPES.includes(rawType)) {
+    errors.push(`type must be one of: ${SHORTAGE_TYPES.join(", ")}`);
+  } else {
+    data.type = rawType;
+  }
+
+  const qty = body.qty !== undefined && body.qty !== null && body.qty !== ""
+    ? parseInt(String(body.qty), 10)
+    : null;
+  if (!Number.isFinite(qty)) {
+    errors.push("qty must be a valid number");
+  } else if (qty < 1) {
+    errors.push("qty must be at least 1");
+  } else {
+    data.qty = qty;
+  }
+
+  if (body.itemcode !== undefined && body.itemcode !== null && body.itemcode !== "") {
+    data.itemcode = String(body.itemcode).trim();
+  }
+
+  if (body.remarks !== undefined && body.remarks !== null && body.remarks !== "") {
+    data.remarks = String(body.remarks).trim();
+  }
+
+  // Month is optional on create — applyShortageApproval falls back to today.
+  if (body.month !== undefined && body.month !== null && body.month !== "") {
+    data.month = body.month;
+  }
+
+  if (body.grpname !== undefined && body.grpname !== null && String(body.grpname).trim() !== "") {
+    data.grpname = String(body.grpname).trim();
+  }
+
+  return { ok: errors.length === 0, errors, data };
+}
+
+/**
+ * Extracts and validates business fields from request body for UPDATE.
+ * Only includes fields explicitly present in body (undefined => skipped, matches old behavior).
+ */
+function parseUpdatePayload(body = {}) {
+  const errors = [];
+  const data = {};
+
+  if (body.itemdcode !== undefined) {
+    if (body.itemdcode === null || body.itemdcode === "") {
+      errors.push("itemdcode is required");
+    } else {
+      const itemdcode = parseInt(String(body.itemdcode), 10);
+      if (!Number.isFinite(itemdcode) || itemdcode <= 0) {
+        errors.push("itemdcode must be a valid number");
+      } else {
+        data.itemdcode = itemdcode;
+      }
+    }
+  }
+
+  if (body.type !== undefined) {
+    const rawType = body.type != null ? String(body.type).trim() : "";
+    if (!rawType) {
+      errors.push("type is required");
+    } else if (!SHORTAGE_TYPES.includes(rawType)) {
+      errors.push(`type must be one of: ${SHORTAGE_TYPES.join(", ")}`);
+    } else {
+      data.type = rawType;
+    }
+  }
+
+  if (body.qty !== undefined) {
+    if (body.qty === null || body.qty === "") {
+      errors.push("qty is required");
+    } else {
+      const qty = parseInt(String(body.qty), 10);
+      if (!Number.isFinite(qty)) {
+        errors.push("qty must be a valid number");
+      } else if (qty < 1) {
+        errors.push("qty must be at least 1");
+      } else {
+        data.qty = qty;
+      }
+    }
+  }
+
+  if (body.itemcode !== undefined) {
+    // Blank string is allowed here (approve-drawer edge case handled in applyShortageApproval).
+    data.itemcode = body.itemcode == null ? "" : String(body.itemcode).trim();
+  }
+
+  if (body.remarks !== undefined) {
+    data.remarks = body.remarks == null || body.remarks === "" ? null : String(body.remarks).trim();
+  }
+
+  if (body.month !== undefined) {
+    data.month = body.month;
+  }
+
+  if (body.grpname !== undefined) {
+    data.grpname = body.grpname == null || String(body.grpname).trim() === "" ? null : String(body.grpname).trim();
+  }
+
+  return { ok: errors.length === 0, errors, data };
+}
+
+async function resolveShortageGrpname(data, existing, reqBody = {}) {
+  const fromBody = reqBody.grpname != null ? String(reqBody.grpname).trim() : "";
+  if (fromBody) return fromBody;
+  const fromData = data.grpname != null ? String(data.grpname).trim() : "";
+  if (fromData) return fromData;
+  return resolveShortageGroupName({
+    itemdcode: data.itemdcode ?? existing?.itemdcode,
+    itemcode: data.itemcode ?? existing?.itemcode,
+    fallback: existing?.grpname ?? null,
+  });
+}
+
+/**
+ * Frontend CRUD → pending unless authorize user sets approved=true.
+ * Bulk / packing auto-create → autoApprove: true (approved by default).
+ */
+async function applyShortageApproval(data, { mode, req, existing, autoApprove = false }) {
+  data.month = normalizeShortageMonth(
+    data.month ?? req?.body?.month ?? req?.body?.shortage_month,
+    null
+  );
+
+  if (autoApprove) {
+    data.approved = true;
+    data.approved_by = auditUserName(req) || "system";
+    data.approved_at = new Date();
+    return data;
+  }
+
+  const incoming = normalizeApprovedInput(req?.body?.approved);
+
+  if (mode === "create") {
+    data.grpname = await resolveShortageGrpname(data, null, req?.body);
+    if (incoming === true) {
+      applyApprovalWorkflow({ req, fields: data, incomingApproved: true, auditAsName: true });
+    } else {
+      data.approved = false;
+      data.approved_by = null;
+      data.approved_at = null;
+    }
+    return data;
+  }
+
+  // UPDATE branch
+  // Protect against transient blank itemcode from frontend picker in approve drawer.
+  if (data.itemcode !== undefined && normText(data.itemcode) === "" && existing?.itemcode != null) {
+    data.itemcode = existing.itemcode;
+  }
+
+  data.grpname = await resolveShortageGrpname(data, existing, req?.body);
+
+  const hasBusinessChanges =
+    (data.itemdcode !== undefined && !sameNum(data.itemdcode, existing?.itemdcode)) ||
+    (data.itemcode !== undefined && !sameText(data.itemcode, existing?.itemcode)) ||
+    (data.grpname !== undefined && !sameText(data.grpname, existing?.grpname)) ||
+    (data.type !== undefined && !sameText(data.type, existing?.type)) ||
+    (data.qty !== undefined && !sameNum(data.qty, existing?.qty)) ||
+    (data.month !== undefined && !sameMonth(data.month, existing?.month)) ||
+    (data.remarks !== undefined && !sameText(data.remarks, existing?.remarks));
+
+  applyApprovalUpdateFields({
+    req,
+    fields: data,
+    incomingApproved: incoming,
+    hasBusinessChanges,
+    alreadyApproved: existing?.approved === true,
+    auditAsName: true,
+  });
+
+  return data;
+}
+
+/* ─────────────────────  CRUD HTTP handlers  ───────────────────── */
+
+export const getShortages = async (req, res) => {
+  try {
+    const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, {
+      sortBy: "id",
+      order: "DESC",
+    });
+
+    const result = await findShortages({
+      filters: sanitizeFilters(filters, CFG.filterFields),
+      search: sanitizeSearch(search),
+      sort: { by: sortBy, order },
+      page,
+      limit,
+      fields: CFG.listFields,
+    });
+
+    const enrichedRows = await enrichShortageRows(result.data || []);
+    res.json({ success: true, ...result, data: enrichedRows });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const getShortageById = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.id);
+    if (!id) return res.status(400).json({ success: false, message: "ID required" });
+
+    const data = await findShortage({ id });
+    if (!data) return res.status(404).json({ success: false, message: "Not found" });
+
+    const [enriched] = await enrichShortageRows([data]);
+    res.json({ success: true, data: enriched });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const createShortage = async (req, res) => {
+  try {
+    const parsed = parseCreatePayload(req.body);
+    if (!parsed.ok) {
+      return res.status(400).json({ success: false, message: parsed.errors.join("; ") });
+    }
+
+    const data = { ...parsed.data, created_by: auditUserName(req) };
+    const prepared = await applyShortageApproval(data, { mode: "create", req, existing: null });
+
+    const row = await insertShortage(prepared);
+
+    await logActivity(req, {
+      action: "create",
+      entity: ENTITY,
+      entity_id: row.id,
+      record: row,
+    });
+
+    const [enriched] = await enrichShortageRows([row]);
+    res.status(201).json({ success: true, data: enriched });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    res.status(status).json({ success: false, message: err.message });
+  }
+};
+
+export const updateShortage = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.id);
+    if (!id) return res.status(400).json({ success: false, message: "ID required" });
+
+    const existing = await findShortage({ id });
+    if (!existing) return res.status(404).json({ success: false, message: "Not found" });
+
+    const parsed = parseUpdatePayload(req.body);
+    if (!parsed.ok) {
+      return res.status(400).json({ success: false, message: parsed.errors.join("; ") });
+    }
+
+    const prepared = await applyShortageApproval(parsed.data, { mode: "update", req, existing });
+    if (forced) prepared.grpname = forced;
+
+    const row = await updateShortages(prepared, { id });
+    if (!row) return res.status(404).json({ success: false, message: "Not found" });
+
+    await logActivity(req, {
+      action: "update",
+      entity: ENTITY,
+      entity_id: id,
+      details: { fields: Object.keys(prepared) },
+    });
+
+    const [enriched] = await enrichShortageRows([row]);
+    res.json({ success: true, data: enriched });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    res.status(status).json({ success: false, message: err.message });
+  }
+};
+
+export const deleteShortage = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.id);
+    if (!id) return res.status(400).json({ success: false, message: "ID required" });
+
+    const existing = await findShortage({ id });
+    if (!existing) return res.status(404).json({ success: false, message: "Not found" });
+
+    await deleteShortages({ id }, { deleted_by: auditUserName(req) });
+
+    await logActivity(req, {
+      action: "delete",
+      entity: ENTITY,
+      entity_id: id,
+      record: existing,
+    });
+
+    res.json({ success: true, message: "Deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/* ─────────────────  Internal helpers (packing sticker override)  ───────────────── */
+
+/** Insert helper used by packing deviation flow — no activity log, auto-approved. */
+export async function createShortageRecordInternal(record, req) {
+  try {
+    const parsed = parseCreatePayload(record);
+    if (!parsed.ok) {
+      return { success: false, message: parsed.errors.join("; ") };
+    }
+
+    const data = { ...parsed.data, created_by: auditUserName(req) };
+    const prepared = await applyShortageApproval(data, { mode: "create", req, existing: null, autoApprove: true });
+
+    const row = await insertShortage(prepared);
+    const [enriched] = await enrichShortageRows([row]);
+    return { success: true, data: enriched };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+}
+
+/** Roll back auto-created shortage if sticker generation fails after insert. */
+export async function revertShortageRecordInternal(id, req) {
+  if (id == null) return;
+  await deleteShortages({ id }, { deleted_by: auditUserName(req) });
+}
+
+/* ─────────────────────────  Bulk import  ───────────────────────── */
 
 /** Existing import rows for itemdcode + calendar month + type (import skip). */
 async function findExistingImportKeys(type, pairs = []) {
@@ -43,86 +445,6 @@ function normalizeBulkImportType(raw) {
   const type = String(raw ?? "PPC").trim();
   return SHORTAGE_BULK_IMPORT_TYPES.includes(type) ? type : null;
 }
-
-async function enrichShortageRows(rows = []) {
-  const { itemMap } = await getImsMapsSafe();
-  return enrichRowsWithIMS(rows, {
-    itemCodeField: "itemdcode",
-    itemCodeOut: "item_code",
-    itemDescOut: "item_desc",
-    maps: { itemMap },
-  });
-}
-
-function markApproved(data, req) {
-  data.approved = true;
-  data.approved_by = auditUserName(req) || "system";
-  data.approved_at = new Date();
-}
-
-function markPending(data) {
-  data.approved = false;
-  data.approved_by = null;
-  data.approved_at = null;
-}
-
-/**
- * Frontend CRUD → pending unless authorize user sets approved=true.
- * Bulk / packing auto-create → autoApprove: true (approved by default).
- */
-function applyShortageApproval(data, { mode, req, existing, autoApprove }) {
-  data.month = normalizeShortageMonth(
-    data.month ?? req?.body?.month ?? req?.body?.shortage_month,
-    null
-  );
-
-  if (autoApprove) {
-    markApproved(data, req);
-    return data;
-  }
-
-  const incoming = normalizeApprovedInput(req?.body?.approved);
-
-  if (mode === "create") {
-    if (incoming === true) {
-      applyApprovalWorkflow({ req, fields: data, incomingApproved: true, auditAsName: true });
-    } else {
-      markPending(data);
-    }
-    return data;
-  }
-
-  const businessKeys = ["itemdcode", "itemcode", "type", "qty", "month", "remarks"];
-  const hasBusinessChanges = businessKeys.some((k) => {
-    if (data[k] === undefined) return false;
-    if (k === "month") {
-      return normalizeShortageMonth(data.month, null) !== normalizeShortageMonth(existing?.month, null);
-    }
-    return String(data[k] ?? "") !== String(existing?.[k] ?? "");
-  });
-
-  applyApprovalWorkflow({
-    req,
-    fields: data,
-    incomingApproved: incoming,
-    hasBusinessChanges,
-    auditAsName: true,
-  });
-  return data;
-}
-
-export const shortageCrud = createCrud(shortageCrudConfig, {
-  enrichRows: enrichShortageRows,
-  beforeSave: applyShortageApproval,
-});
-
-export const {
-  list: getShortages,
-  get: getShortageById,
-  create: createShortage,
-  update: updateShortage,
-  remove: deleteShortage,
-} = shortageCrud;
 
 function pickBulkRows(body) {
   if (Array.isArray(body?.data)) return body.data;
@@ -204,6 +526,7 @@ async function buildBulkPreviewRows(rawRows, monthRaw, importTypeRaw) {
       key,
       itemdcode,
       itemcode: ims?.item_code || itemcodeIn || String(itemdcode),
+      grpname: ims?.grpname || null,
       item_code: ims?.item_code || itemcodeIn || null,
       item_desc: ims?.item_desc || null,
       qty,
@@ -230,11 +553,7 @@ async function buildBulkPreviewRows(rawRows, monthRaw, importTypeRaw) {
     }
   }
 
-  return {
-    month,
-    type: importType,
-    rows,
-  };
+  return { month, type: importType, rows };
 }
 
 /**
@@ -331,14 +650,14 @@ export const bulkCreateShortages = async (req, res) => {
         let p = 1;
         for (const row of chunk) {
           values.push(
-            `($${p++}, $${p++}, $${p++}, $${p++}, $${p++}::date, NULL, true, $${p++}, $${p++}, false, $${p++}, NOW())`
+            `($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}::date, NULL, true, $${p++}, $${p++}, false, $${p++}, NOW())`
           );
-          params.push(row.itemdcode, row.itemcode, type, row.qty, month, user, approvedAt, user);
+          params.push(row.itemdcode, row.itemcode, row.grpname || null, type, row.qty, month, user, approvedAt, user);
         }
         await client.query(
           `
           INSERT INTO ${T.SHORTAGE}
-            (itemdcode, itemcode, type, qty, month, remarks, approved, approved_by, approved_at, is_deleted, created_by, created_at)
+            (itemdcode, itemcode, grpname, type, qty, month, remarks, approved, approved_by, approved_at, is_deleted, created_by, created_at)
           VALUES ${values.join(", ")}
           `,
           params
@@ -364,6 +683,7 @@ export const bulkCreateShortages = async (req, res) => {
 /**
  * POST /shortage/master-list
  * One row per itemdcode + calendar month (YYYY-MM). Type qty sums only that month.
+ * When filters.approved is omitted, all statuses are included; UI master tab sends approved=true only.
  */
 export const getShortageMasterList = async (req, res) => {
   try {
@@ -407,12 +727,18 @@ export const getShortageMasterList = async (req, res) => {
       values.push(itemdcodeFilter);
       where.push(`s.itemdcode = $${values.length}`);
     }
+    const grpname = String(filters.grpname ?? "").trim();
+    if (grpname) {
+      values.push(grpname);
+      where.push(`LOWER(TRIM(COALESCE(s.grpname, ''))) = LOWER($${values.length})`);
+    }
 
     const rows = await dbQuery(
       `SELECT
          s.itemdcode,
          to_char(s.month, 'YYYY-MM') AS year_month,
          MAX(NULLIF(TRIM(s.itemcode), '')) AS itemcode,
+         MAX(NULLIF(TRIM(s.grpname), '')) AS grpname,
          COUNT(*)::int AS entry_count,
          COALESCE(SUM(COALESCE(s.qty, 0)), 0)::float AS total_shortage_qty,
          COALESCE(SUM(CASE WHEN s.type = 'PPC' THEN COALESCE(s.qty, 0) ELSE 0 END), 0)::float AS qty_ppc,
@@ -444,11 +770,12 @@ export const getShortageMasterList = async (req, res) => {
           id: `master-${r.itemdcode}-${ym}`,
           itemdcode: r.itemdcode,
           itemcode: r.itemcode || String(r.itemdcode),
+          grpname: r.grpname || null,
           year_month: ym,
           entry_count: Number(r.entry_count) || 0,
           total_shortage_qty: total,
-          type_qty: SHORTAGE_TYPES.map((type, i) => ({
-            type,
+          type_qty: SHORTAGE_TYPES.map((typeName, i) => ({
+            type: typeName,
             qty: Number(r[MASTER_TYPE_QTY_KEYS[i]]) || 0,
           })).filter((x) => x.qty > 0),
           produced_qty: produced,
@@ -463,17 +790,6 @@ export const getShortageMasterList = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message || "Failed to load master shortage report." });
   }
 };
-
-/** Internal helper — packing sticker override (auto-approved Deviation). */
-export async function createShortageRecordInternal(record, req) {
-  return shortageCrud.insertOne(record, req, { skipLog: true, autoApprove: true });
-}
-
-/** Roll back auto-created shortage if sticker generation fails after insert. */
-export async function revertShortageRecordInternal(id, req) {
-  if (id == null) return;
-  await shortageCrud.deleteOne(id, req, { skipLog: true });
-}
 
 /**
  * POST /shortage/packing-deviation

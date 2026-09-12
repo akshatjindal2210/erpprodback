@@ -4,7 +4,7 @@ import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js"
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { resolveViewsFields } from "../../../lib/config/views/helperViews.js";
-import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName, applyApprovalUpdateFields, prepareUpdateByRules } from "../../../../core/lib/utils/auth/approval.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 
@@ -15,6 +15,24 @@ function rowKg(weight, qty) {
   const q = Number(qty);
   if (!Number.isFinite(w) || !Number.isFinite(q)) return null;
   return w * q;
+}
+
+function normalizeOptionalAccCode(acc_code) {
+  if (acc_code === undefined) return undefined;
+  if (acc_code === "" || acc_code === null) return null;
+  return Number(acc_code);
+}
+
+function preparePackingUpdate(existing, next = {}) {
+  const rules = [
+    { field: "item_dcode", normalize: (v) => String(v ?? "") },
+    { field: "qty", normalize: (v) => Number(v) },
+    { field: "unit", normalize: (v) => String(v || "") },
+    { field: "type", normalize: (v) => Number(v) },
+    { field: "sticker_type", normalize: (v) => Number(v) },
+    { field: "acc_code", normalize: normalizeOptionalAccCode },
+  ];
+  return prepareUpdateByRules({ existing, input: next, rules });
 }
 
 async function enrichPackingRows(rows = []) {
@@ -123,6 +141,7 @@ export const createPackingStandard = async (req, res) => {
         incomingApproved: true,
         hasBusinessChanges: false,
         auditAsName: true,
+        approvalTimestamp: row?.created_at || new Date(),
       });
       await updatePackingStandards(approvalFields, { standard_id: row.standard_id });
     }
@@ -171,14 +190,7 @@ export const updatePackingStandard = async (req, res) => {
 
     item_dcode = item_dcode?.toString().trim();
     unit = unit?.toString().trim();
-
-    const hasChanges =
-      item_dcode !== undefined ||
-      qty !== undefined ||
-      unit !== undefined ||
-      type !== undefined ||
-      sticker_type !== undefined ||
-      acc_code !== undefined;
+    const { hasChanges, fields } = preparePackingUpdate(existing, { item_dcode, qty, unit, type, sticker_type, acc_code });
 
     if (!hasChanges && normalizedApproved === undefined) {
       return res.status(400).json({ success: false, message: "No fields to update" });
@@ -189,7 +201,7 @@ export const updatePackingStandard = async (req, res) => {
       const duplicate = await findPackingStandardDuplicate({
         item_dcode: item_dcode ?? existing.item_dcode,
         type: type ?? existing.type,
-        acc_code: acc_code ?? existing.acc_code
+        acc_code: fields.acc_code !== undefined ? fields.acc_code : existing.acc_code
       });
 
       if (duplicate && Number(duplicate.standard_id) !== Number(standard_id)) {
@@ -197,18 +209,7 @@ export const updatePackingStandard = async (req, res) => {
       }
     }
 
-    const fields = {
-      ...(item_dcode !== undefined && { item_dcode }),
-      ...(qty !== undefined && { qty }),
-      ...(unit !== undefined && { unit }),
-      ...(type !== undefined && { type }),
-      ...(sticker_type !== undefined && { sticker_type }),
-      ...(acc_code !== undefined && { acc_code }),
-      updated_by: auditUserName(req),
-      updated_at: new Date()
-    };
-
-    applyApprovalWorkflow({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges: hasChanges, auditAsName: true });
+    applyApprovalUpdateFields({ req, fields, incomingApproved: normalizedApproved, hasBusinessChanges: hasChanges, alreadyApproved: existing.approved === true, auditAsName: true });
 
     await updatePackingStandards(fields, { standard_id });
 

@@ -51,11 +51,14 @@ export async function resolveHoldBoxUids({
 } = {}) {
   const mode = normalizeHoldScanMode(holdScanMode);
   const list = [...new Set((scannedUids || []).map((v) => String(v).trim()).filter(Boolean))];
-  if (!list.length) return [];
+  if (!list.length && mode !== QC_HOLD_SCAN_FULL) return [];
 
   if (mode === QC_HOLD_SCAN_FULL) {
+    // When caller already sends resolved full-hold boxes (e.g. job-card based multi-packing),
+    // trust that set and only keep sellable/in-hand rows.
+    if (list.length) return uidsForSellableInHand(list);
     const pn = String(packingNumber ?? "").trim();
-    if (!pn) return list;
+    if (!pn) return [];
     const boxes = await findSellableInHandBoxesByPackingNumber(pn);
     const expanded = (boxes || [])
       .map((b) => String(b.box_no_uid ?? b.box_uid ?? "").trim())

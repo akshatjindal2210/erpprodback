@@ -1,12 +1,89 @@
 /**
  * ERP vs DB stock comparison report — merges in-hand DB stock with IMS erpfg.
+ * DB rows come pre-aggregated from SQL (packing + doc_dt + job_card + item).
  */
 
 import dbQuery from "../../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../../config/db/dbTables.js";
-import { sqlErpStockDbRows } from "../sql/erpStockDbSql.js";
 import { fetchAllErpFgStock, buildErpFgStockByItemMap, invalidateErpFgStockCache } from "../../../../lib/utils/erp-api/stock/erpFgStock.js";
 import { canonicalCode, getImsMapsSafe } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
+
+/** In-hand stock grouped by packing + date + job + item. Customer names joined (display only). */
+const ERP_STOCK_DB_SQL = `
+WITH in_hand AS (
+  SELECT NULLIF(TRIM(b.packing_number::text), '') AS packing_number,
+         COALESCE(b.qty, 0)::bigint AS qty,
+         NULLIF(TRIM(b.override_cust::text), '') AS override_cust,
+         sa.item_dcode AS sa_item_dcode,
+         NULLIF(TRIM(sa.item_code::text), '') AS sa_item_code,
+         NULLIF(TRIM(sa.item_desc::text), '') AS sa_item_desc,
+         to_char(sa.doc_dt::date, 'YYYY-MM-DD') AS sa_doc_dt,
+         NULLIF(TRIM(sa.job_card_no::text), '') AS sa_job_card,
+         NULLIF(TRIM(sa.acc_name::text), '') AS sa_acc_name
+  FROM ims_box_table b
+  LEFT JOIN ims_stock_adjustment sa
+    ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false AND sa.approved = true
+  WHERE b.is_deleted = false AND b.out_uid IS NULL
+    AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')
+    AND COALESCE(b.qty, 0) > 0
+    AND NULLIF(TRIM(b.packing_number::text), '') IS NOT NULL
+),
+pack_keys AS (
+  SELECT DISTINCT packing_number, override_cust,
+         CASE WHEN packing_number ~ '^[0-9]+$' THEN packing_number::integer END AS pn_int
+  FROM in_hand
+),
+dp_hits AS (
+  SELECT p.packing_number, p.override_cust, dp.doc_dt, dp.doc_no, dp.job_card_no,
+         dp.item_dcode, dp.item_code, dp.item_desc, dp.acc_code, dp.acc_name
+  FROM pack_keys p
+  JOIN ims_dailyprod dp ON dp.doc_no = p.pn_int
+  WHERE p.pn_int IS NOT NULL
+  UNION ALL
+  SELECT p.packing_number, p.override_cust, dp.doc_dt, dp.doc_no, dp.job_card_no,
+         dp.item_dcode, dp.item_code, dp.item_desc, dp.acc_code, dp.acc_name
+  FROM pack_keys p
+  JOIN ims_dailyprod dp ON TRIM(dp.doc_no::text) = p.packing_number
+  WHERE p.pn_int IS NULL
+),
+best_dp AS (
+  SELECT DISTINCT ON (d.packing_number, d.override_cust)
+         d.packing_number, d.override_cust,
+         to_char(d.doc_dt::date, 'YYYY-MM-DD') AS doc_dt,
+         NULLIF(TRIM(d.job_card_no::text), '') AS job_card_no,
+         d.item_dcode::text AS item_dcode,
+         NULLIF(TRIM(d.item_code::text), '') AS item_code,
+         NULLIF(TRIM(d.item_desc::text), '') AS item_desc,
+         NULLIF(TRIM(d.acc_name::text), '') AS acc_name
+  FROM dp_hits d
+  ORDER BY d.packing_number, d.override_cust,
+           (d.override_cust IS NOT NULL AND TRIM(d.acc_code::text) = d.override_cust) DESC,
+           (d.doc_dt IS NOT NULL) DESC, d.doc_dt DESC NULLS LAST, d.doc_no DESC
+),
+box_rows AS (
+  SELECT ih.packing_number, ih.qty,
+         COALESCE(ih.sa_item_dcode::text, dp.item_dcode, '—') AS item_dcode,
+         COALESCE(ih.sa_item_code, dp.item_code) AS item_code,
+         COALESCE(ih.sa_item_desc, dp.item_desc) AS item_desc,
+         COALESCE(ih.sa_doc_dt, dp.doc_dt) AS doc_dt,
+         COALESCE(ih.sa_job_card, dp.job_card_no) AS job_card_no,
+         COALESCE(ih.sa_acc_name, dp.acc_name, ih.override_cust) AS customer_name
+  FROM in_hand ih
+  LEFT JOIN best_dp dp
+    ON dp.packing_number = ih.packing_number
+   AND dp.override_cust IS NOT DISTINCT FROM ih.override_cust
+)
+SELECT packing_number,
+       TRIM(item_dcode) AS item_dcode,
+       TRIM(COALESCE(MAX(NULLIF(TRIM(item_code), '')), TRIM(item_dcode))) AS item_code,
+       NULLIF(TRIM(MAX(item_desc)), '') AS item_desc,
+       doc_dt,
+       job_card_no,
+       NULLIF(STRING_AGG(DISTINCT NULLIF(TRIM(customer_name), ''), ', '), '') AS customer_name,
+       SUM(qty)::bigint AS db_stock
+FROM box_rows
+WHERE TRIM(COALESCE(item_dcode, '')) NOT IN ('', '—')
+GROUP BY packing_number, TRIM(item_dcode), doc_dt, job_card_no`;
 
 const REPORT_CACHE_MS = Math.max(60_000, Number(process.env.ERP_STOCK_REPORT_CACHE_MS) || 120_000);
 const DB_STOCK_CACHE_MS = Math.max(30_000, Number(process.env.ERP_STOCK_DB_CACHE_MS) || 60_000);
@@ -15,13 +92,19 @@ let reportCache = null;
 let reportCacheAt = 0;
 let dbStockCache = null;
 let dbStockCacheAt = 0;
+let inflightReport = null;
+let inflightReportKey = "";
+let reportGen = 0;
 
 /** @param {{ all?: boolean }} opts — `all` also clears IMS erpfg cache (slow path). */
 export function invalidateErpStockReportCache({ all = false } = {}) {
+  reportGen += 1;
   reportCache = null;
   reportCacheAt = 0;
   dbStockCache = null;
   dbStockCacheAt = 0;
+  inflightReport = null;
+  inflightReportKey = "";
   if (all) invalidateErpFgStockCache();
 }
 
@@ -78,7 +161,7 @@ async function loadDbStockRows({ refresh = false } = {}) {
   if (!refresh && dbStockCache && now - dbStockCacheAt < DB_STOCK_CACHE_MS) {
     return dbStockCache;
   }
-  const rows = await dbQuery(sqlErpStockDbRows());
+  const rows = await dbQuery(ERP_STOCK_DB_SQL);
   dbStockCache = rows || [];
   dbStockCacheAt = now;
   return dbStockCache;
@@ -195,8 +278,20 @@ function paginateRows(rows, page, limit) {
   };
 }
 
+function packingItemKey(packing, itemDcode) {
+  return `${packing}::${itemDcode}`;
+}
+
 function mergeDbAndErpRows(dbRows, erpByItem) {
   const merged = new Map();
+  const byPackingItem = new Map();
+
+  const indexRow = (key, row) => {
+    const idx = packingItemKey(row.packing_number, row.item_dcode);
+    const list = byPackingItem.get(idx);
+    if (list) list.push([key, row]);
+    else byPackingItem.set(idx, [[key, row]]);
+  };
 
   for (const db of dbRows) {
     const packing = norm(db.packing_number);
@@ -214,7 +309,7 @@ function mergeDbAndErpRows(dbRows, erpByItem) {
       if (!existing.item_desc && db.item_desc) existing.item_desc = db.item_desc;
       continue;
     }
-    merged.set(key, {
+    const row = {
       packing_number: packing,
       item_dcode: itemDcode,
       item_code: db.item_code ?? itemDcode,
@@ -226,7 +321,9 @@ function mergeDbAndErpRows(dbRows, erpByItem) {
       db_stock: dbStock,
       stock_diff: dbStock,
       mismatch: mismatchKind(dbStock, 0),
-    });
+    };
+    merged.set(key, row);
+    indexRow(key, row);
   }
 
   // ERP FG is packing+item level — assign qty once to the best-matching DB row
@@ -237,13 +334,7 @@ function mergeDbAndErpRows(dbRows, erpByItem) {
       const erpStock = toQty(byPacking[packing]);
       const erpDocDt = norm(summary.docDtByPacking?.[packing]) || null;
       const erpJob = norm(summary.jobCardByPacking?.[packing]) || null;
-
-      const candidates = [];
-      for (const [key, row] of merged.entries()) {
-        if (norm(row.packing_number) !== packing) continue;
-        if (norm(row.item_dcode) !== itemDcode) continue;
-        candidates.push([key, row]);
-      }
+      const candidates = byPackingItem.get(packingItemKey(packing, itemDcode)) || [];
 
       if (!candidates.length) {
         const key = rowKey({
@@ -267,13 +358,22 @@ function mergeDbAndErpRows(dbRows, erpByItem) {
         continue;
       }
 
-      candidates.sort((a, b) => {
-        const scoreDiff = erpMatchScore(b[1], erpDocDt, erpJob) - erpMatchScore(a[1], erpDocDt, erpJob);
-        if (scoreDiff) return scoreDiff;
-        return toQty(b[1].db_stock) - toQty(a[1].db_stock);
-      });
+      let bestKey = candidates[0][0];
+      let best = candidates[0][1];
+      let bestScore = erpMatchScore(best, erpDocDt, erpJob);
+      let bestQty = toQty(best.db_stock);
+      for (let i = 1; i < candidates.length; i++) {
+        const [key, row] = candidates[i];
+        const score = erpMatchScore(row, erpDocDt, erpJob);
+        const qty = toQty(row.db_stock);
+        if (score > bestScore || (score === bestScore && qty > bestQty)) {
+          bestKey = key;
+          best = row;
+          bestScore = score;
+          bestQty = qty;
+        }
+      }
 
-      const [bestKey, best] = candidates[0];
       merged.set(bestKey, {
         ...best,
         erp_stock: erpStock,
@@ -333,9 +433,22 @@ export async function findErpStockComparisonReport(options = {}) {
     invalidateErpStockReportCache({ all: refreshErp });
   }
 
-  const rows = await buildMergedRows({ refresh, refreshErp });
-  reportCache = { rows };
-  reportCacheAt = Date.now();
+  const inflightKey = `${Boolean(refresh)}:${Boolean(refreshErp)}`;
+  const gen = reportGen;
+  if (!inflightReport || inflightReportKey !== inflightKey) {
+    inflightReportKey = inflightKey;
+    inflightReport = buildMergedRows({ refresh, refreshErp }).finally(() => {
+      if (inflightReportKey === inflightKey) {
+        inflightReport = null;
+        inflightReportKey = "";
+      }
+    });
+  }
+  const rows = await inflightReport;
+  if (gen === reportGen) {
+    reportCache = { rows };
+    reportCacheAt = Date.now();
+  }
 
   const sortDir = String(order).toUpperCase() === "ASC" ? 1 : -1;
   if (options.sortOnServer) {
@@ -357,7 +470,7 @@ export async function findErpStockComparisonReport(options = {}) {
       if (av > bv) return 1 * sortDir;
       return 0;
     });
-    reportCache = { rows };
+    if (gen === reportGen) reportCache = { rows };
   }
 
   return paginateRows(rows, page, limit);

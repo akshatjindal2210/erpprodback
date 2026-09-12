@@ -53,6 +53,7 @@ export async function createBoxTable() {
       `CREATE INDEX IF NOT EXISTS idx_box_fuid ON ${T.BOX_TABLE}(fuid)`,
       `CREATE INDEX IF NOT EXISTS idx_box_download_count ON ${T.BOX_TABLE}(download_count)`,
       `CREATE INDEX IF NOT EXISTS idx_box_in_hand ON ${T.BOX_TABLE}(is_deleted, out_uid, location_id) WHERE is_deleted = false AND out_uid IS NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_box_in_hand_stock ON ${T.BOX_TABLE}(packing_number) WHERE is_deleted = false AND out_uid IS NULL AND (sa_entry_type IS DISTINCT FROM 'stock_out') AND COALESCE(qty, 0) > 0`,
       `CREATE INDEX IF NOT EXISTS idx_box_sa_lookup ON ${T.BOX_TABLE}(sa_id, is_deleted) WHERE sa_id IS NOT NULL`,
       `CREATE INDEX IF NOT EXISTS idx_box_packing_number_trimmed ON ${T.BOX_TABLE} (NULLIF(TRIM(packing_number::text), ''))`,
       `CREATE INDEX IF NOT EXISTS idx_box_no_uid_trgm ON ${T.BOX_TABLE} USING gin (box_no_uid gin_trgm_ops)`,

@@ -254,8 +254,6 @@ export const updatePackingStandards = async (fields = {}, filters = {}) => {
     }
   }
 
-  safeFields.updated_at = new Date();
-
   const fieldKeys  = Object.keys(safeFields);
   const filterKeys = Object.keys(safeFilters);
 
