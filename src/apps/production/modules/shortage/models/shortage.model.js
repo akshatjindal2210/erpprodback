@@ -5,7 +5,7 @@ import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
  * Production Shortage — DB layer. Uses the existing ims_shortage table (no new tables).
  */
 
-const ALLOWED_FILTER_FIELDS = [ "id", "itemdcode", "type", "approved", "month", "grpname", "from_date", "to_date" ];
+const ALLOWED_FILTER_FIELDS = [ "id", "itemdcode", "type", "types", "approved", "month", "grpname", "from_date", "to_date" ];
 
 const ALLOWED_SORT_FIELDS = [ "id", "itemdcode", "itemcode", "grpname", "type", "qty", "month", "approved", "created_at", "updated_at" ];
 
@@ -51,6 +51,14 @@ export const findShortages = async (options = {}) => {
       if (!needle) continue;
       values.push(needle);
       conditions.push(`LOWER(TRIM(COALESCE(s.grpname, ''))) = LOWER($${i++})`);
+      continue;
+    }
+
+    if (key === "types") {
+      const arr = (Array.isArray(val) ? val : []).map((x) => String(x).trim()).filter(Boolean);
+      if (!arr.length) continue;
+      values.push(arr);
+      conditions.push(`s.type = ANY($${i++}::text[])`);
       continue;
     }
 

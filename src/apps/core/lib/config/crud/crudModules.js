@@ -28,6 +28,13 @@ export const CRUD_MODULES = {
     filterFields: ["location_id", "rack_no", "shelf_no", "location_no", "type", "approved", "from_date", "to_date"],
     searchFields: ["rack_no", "shelf_no", "location_no", "type", "acc_name", "item_code"],
   },
+  tray_master: {
+    idField: "id",
+    // list SQL lives in trayMaster.model DEFAULT_FIELDS
+    listFields: [],
+    filterFields: ["id", "code", "type", "batch_id", "status", "approved", "from_date", "to_date"],
+    searchFields: ["code", "type", "batch_id", "serial_number"],
+  },
   rm_store_location_master: {
     idField: "location_id",
     // list SQL lives in storeLocationMaster.model DEFAULT_FIELDS

@@ -1,5 +1,5 @@
 import { findShortages, findShortage, insertShortage, updateShortages, deleteShortages } from "../models/shortage.model.js";
-import { normalizeShortageMonth, SHORTAGE_BULK_IMPORT_TYPES, SHORTAGE_TYPES } from "../shortage.config.js";
+import { normalizeShortageMonth, SHORTAGE_BULK_IMPORT_TYPES, SHORTAGE_LIST_TYPES, SHORTAGE_TYPES } from "../shortage.config.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -14,7 +14,7 @@ import { PURCHASE_GROUP_NAME } from "../../../lib/config/groupFilter.js";
 
 const CFG = getCrudModuleConfig("shortage");
 const BULK_INSERT_CHUNK = 400;
-const MASTER_TYPE_QTY_KEYS = ["qty_ppc", "qty_wip", "qty_deviation", "qty_additional"];
+const MASTER_TYPE_QTY_KEYS = ["qty_ppc", "qty_additional"];
 
 const ENTITY = "purchase_shortage";
 
@@ -71,10 +71,33 @@ function forcedGrpnameFromReq() {
   return PURCHASE_GROUP_NAME;
 }
 
+function applyListTypeScope(filters = {}) {
+  const next = { ...(filters || {}) };
+  const type = String(next.type ?? "").trim();
+  if (type && type.toLowerCase() !== "all" && SHORTAGE_LIST_TYPES.includes(type)) return next;
+  delete next.type;
+  next.types = [...SHORTAGE_LIST_TYPES];
+  return next;
+}
+
 function applyForcedGrpnameFilters(req, filters = {}) {
   const forced = forcedGrpnameFromReq(req);
-  if (!forced) return { ...(filters || {}) };
-  return { ...(filters || {}), grpname: forced };
+  let next = applyListTypeScope(filters);
+  if (forced) next = { ...next, grpname: forced };
+  return next;
+}
+
+function pushMasterTypeFilter(where, values, filters = {}) {
+  const type = filters.type != null && String(filters.type).trim() !== "" && String(filters.type).toLowerCase() !== "all"
+    ? String(filters.type).trim()
+    : null;
+  if (type && SHORTAGE_LIST_TYPES.includes(type)) {
+    values.push(type);
+    where.push(`s.type = $${values.length}`);
+    return;
+  }
+  values.push(SHORTAGE_LIST_TYPES);
+  where.push(`s.type = ANY($${values.length}::text[])`);
 }
 
 function recordMatchesForcedGrpname(req, record) {
@@ -736,9 +759,6 @@ export const getShortageMasterList = async (req, res) => {
       req,
       req.body?.filters && typeof req.body.filters === "object" ? req.body.filters : {}
     );
-    const type = filters.type != null && String(filters.type).trim() !== "" && String(filters.type).toLowerCase() !== "all"
-      ? String(filters.type).trim()
-      : null;
     const approved =
       filters.approved === true || filters.approved === "true" || filters.approved === 1 || filters.approved === "1"
         ? true
@@ -754,10 +774,7 @@ export const getShortageMasterList = async (req, res) => {
     const values = [];
     const where = [`s.is_deleted = false`];
 
-    if (type) {
-      values.push(type);
-      where.push(`s.type = $${values.length}`);
-    }
+    pushMasterTypeFilter(where, values, filters);
     if (approved === true) {
       where.push(`s.approved = true`);
     } else if (approved === false) {
@@ -822,7 +839,7 @@ export const getShortageMasterList = async (req, res) => {
           year_month: ym,
           entry_count: Number(r.entry_count) || 0,
           total_shortage_qty: total,
-          type_qty: SHORTAGE_TYPES.map((typeName, i) => ({
+          type_qty: SHORTAGE_LIST_TYPES.map((typeName, i) => ({
             type: typeName,
             qty: Number(r[MASTER_TYPE_QTY_KEYS[i]]) || 0,
           })).filter((x) => x.qty > 0),

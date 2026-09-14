@@ -14,7 +14,8 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { getShortageQtyPercentage } from "../../../../core/configuration/models/appConfig.model.js";
-import { resolveStickerRequestedQty } from "./itemSellableStock.js";
+import { fetchImsDataRaw } from "../../services/ims.service.js";
+import { getItemSellableQty, resolveStickerRequestedQty } from "./itemSellableStock.js";
 
 export { resolveStickerRequestedQty };
 
@@ -219,19 +220,23 @@ export async function getApprovedShortageQty(itemdcode, yearMonth = currentYearM
   };
 }
 
-async function sumItemScheduleQty(itemdcode, schmonth, docDt) {
+/** Display-only: item + month ka schedule total (pehle DB, warna IMS — Schedule Planning jaisa). */
+async function sumItemScheduleQty(itemdcode, schmonth) {
   const code = Number(itemdcode);
   const month = Number(schmonth);
-  const asOf = docDt ? String(docDt).trim().slice(0, 10) : null;
   if (!Number.isFinite(code) || month < 1 || month > 12) return 0;
-  const [row] = await dbQuery(
-    `SELECT COALESCE(SUM(COALESCE(totalqty, 0)), 0)::float AS qty
+
+  const [local] = await dbQuery(
+    `SELECT COALESCE(SUM(totalqty), 0)::float AS qty
      FROM ${T.SCHEDULE_PLAN}
-     WHERE itemdcode = $1 AND schmonth = $2 AND is_planned NOT IN (4, 5)
-       AND ($3::text IS NULL OR COALESCE(schdt::date, $3::date) <= $3::date)`,
-    [code, month, asOf]
+     WHERE itemdcode = $1 AND schmonth = $2 AND is_planned NOT IN (4, 5)`,
+    [code, month]
   );
-  return Number(row?.qty) || 0;
+  const fromDb = Number(local?.qty) || 0;
+  if (fromDb > 0) return fromDb;
+
+  const rows = (await fetchImsDataRaw("schdule", null))?.records || [];
+  return rows.reduce((sum, row) => Number(row?.itemdcode ?? row?.item_dcode) === code && Number(row?.schmonth) === month ? sum + (Number(row?.totalqty ?? row?.total_qty) || 0) : sum, 0);
 }
 
 /**
@@ -242,12 +247,13 @@ export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing
   const requestedQty = resolveStickerRequestedQty({ total_qty, packing_config });
   const { yearMonth, schmonth: month } = resolveLimitMonth({ doc_dt, year_month });
 
-  const [monthUsedQty, shortage, pct] = await Promise.all([
+  const [monthUsedQty, shortage, pct, fgStockQty] = await Promise.all([
     getItemMonthlyPackingUsed(itemdcode, { yearMonth, excludeDocNo: doc_no }),
     getApprovedShortageQty(itemdcode, yearMonth),
     getShortageQtyPercentage(),
+    getItemSellableQty(itemdcode),
   ]);
-  const scheduleQty = await sumItemScheduleQty(itemdcode, month, doc_dt);
+  const scheduleQty = await sumItemScheduleQty(itemdcode, month);
 
   const baseQty = shortage.total;
   const toleranceQty = Math.floor(baseQty * (pct / 100));
@@ -264,6 +270,8 @@ export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing
     projected_total: projectedTotal,
     monthly_requirement: 0,
     schedule_qty: scheduleQty,
+    fg_stock_qty: fgStockQty,
+    in_hand_qty: fgStockQty,
     base_qty: baseQty,
     base_allowed_limit: baseQty,
     tolerance_qty: toleranceQty,

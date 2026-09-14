@@ -5,7 +5,7 @@ import { formatHrmsDateTime } from "../../../lib/hrmsFormat.js";
 import { istTs, LOG_DATE_SQL } from "../../../lib/attendanceCommon.js";
 import { fetchAcsEvents, fetchEmpMaster, hikvisionFetchImageBinary } from "../../../lib/erpApi.js";
 import { deviceEventToRecord, extractDeviceEventImage, extractDeviceEvents } from "../../../lib/hikvisionEvents.js";
-import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
+import { logHrmsActivity } from "../../../lib/utils/activity/logHrmsActivity.js";
 
 const ENTITY = "hrms_attendance_log";
 
@@ -101,11 +101,10 @@ export async function syncAttendanceLogs(req, res) {
     const saved = await saveEventsFromBody({ InfoList: events });
     const data = saved.map(formatLogRow);
     if (data.length) {
-      await logActivity(req, {
+      await logHrmsActivity(req, {
         action: "create",
         entity: ENTITY,
         entity_id: from || to || "sync",
-        appType: "hrms",
         record: { from: from || null, to: to || null },
         details: { total: data.length, fetched: events.length },
       });

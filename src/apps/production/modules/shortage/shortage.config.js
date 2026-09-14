@@ -10,6 +10,9 @@
 /** Allowed shortage types — validated on save. Must match frontend shortage.js. */
 export const SHORTAGE_TYPES = ["PPC", "WIP", "Deviation", "Additional"];
 
+/** Production shortage list — only these types (no WIP / Deviation). */
+export const SHORTAGE_LIST_TYPES = ["PPC", "Additional"];
+
 /** Bulk spreadsheet import supports PPC and WIP only. */
 export const SHORTAGE_BULK_IMPORT_TYPES = ["PPC", "WIP"];
 

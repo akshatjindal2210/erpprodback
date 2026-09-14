@@ -53,6 +53,7 @@ export const DB_TABLES = {
     "ims_sticker_type",
     "ims_app_config",
     "ims_location_master",
+    "ims_tray_master",
     "ims_packing_standard",
     "ims_inventory_inwards",
     "ims_forwarding_note_master",

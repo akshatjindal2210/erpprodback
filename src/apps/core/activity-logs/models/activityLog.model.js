@@ -85,8 +85,14 @@ function buildActivityLogWhere({ user_id, app_type, module, action_type, search,
     params.push(module);
   }
   if (action_type) {
-    conditions.push(`l.action_type = $${params.length + 1}`);
-    params.push(action_type);
+    // "Update" filter covers both UPDATE and legacy MODIFY action rows.
+    const normalized = String(action_type).trim().toUpperCase();
+    if (normalized === "UPDATE") {
+      conditions.push(`UPPER(l.action_type) IN ('UPDATE', 'MODIFY')`);
+    } else {
+      conditions.push(`l.action_type = $${params.length + 1}`);
+      params.push(action_type);
+    }
   }
   if (entity) {
     conditions.push(`l.entity = $${params.length + 1}`);

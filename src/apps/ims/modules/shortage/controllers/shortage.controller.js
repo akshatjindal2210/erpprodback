@@ -346,7 +346,6 @@ export const updateShortage = async (req, res) => {
     }
 
     const prepared = await applyShortageApproval(parsed.data, { mode: "update", req, existing });
-    if (forced) prepared.grpname = forced;
 
     const row = await updateShortages(prepared, { id });
     if (!row) return res.status(404).json({ success: false, message: "Not found" });

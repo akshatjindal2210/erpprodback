@@ -193,6 +193,31 @@ function fieldsForPackingStandard(mod, act) {
   return null;
 }
 
+// ─── Trays (/trays/helper) ───────────────────────────────────────────────────
+const trayPicker = ["t.id", "t.code", "t.type", "t.serial_number", "t.batch_id"];
+const trayModal = [...trayPicker, "t.approved"];
+
+function fieldsForTrays(mod, act) {
+  if (mod == null || act == null) return null;
+
+  if (mod === "inventory_inwards" && act === VIEW) return [...trayPicker];
+  if (mod === "inventory_inwards" && isForm(act)) return [...trayModal];
+
+  if (mod === "out_entry" && act === VIEW) return [...trayPicker];
+  if (mod === "out_entry" && isForm(act)) return [...trayModal];
+
+  if (mod === "packing_entry" && act === VIEW) return [...trayPicker];
+  if (mod === "packing_entry" && isForm(act)) return [...trayModal];
+
+  if (mod === "stock_adjustment" && (act === VIEW || isForm(act))) return [...trayPicker];
+
+  if (mod === "audit" && (act === VIEW || isForm(act))) return [...trayPicker];
+
+  if (mod === "tray_master" && act === VIEW) return [...trayPicker];
+
+  return null;
+}
+
 // ─── Category (/category/helper) ─────────────────────────────────────────────
 const catPicker = ["id", "name"];
 const catModal = [...catPicker, "approved", "created_at", "updated_at"];
@@ -278,6 +303,7 @@ const BY_HELPER = {
   ledgers: fieldsForLedgers,
   boxes: fieldsForBoxes,
   locations: fieldsForLocations,
+  trays: fieldsForTrays,
   packingStandard: fieldsForPackingStandard,
   category: fieldsForCategory,
   partyRates: fieldsForPartyRates,

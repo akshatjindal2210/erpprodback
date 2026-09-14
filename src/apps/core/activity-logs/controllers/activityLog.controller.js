@@ -8,12 +8,23 @@ export const getActivityLogs = async (req, res) => {
       search, date_from, date_to, 
       entity, entity_id, 
       skipCount,
-      isExport // New flag for export
+      isExport, // New flag for export
+      user_id: userIdFilter // Super-admin only: filter by a specific user
     } = req.query;
 
     const userType = String(req.user?.type || req.user?.role || "").toLowerCase().trim();
     const isSuperAdmin = userType === "super_admin";
-    const user_id = isSuperAdmin ? null : req.user.id;
+
+    // Secure resolution of user_id filter:
+    //  - Non super-admin  → always self (ignore any user_id in the query).
+    //  - Super-admin      → optional filter by a specific user_id, else null (all users).
+    let user_id;
+    if (!isSuperAdmin) {
+      user_id = req.user.id;
+    } else {
+      const parsed = parseInt(userIdFilter, 10);
+      user_id = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    }
 
     const isSkipCount = skipCount === "true" || skipCount === true || isExport === "true";
     const fetchOptions = {

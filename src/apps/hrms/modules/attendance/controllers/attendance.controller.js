@@ -4,7 +4,7 @@ import { extractHrmsListParams } from "../../../lib/listParams.js";
 import { formatHrmsDate, formatHrmsDateTime, formatHrmsTime } from "../../../lib/hrmsFormat.js";
 import { fetchEmpMaster } from "../../../lib/erpApi.js";
 import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
-import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
+import { logHrmsActivity } from "../../../lib/utils/activity/logHrmsActivity.js";
 import { istTs, LOG_DATE_SQL, LOG_VALID_PUNCH_SQL, normalizeShift, shiftDisplay, countPunches, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate } from "../../../lib/attendanceCommon.js";
 
 const ENTITY = "hrms_attendance";
@@ -143,7 +143,7 @@ function formatRow(row) {
 }
 
 function logAttendance(req, payload) {
-  return logActivity(req, { ...payload, entity: ENTITY, appType: "hrms" });
+  return logHrmsActivity(req, { ...payload, entity: ENTITY });
 }
 
 function addOneDayYmd(date) {
