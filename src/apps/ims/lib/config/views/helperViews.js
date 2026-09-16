@@ -195,7 +195,7 @@ function fieldsForPackingStandard(mod, act) {
 
 // ─── Trays (/trays/helper) ───────────────────────────────────────────────────
 const trayPicker = ["t.id", "t.code", "t.type", "t.serial_number", "t.batch_id"];
-const trayModal = [...trayPicker, "t.approved"];
+const trayModal = [...trayPicker, "approved"];
 
 function fieldsForTrays(mod, act) {
   if (mod == null || act == null) return null;

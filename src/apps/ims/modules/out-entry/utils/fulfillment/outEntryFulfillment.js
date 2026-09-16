@@ -368,6 +368,19 @@ export async function getOutEntryScanSummary({ fuid, scanned_boxes = [] }) {
   };
 }
 
+function blockTrayStickerScan(results, { id, canonical, tray_code, via_tray }) {
+  const code = tray_code != null ? String(tray_code).trim() : "";
+  if (!code || via_tray) return false;
+  results.push({
+    id,
+    found: true,
+    box_no_uid: canonical,
+    allowed: false,
+    message: "Scan the linked tray. Send out all stickers on this tray.",
+  });
+  return true;
+}
+
 function buildOutEntryScanIndexFromItems(items = []) {
   const index = new Map();
   for (const item of items || []) {
@@ -419,6 +432,7 @@ export async function resolveOutEntryBatchScan({fuid, forOutUid = null, items = 
   const normalizedItems = (items || []).map((item, index) => ({
     id: item?.id != null ? String(item.id) : String(index),
     code: item?.code != null ? String(item.code).trim() : "",
+    via_tray: item?.via_tray === true,
   }));
 
   const hits = normalizedItems.map((item) => ({
@@ -434,7 +448,7 @@ export async function resolveOutEntryBatchScan({fuid, forOutUid = null, items = 
 
   const results = [];
 
-  for (const { id, code, hit } of hits) {
+  for (const { id, code, hit, via_tray } of hits) {
     if (!code) {
       results.push({
         id,
@@ -458,6 +472,7 @@ export async function resolveOutEntryBatchScan({fuid, forOutUid = null, items = 
     }
 
     const canonical = hit.canonicalBoxId;
+    if (blockTrayStickerScan(results, { id, canonical, tray_code: hit.box?.tray_code, via_tray })) continue;
     if (confirmed.has(canonical)) {
       results.push({
         id,
@@ -550,6 +565,7 @@ export async function resolveOutEntryOtherBatchScan({
       id: item?.id != null ? String(item.id) : String(index),
       code: raw,
       lookupCodes,
+      via_tray: item?.via_tray === true,
     };
   });
 
@@ -562,7 +578,7 @@ export async function resolveOutEntryOtherBatchScan({
   const confirmed = new Set((session_scanned || []).map((u) => String(u).trim()).filter(Boolean));
   const results = [];
 
-  for (const { id, code, lookupCodes } of normalizedItems) {
+  for (const { id, code, lookupCodes, via_tray } of normalizedItems) {
     if (!code) {
       results.push({
         id,
@@ -591,6 +607,8 @@ export async function resolveOutEntryOtherBatchScan({
       });
       continue;
     }
+
+    if (blockTrayStickerScan(results, { id, canonical, tray_code: inHand?.tray_code, via_tray })) continue;
 
     if (confirmed.has(canonical)) {
       results.push({
@@ -639,6 +657,7 @@ export async function resolveOutEntryOtherBatchScan({
       packing_number: dbRow?.packing_number ?? inHand?.packing_number ?? null,
       qty: Number(dbRow?.qty ?? inHand?.qty) || 0,
       is_loose: isForwardingLooseBox(dbRow),
+      tray_code: inHand?.tray_code ?? dbRow?.tray_code ?? null,
     });
   }
 
@@ -663,6 +682,7 @@ export async function resolveOutEntryInventoryOutBatchScan({
       id: item?.id != null ? String(item.id) : String(index),
       code: raw,
       lookupCodes,
+      via_tray: item?.via_tray === true,
     };
   });
 
@@ -675,7 +695,7 @@ export async function resolveOutEntryInventoryOutBatchScan({
   const confirmed = new Set((session_scanned || []).map((u) => String(u).trim()).filter(Boolean));
   const results = [];
 
-  for (const { id, code, lookupCodes } of normalizedItems) {
+  for (const { id, code, lookupCodes, via_tray } of normalizedItems) {
     if (!code) {
       results.push({
         id,
@@ -704,6 +724,8 @@ export async function resolveOutEntryInventoryOutBatchScan({
       });
       continue;
     }
+
+    if (blockTrayStickerScan(results, { id, canonical, tray_code: inHand?.tray_code, via_tray })) continue;
 
     if (confirmed.has(canonical)) {
       results.push({
@@ -752,6 +774,7 @@ export async function resolveOutEntryInventoryOutBatchScan({
       packing_number: dbRow?.packing_number ?? inHand?.packing_number ?? null,
       qty: Number(dbRow?.qty ?? inHand?.qty) || 0,
       is_loose: isForwardingLooseBox(dbRow),
+      tray_code: inHand?.tray_code ?? dbRow?.tray_code ?? null,
     });
   }
 
@@ -901,6 +924,7 @@ export async function resolveOutEntryQcAreaBatchScan({
       packing_number: dbRow?.packing_number ?? null,
       qty: Number(dbRow?.qty) || 0,
       is_loose: isForwardingLooseBox(dbRow),
+      tray_code: anyRow?.tray_code ?? dbRow?.tray_code ?? null,
     });
   }
 

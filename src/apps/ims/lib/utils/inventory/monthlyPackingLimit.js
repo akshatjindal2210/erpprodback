@@ -14,8 +14,9 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { getShortageQtyPercentage } from "../../../../core/configuration/models/appConfig.model.js";
-import { fetchImsDataRaw } from "../../services/ims.service.js";
+import { fetchFromIMS, fetchImsDataRaw } from "../../services/ims.service.js";
 import { getItemSellableQty, resolveStickerRequestedQty } from "./itemSellableStock.js";
+import { loadScheduleDispatchQtyMap, planKey } from "../../../modules/schedule-planning/utils/db/schedulePlanDb.js";
 
 export { resolveStickerRequestedQty };
 
@@ -220,6 +221,24 @@ export async function getApprovedShortageQty(itemdcode, yearMonth = currentYearM
   };
 }
 
+function reorderFromItem(row) {
+  if (!row || typeof row !== "object") return 0;
+  for (const [key, value] of Object.entries(row)) {
+    if (String(key).replace(/[^a-z]/gi, "").toLowerCase() !== "reorderqty") continue;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+async function getItemReorderQty(itemdcode) {
+  const code = String(itemdcode ?? "").trim();
+  if (!code) return 0;
+  const records = await fetchFromIMS("item");
+  const row = (records || []).find((r) => String(r.ItemDcode ?? r.itemdcode ?? r.Itemdcode ?? "").trim() === code);
+  return reorderFromItem(row);
+}
+
 /** Display-only: item + month ka schedule total (pehle DB, warna IMS — Schedule Planning jaisa). */
 async function sumItemScheduleQty(itemdcode, schmonth) {
   const code = Number(itemdcode);
@@ -239,21 +258,77 @@ async function sumItemScheduleQty(itemdcode, schmonth) {
   return rows.reduce((sum, row) => Number(row?.itemdcode ?? row?.item_dcode) === code && Number(row?.schmonth) === month ? sum + (Number(row?.totalqty ?? row?.total_qty) || 0) : sum, 0);
 }
 
+function imsScheduleRows(records, itemdcode, schmonth) {
+  const code = Number(itemdcode);
+  const month = Number(schmonth);
+  return (records || []).flatMap((row) => {
+    const item = Number(row?.itemdcode ?? row?.item_dcode ?? row?.ItemDcode);
+    const m = Number(row?.schmonth ?? row?.Schmonth ?? row?.sch_month);
+    if (item !== code || m !== month) return [];
+    return [{
+      schno: String(row?.schno ?? row?.Schno ?? "").trim(),
+      itemdcode: item,
+      totalqty: Number(row?.totalqty ?? row?.total_qty ?? row?.Totalqty) || 0,
+    }];
+  });
+}
+
+/** Schedule Item Wise Default list: all IMS schedules for the item and month, not only local plan rows. */
+async function loadItemMonthSchedulePair(itemdcode, schmonth) {
+  const code = Number(itemdcode);
+  const month = Number(schmonth);
+  if (!Number.isFinite(code) || month < 1 || month > 12) return { scheduleQty: 0, balanceQty: 0 };
+
+  const [imsRaw, localRows] = await Promise.all([
+    fetchImsDataRaw("schdule", null),
+    dbQuery(
+      `SELECT TRIM(schno) AS schno, itemdcode, COALESCE(totalqty, 0)::float AS totalqty
+       FROM ${T.SCHEDULE_PLAN}
+       WHERE itemdcode = $1 AND schmonth = $2 AND is_planned NOT IN (4, 5)`,
+      [code, month]
+    ),
+  ]);
+  const localBySchno = new Map((localRows || []).map((row) => [String(row.schno ?? "").trim(), row]));
+  let plans = imsScheduleRows(imsRaw?.records, code, month).map((row) => {
+    const local = localBySchno.get(row.schno);
+    return local ? { ...row, totalqty: Number(local.totalqty) || row.totalqty } : row;
+  });
+  if (!plans.length) plans = localRows || [];
+  if (!plans.length) return { scheduleQty: 0, balanceQty: 0 };
+
+  const dispatchMap = await loadScheduleDispatchQtyMap();
+  let scheduleQty = 0;
+  let balanceQty = 0;
+  for (const plan of plans) {
+    const qty = Number(plan.totalqty) || 0;
+    const dispatched = Number(dispatchMap.get(planKey(plan.schno, plan.itemdcode ?? code)) ?? 0);
+    scheduleQty += qty;
+    balanceQty += Math.max(0, qty - dispatched);
+  }
+  return { scheduleQty, balanceQty };
+}
+
 /**
  * Evaluate monthly packing limit (Packing Entry / Daily Production only).
  * Base = approved shortage sum only; then + config tolerance %.
  */
-export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing_config, doc_no, doc_dt = null, year_month = null}) {
+export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing_config, doc_no, doc_dt = null, year_month = null, withReorder = false}) {
   const requestedQty = resolveStickerRequestedQty({ total_qty, packing_config });
   const { yearMonth, schmonth: month } = resolveLimitMonth({ doc_dt, year_month });
 
-  const [monthUsedQty, shortage, pct, fgStockQty] = await Promise.all([
+  const [monthUsedQty, shortagePackedQty, shortage, pct, fgStockQty] = await Promise.all([
     getItemMonthlyPackingUsed(itemdcode, { yearMonth, excludeDocNo: doc_no }),
+    withReorder ? getItemMonthlyPackingUsed(itemdcode, { yearMonth }) : 0,
     getApprovedShortageQty(itemdcode, yearMonth),
     getShortageQtyPercentage(),
     getItemSellableQty(itemdcode),
   ]);
-  const scheduleQty = await sumItemScheduleQty(itemdcode, month);
+  const [schedulePair, reorderQty] = await Promise.all([
+    withReorder ? loadItemMonthSchedulePair(itemdcode, month) : null,
+    withReorder ? getItemReorderQty(itemdcode) : 0,
+  ]);
+  const scheduleQty = schedulePair?.scheduleQty ?? 0;
+  const scheduleBalanceQty = schedulePair?.balanceQty ?? 0;
 
   const baseQty = shortage.total;
   const toleranceQty = Math.floor(baseQty * (pct / 100));
@@ -270,6 +345,9 @@ export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing
     projected_total: projectedTotal,
     monthly_requirement: 0,
     schedule_qty: scheduleQty,
+    schedule_balance_qty: scheduleBalanceQty,
+    shortage_balance_qty: baseQty - (withReorder ? shortagePackedQty : monthUsedQty),
+    reorder_qty: reorderQty,
     fg_stock_qty: fgStockQty,
     in_hand_qty: fgStockQty,
     base_qty: baseQty,

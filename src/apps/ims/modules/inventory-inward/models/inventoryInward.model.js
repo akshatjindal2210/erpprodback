@@ -155,9 +155,12 @@ export const findInventoryInward = async (filters = {}) => {
       b.packing_number,
       b.location_id,
       lm.rack_no,
-      lm.shelf_no
+      lm.shelf_no,
+      t.code AS tray_code,
+      t.id AS tray_id
     FROM ims_box_table b
     LEFT JOIN ims_location_master lm ON b.location_id = lm.location_id
+    LEFT JOIN ims_tray_master t ON t.box_uid = b.box_uid
     WHERE b.in_uid = $1 AND b.is_deleted = false
   `, [row.in_uid]);
 
@@ -175,6 +178,8 @@ export const findInventoryInward = async (filters = {}) => {
       box_no_uid: box.box_no_uid,
       qty: box.qty != null ? Number(box.qty) : 0,
       packing_number: box.packing_number != null ? String(box.packing_number).trim() : null,
+      tray_code: box.tray_code != null && String(box.tray_code).trim() !== "" ? String(box.tray_code).trim() : null,
+      tray_id: box.tray_id != null ? Number(box.tray_id) : null,
     });
   });
 

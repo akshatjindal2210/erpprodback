@@ -45,6 +45,7 @@ const BOX_STORE_LIST_FIELDS = [
   "fnm.acc_code AS forward_acc_code",
   "COALESCE(NULLIF(TRIM(sa.job_card_no::text), ''), NULLIF(TRIM(dp.job_card_no::text), '')) AS job_card_no",
   "COALESCE(sa.doc_dt, dp.doc_dt) AS doc_dt",
+  "t.code AS tray_code",
 ];
 
 const BOX_AUDIT_RESPONSE_KEYS = new Set([
@@ -1104,6 +1105,7 @@ export const previewMonthlyPackingLimit = async (req, res) => {
       doc_no: doc_no != null ? String(doc_no).trim() : null,
       doc_dt,
       year_month,
+      withReorder: true,
     });
 
     return res.json({
@@ -1125,10 +1127,9 @@ export const generateStickers = async (req, res) => {
     const { doc_no, itemdcode, item_code, acc_name, acc_code, packing_config, doc_dt, job_card_no, total_qty, unit, party_rate_cust_code, category_id, category_name, itemdesc, description, fg_location, internal_create_user, internal_create_date } = req.body;
     
     if (!doc_no || !itemdcode || !packing_config) {
-      console.log("Validation failed. Missing fields:", { doc_no, itemdcode, packing_config });
-      return res.status(400).json({ 
-        success: false, 
-        message: "Required fields are missing (Doc No, Item Code, Packing Config)." 
+      return res.status(400).json({
+        success: false,
+        message: "Required fields are missing (Doc No, Item Code, Packing Config).",
       });
     }
 
@@ -1199,7 +1200,7 @@ export const generateStickers = async (req, res) => {
       system_generate_user: req.user.name, system_generate_date: new Date().toISOString(), packing_config,
     });
     try {
-      await updateDailyProdStickerStatus(doc_no, stdId, stickerFields);
+      await updateDailyProdStickerStatus(docNo, stdId, stickerFields);
     } catch (dailyprodErr) {
       await permanentlyDeleteProductionBoxesForPackingNumber({
         packing_number: docNo,

@@ -7,6 +7,7 @@ import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput, applyApprovalUpdateFields, prepareUpdateByRules, equalIntLists } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
+import logger from "../../../../core/lib/utils/logging/logger.js";
 
 const CFG = getCrudModuleConfig("location_master");
 const RACK_NO_NUMERIC_RE = /^\d+$/;
@@ -234,7 +235,7 @@ export const createLocation = async (req, res) => {
 
     return res.status(201).json({ success: true, data: enriched ?? data, message: "Location created successfully" });
   } catch (err) {
-    console.log("Error creating location:", err);
+    logger.error(`Error creating location: ${err?.message || err}`);
     if (err?.code === "23505") {
       return res.status(409).json({
         success: false,
@@ -343,7 +344,7 @@ export const updateLocation = async (req, res) => {
     const [enriched] = await enrichLocationRows(data ? [data] : updated ? [updated] : []);
     return res.json({ success: true, data: enriched ?? data ?? updated, message: "Location updated successfully" });
   } catch (err) {
-    console.log("Error updating location:", err);
+    logger.error(`Error updating location: ${err?.message || err}`);
     if (err?.code === "23505") {
       return res.status(409).json({
         success: false,

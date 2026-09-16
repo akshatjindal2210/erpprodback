@@ -5,7 +5,7 @@ import { resolveViewsFields } from "../../../lib/config/views/helperViews.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
-import { createTrayBatch, deleteTrayBatch as deleteTrayBatchRows, deleteTrayById, findTray, findTrayBatches, findTrays, updateTrayApprovalById, updateTrayBatch, updateTrayBatchStatus, updateTrayStatusById, updateTrayStatusByIds } from "../models/trayMaster.model.js";
+import { createTrayBatch, deleteTrayBatch as deleteTrayBatchRows, deleteTrayById, deleteTraysByIds, findTray, findTrayBatches, findTrays, updateTrayApprovalById, updateTrayBatch, updateTrayBatchStatus, updateTrayStatusById, updateTrayStatusByIds } from "../models/trayMaster.model.js";
 import { TRAY_TYPES, isValidTrayType, normalizeTrayType } from "../config/trayTypes.js";
 import { isValidTrayStatus, normalizeTrayStatus } from "../config/trayStatuses.js";
 
@@ -51,7 +51,7 @@ export const getTraysViews = async (req, res) => {
     const { id, code } = req.body;
     const lookupId = parsePositiveIntId(id);
     const lookupCode = code != null && String(code).trim() !== "" ? String(code).trim().toUpperCase() : null;
-    const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, { sortBy: "code", order: "ASC" });
+    const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, { sortBy: "serial_number", order: "ASC" });
 
     const viewFields =
       resolveViewsFields("trays", {
@@ -111,7 +111,7 @@ export const getTraysViews = async (req, res) => {
 export const getTrays = async (req, res) => {
   try {
     const view = String(req.body?.view || "batch").trim().toLowerCase();
-    const defaults = view === "tray" ? { sortBy: "id", order: "DESC" } : { sortBy: "created_at", order: "DESC" };
+    const defaults = view === "tray" ? { sortBy: "serial_number", order: "ASC" } : { sortBy: "created_at", order: "DESC" };
     const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, defaults);
     const safeFilters = sanitizeFilters(filters, CFG.filterFields);
 
@@ -148,16 +148,20 @@ export const createTray = async (req, res) => {
     const quantity = Number(req.body?.quantity);
 
     if (!isValidTrayType(type)) {
-      return res.status(400).json({ success: false, message: "Invalid tray type" });
+      return res.status(400).json({ success: false, message: "This tray type is not valid." });
     }
     if (!Number.isFinite(quantity) || quantity <= 0 || Math.trunc(quantity) !== quantity) {
-      return res.status(400).json({ success: false, message: "quantity must be a positive whole number" });
+      return res.status(400).json({ success: false, message: "Enter a whole number greater than 0." });
     }
 
+    const canAuthorize = Boolean(req?.permission?.can_authorize) || req?.user?.type === "super_admin";
+    const remark = String(req.body?.remark ?? "").trim() || null;
     const created = await createTrayBatch({
       type,
       quantity,
       created_by: auditUserName(req),
+      approved: canAuthorize && normalizeApprovedInput(req.body?.approved) === true,
+      remark,
     });
 
     await log(req, "create", created.batch.batch_id, {
@@ -195,10 +199,6 @@ export const updateTray = async (req, res) => {
         return res.status(400).json({ success: false, message: "Invalid tray status" });
       }
       const remark = parseTrayRemark(req.body);
-      if ((nextStatus === "inactive" || nextStatus === "deleted") && !remark) {
-        return res.status(400).json({ success: false, message: "Remark is required" });
-      }
-
       const trayIds = parseTrayIds(req.body?.ids);
       if (trayIds.length) {
         const result = await updateTrayStatusByIds(trayIds, nextStatus, auditUserName(req), remark || null);
@@ -226,13 +226,10 @@ export const updateTray = async (req, res) => {
         });
       }
 
-      if (!id) return res.status(400).json({ success: false, message: "Valid tray id or batch_id required" });
+      if (!id) return res.status(400).json({ success: false, message: "Select a tray or batch." });
 
       const existing = await findTray({ id });
       if (!existing) return res.status(404).json({ success: false, message: "Not found" });
-      if (normalizeTrayStatus(existing.status) === "deleted") {
-        return res.status(400).json({ success: false, message: "Deleted tray cannot be changed." });
-      }
       if (normalizeTrayStatus(existing.status) === nextStatus) {
         return res.status(400).json({ success: false, message: "Tray is already in this status." });
       }
@@ -251,18 +248,20 @@ export const updateTray = async (req, res) => {
     if (batch_id) {
       const nextType = req.body?.type ? normalizeTrayType(req.body.type) : undefined;
       const hasType = !!nextType;
+      const hasRemark = Object.prototype.hasOwnProperty.call(req.body || {}, "remark");
+      const remark = hasRemark ? String(req.body.remark ?? "").trim() : undefined;
       if (hasType && !isValidTrayType(nextType)) {
-        return res.status(400).json({ success: false, message: "Invalid tray type" });
+        return res.status(400).json({ success: false, message: "This tray type is not valid." });
       }
-      if (!hasQuantity && normalizedApproved === undefined && !hasType) {
-        return res.status(400).json({ success: false, message: "type, quantity or approved is required for batch update" });
+      if (!hasQuantity && normalizedApproved === undefined && !hasType && !hasRemark) {
+        return res.status(400).json({ success: false, message: "type, quantity, remark or approved is required for batch update" });
       }
 
       let quantity;
       if (hasQuantity) {
         quantity = Number(req.body.quantity);
         if (!Number.isFinite(quantity) || quantity <= 0 || Math.trunc(quantity) !== quantity) {
-          return res.status(400).json({ success: false, message: "quantity must be a positive whole number" });
+          return res.status(400).json({ success: false, message: "Enter a whole number greater than 0." });
         }
       }
 
@@ -272,6 +271,7 @@ export const updateTray = async (req, res) => {
         quantity: hasQuantity ? quantity : undefined,
         approved: normalizedApproved,
         actor: auditUserName(req),
+        remark,
       });
 
       if (!result.changed) {
@@ -293,16 +293,13 @@ export const updateTray = async (req, res) => {
     }
 
     if (normalizedApproved === undefined) {
-      return res.status(400).json({ success: false, message: "approved field is required" });
+      return res.status(400).json({ success: false, message: "Approval is required." });
     }
 
-    if (!id) return res.status(400).json({ success: false, message: "Valid tray id or batch_id required" });
+    if (!id) return res.status(400).json({ success: false, message: "Select a tray or batch." });
 
     const existing = await findTray({ id });
     if (!existing) return res.status(404).json({ success: false, message: "Not found" });
-    if (normalizeTrayStatus(existing.status) === "deleted") {
-      return res.status(400).json({ success: false, message: "Deleted tray cannot be updated" });
-    }
     if (existing.approved === normalizedApproved) {
       return res.status(400).json({ success: false, message: "Approval status is already set." });
     }
@@ -318,6 +315,10 @@ export const updateTray = async (req, res) => {
       message: normalizedApproved ? "Tray approved successfully" : "Tray moved to pending",
     });
   } catch (err) {
+    const msg = String(err?.message || "");
+    if (msg.startsWith("Cannot ")) {
+      return res.status(400).json({ success: false, message: msg });
+    }
     if (err?.code === "23505") {
       return res.status(409).json({ success: false, message: "Tray code conflict detected. Please retry." });
     }
@@ -327,18 +328,28 @@ export const updateTray = async (req, res) => {
 
 export const deleteTray = async (req, res) => {
   try {
-    const remark = parseTrayRemark(req.body);
-    if (!remark) {
-      return res.status(400).json({ success: false, message: "Remark is required" });
+    const trayIds = parseTrayIds(req.body?.ids);
+    const batch_id = String(req.body?.batch_id || "").trim();
+
+    if (trayIds.length) {
+      const result = await deleteTraysByIds(trayIds, auditUserName(req));
+      if (!result.updated) {
+        return res.status(400).json({ success: false, message: "No trays to delete." });
+      }
+      await log(req, "delete", trayIds.join(","), { ids: trayIds, deleted_count: result.updated });
+      return res.json({
+        success: true,
+        data: result,
+        message: result.updated === 1 ? "Tray deleted successfully" : `Deleted ${result.updated} tray(s)`,
+      });
     }
 
-    const batch_id = String(req.body?.batch_id || "").trim();
     if (batch_id) {
-      const result = await deleteTrayBatchRows(batch_id, auditUserName(req), remark);
+      const result = await deleteTrayBatchRows(batch_id, auditUserName(req));
       if (!result.updated) {
         return res.status(400).json({ success: false, message: "No active trays to delete in this batch." });
       }
-      await log(req, "delete", batch_id, { batch: true, remark, deleted_count: result.updated });
+      await log(req, "delete", batch_id, { batch: true, deleted_count: result.updated });
       return res.json({
         success: true,
         data: result,
@@ -347,21 +358,22 @@ export const deleteTray = async (req, res) => {
     }
 
     const id = parsePositiveIntId(req.body?.id);
-    if (!id) return res.status(400).json({ success: false, message: "Valid tray id or batch_id required" });
+    if (!id) return res.status(400).json({ success: false, message: "Select a tray or batch." });
 
     const existing = await findTray({ id });
     if (!existing) return res.status(404).json({ success: false, message: "Not found" });
-    if (existing.status === "deleted") {
-      return res.status(400).json({ success: false, message: "Tray already deleted" });
-    }
 
-    const deleted = await deleteTrayById(id, auditUserName(req), remark);
+    const deleted = await deleteTrayById(id, auditUserName(req));
     if (!deleted) return res.status(400).json({ success: false, message: "Tray already deleted" });
 
-    await log(req, "delete", id, { remark, code: existing.code, type: existing.type, batch_id: existing.batch_id }, existing);
+    await log(req, "delete", id, { code: existing.code, type: existing.type, batch_id: existing.batch_id }, existing);
 
     return res.json({ success: true, message: "Tray deleted successfully" });
   } catch (err) {
+    const msg = String(err?.message || "");
+    if (msg.startsWith("Cannot delete")) {
+      return res.status(400).json({ success: false, message: msg });
+    }
     return res.status(500).json({ success: false, message: err.message });
   }
 };

@@ -6,7 +6,7 @@
  */
 
 import dbQuery from "../../../../../../config/db/db.js";
-import { sqlBoxSellable, sqlBoxPackingNumber, sqlDailyprodDocNoMatch, sqlDailyprodMatchOrder, sqlDocDtFromDailyprod, sqlDocDtText, boxSourceSql } from "../../../box/utils/inventory/boxInventorySql.js";
+import { sqlBoxSellable, sqlBoxPackingNumber, sqlDailyprodDocNoMatch, sqlDailyprodMatchOrder, sqlDocDtFromDailyprod, sqlDocDtText, boxSourceSql, sqlManageTrayPending } from "../../../box/utils/inventory/boxInventorySql.js";
 
 const TRIM = (expr) => `NULLIF(TRIM((${expr})::text), '')`;
 const DP_ITEM_CODE = TRIM("dp.item_code");
@@ -188,9 +188,12 @@ function applyBoxSourceFilter(conditions, source) {
   } else if (src === "QC HOLD") {
     conditions.push(`(b.sa_id IS NULL OR b.sa_entry_type IS DISTINCT FROM 'stock_in')`);
     conditions.push(`b.box_no_uid ~ '_QCH[0-9]+_'`);
+  } else if (src === "MANAGE TRAY") {
+    conditions.push(sqlManageTrayPending("b"));
   } else if (src === "PACKING ENTRY") {
     conditions.push(`(b.sa_id IS NULL OR b.sa_entry_type IS DISTINCT FROM 'stock_in')`);
     conditions.push(`b.box_no_uid !~ '_QCH[0-9]+_'`);
+    conditions.push(`NOT ${sqlManageTrayPending("b")}`);
   }
 }
 

@@ -19,6 +19,7 @@ import appConfigRoutes from "../manage/app-config/routes/appConfig.route.js";
 import auditRoutes from "../modules/audit/routes/audit.routes.js";
 import qcHoldMaterialRoutes from "../modules/qc-hold-material/routes/qcHoldMaterial.routes.js";
 import shortageRoutes from "../modules/shortage/routes/shortage.route.js";
+import manageTrayRoutes from "../modules/manage-tray/routes/manageTray.route.js";
 
 const router = Router();
 
@@ -41,5 +42,6 @@ router.use("/app-config", appConfigRoutes);
 router.use("/audit", auditRoutes);
 router.use("/qc-hold-material", qcHoldMaterialRoutes);
 router.use("/shortage", shortageRoutes);
+router.use("/manage-tray", manageTrayRoutes);
 
 export default router;

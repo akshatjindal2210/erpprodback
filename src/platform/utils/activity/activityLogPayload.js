@@ -66,6 +66,7 @@ const ENTITY_LABELS = {
   stock_adjustment: "adjustment",
   location_master: "location",
   tray_master: "tray",
+  manage_tray: "manage tray",
   users: "user",
   audit: "audit",
   change_override_customer: "customer override",

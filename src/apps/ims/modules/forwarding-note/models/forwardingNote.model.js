@@ -525,6 +525,7 @@ export const findAvailableBoxes = async (item_dcode, { client } = {}) => {
       b.qty,
       b.location_id,
       b.is_loose,
+      (SELECT t.code FROM ims_tray_master t WHERE t.box_uid = b.box_uid LIMIT 1) AS tray_code,
       b.override_cust,
       COALESCE(b.category_id, sa_adj.category_id, dp.category_id, ps.type) AS category_id,
       dp.doc_no,

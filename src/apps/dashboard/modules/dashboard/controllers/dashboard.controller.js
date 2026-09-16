@@ -30,6 +30,7 @@ const APP_TABLE_PREFIX = {
 const TABLE_MODULE_OVERRIDES = {
   ims_location_master: "location_master",
   ims_tray_master: "tray_master",
+  ims_tray_batch: "tray_batch",
   rmstore_master_production: "rm_production_master",
   rmstore_spec_master: "rm_spec_master",
   rmstore_spec_detail: "rm_spec_master",

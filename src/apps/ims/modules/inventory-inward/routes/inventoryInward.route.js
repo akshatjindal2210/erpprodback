@@ -1,5 +1,5 @@
 import express from "express";
-import { getInventoryInwards, getPackingAreaList, getPackingAreaBoxesList, getInventoryInwardById, createInventoryInward, updateInventoryInward, deleteInventoryInward, getInventoryInwardsViews, validateInwardBoxAtLocation, batchScanInwardBoxes } from "../controllers/inventoryInward.controller.js";
+import { getInventoryInwards, getPackingAreaList, getPackingAreaBoxesList, getInventoryInwardById, createInventoryInward, updateInventoryInward, deleteInventoryInward, getInventoryInwardsViews, validateInwardBoxAtLocation, batchScanInwardBoxes, batchScanInwardTray } from "../controllers/inventoryInward.controller.js";
 
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
@@ -22,6 +22,7 @@ router.post("/validate-box-location", authenticate, accessControl("inventory_inw
 
 // Batch resolve + validate scanned boxes (fast multi-scan path)
 router.post("/batch-scan-boxes", authenticate, accessControl("inventory_inwards", ["view", "add", "edit", "authorize"]), batchScanInwardBoxes);
+router.post("/batch-scan-tray", authenticate, accessControl("inventory_inwards", ["view", "add", "edit", "authorize"]), batchScanInwardTray);
 
 // Create
 router.post("/create", authenticate, accessControl("inventory_inwards", "add"), createInventoryInward);

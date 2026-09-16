@@ -873,24 +873,12 @@ const Task = {
 
   // GET PENDING SUB USERS
   async getPendingSubUsers(task_id) {
-    //   `SELECT assignment_id, assigned_to FROM task_assignments
-    //    WHERE task_id = ? AND role = 'sub_user' AND is_active = TRUE
-    //      AND (completion_requested_at IS NULL OR completion_approved_at IS NULL)`,
-    //   [task_id]
-    // );
-    console.log(`SELECT assignment_id, assigned_to FROM task_assignments 
-      WHERE task_id = ? 
-      AND is_active = TRUE 
-      AND role != 'level_one' -- L1 ko chhod kar
-      AND (completion_approved_at IS NULL)`, 
-      [task_id]);
-      console.log(1111);
     return dbQuery(
-      `SELECT assignment_id, assigned_to FROM task_assignments 
-      WHERE task_id = ? 
-      AND is_active = TRUE 
-      AND role != 'level_one' -- L1 ko chhod kar
-      AND (completion_approved_at IS NULL)`, 
+      `SELECT assignment_id, assigned_to FROM task_assignments
+       WHERE task_id = ?
+         AND is_active = TRUE
+         AND role != 'level_one'
+         AND completion_approved_at IS NULL`,
       [task_id]
     );
   },
@@ -1103,10 +1091,6 @@ const Task = {
   },
 
   async getActiveL1ByUser(task_id, user_id) {
-    console.log(`SELECT * FROM task_assignments
-       WHERE task_id = ? AND assigned_to = ? AND role = 'level_one' AND is_active = TRUE`,
-      [task_id, user_id]);
-
     const rows = await dbQuery(
       `SELECT * FROM task_assignments
        WHERE task_id = ? AND assigned_to = ? AND role = 'level_one' AND is_active = TRUE`,

@@ -1,5 +1,8 @@
+import dbQuery from "../../../../../config/db/db.js";
 import { createLocationMasterTable } from "../tables/location/location_master.table.js";
+import { createTrayBatchTable } from "../tables/tray/tray_batch.table.js";
 import { createTrayMasterTable } from "../tables/tray/tray_master.table.js";
+import { createTrayManageTable } from "../tables/tray/tray_manage.table.js";
 import { createPackingStandardTable } from "../tables/packing-standard/packing_standard.table.js";
 import { createBoxDownloadLogTable, createBoxOverrideRequestTable, createBoxTable } from "../tables/box/box_table.table.js";
 import { createDailyProdTable } from "../tables/box/dailyprod.table.js";
@@ -26,7 +29,9 @@ export async function initImsDB() {
   await createStickerTypeTable();
   await createAppConfigTable();
   await createLocationMasterTable();
+  await createTrayBatchTable();
   await createTrayMasterTable();
+  await createTrayManageTable();
   await createPackingStandardTable();
   await createInventoryInwardsTable();
   await createForwardingNoteMasterTable();

@@ -45,6 +45,7 @@ const JOINS_SIMPLE = `
   LEFT JOIN ims_forwarding_note_master fnm ON fnm.fuid = io.fuid AND fnm.is_deleted = false
   LEFT JOIN ims_stock_adjustment sa ON sa.adjustment_id = b.sa_id AND sa.is_deleted = false
   LEFT JOIN ims_dailyprod dp ON trim(b.packing_number::text) = trim(dp.doc_no::text)
+  LEFT JOIN ims_tray_master t ON t.box_uid = b.box_uid
 `;
 
 const JOINS_WITHOUT_LATERAL = `
@@ -294,8 +295,9 @@ export const findInHandBoxesByScanCodes = async (scanCodes = []) => {
   const numericOnly = raw.filter((c) => /^\d+$/.test(c));
 
   return dbQuery(
-    `SELECT b.box_uid, b.box_no_uid, b.packing_number, b.qty
+    `SELECT b.box_uid, b.box_no_uid, b.packing_number, b.qty, t.id AS tray_id, t.code AS tray_code
      FROM ims_box_table b
+     LEFT JOIN ims_tray_master t ON t.box_uid = b.box_uid
      WHERE b.is_deleted = false
        AND ${sqlBoxSellable("b")}
        AND (
@@ -303,6 +305,37 @@ export const findInHandBoxesByScanCodes = async (scanCodes = []) => {
          OR (cardinality($2::text[]) > 0 AND b.box_uid::text = ANY($2::text[]))
        )`,
     [raw, numericOnly]
+  );
+};
+
+export const findSellableBoxesByTrayId = async (trayId) => {
+  const id = parseInt(String(trayId), 10);
+  if (!Number.isFinite(id) || id <= 0) return [];
+  return dbQuery(
+    `SELECT b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.is_loose, b.location_id, t.id AS tray_id, t.code AS tray_code
+     FROM ims_tray_master t
+     JOIN ims_box_table b ON b.box_uid = t.box_uid
+     WHERE b.is_deleted = false
+       AND t.id = $1
+       AND ${sqlBoxSellable("b")}
+     ORDER BY b.box_uid ASC`,
+    [id]
+  );
+};
+
+export const findPackingAreaBoxesByTrayId = async (trayId) => {
+  const id = parseInt(String(trayId), 10);
+  if (!Number.isFinite(id) || id <= 0) return [];
+  return dbQuery(
+    `SELECT b.box_uid, b.box_no_uid, b.packing_number, b.qty, t.id AS tray_id, t.code AS tray_code
+     FROM ims_tray_master t
+     JOIN ims_box_table b ON b.box_uid = t.box_uid
+     WHERE b.is_deleted = false
+       AND t.id = $1
+       AND b.location_id IS NULL
+       AND ${sqlBoxSellable("b")}
+     ORDER BY b.box_uid ASC`,
+    [id]
   );
 };
 
@@ -314,8 +347,9 @@ export const findBoxesByScanCodesAny = async (scanCodes = []) => {
   const numericOnly = raw.filter((c) => /^\d+$/.test(c));
 
   return dbQuery(
-    `SELECT b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.out_uid, b.sa_entry_type, b.is_deleted, b.qc_hold_id
+    `SELECT b.box_uid, b.box_no_uid, b.packing_number, b.qty, b.out_uid, b.sa_entry_type, b.is_deleted, b.qc_hold_id, t.id AS tray_id, t.code AS tray_code
      FROM ims_box_table b
+     LEFT JOIN ims_tray_master t ON t.box_uid = b.box_uid
      WHERE b.is_deleted = false
        AND (
          b.box_no_uid = ANY($1::text[])

@@ -3,7 +3,7 @@ import { findInventoryInwards, findInventoryInward, insertInventoryInward, updat
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
-import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByAnyScanCodes, inwardScanRejectMessage } from "../../box/models/box.model.js";
+import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByAnyScanCodes, inwardScanRejectMessage, findPackingAreaBoxesByTrayId } from "../../box/models/box.model.js";
 import { expandStickerScanLookupCodes, primaryStickerScanCode } from "../../box/utils/stickers/stickerScanParse.js";
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { logInwardLinkBatch } from "../../box/utils/transactions/logBoxTransaction.js";
@@ -13,6 +13,8 @@ import { resolvePackingCustomerName } from "../../../lib/utils/packing-entry/cus
 import { withTransaction } from "../../../../../config/db/db.js";
 import { snapshotMetadataFromBoxUids, snapshotInwardMetadata } from "../../../lib/utils/erp-api/list/entryListMetadata.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
+import { getManageTrayPendingPackingNumbers } from "../../manage-tray/models/manageTray.model.js";
+import { findTray } from "../../tray/models/trayMaster.model.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 
 const INWARD_CFG = getCrudModuleConfig("inventory_inwards");
@@ -40,7 +42,6 @@ function uniqueBoxNoUidsFromLocations(locations) {
   return [...set];
 }
 
-/** One header string: all distinct packings across every box on this inward (e.g. `PN1 | PN2`). */
 async function resolveAggregatePackingForLocations(locations) {
   const ids = uniqueBoxNoUidsFromLocations(locations);
   if (!ids.length) return null;
@@ -244,6 +245,15 @@ export const createInventoryInward = async (req, res) => {
       return res.status(400).json({ success: false, message: "Packing number not found for these boxes" });
     }
 
+    const packingKeys = packingNumber.split("|").map((v) => String(v).trim()).filter(Boolean);
+    const pendingPackings = await getManageTrayPendingPackingNumbers(packingKeys);
+    if (pendingPackings.size) {
+      return res.status(400).json({
+        success: false,
+        message: "Link all stickers to trays in Manage Tray before Store In.",
+      });
+    }
+
     const boxUids = uniqueBoxNoUidsFromLocations(locations);
     const listMeta = await snapshotMetadataFromBoxUids(boxUids);
 
@@ -312,7 +322,7 @@ export const updateInventoryInward = async (req, res) => {
     if (locations && locations.length > 0) {
       const locErr = await validateInwardLocationsAgainstBoxes(locations);
       if (locErr) return res.status(400).json({ success: false, message: locErr });
-      await resetBoxesForInward(in_uid, userId);
+      const resetRows = await resetBoxesForInward(in_uid, userId);
       const linkResults = await Promise.all(
         locations.map((loc) =>
           updateBoxesAfterInward(in_uid, loc.location_id, inwardBoxNoUids(loc.boxes), userId, { logEvent: false, userName })
@@ -363,7 +373,7 @@ export const batchScanInwardBoxes = async (req, res) => {
     const lid = parseInt(String(location_id), 10);
 
     if (!Number.isFinite(lid) || lid <= 0) {
-      return res.status(400).json({ success: false, message: "location_id is required" });
+      return res.status(400).json({ success: false, message: "Location is required." });
     }
 
     const scanItems = Array.isArray(items) ? items : [];
@@ -409,6 +419,10 @@ export const batchScanInwardBoxes = async (req, res) => {
     const validation = await validateBoxesAtLocationBatch(lid, boxNoUids);
     const validationMap = new Map((validation.results || []).map((row) => [String(row.box_no_uid).trim(), row]));
 
+    const pendingPackings = await getManageTrayPendingPackingNumbers(
+      resolved.map(({ row }) => row?.packing_number).filter(Boolean)
+    );
+
     const results = resolved.map(({ id, code, row, anyRow }) => {
       if (!code) {
         return {
@@ -441,6 +455,31 @@ export const batchScanInwardBoxes = async (req, res) => {
           ? String(row.packing_number).trim()
           : null;
 
+      if (packing_number && pendingPackings.has(packing_number)) {
+        return {
+          id,
+          found: true,
+          box_no_uid: uid,
+          qty: Number.isFinite(qty) ? qty : 0,
+          packing_number,
+          allowed: false,
+          message: "Link all stickers to trays in Manage Tray before Store In.",
+        };
+      }
+
+      if (row.tray_id != null && String(row.tray_id).trim() !== "") {
+        return {
+          id,
+          found: true,
+          box_no_uid: uid,
+          qty: Number.isFinite(qty) ? qty : 0,
+          packing_number,
+          tray_code: String(row.tray_code || "").trim() || null,
+          allowed: false,
+          message: "Scan the linked tray. Store every sticker on this tray.",
+        };
+      }
+
       return {
         id,
         found: true,
@@ -456,6 +495,83 @@ export const batchScanInwardBoxes = async (req, res) => {
       success: true,
       validation_enabled: validation.validation_enabled,
       results,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const batchScanInwardTray = async (req, res) => {
+  try {
+    const { location_id, code } = req.body;
+    const lid = parseInt(String(location_id), 10);
+    const raw = code != null ? String(code).trim().toUpperCase() : "";
+
+    if (!Number.isFinite(lid) || lid <= 0) {
+      return res.status(400).json({ success: false, message: "Location is required." });
+    }
+    if (!raw) {
+      return res.status(400).json({ success: false, message: "Tray code is required." });
+    }
+
+    const trayFilter = /^\d+$/.test(raw) ? { id: parseInt(raw, 10) } : { code: raw };
+    const tray = await findTray(trayFilter, {
+      fields: ["t.id", "t.code", "t.type", "t.status", "t.approved", "t.pool_status"],
+    });
+    if (!tray) {
+      return res.status(400).json({ success: false, message: "Tray not found." });
+    }
+    if (String(tray.status || "").trim().toLowerCase() !== "active") {
+      return res.status(400).json({ success: false, message: "Tray is not active" });
+    }
+    if (tray.approved !== true) {
+      return res.status(400).json({ success: false, message: "Tray is not authorized" });
+    }
+
+    const boxes = await findPackingAreaBoxesByTrayId(tray.id);
+    if (!boxes.length) {
+      return res.status(400).json({
+        success: false,
+        message: "No packing area stickers are on this tray. Link stickers in Manage Tray first.",
+      });
+    }
+
+    const packingNumbers = boxes.map((row) => row.packing_number).filter(Boolean);
+    const pendingPackings = await getManageTrayPendingPackingNumbers(packingNumbers);
+    const pendingHit = packingNumbers.find((pn) => pendingPackings.has(String(pn).trim()));
+    if (pendingHit) {
+      return res.status(400).json({
+        success: false,
+        message: "Link all stickers to trays in Manage Tray before Store In.",
+      });
+    }
+
+    const boxNoUids = boxes.map((row) => String(row.box_no_uid).trim()).filter(Boolean);
+    const validation = await validateBoxesAtLocationBatch(lid, boxNoUids);
+    const validationMap = new Map((validation.results || []).map((row) => [String(row.box_no_uid).trim(), row]));
+    const blocked = boxNoUids
+      .map((uid) => validationMap.get(uid))
+      .find((row) => row && row.allowed === false);
+    if (blocked) {
+      return res.status(400).json({
+        success: false,
+        message: blocked.message || "These tray stickers cannot be stored at this location.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      validation_enabled: validation.validation_enabled,
+      data: {
+        tray_id: tray.id,
+        tray_code: String(tray.code).trim(),
+        boxes: boxes.map((row) => ({
+          box_no_uid: String(row.box_no_uid).trim(),
+          qty: Number(row.qty) || 0,
+          packing_number: row.packing_number != null ? String(row.packing_number).trim() : null,
+          tray_code: String(row.tray_code || tray.code).trim(),
+        })),
+      },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -508,10 +624,7 @@ export const deleteInventoryInward = async (req, res) => {
     }
 
     await withTransaction(async (client) => {
-      // 1. Reset boxes (unlink from location and inward)
       await resetBoxesForInward(in_uid, req.user.id, { client });
-
-      // 2. Soft-delete the inward record
       await deleteInventoryInwards(
         { in_uid },
         { client, deleted_by: auditUserName(req) }

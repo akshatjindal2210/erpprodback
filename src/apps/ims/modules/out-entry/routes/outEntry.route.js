@@ -1,5 +1,5 @@
 import express from "express";
-import { getOutEntries, getOutEntryById, createOutEntry, updateOutEntry, deleteOutEntry, verifyBoxSticker, batchScanOutEntryBoxes, getFuidDetailsForOutEntry, getQcHoldDetailsForOutEntry, getOutEntryLinkedBoxesController, getAvailableBoxesByItemForOutEntry, lockFuidForOutEntry, getOutEntriesViews, getOutEntryReasonsViews } from "../controllers/outEntry.controller.js";
+import { getOutEntries, getOutEntryById, createOutEntry, updateOutEntry, deleteOutEntry, verifyBoxSticker, batchScanOutEntryBoxes, batchScanOutEntryTray, getFuidDetailsForOutEntry, getQcHoldDetailsForOutEntry, getOutEntryLinkedBoxesController, getAvailableBoxesByItemForOutEntry, lockFuidForOutEntry, getOutEntriesViews, getOutEntryReasonsViews } from "../controllers/outEntry.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
 import { helperAccess } from "../../../lib/config/views/helperViews.js";
@@ -35,6 +35,7 @@ router.post("/lock-fuid", authenticate, accessControl("out_entry", ["add", "edit
 router.post("/verify-box", authenticate, accessControl("out_entry", "view"), verifyBoxSticker);
 
 router.post("/batch-scan-boxes", authenticate, accessControl("out_entry", ["view", "add", "edit", "authorize"]), batchScanOutEntryBoxes);
+router.post("/batch-scan-tray", authenticate, accessControl("out_entry", ["view", "add", "edit", "authorize"]), batchScanOutEntryTray);
 
 // Views (Helper API)
 router.post("/helper", authenticate, helperAccess("outEntries"), getOutEntriesViews);

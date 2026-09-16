@@ -1,4 +1,4 @@
-import { findOutEntries, findOutEntry, insertOutEntry, updateOutEntries, deleteOutEntries, findFuidDetailsForOutEntry, findOutEntryLinkedBoxes, findQcHoldDetailsForOutEntry, clearOutEntryDraftScans, resetBoxesForOutEntry, findAnyOutEntryByFuid, findDistinctOutEntryReasons } from "../models/outEntry.model.js";
+import { findOutEntries, findOutEntry, insertOutEntry, updateOutEntries, deleteOutEntries, findFuidDetailsForOutEntry, findOutEntryLinkedBoxes, findQcHoldDetailsForOutEntry, clearOutEntryDraftScans, resetBoxesForOutEntry, findAnyOutEntryByFuid, findDistinctOutEntryReasons, replaceOutEntryDraftScans } from "../models/outEntry.model.js";
 import { findUser } from "../../../../core/identity/users/models/user.model.js";
 import { findAvailableBoxes, findForwardingNote, lockForwardingNoteForOutEntry, unlockForwardingNoteForOutEntry } from "../../forwarding-note/models/forwardingNote.model.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
@@ -13,6 +13,9 @@ import { enrichQcHoldListRows } from "../../qc-hold-material/utils/list/qcHoldLi
 import { snapshotMetadataFromBoxUids, snapshotOutEntryMetadata } from "../../../lib/utils/erp-api/list/entryListMetadata.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { hasInventoryOutApprovePermission, hasInventoryOutPermission } from "../../../lib/utils/imsSpecialPermissions.js";
+import { findBoxesByNoUids, findSellableBoxesByTrayId } from "../../box/models/box.model.js";
+import { findTray } from "../../tray/models/trayMaster.model.js";
+import { isBoxAvailableForOutEntryScan } from "../../box/utils/inventory/boxInventory.js";
 
 const OUT_CFG = getCrudModuleConfig("out_entry");
 
@@ -528,6 +531,49 @@ export const updateOutEntry = async (req, res) => {
 
     const summary = await getOutEntryScanSummary({ fuid: effectiveFuid, scanned_boxes: finalScanned });
 
+    if (normalizedApproved === true && finalScanned.length) {
+      const scannedRows = await findBoxesByNoUids(finalScanned);
+      const rowMap = new Map((scannedRows || []).map((r) => [String(r.box_no_uid ?? "").trim(), r]));
+      const kept = [];
+      const removed = [];
+      for (const uid of finalScanned) {
+        const key = String(uid ?? "").trim();
+        const row = rowMap.get(key);
+        if (row && isBoxAvailableForOutEntryScan(row, { forOutUid: out_uid })) kept.push(key);
+        else removed.push(key);
+      }
+
+      if (removed.length) {
+        await replaceOutEntryDraftScans({ out_uid, scanned_boxes: kept });
+        const [trimmedSummary, listMeta] = await Promise.all([
+          getOutEntryScanSummary({ fuid: effectiveFuid, scanned_boxes: kept }),
+          snapshotOutEntryMetadata(out_uid),
+        ]);
+        await updateOutEntries(
+          {
+            packing_numbers: listMeta?.packing_numbers ?? null,
+            item_codes: listMeta?.item_codes ?? null,
+            qtys: listMeta?.qtys ?? null,
+            total_qty: listMeta?.total_qty ?? null,
+            scan_complete: trimmedSummary.scan_complete,
+            boxes_required: trimmedSummary.boxes_required,
+            boxes_scanned: trimmedSummary.boxes_scanned,
+            approved: false,
+            approved_by: null,
+            approved_at: null,
+            updated_by: userName,
+            updated_at: new Date(),
+          },
+          { out_uid }
+        );
+        return res.status(409).json({
+          success: false,
+          message: `Removed ${removed.length} unavailable box${removed.length === 1 ? "" : "es"} from this draft. Scan again, then approve.`,
+          data: { removed_boxes: removed, kept_boxes: kept },
+        });
+      }
+    }
+
     if (normalizedApproved === true && !summary.scan_complete) {
       return res.status(400).json({
         success: false,
@@ -727,6 +773,43 @@ export const verifyBoxSticker = async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: "Internal Server Error" });
+  }
+};
+
+export const batchScanOutEntryTray = async (req, res) => {
+  try {
+    const raw = String(req.body?.code || "").trim().toUpperCase();
+    if (!raw) return res.status(400).json({ success: false, message: "Tray code is required." });
+    const tray = await findTray(/^\d+$/.test(raw) ? { id: parseInt(raw, 10) } : { code: raw }, {
+      fields: ["t.id", "t.code", "t.type", "t.status", "t.approved"],
+    });
+    if (!tray) return res.status(400).json({ success: false, message: "Tray not found." });
+    if (String(tray.status || "").trim().toLowerCase() !== "active") {
+      return res.status(400).json({ success: false, message: "This tray is not active." });
+    }
+    if (tray.approved !== true) return res.status(400).json({ success: false, message: "This tray is not approved." });
+    const boxes = await findSellableBoxesByTrayId(tray.id);
+    if (!boxes.length) {
+      return res.status(400).json({ success: false, message: "No stickers on this tray are ready to send out." });
+    }
+    const trayCode = String(tray.code).trim();
+    return res.json({
+      success: true,
+      data: {
+        tray_id: tray.id,
+        tray_code: trayCode,
+        boxes: boxes.map((row) => ({
+          box_no_uid: String(row.box_no_uid).trim(),
+          qty: Number(row.qty) || 0,
+          is_loose: row.is_loose === true,
+          packing_number: row.packing_number != null ? String(row.packing_number).trim() : null,
+          location_id: row.location_id ?? null,
+          tray_code: String(row.tray_code || trayCode).trim(),
+        })),
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
@@ -942,6 +1025,7 @@ export const getAvailableBoxesByItemForOutEntry = async (req, res) => {
     const data = (rows || []).map((r) => ({
       box_uid: r.box_uid,
       box_no_uid: r.box_no_uid,
+      tray_code: r.tray_code != null && String(r.tray_code).trim() !== "" ? String(r.tray_code).trim() : null,
       packing_number: r.packing_number,
       qty: Number(r.qty) || 0,
       is_loose: r.is_loose === true || r.is_loose === 1 || r.is_loose === "true" || r.is_loose === "1",

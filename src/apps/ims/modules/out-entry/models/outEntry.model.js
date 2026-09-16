@@ -233,6 +233,7 @@ const OUT_ENTRY_BOX_JSON_AGG = `
     json_build_object(
       'box_uid', b.box_uid,
       'box_no_uid', b.box_no_uid,
+      'tray_code', (SELECT t.code FROM ims_tray_master t WHERE t.box_uid = b.box_uid LIMIT 1),
       'qty', b.qty,
       'is_loose', b.is_loose,
       'qty_per_box', dp.qty_per_box,
@@ -436,7 +437,8 @@ export const findOutEntryLinkedBoxes = async (out_uid) => {
               b.sa_id,
               b.sa_entry_type,
               b.qty,
-              b.location_id
+              b.location_id,
+              (SELECT t.code FROM ims_tray_master t WHERE t.box_uid = b.box_uid LIMIT 1) AS tray_code
        FROM ims_out_entry_scanned_box d
        INNER JOIN ims_box_table b ON b.box_no_uid::text = d.box_no_uid AND b.is_deleted = false
        WHERE d.out_uid = $1
@@ -453,7 +455,8 @@ export const findOutEntryLinkedBoxes = async (out_uid) => {
               b.sa_id,
               b.sa_entry_type,
               b.qty,
-              b.location_id
+              b.location_id,
+              (SELECT t.code FROM ims_tray_master t WHERE t.box_uid = b.box_uid LIMIT 1) AS tray_code
        FROM ims_box_table b
        WHERE b.out_uid = $1 AND b.is_deleted = false
        ORDER BY b.box_uid ASC`,
@@ -468,7 +471,8 @@ export const findOutEntryLinkedBoxes = async (out_uid) => {
             b.sa_id,
             b.sa_entry_type,
             b.qty,
-            b.location_id
+            b.location_id,
+            (SELECT t.code FROM ims_tray_master t WHERE t.box_uid = b.box_uid LIMIT 1) AS tray_code
      FROM ims_out_entry_scanned_box d
      INNER JOIN ims_box_table b ON b.box_no_uid::text = d.box_no_uid AND b.is_deleted = false
      WHERE d.out_uid = $1

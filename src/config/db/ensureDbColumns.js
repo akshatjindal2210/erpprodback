@@ -152,3 +152,18 @@ export async function renameTableIfExists(query, fromName, toName) {
   await query(`ALTER TABLE ${fromName} RENAME TO ${toName}`);
 }
 
+export async function tableExists(query, tableName) {
+  if (!tableName) return false;
+  const rows = await query(
+    `SELECT 1 FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = $1 LIMIT 1`,
+    [tableName],
+  );
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+export async function dropTableIfExists(query, tableName) {
+  if (!tableName || !(await tableExists(query, tableName))) return;
+  await query(`DROP TABLE IF EXISTS ${tableName}`);
+}
+

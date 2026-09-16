@@ -10,9 +10,40 @@ export function sqlBoxOutUidEmpty(alias = "b") {
   return `${alias}.out_uid IS NULL`;
 }
 
-/** List/group SOURCE label — packing entry / SA stock_in / QC hold completion. */
+/** Packing category is tray (dailyprod or category master). Sticker type is always box. */
+export function sqlPackingIsTray(packingExpr) {
+  return `EXISTS (
+    SELECT 1
+    FROM ims_dailyprod dp
+    LEFT JOIN ims_category c ON c.id = dp.category_id
+    WHERE TRIM(dp.doc_no::text) = TRIM(${packingExpr}::text)
+      AND (
+        LOWER(TRIM(COALESCE(dp.category_name, ''))) = 'tray'
+        OR LOWER(TRIM(COALESCE(c.name, ''))) = 'tray'
+      )
+  )`;
+}
+
+/** Tray packing is blocked in Store In until it has an active register row. */
+export function sqlManageTrayPending(alias = "b") {
+  return `(
+    ${alias}.out_uid IS NULL
+    AND (${alias}.sa_entry_type IS DISTINCT FROM 'stock_out')
+    AND ${alias}.qc_hold_id IS NULL
+    AND ${sqlPackingIsTray(`${alias}.packing_number`)}
+    AND NOT EXISTS (
+      SELECT 1 FROM ims_tray_manage m
+      WHERE m.is_deleted = false
+        AND m.approved = true
+        AND TRIM(m.data->>'packing_number') = TRIM(${alias}.packing_number::text)
+    )
+  )`;
+}
+
+/** List/group SOURCE label — packing entry / SA stock_in / QC hold / manage tray. */
 export function boxSourceSql(alias = "b") {
   return `CASE
+    WHEN ${sqlManageTrayPending(alias)} THEN 'MANAGE TRAY'
     WHEN ${alias}.sa_id IS NOT NULL AND ${alias}.sa_entry_type = 'stock_in' THEN 'STOCK ADJUSTMENT'
     WHEN ${alias}.box_no_uid ~ '_QCH[0-9]+_' THEN 'QC HOLD'
     ELSE 'PACKING ENTRY'
