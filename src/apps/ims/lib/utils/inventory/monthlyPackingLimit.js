@@ -15,8 +15,8 @@ import dbQuery from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { getShortageQtyPercentage } from "../../../../core/configuration/models/appConfig.model.js";
 import { fetchFromIMS, fetchImsDataRaw } from "../../services/ims.service.js";
+import { toCalendarDateKey } from "../packing-entry/parse/packRowParse.js";
 import { getItemSellableQty, resolveStickerRequestedQty } from "./itemSellableStock.js";
-import { loadScheduleDispatchQtyMap, planKey } from "../../../modules/schedule-planning/utils/db/schedulePlanDb.js";
 
 export { resolveStickerRequestedQty };
 
@@ -40,11 +40,11 @@ export function resolveLimitMonth({ doc_dt = null, year_month = null } = {}) {
     return { yearMonth: ymRaw, schmonth: parseInt(ymRaw.slice(5, 7), 10) };
   }
 
-  const dt = doc_dt != null ? String(doc_dt).trim() : "";
-  if (/^\d{4}-\d{2}-\d{2}/.test(dt)) {
+  const key = toCalendarDateKey(doc_dt);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(key)) {
     return {
-      yearMonth: dt.slice(0, 7),
-      schmonth: parseInt(dt.slice(5, 7), 10),
+      yearMonth: key.slice(0, 7),
+      schmonth: parseInt(key.slice(5, 7), 10),
     };
   }
 
@@ -239,32 +239,16 @@ async function getItemReorderQty(itemdcode) {
   return reorderFromItem(row);
 }
 
-/** Display-only: item + month ka schedule total (pehle DB, warna IMS — Schedule Planning jaisa). */
-async function sumItemScheduleQty(itemdcode, schmonth) {
+function imsScheduleRows(records, itemdcode, schmonth, itemCode) {
   const code = Number(itemdcode);
   const month = Number(schmonth);
-  if (!Number.isFinite(code) || month < 1 || month > 12) return 0;
-
-  const [local] = await dbQuery(
-    `SELECT COALESCE(SUM(totalqty), 0)::float AS qty
-     FROM ${T.SCHEDULE_PLAN}
-     WHERE itemdcode = $1 AND schmonth = $2 AND is_planned NOT IN (4, 5)`,
-    [code, month]
-  );
-  const fromDb = Number(local?.qty) || 0;
-  if (fromDb > 0) return fromDb;
-
-  const rows = (await fetchImsDataRaw("schdule", null))?.records || [];
-  return rows.reduce((sum, row) => Number(row?.itemdcode ?? row?.item_dcode) === code && Number(row?.schmonth) === month ? sum + (Number(row?.totalqty ?? row?.total_qty) || 0) : sum, 0);
-}
-
-function imsScheduleRows(records, itemdcode, schmonth) {
-  const code = Number(itemdcode);
-  const month = Number(schmonth);
+  const codeText = String(itemCode ?? "").trim().toUpperCase();
   return (records || []).flatMap((row) => {
     const item = Number(row?.itemdcode ?? row?.item_dcode ?? row?.ItemDcode);
+    const rowCode = String(row?.item_code ?? row?.Item_Code ?? row?.itemcode ?? "").trim().toUpperCase();
     const m = Number(row?.schmonth ?? row?.Schmonth ?? row?.sch_month);
-    if (item !== code || m !== month) return [];
+    const itemMatch = (Number.isFinite(code) && item === code) || (codeText && rowCode === codeText);
+    if (!itemMatch || m !== month) return [];
     return [{
       schno: String(row?.schno ?? row?.Schno ?? "").trim(),
       itemdcode: item,
@@ -273,46 +257,53 @@ function imsScheduleRows(records, itemdcode, schmonth) {
   });
 }
 
-/** Schedule Item Wise Default list: all IMS schedules for the item and month, not only local plan rows. */
-async function loadItemMonthSchedulePair(itemdcode, schmonth) {
+/** Approved customer out-entry box qty for this item in YYYY-MM. Not schedule_plan, not forwarding-note qty. */
+async function getItemMonthDispatchedQty(itemdcode, yearMonth) {
+  const code = Number(itemdcode);
+  const ym = String(yearMonth || "").slice(0, 7);
+  if (!Number.isFinite(code) || !/^\d{4}-\d{2}$/.test(ym)) return 0;
+
+  const [row] = await dbQuery(
+    `SELECT COALESCE(SUM(b.qty), 0)::float AS dispatch_qty
+     FROM ${T.BOX_TABLE} b
+     JOIN ${T.OUT_ENTRY} o
+       ON o.out_uid = b.out_uid
+      AND o.is_deleted = false
+      AND o.approved = true
+      AND COALESCE(NULLIF(TRIM(o.entry_type::text), ''), 'forwarding_note') IN ('forwarding_note', 'inventory_out')
+     JOIN ${T.DAILYPROD} dp
+       ON TRIM(dp.doc_no::text) = TRIM(b.packing_number::text)
+     WHERE b.is_deleted = false
+       AND dp.item_dcode = $1
+       AND to_char(COALESCE(o.approved_at, o.created_at), 'YYYY-MM') = $2`,
+    [code, ym]
+  );
+  return Number(row?.dispatch_qty) || 0;
+}
+
+/** IMS schedule for the month. Balance = that qty minus out-entry dispatch. */
+async function loadItemMonthSchedulePair(itemdcode, schmonth, itemCode, yearMonth) {
   const code = Number(itemdcode);
   const month = Number(schmonth);
-  if (!Number.isFinite(code) || month < 1 || month > 12) return { scheduleQty: 0, balanceQty: 0 };
-
-  const [imsRaw, localRows] = await Promise.all([
-    fetchImsDataRaw("schdule", null),
-    dbQuery(
-      `SELECT TRIM(schno) AS schno, itemdcode, COALESCE(totalqty, 0)::float AS totalqty
-       FROM ${T.SCHEDULE_PLAN}
-       WHERE itemdcode = $1 AND schmonth = $2 AND is_planned NOT IN (4, 5)`,
-      [code, month]
-    ),
-  ]);
-  const localBySchno = new Map((localRows || []).map((row) => [String(row.schno ?? "").trim(), row]));
-  let plans = imsScheduleRows(imsRaw?.records, code, month).map((row) => {
-    const local = localBySchno.get(row.schno);
-    return local ? { ...row, totalqty: Number(local.totalqty) || row.totalqty } : row;
-  });
-  if (!plans.length) plans = localRows || [];
-  if (!plans.length) return { scheduleQty: 0, balanceQty: 0 };
-
-  const dispatchMap = await loadScheduleDispatchQtyMap();
-  let scheduleQty = 0;
-  let balanceQty = 0;
-  for (const plan of plans) {
-    const qty = Number(plan.totalqty) || 0;
-    const dispatched = Number(dispatchMap.get(planKey(plan.schno, plan.itemdcode ?? code)) ?? 0);
-    scheduleQty += qty;
-    balanceQty += Math.max(0, qty - dispatched);
+  const codeText = String(itemCode ?? "").trim();
+  if ((!Number.isFinite(code) && !codeText) || month < 1 || month > 12) {
+    return { scheduleQty: 0, dispatchQty: 0, balanceQty: 0 };
   }
-  return { scheduleQty, balanceQty };
+
+  const [imsRaw, dispatchQty] = await Promise.all([
+    fetchImsDataRaw("schdule", null),
+    getItemMonthDispatchedQty(code, yearMonth),
+  ]);
+  const plans = imsScheduleRows(imsRaw?.records, code, month, codeText);
+  const scheduleQty = plans.reduce((sum, plan) => sum + (Number(plan.totalqty) || 0), 0);
+  return { scheduleQty, dispatchQty, balanceQty: Math.max(0, scheduleQty - dispatchQty) };
 }
 
 /**
  * Evaluate monthly packing limit (Packing Entry / Daily Production only).
  * Base = approved shortage sum only; then + config tolerance %.
  */
-export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing_config, doc_no, doc_dt = null, year_month = null, withReorder = false}) {
+export async function evaluateMonthlyPackingLimit({itemdcode, item_code = null, total_qty, packing_config, doc_no, doc_dt = null, year_month = null, withReorder = false}) {
   const requestedQty = resolveStickerRequestedQty({ total_qty, packing_config });
   const { yearMonth, schmonth: month } = resolveLimitMonth({ doc_dt, year_month });
 
@@ -324,10 +315,11 @@ export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing
     getItemSellableQty(itemdcode),
   ]);
   const [schedulePair, reorderQty] = await Promise.all([
-    withReorder ? loadItemMonthSchedulePair(itemdcode, month) : null,
+    withReorder ? loadItemMonthSchedulePair(itemdcode, month, item_code, yearMonth) : null,
     withReorder ? getItemReorderQty(itemdcode) : 0,
   ]);
   const scheduleQty = schedulePair?.scheduleQty ?? 0;
+  const dispatchQty = schedulePair?.dispatchQty ?? 0;
   const scheduleBalanceQty = schedulePair?.balanceQty ?? 0;
 
   const baseQty = shortage.total;
@@ -345,6 +337,7 @@ export async function evaluateMonthlyPackingLimit({itemdcode, total_qty, packing
     projected_total: projectedTotal,
     monthly_requirement: 0,
     schedule_qty: scheduleQty,
+    dispatch_qty: dispatchQty,
     schedule_balance_qty: scheduleBalanceQty,
     shortage_balance_qty: baseQty - (withReorder ? shortagePackedQty : monthUsedQty),
     reorder_qty: reorderQty,

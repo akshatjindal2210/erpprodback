@@ -107,9 +107,91 @@ export function parseStickerBoxIndex(boxNoUid) {
 }
 
 function prefixOffset(parts) {
-  if (parts.length >= 5 && /^[A-Za-z]{1,8}$/.test(parts[0]) && /^\d{2,4}$/.test(parts[1])) return 2;
+  // APP + year (FG_26_… / RM_26_…) — 4+ parts covers MRN uid RM_26_4111_1 and coil RM_26_4111_1_10_1
+  if (parts.length >= 4 && /^[A-Za-z]{1,8}$/.test(parts[0]) && /^\d{2,4}$/.test(parts[1])) return 2;
   if (parts.length >= 4 && /^\d{2,4}$/.test(parts[0])) return 1;
   return 0;
+}
+
+function stickerUidEndsWithCore(full, core) {
+  const a = String(full ?? "").trim().toLowerCase();
+  const b = String(core ?? "").trim().toLowerCase();
+  if (!a || !b || a === b) return a === b;
+  return a.length > b.length && a.endsWith("_" + b);
+}
+
+/** Underscore segments for any sticker UID (coil, box, MRN uid, etc.). */
+export function splitStickerUidParts(uid) {
+  return String(uid ?? "").trim().split("_").filter(Boolean);
+}
+
+/**
+ * Match/compare key with app+year prefix stripped (same rules as formatCoilNoUid / prefixOffset).
+ * RM_26_4111_1_10_1 → 4111_1_10_1 · 4111_1 → 4111_1 · 26_4111_1_10_1 → 4111_1_10_1
+ */
+export function stickerUidCoreKey(uid) {
+  const parts = splitStickerUidParts(uid);
+  if (!parts.length) return "";
+  return parts.slice(prefixOffset(parts)).join("_").toLowerCase();
+}
+
+/**
+ * True when two UIDs match:
+ * - exact / case-insensitive
+ * - same core after stripping APP+year (stickerUidCoreKey)
+ * - IMS-style underscore suffix (`4111_1_10_1` ↔ `RM_26_4111_1_10_1`)
+ */
+export function stickerUidsMatch(a, b) {
+  const left = String(a ?? "").trim();
+  const right = String(b ?? "").trim();
+  if (!left || !right) return false;
+  if (left.toLowerCase() === right.toLowerCase()) return true;
+  const leftKey = stickerUidCoreKey(left);
+  const rightKey = stickerUidCoreKey(right);
+  if (leftKey && rightKey && leftKey === rightKey) return true;
+  return stickerUidEndsWithCore(left, right) || stickerUidEndsWithCore(right, left);
+}
+
+/** Printed sticker UID (uses STICKER_BY_APP codes — do not hardcode FG_/RM_). */
+export function looksLikeStickerUid(uid) {
+  const raw = String(uid ?? "").trim();
+  if (!raw) return false;
+  const parts = splitStickerUidParts(raw);
+  if (parts.length < 3) return false;
+  const codes = new Set(
+    Object.values(STICKER_BY_APP)
+      .map((app) => String(app?.code || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  if (codes.has(String(parts[0]).toLowerCase()) && /^\d{2,4}$/.test(parts[1])) return true;
+  if (prefixOffset(parts) > 0) return true;
+  const last = parts[parts.length - 1];
+  const prev = parts[parts.length - 2];
+  return /^\d+$/.test(last) && /^\d+$/.test(prev);
+}
+
+/**
+ * SQL predicate matching IMS box_no_uid lookup:
+ * exact, case-insensitive, or stored/scan is an underscore-suffix of the other.
+ */
+export function sqlStickerUidEquals(columnSql, paramSql = "$1") {
+  const col = `trim(${columnSql}::text)`;
+  const p = `trim(${paramSql}::text)`;
+  return `(
+    ${col} = ${p}
+    OR lower(${col}) = lower(${p})
+    OR (length(${col}) > length(${p}) AND right(${col}, length(${p}) + 1) = ('_' || ${p}))
+    OR (length(${p}) > length(${col}) AND right(${p}, length(${col}) + 1) = ('_' || ${col}))
+  )`;
+}
+
+/** Resolve scanned/typed UID to a known coil_no_uid from a list (exact, core, or suffix). */
+export function findMatchingCoilNoUid(scanned, coilUids = []) {
+  const raw = String(scanned ?? "").trim();
+  if (!raw || !Array.isArray(coilUids) || !coilUids.length) return null;
+  const exact = coilUids.find((uid) => String(uid ?? "").trim().toLowerCase() === raw.toLowerCase());
+  if (exact) return exact;
+  return coilUids.find((uid) => stickerUidsMatch(uid, raw)) || null;
 }
 
 export function parseStandardBoxNoUid(boxNoUid) {

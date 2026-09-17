@@ -4,6 +4,7 @@ import { orderMrnQuotasFifo } from "../../../lib/utils/mrnFifoOrder.js";
 import { COIL_QC_JOIN, COIL_QC_PASSED_COND } from "../../../lib/utils/coilQcStatusSql.js";
 import { coilIndexFromUidSql } from "../../coil/models/coil.model.js";
 import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
+import { mrnPortalRejectionPendingExcludeSql } from "../../rm-rejection/models/rmRejection.model.js";
 
 const TABLE = T.OUT_ENTRY;
 const SCANNED = T.OUT_ENTRY_SCANNED_COIL;
@@ -1220,8 +1221,11 @@ export const findPendingRejectionStoreOut = async (options = {}) => {
       )
   )`;
 
+  const mrnPortalExclude = mrnPortalRejectionPendingExcludeSql("r");
+
   const virtualConditions = [
     "r.is_deleted = false",
+    mrnPortalExclude,
     storeOutApprovedSql,
     openDraftExistsSql,
   ];
@@ -1229,6 +1233,7 @@ export const findPendingRejectionStoreOut = async (options = {}) => {
     "o.is_deleted = false",
     "COALESCE(o.approved, false) = false",
     "r.is_deleted = false",
+    mrnPortalExclude,
     storeOutApprovedSql,
     "(o.out_uid = r.out_uid OR (o.qc_reject_uid IS NOT NULL AND o.qc_reject_uid = r.qc_reject_uid))",
   ];

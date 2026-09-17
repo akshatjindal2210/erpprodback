@@ -101,6 +101,14 @@ function fieldsForinProcessRequest(mod, act) {
   return null;
 }
 
+/** Spec lookup / header suggest — IMS-style GET: caller page view only. */
+function fieldsForSpec(mod, act) {
+  if (mod == null || act == null) return null;
+  const allowed = ["rm_spec_master", "rm_mrn_portal", "rm_stock_adjustment"];
+  if (allowed.includes(mod) && act === VIEW) return [];
+  return null;
+}
+
 const BY_HELPER = {
   locations: fieldsForLocations,
   productionItems: allowErpHelper,
@@ -110,6 +118,7 @@ const BY_HELPER = {
   qcCheck: fieldsForQcCheck,
   issueRequest: fieldsForIssueRequest,
   inProcessRequest: fieldsForinProcessRequest,
+  spec: fieldsForSpec,
 };
 
 function resolveHelperFields(helper, { permission_module, permission_action } = {}) {

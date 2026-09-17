@@ -1093,19 +1093,28 @@ function monthlyLimitExceededPayload(limitCheck, canCreateDeviation) {
 /** Preview monthly packing limit for a packing row (Create Deviation drawer). */
 export const previewMonthlyPackingLimit = async (req, res) => {
   try {
-    const { doc_no, itemdcode, total_qty, packing_config, doc_dt, year_month } = req.body || {};
+    const { doc_no, itemdcode, item_code, total_qty, packing_config, doc_dt, year_month } = req.body || {};
     if (!itemdcode) {
       return res.status(400).json({ success: false, message: "itemdcode is required." });
     }
 
     const limitCheck = await evaluateMonthlyPackingLimit({
       itemdcode,
+      item_code,
       total_qty,
       packing_config,
       doc_no: doc_no != null ? String(doc_no).trim() : null,
       doc_dt,
       year_month,
       withReorder: true,
+    });
+
+    console.log("[packing-deviation]", {
+      itemdcode,
+      year_month: limitCheck.year_month,
+      schedule_qty: limitCheck.schedule_qty,
+      dispatch_qty: limitCheck.dispatch_qty,
+      schedule_balance_qty: limitCheck.schedule_balance_qty,
     });
 
     return res.json({
@@ -1471,15 +1480,12 @@ export const trackBulkDownload = async (req, res) => {
 
 export const renderSingleSticker = async (req, res) => {
   try {
-    const { box_uid: boxUidRaw, sticker_meta = {}, device_type = "desktop" } = req.body;
+    const { box_uid: boxUidRaw, sticker_meta = {} } = req.body;
     const download_source = normalizeStickerDownloadSource(req.body.download_source);
 
     const box_uid = Number(boxUidRaw);
     if (!Number.isFinite(box_uid) || box_uid <= 0)
       return res.status(400).json({ success: false, message: "box_uid required" });
-
-    if (device_type !== "desktop")
-      return res.status(400).json({ success: false, message: "Sticker print allowed only laptop/computer." });
 
     const box = await findBoxDetailed({ box_uid });
 
@@ -1536,14 +1542,11 @@ export const renderSingleSticker = async (req, res) => {
 
 export const renderBulkStickers = async (req, res) => {
   try {
-    const { packing_number, box_uids = [], sticker_meta = {}, device_type = "desktop" } = req.body;
+    const { packing_number, box_uids = [], sticker_meta = {} } = req.body;
     const download_source = normalizeStickerDownloadSource(req.body.download_source);
 
     if (!packing_number && !box_uids.length)
       return res.status(400).json({ success: false, message: "packing_number or box_uids is required" });
-
-    if (device_type !== "desktop")
-      return res.status(400).json({ success: false, message: "Sticker print allowed only laptop/computer" });
 
     const boxes = box_uids.length ? await findBoxesDetailed({ box_uids }) : await findBoxesDetailed({ packing_number });
 

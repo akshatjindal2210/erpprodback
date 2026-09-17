@@ -53,7 +53,7 @@ export const getCoilByUid = async (req, res) => {
     if (!coil_no_uid) return res.status(400).json({ success: false, message: "Coil UID is required." });
     const data = await findCoilByUid(coil_no_uid);
     if (!data) return res.status(404).json({ success: false, message: "Coil not found." });
-    const pendingStoreIn = await findPendingStoreInForCoil(coil_no_uid);
+    const pendingStoreIn = await findPendingStoreInForCoil(data.coil_no_uid || coil_no_uid);
     return res.json({
       success: true,
       data: {
@@ -76,7 +76,7 @@ export const getCoilsViews = async (req, res) => {
     if (coil_no_uid) {
       const data = await findCoilByUid(coil_no_uid);
       if (!data) return res.status(404).json({ success: false, message: "Coil not found." });
-      const pendingStoreIn = await findPendingStoreInForCoil(coil_no_uid);
+      const pendingStoreIn = await findPendingStoreInForCoil(data.coil_no_uid || coil_no_uid);
       return res.json({
         success: true,
         data: {

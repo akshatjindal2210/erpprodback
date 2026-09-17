@@ -16,6 +16,7 @@ export function mrnPortalStickerCoilSql(cAlias = "c", mAlias = "m") {
   return `(
     ${portalMrnCoilBaseSql(cAlias)}
     AND ${mAlias}.sticker_generated = true
+    AND COALESCE(${mAlias}.sticker_approved, true) = true
   )`;
 }
 
@@ -26,6 +27,7 @@ export function mrnPortalStickerCoilExistsSql(cAlias = "c") {
     FROM ${T.MRN} mx
     WHERE mx.uid = ${cAlias}.mrn_uid
       AND mx.sticker_generated = true
+      AND COALESCE(mx.sticker_approved, true) = true
   )`;
 }
 

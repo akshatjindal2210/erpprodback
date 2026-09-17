@@ -300,8 +300,9 @@ export async function fetchMrnRowsForFinancialYear(financialYear, options = {}) 
   const key = String(options.search ?? options.mrn_no ?? options.uid ?? "").trim();
   const { from, to } = parseIndianFinancialYearBounds(fy);
   const filter = buildImsMrnRmDateFilter(from, to);
+  const requestedData = String(options.requestedData ?? "mrn_rm").trim() || "mrn_rm";
 
-  const json = await fetchImsDataRaw("mrn_rm", filter);
+  const json = await fetchImsDataRaw(requestedData, filter);
   if (!json?.success) {
     return { success: false, records: [], message: json?.message || "IMS API failed", filter };
   }

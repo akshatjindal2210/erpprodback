@@ -34,11 +34,30 @@ export async function createRmStoreMrnTable() {
       rmtc_file_name           VARCHAR(255),
       sticker_draft            JSONB,
       sticker_draft_at         TIMESTAMP WITH TIME ZONE,
-      sticker_draft_by         VARCHAR(255)
+      sticker_draft_by         VARCHAR(255),
+      sticker_approved         BOOLEAN DEFAULT false,
+      sticker_approved_by      VARCHAR(255),
+      sticker_approved_at      TIMESTAMP WITH TIME ZONE,
+      sticker_rejected         BOOLEAN DEFAULT false,
+      sticker_reject_uid       INTEGER,
+      sticker_rejected_by      VARCHAR(255),
+      sticker_rejected_at      TIMESTAMP WITH TIME ZONE
     );
 
     CREATE INDEX IF NOT EXISTS rmstore_mrn_sticker_generated_idx
       ON ${T.MRN}(sticker_generated);
     CREATE INDEX IF NOT EXISTS rmstore_mrn_mrn_no_idx ON ${T.MRN}(mrn_no);
   `);
+
+  await patchTableSchema(dbQuery, T.MRN, {
+    columns: [
+      patchCol("sticker_approved", "BOOLEAN DEFAULT false"),
+      patchCol("sticker_approved_by", "VARCHAR(255)"),
+      patchCol("sticker_approved_at", "TIMESTAMP WITH TIME ZONE"),
+      patchCol("sticker_rejected", "BOOLEAN DEFAULT false"),
+      patchCol("sticker_reject_uid", "INTEGER"),
+      patchCol("sticker_rejected_by", "VARCHAR(255)"),
+      patchCol("sticker_rejected_at", "TIMESTAMP WITH TIME ZONE"),
+    ],
+  });
 }

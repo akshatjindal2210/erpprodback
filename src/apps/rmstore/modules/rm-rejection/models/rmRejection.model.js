@@ -1,8 +1,28 @@
 ﻿import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
+import { findMrnByUid, hardDeleteMrnByUid } from "../../mrn/models/mrn.model.js";
+import { countCoilsForMrn } from "../../coil/models/coil.model.js";
 
 const TABLE = T.REJECTION;
+
+/** MRN Portal reject — register only: attach bill and complete (no Store Out / coils). */
+export const MRN_PORTAL_REJECTION_REASON = "MRN Portal Rejection";
+
+export function isMrnPortalRejectionRow(row) {
+  return String(row?.reason || "").trim() === MRN_PORTAL_REJECTION_REASON;
+}
+
+/** Exclude MRN Portal rejections from Store Out / RM Rejection pending queues. */
+export const mrnPortalRejectionPendingExcludeSql = (alias = "q") => `NOT (
+  TRIM(COALESCE(${alias}.reason, '')) = '${MRN_PORTAL_REJECTION_REASON}'
+  OR EXISTS (
+    SELECT 1 FROM ${T.MRN} mp
+    WHERE mp.sticker_reject_uid = ${alias}.qc_reject_uid
+      AND COALESCE(mp.sticker_rejected, false) = true
+  )
+)`;
+
 const OUT_TABLE = T.OUT_ENTRY;
 const COIL_TABLE = T.COIL_TABLE;
 const SCANNED_COIL_TABLE = T.OUT_ENTRY_SCANNED_COIL;
@@ -102,7 +122,10 @@ export async function attachRejectionCoils(rows = []) {
     let rejection_origin = null;
     const sourceSep = " · ";
     let rejection_origin_label = null;
-    if (ipr_uid != null) {
+    if (isMrnPortalRejectionRow(row)) {
+      rejection_origin = "mrn_portal";
+      rejection_origin_label = "MRN Portal";
+    } else if (ipr_uid != null) {
       rejection_origin = "in_process";
       rejection_origin_label = `In-Process${sourceSep}IPR-${ipr_uid}`;
     } else if (qc_check_uid != null) {
@@ -288,10 +311,69 @@ export const softDeleteQcRejection = async (qc_reject_uid, deleted_by) => {
   );
 };
 
+export const hardDeleteQcRejection = async (qc_reject_uid) => {
+  const id = Number(qc_reject_uid);
+  if (!Number.isFinite(id) || id <= 0) return false;
+  const rows = await dbQuery(
+    `DELETE FROM ${TABLE} WHERE qc_reject_uid = $1 RETURNING qc_reject_uid`,
+    [id]
+  );
+  return Array.isArray(rows) && rows.length > 0;
+};
+
+/** Primary MRN UID on a rejection register row (first when pipe-separated). */
+export function primaryMrnUidFromRejection(row) {
+  const raw = String(row?.mrn_uids || row?.mrn_uid || "").trim();
+  if (!raw) return null;
+  return raw.split("|").map((s) => s.trim()).find(Boolean) || null;
+}
+
 /**
- * Incomplete rejection register rows (no bill_no yet) — single source for RM Rejection Pending.
+ * Permanently remove an unused MRN Portal rejection (no bill, no coils, no stickers).
+ * Deletes the register row and the local MRN snapshot when safe.
+ */
+export async function permanentlyRemoveUnusedMrnPortalRejection(rejection, { mrn_uid } = {}) {
+  const rejectId = Number(rejection?.qc_reject_uid);
+  if (!Number.isFinite(rejectId) || rejectId <= 0) {
+    return { ok: false, message: "Invalid rejection id." };
+  }
+  if (!isMrnPortalRejectionRow(rejection)) {
+    return { ok: false, message: "Not an MRN Portal rejection." };
+  }
+
+  const uid = String(mrn_uid || primaryMrnUidFromRejection(rejection) || "").trim();
+  let mrnDeleted = false;
+
+  if (uid) {
+    const mrn = await findMrnByUid(uid);
+    if (mrn) {
+      if (mrn.sticker_generated || (await countCoilsForMrn(uid)) > 0) {
+        return {
+          ok: false,
+          message: "Cannot permanently delete — stickers or coils exist for this MRN.",
+        };
+      }
+      mrnDeleted = await hardDeleteMrnByUid(uid);
+    }
+  }
+
+  const rejectDeleted = await hardDeleteQcRejection(rejectId);
+  if (!rejectDeleted) {
+    return { ok: false, message: "Rejection register could not be deleted." };
+  }
+
+  return {
+    ok: true,
+    qc_reject_uid: rejectId,
+    mrn_uid: uid || null,
+    mrn_deleted: mrnDeleted,
+  };
+}
+
+/**
+ * Incomplete rejection register rows (no bill_no yet) — feeds RM Rejection Pending queue.
+ * MRN Portal rejections are excluded (register-only: attach bill on Register tab, no Store Out).
  * Stage: awaiting_store_out | awaiting_bill
- * Register approval is skipped; Store Out scan/authorize is the gate.
  */
 function classifyIncompleteRejection(row) {
   const storeOutApproved =
@@ -350,6 +432,7 @@ export const findIncompleteRejectionRegisters = async (options = {}) => {
   const conditions = [
     "q.is_deleted = false",
     `COALESCE(TRIM(q.bill_no), '') = ''`,
+    mrnPortalRejectionPendingExcludeSql("q"),
   ];
 
   if (search) {

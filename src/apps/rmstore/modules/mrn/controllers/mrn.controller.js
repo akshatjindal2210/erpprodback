@@ -48,6 +48,7 @@ export function mapErpMrnRecord(r = {}) {
     it_unit: r.itunit ?? r.it_unit ?? null,
     fyid: r.fyid ?? null,
     totalqty: r.totalqty ?? null,
+    coils: r.coils ?? r.Coils ?? null,
     userc: r.userc ?? r.Userc ?? null,
     datec: r.datec ?? r.Datec ?? null,
     internal_create_user: r.internal_create_user ?? r.userc ?? r.Userc ?? null,
@@ -177,6 +178,27 @@ function isDbStickerGenerated(dbRow) {
   return dbRow?.sticker_generated === true || dbRow?.sticker_generated === "true";
 }
 
+function isDbStickerApproved(dbRow) {
+  if (dbRow?.sticker_approved === false || dbRow?.sticker_approved === "false") return false;
+  if (dbRow?.sticker_approved === true || dbRow?.sticker_approved === "true") return true;
+  return isDbStickerGenerated(dbRow);
+}
+
+function isDbStickerRejected(dbRow) {
+  return dbRow?.sticker_rejected === true || dbRow?.sticker_rejected === "true";
+}
+
+function isAwaitingStickerApproval(dbRow) {
+  return isDbStickerGenerated(dbRow) && !isDbStickerApproved(dbRow);
+}
+
+export function resolveMrnPortalStatus(dbRow, { draft = false } = {}) {
+  if (isDbStickerRejected(dbRow)) return "reject";
+  if (!isDbStickerGenerated(dbRow)) return draft ? "draft" : "pending";
+  if (isDbStickerApproved(dbRow)) return "approved";
+  return "generate";
+}
+
 function hasStickerDraft(dbRow) {
   const raw = dbRow?.sticker_draft;
   if (!raw) return false;
@@ -195,12 +217,33 @@ function decoratePendingListRow(erpRow, dbRow) {
   const draft = hasStickerDraft(dbRow);
   return {
     ...erpRow,
-    status: draft ? "draft" : "pending",
+    status: resolveMrnPortalStatus(dbRow, { draft }),
     id: erpRow.uid,
     sticker_generated: false,
+    sticker_approved: false,
     has_sticker_draft: draft,
     sticker_draft_at: dbRow?.sticker_draft_at ?? null,
     sticker_draft_by: dbRow?.sticker_draft_by ?? null,
+  };
+}
+
+function decorateGenerateListRow(dbRow, { qty_editable, qty_auto_calc, imsRow = null } = {}) {
+  return {
+    ...dbRow,
+    uid: dbRow.uid,
+    id: dbRow.uid,
+    status: "generate",
+    sticker_generated: true,
+    sticker_approved: false,
+    sticker_approved_by: null,
+    sticker_approved_at: null,
+    userc: dbRow.internal_create_user ?? imsRow?.userc ?? null,
+    datec: dbRow.internal_create_date ?? imsRow?.datec ?? null,
+    created_by_name: dbRow.system_generate_user_name ?? dbRow.created_by_name ?? null,
+    created_at: dbRow.system_generate_date ?? dbRow.created_at ?? null,
+    qty_editable,
+    qty_auto_calc,
+    sticker_mode: dbRow.sticker_mode || "coil",
   };
 }
 
@@ -246,13 +289,38 @@ function buildMrnComparison(imsRow, localRow) {
   };
 }
 
+function decorateRejectedListRow(dbRow, imsRow = null) {
+  return {
+    ...dbRow,
+    ...(imsRow || {}),
+    uid: dbRow.uid,
+    id: dbRow.uid,
+    status: "reject",
+    sticker_rejected: true,
+    sticker_reject_uid: dbRow.sticker_reject_uid ?? null,
+    sticker_rejected_by: dbRow.sticker_rejected_by ?? null,
+    sticker_rejected_at: dbRow.sticker_rejected_at ?? null,
+    mrn_dt: dbRow.mrn_dt ?? imsRow?.mrn_dt ?? null,
+    bill_no: dbRow.bill_no ?? imsRow?.bill_no ?? null,
+    bill_dt: dbRow.bill_dt ?? imsRow?.bill_dt ?? null,
+    acc_name: dbRow.acc_name ?? imsRow?.acc_name ?? null,
+    item_code: dbRow.item_code ?? imsRow?.item_code ?? null,
+    item_desc: dbRow.item_desc ?? imsRow?.item_desc ?? null,
+    it_recp_qty: dbRow.it_recp_qty ?? imsRow?.it_recp_qty ?? null,
+    it_lot_no: dbRow.it_lot_no ?? imsRow?.it_lot_no ?? null,
+  };
+}
+
 function decorateGeneratedListRow(dbRow, { qty_editable, qty_auto_calc, imsRow = null } = {}) {
   return {
     ...dbRow,
     uid: dbRow.uid,
     id: dbRow.uid,
-    status: "generated",
+    status: "approved",
     sticker_generated: true,
+    sticker_approved: true,
+    sticker_approved_by: dbRow.sticker_approved_by ?? null,
+    sticker_approved_at: dbRow.sticker_approved_at ?? null,
     userc: dbRow.internal_create_user ?? imsRow?.userc ?? null,
     datec: dbRow.internal_create_date ?? imsRow?.datec ?? null,
     created_by_name: dbRow.system_generate_user_name ?? dbRow.created_by_name ?? null,
@@ -280,7 +348,7 @@ export const getMrnList = async (req, res) => {
     const to_date = filters?.to_date || null;
     const financial_year = String(filters?.financial_year ?? filters?.financialYear ?? "").trim() || null;
 
-    if (status === "generated") {
+    if (status === "approved" || status === "generated") {
       const result = await findGeneratedMrns({
         search: q,
         page,
@@ -288,6 +356,7 @@ export const getMrnList = async (req, res) => {
         from_date,
         to_date,
         permission: req.permission,
+        approved_only: true,
       });
       const [qty_editable, qty_auto_calc, sticker_mode] = await Promise.all([
         getMrnCoilQtyEditable(),
@@ -295,18 +364,7 @@ export const getMrnList = async (req, res) => {
         getMrnStickerMode(),
       ]);
       const data = (result.data || []).map((row) => ({
-        ...row,
-        status: "generated",
-        id: row.uid,
-        sticker_generated: !!row.sticker_generated,
-        userc: row.internal_create_user ?? row.userc ?? null,
-        datec: row.internal_create_date ?? row.datec ?? null,
-        created_by_name: row.system_generate_user_name ?? row.created_by_name ?? null,
-        created_at: row.system_generate_date ?? row.created_at ?? null,
-        qty_editable,
-        qty_auto_calc,
-        // Legacy generated rows with null mode were coil-wise (before master sticker_mode).
-        sticker_mode: row.sticker_mode || "coil",
+        ...decorateGeneratedListRow(row, { qty_editable, qty_auto_calc }),
       }));
       return res.json({ success: true, ...result, data, qty_editable, qty_auto_calc, sticker_mode });
     }
@@ -395,33 +453,72 @@ export const getMrnList = async (req, res) => {
       findAllActiveMrnByUid(),
     ]);
 
-    let rows = (erpRecords || []).map(mapErpMrnRecord).filter((r) => r.uid);
+    const imsByUid = new Map(
+      (erpRecords || []).map(mapErpMrnRecord).filter((r) => r.uid).map((r) => [String(r.uid), r])
+    );
 
-    if (status === "pending") {
+    if (status === "rejected") {
+      let rows = [];
+      for (const [uid, dbRow] of dbMap) {
+        if (!isDbStickerRejected(dbRow)) continue;
+        const imsRow = imsByUid.get(String(uid)) || null;
+        const row = decorateRejectedListRow(dbRow, imsRow);
+        if (!inDateRange(row, from_date, to_date)) continue;
+        rows.push(row);
+      }
+      if (q) rows = rows.filter((r) => matchesSearch(r, q));
+      rows.sort((a, b) => {
+        const da = a.sticker_rejected_at ? new Date(a.sticker_rejected_at).getTime() : 0;
+        const db = b.sticker_rejected_at ? new Date(b.sticker_rejected_at).getTime() : 0;
+        if (db !== da) return db - da;
+        const ma = a.mrn_dt ? new Date(a.mrn_dt).getTime() : 0;
+        const mb = b.mrn_dt ? new Date(b.mrn_dt).getTime() : 0;
+        return mb - ma;
+      });
+      const out = slicePage(rows, page, limit || rows.length || 1000);
+      const [qty_editable, qty_auto_calc, sticker_mode] = await Promise.all([
+        getMrnCoilQtyEditable(),
+        getMrnCoilQtyAutoCalc(),
+        getMrnStickerMode(),
+      ]);
+      return res.json({
+        success: true,
+        ...out,
+        data: out.data,
+        qty_editable,
+        qty_auto_calc,
+        sticker_mode,
+      });
+    }
+
+    let rows = [...imsByUid.values()];
+
+    if (status === "pending" || status === "generate") {
       rows = rows.filter((r) => {
         const saved = dbMap.get(r.uid);
-        return !saved || !isDbStickerGenerated(saved);
+        if (isDbStickerRejected(saved)) return false;
+        if (isDbStickerGenerated(saved) && isDbStickerApproved(saved)) return false;
+        return !saved || !isDbStickerGenerated(saved) || isAwaitingStickerApproval(saved);
       });
-      rows = rows.map((r) => decoratePendingListRow(r, dbMap.get(r.uid)));
-    } else {
-      // all — merge ERP with DB status
       rows = rows.map((r) => {
         const saved = dbMap.get(r.uid);
+        if (isAwaitingStickerApproval(saved)) {
+          return { ...decorateGenerateListRow(saved, { imsRow: r }), ...r, uid: saved.uid };
+        }
+        return decoratePendingListRow(r, saved);
+      });
+    } else {
+      rows = rows.map((r) => {
+        const saved = dbMap.get(r.uid);
+        if (isDbStickerRejected(saved)) {
+          return decorateRejectedListRow(saved, r);
+        }
         if (isDbStickerGenerated(saved)) {
-          return {
-            ...saved,
-            ...r,
-            uid: saved.uid,
-            status: "generated",
-            id: saved.uid,
-            sticker_generated: true,
-            created_by_name: saved.system_generate_user_name ?? saved.created_by_name,
-            created_at: saved.system_generate_date ?? saved.created_at,
-            userc: saved.internal_create_user ?? r.userc ?? null,
-            datec: saved.internal_create_date ?? r.datec ?? null,
-            internal_create_user: saved.internal_create_user ?? r.internal_create_user ?? null,
-            internal_create_date: saved.internal_create_date ?? r.internal_create_date ?? null,
-          };
+          const cfg = { imsRow: r };
+          if (isDbStickerApproved(saved)) {
+            return { ...decorateGeneratedListRow(saved, cfg), ...r, uid: saved.uid };
+          }
+          return { ...decorateGenerateListRow(saved, cfg), ...r, uid: saved.uid };
         }
         return decoratePendingListRow(r, saved);
       });
@@ -674,7 +771,10 @@ function sortMrnSearchRows(a, b) {
 
 async function fetchMrnRowsForAdjustmentSearch(financial_year, { entry_type = "" } = {}) {
   if (String(financial_year || "").trim()) {
-    const ims = await fetchMrnRowsForFinancialYear(financial_year, {});
+    const isOld = String(entry_type || "").trim().toLowerCase() === "old";
+    const ims = await fetchMrnRowsForFinancialYear(financial_year, {
+      requestedData: isOld ? "mrn_rm_old" : "mrn_rm",
+    });
     if (!ims.success) {
       return { success: false, rows: [], message: ims.message, filter: ims.filter ?? null };
     }
@@ -857,9 +957,7 @@ export const searchAdjustmentMrns = async (req, res) => {
   try {
     const financial_year = String(req.body?.financial_year ?? req.body?.financialYear ?? "").trim();
     const search_mode = String(req.body?.search_mode ?? req.body?.searchMode ?? "").trim().toLowerCase();
-    const lot_no = String(
-      req.body?.lot_no ?? req.body?.it_lot_no ?? req.body?.itLotNo ?? req.body?.heat_no ?? ""
-    ).trim();
+    const lot_no = String(req.body?.lot_no ?? req.body?.it_lot_no ?? req.body?.itLotNo ?? req.body?.heat_no ?? "").trim();
     const key = String(req.body?.mrn_no ?? req.body?.uid ?? req.body?.search ?? req.body?.mrn_uid ?? "").trim();
     const entry_type = String(req.body?.entry_type ?? req.body?.entryType ?? "").trim().toLowerCase();
 
@@ -934,6 +1032,7 @@ export const searchAdjustmentMrns = async (req, res) => {
     const data = await Promise.all(
       hits.map(async (hit) => {
         const saved = dbMap.get(String(hit.uid));
+        const erpCoils = hit?.coils ?? hit?.Coils ?? null;
         const base = {
           ...hit,
           ...(saved && isDbStickerGenerated(saved) ? saved : {}),
@@ -945,6 +1044,7 @@ export const searchAdjustmentMrns = async (req, res) => {
           qty_auto_calc,
           sticker_mode: saved?.sticker_mode || sticker_mode,
           financial_year: (deriveFinancialYearFromMrnRow(hit) ?? financial_year) || null,
+          ...(erpCoils != null && erpCoils !== "" ? { coils: erpCoils } : {}),
         };
         const row = enrichAdd ? await attachMrnAdjustmentSummary(base, excludeAdjustmentId) : base;
         return decorateErpMrnPickerRow(row);

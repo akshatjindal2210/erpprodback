@@ -16,6 +16,8 @@ const DEFAULT_FIELDS = [
   "m.system_generate_user", "m.system_generate_date",
   "m.tc_file_path", "m.tc_file_name", "m.rmtc_file_path", "m.rmtc_file_name",
   "m.sticker_draft", "m.sticker_draft_at", "m.sticker_draft_by",
+  "m.sticker_approved", "m.sticker_approved_by", "m.sticker_approved_at",
+  "m.sticker_rejected", "m.sticker_reject_uid", "m.sticker_rejected_by", "m.sticker_rejected_at",
   "m.system_generate_user AS system_generate_user_name",
   "m.system_generate_user AS created_by_name",
   "m.system_generate_date AS created_at",
@@ -90,16 +92,20 @@ export const findAllActiveMrnByUid = async () => {
   return map;
 };
 
-export const findGeneratedMrns = async ({ search, page = 1, limit = 1000, from_date, to_date, permission = {} } = {}) => {
+export const findGeneratedMrns = async ({ search, page = 1, limit = 1000, from_date, to_date, permission = {}, approved_only = true } = {}) => {
   const values = [];
   let i = 1;
   const conditions = [
     "m.sticker_generated = true",
+    "COALESCE(m.sticker_rejected, false) = false",
+    ...(approved_only ? ["COALESCE(m.sticker_approved, true) = true"] : []),
     `EXISTS (
       SELECT 1 FROM ${T.COIL_TABLE} c
       WHERE c.mrn_uid = m.uid
         AND c.is_deleted = false
-        AND ${portalMrnCoilSql("c")}
+        AND c.sa_id IS NULL
+        AND NULLIF(TRIM(c.mrn_uid::text), '') IS NOT NULL
+        AND LOWER(COALESCE(c.sa_entry_type, '')) <> 'production_return'
     )`,
   ];
 
@@ -261,6 +267,9 @@ export const setMrnStickerGenerated = async (uid, { user, at, sticker_mode } = {
   const [row] = await dbQuery(
     `UPDATE ${TABLE}
      SET sticker_generated = true,
+         sticker_approved = false,
+         sticker_approved_by = NULL,
+         sticker_approved_at = NULL,
          system_generate_user = COALESCE($2::text, system_generate_user),
          system_generate_date = COALESCE($3::timestamptz, NOW()),
          sticker_mode = COALESCE($4::text, sticker_mode),
@@ -270,6 +279,69 @@ export const setMrnStickerGenerated = async (uid, { user, at, sticker_mode } = {
      WHERE uid = $1
      RETURNING *`,
     [String(uid), user ?? null, at ?? null, sticker_mode ?? null]
+  );
+  return row ?? null;
+};
+
+export const setMrnStickerApproved = async (uid, { user, at } = {}) => {
+  const [row] = await dbQuery(
+    `UPDATE ${TABLE}
+     SET sticker_approved = true,
+         sticker_approved_by = COALESCE($2::text, sticker_approved_by),
+         sticker_approved_at = COALESCE($3::timestamptz, NOW())
+     WHERE uid = $1
+       AND sticker_generated = true
+       AND COALESCE(sticker_rejected, false) = false
+     RETURNING *`,
+    [String(uid), user ?? null, at ?? null]
+  );
+  return row ?? null;
+};
+
+export const setMrnStickerRejected = async (uid, { reject_uid, user, at } = {}) => {
+  const [row] = await dbQuery(
+    `UPDATE ${TABLE}
+     SET sticker_rejected = true,
+         sticker_reject_uid = COALESCE($2::int, sticker_reject_uid),
+         sticker_rejected_by = COALESCE($3::text, sticker_rejected_by),
+         sticker_rejected_at = COALESCE($4::timestamptz, NOW())
+     WHERE uid = $1
+     RETURNING *`,
+    [String(uid), reject_uid ?? null, user ?? null, at ?? null]
+  );
+  return row ?? null;
+};
+
+export const clearMrnStickerRejected = async (uid) => {
+  const key = String(uid || "").trim();
+  if (!key) return null;
+  const [row] = await dbQuery(
+    `UPDATE ${TABLE}
+     SET sticker_rejected = false,
+         sticker_reject_uid = NULL,
+         sticker_rejected_by = NULL,
+         sticker_rejected_at = NULL
+     WHERE uid = $1
+       AND COALESCE(sticker_rejected, false) = true
+     RETURNING *`,
+    [key]
+  );
+  return row ?? null;
+};
+
+export const clearMrnStickerRejectedByRejectUid = async (qc_reject_uid) => {
+  const id = Number(qc_reject_uid);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const [row] = await dbQuery(
+    `UPDATE ${TABLE}
+     SET sticker_rejected = false,
+         sticker_reject_uid = NULL,
+         sticker_rejected_by = NULL,
+         sticker_rejected_at = NULL
+     WHERE sticker_reject_uid = $1
+       AND COALESCE(sticker_rejected, false) = true
+     RETURNING *`,
+    [id]
   );
   return row ?? null;
 };
@@ -308,6 +380,9 @@ export const resetMrnStickerGenerated = async (uid) => {
   const [row] = await dbQuery(
     `UPDATE ${TABLE}
      SET sticker_generated = false,
+         sticker_approved = false,
+         sticker_approved_by = NULL,
+         sticker_approved_at = NULL,
          system_generate_user = NULL,
          system_generate_date = NULL,
          sticker_mode = NULL,

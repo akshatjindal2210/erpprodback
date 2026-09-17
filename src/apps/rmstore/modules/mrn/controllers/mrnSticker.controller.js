@@ -1,4 +1,8 @@
-import { findMrnByUid, insertMrn, setMrnStickerGenerated, updateMrnDocs, updateMrnStickerMeta, saveMrnStickerDraft } from "../models/mrn.model.js";
+import { findMrnByUid, insertMrn, setMrnStickerGenerated, setMrnStickerApproved, setMrnStickerRejected, hardDeleteMrnByUid, updateMrnDocs, updateMrnStickerMeta, saveMrnStickerDraft } from "../models/mrn.model.js";
+import { findQcRejection, insertQcRejection, updateQcRejection, hasApprovedRejectionStoreOut, isMrnPortalRejectionRow, permanentlyRemoveUnusedMrnPortalRejection, MRN_PORTAL_REJECTION_REASON } from "../../rm-rejection/models/rmRejection.model.js";
+import { findOutEntry } from "../../out-entry/models/outEntry.model.js";
+import { isSuperAdminUser } from "../../../lib/utils/rmstoreSpecialPermissions.js";
+import { applyApprovalWorkflow } from "../../../../core/lib/utils/auth/approval.js";
 import { resolveMrnForSticker } from "../utils/resolveMrnForSticker.js";
 import { countCoilsForMrn, insertBulkCoils, findCoils, softDeleteCoilsByCoilNoUids } from "../../coil/models/coil.model.js";
 import { formatCoilNoUid } from "../../../lib/coilUidFormat.js";
@@ -12,7 +16,8 @@ import { logRmstoreActivity } from "../../../lib/utils/activity/logRmstoreActivi
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
-export { splitQtyAcrossCoils, equalSplitQtyAcrossCoils } from "../../../lib/utils/coilQtySplit.js";
+import { splitQtyAcrossCoils, equalSplitQtyAcrossCoils } from "../../../lib/utils/coilQtySplit.js";
+export { splitQtyAcrossCoils, equalSplitQtyAcrossCoils };
 
 const MODULE = "rm_mrn_portal";
 const QTY_EPS = 0.001;
@@ -132,6 +137,17 @@ export const getMrnDetail = async (req, res) => {
         datec: mrn.internal_create_date ?? null,
         coils: coils.data || [],
         sticker_generated: !!mrn.sticker_generated,
+        sticker_approved: mrn.sticker_approved === true || (mrn.sticker_generated && mrn.sticker_approved !== false),
+        sticker_approved_by: mrn.sticker_approved_by ?? null,
+        sticker_approved_at: mrn.sticker_approved_at ?? null,
+        sticker_rejected: mrn.sticker_rejected === true,
+        status: mrn.sticker_rejected
+          ? "reject"
+          : !mrn.sticker_generated
+            ? "pending"
+            : mrn.sticker_approved === false
+              ? "generate"
+              : "approved",
         sticker_draft: parseDraftObj(mrn.sticker_draft) ?? mrn.sticker_draft ?? null,
         has_sticker_draft: !!parseDraftObj(mrn.sticker_draft),
         coil_count: (coils.data || []).length,
@@ -166,6 +182,13 @@ export const generateMrnStickers = async (req, res) => {
     }
     const mrn = resolved.mrn;
     const uid = String(mrn.uid);
+
+    if (mrn.sticker_rejected) {
+      return res.status(409).json({
+        success: false,
+        message: "This MRN has been rejected and cannot generate stickers.",
+      });
+    }
 
     if (mrn.sticker_generated || (await countCoilsForMrn(uid)) > 0) {
       return res.status(409).json({
@@ -392,6 +415,13 @@ export const saveMrnStickerDraftCtrl = async (req, res) => {
     const mrn = resolved.mrn;
     const uid = String(mrn.uid);
 
+    if (mrn.sticker_rejected) {
+      return res.status(409).json({
+        success: false,
+        message: "This MRN has been rejected and cannot save a sticker draft.",
+      });
+    }
+
     if (mrn.sticker_generated || (await countCoilsForMrn(uid)) > 0) {
       return res.status(409).json({
         success: false,
@@ -527,6 +557,320 @@ async function mergeMrnDocUploads(req, uid, { requireBoth = false } = {}) {
 function mrnHasBothDocs(mrn) {
   return Boolean(String(mrn?.tc_file_path || "").trim() && String(mrn?.rmtc_file_path || "").trim());
 }
+
+function parseUidList(raw) {
+  if (Array.isArray(raw)) {
+    return raw.map((v) => String(v || "").trim()).filter(Boolean);
+  }
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map((v) => String(v || "").trim()).filter(Boolean);
+    } catch {
+      // continue
+    }
+    return raw.split(/[,|]+/).map((v) => v.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+export const approveMrnStickers = async (req, res) => {
+  try {
+    const canApprove = isSuperAdminUser(req.user) || Boolean(req?.permission?.can_authorize) || String(req?.user?.type || req?.user?.role || "").toLowerCase() === "super_admin";
+    if (!canApprove) {
+      return res.status(403).json({ success: false, message: "You do not have permission to approve stickers." });
+    }
+
+    const uid = String(req.body?.uid ?? req.body?.mrn_uid ?? "").trim();
+    if (!uid) return res.status(400).json({ success: false, message: "MRN UID is required." });
+
+    const mrn = await findMrnByUid(uid);
+    if (!mrn) return res.status(404).json({ success: false, message: "MRN not found." });
+    if (!mrn.sticker_generated) {
+      return res.status(400).json({ success: false, message: "Stickers have not been generated for this MRN." });
+    }
+    if (mrn.sticker_approved === true) {
+      return res.status(409).json({ success: false, message: "Stickers are already approved for this MRN." });
+    }
+
+    const coils = await findCoils({
+      filters: { mrn_uid: uid, source: "MRN PORTAL" },
+      limit: 5000,
+      sortBy: "coil_index",
+      order: "ASC",
+    });
+    const coilRows = coils.data || [];
+    if (!coilRows.length) {
+      return res.status(400).json({ success: false, message: "No generated coils were found for this MRN." });
+    }
+
+    const scannedCoils = parseUidList(req.body?.scanned_coils ?? req.body?.scannedCoils);
+    const scannedQc = parseUidList(req.body?.scanned_qc ?? req.body?.scannedQc);
+    const scannedBatchQc = req.body?.scanned_batch_qc === true || req.body?.scannedBatchQc === true;
+    const stickerMode = String(mrn.sticker_mode || "coil").toLowerCase() === "batch" ? "batch" : "coil";
+    const expectedCoils = coilRows.map((c) => String(c.coil_no_uid || "").trim()).filter(Boolean);
+    const coilSet = new Set(scannedCoils.map((v) => v.toLowerCase()));
+
+    if (expectedCoils.some((c) => !coilSet.has(c.toLowerCase()))) {
+      return res.status(400).json({
+        success: false,
+        message: "All coil stickers must be scanned before approval.",
+      });
+    }
+
+    if (stickerMode === "batch") {
+      if (!scannedBatchQc) {
+        return res.status(400).json({
+          success: false,
+          message: "Batch QC sticker must be scanned before approval.",
+        });
+      }
+    } else if (expectedCoils.some((c) => !scannedQc.map((v) => v.toLowerCase()).includes(c.toLowerCase()))) {
+      return res.status(400).json({
+        success: false,
+        message: "All QC stickers must be scanned before approval.",
+      });
+    }
+
+    const user = auditUserName(req);
+    const approved = await setMrnStickerApproved(uid, { user, at: new Date().toISOString() });
+    if (!approved) {
+      return res.status(500).json({ success: false, message: "Could not approve stickers for this MRN." });
+    }
+
+    await log(req, "approve", uid, {
+      uid,
+      coil_count: expectedCoils.length,
+      sticker_mode: stickerMode,
+    }, approved);
+
+    return res.json({
+      success: true,
+      data: {
+        uid,
+        sticker_approved: true,
+        sticker_approved_by: approved.sticker_approved_by ?? user,
+        sticker_approved_at: approved.sticker_approved_at ?? null,
+        status: "approved",
+      },
+      message: "Stickers approved successfully.",
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const rejectMrnPortal = async (req, res) => {
+  try {
+    const canReject = isSuperAdminUser(req.user) || Boolean(req?.permission?.can_authorize) || String(req?.user?.type || req?.user?.role || "").toLowerCase() === "super_admin";
+    if (!canReject) {
+      return res.status(403).json({ success: false, message: "You do not have permission to reject this MRN." });
+    }
+
+    const uid = String(req.body?.uid ?? req.body?.mrn_uid ?? "").trim();
+    if (!uid) return res.status(400).json({ success: false, message: "MRN UID is required." });
+
+    const remarks = req.body?.remarks != null ? String(req.body.remarks).trim() : "";
+    if (!remarks) {
+      return res.status(400).json({ success: false, message: "Remark is required." });
+    }
+
+    const resolved = await resolveMrnForGenerate(req);
+    if (resolved.error) {
+      return res.status(resolved.error.status).json({ success: false, message: resolved.error.message });
+    }
+    const mrn = resolved.mrn;
+    if (mrn.sticker_generated || (await countCoilsForMrn(uid)) > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Reject is only allowed before sticker generation.",
+      });
+    }
+    if (mrn.sticker_rejected) {
+      return res.status(409).json({ success: false, message: "This MRN has already been rejected." });
+    }
+
+    const draft = parseDraftObj(mrn.sticker_draft);
+    let coil_count = Number(req.body?.coil_count);
+    if (!Number.isFinite(coil_count) || coil_count < 1) {
+      coil_count = draft?.coil_count != null ? Math.max(1, Number(draft.coil_count) || 1) : 1;
+    }
+
+    const total_qty =
+      req.body?.total_qty != null && req.body.total_qty !== ""
+        ? round3(Number(req.body.total_qty))
+        : draft?.total_qty != null && draft.total_qty !== ""
+          ? round3(Number(draft.total_qty))
+          : round3(Number(mrn.it_recp_qty));
+
+    let coil_qtys = parseCoilQtys(req.body, coil_count);
+    if (!coil_qtys && Array.isArray(draft?.coil_qtys) && draft.coil_qtys.length === coil_count) {
+      coil_qtys = draft.coil_qtys.map((q) => round3(Number(q)));
+    }
+    if (!coil_qtys) {
+      coil_qtys = splitQtyAcrossCoils(total_qty, coil_count);
+    }
+
+    const totalQty = round3(coil_qtys.reduce((s, q) => s + Number(q), 0));
+    const heat_no = String(
+      req.body?.heat_no ?? draft?.heat_no ?? mrn.heat_no ?? mrn.it_lot_no ?? ""
+    ).trim() || null;
+
+    const user = auditUserName(req);
+
+    const rejection = await insertQcRejection({
+      mrn_refs: mrn.mrn_no != null ? String(mrn.mrn_no) : null,
+      mrn_uids: uid,
+      heat_nos: heat_no,
+      item_codes: mrn.item_code || null,
+      item_descs: mrn.item_desc || null,
+      qtys: coil_qtys.join(","),
+      total_qty: totalQty,
+      coil_count,
+      reason: MRN_PORTAL_REJECTION_REASON,
+      remarks: `${remarks}${coil_count ? ` · ${coil_count} coil(s)` : ""}`,
+      created_by: user,
+    });
+
+    const approvalFields = {};
+    applyApprovalWorkflow({
+      req,
+      fields: approvalFields,
+      incomingApproved: true,
+      hasBusinessChanges: false,
+      auditAsName: true,
+    });
+    await updateQcRejection(rejection.qc_reject_uid, approvalFields);
+    const rejectedAt = new Date().toISOString();
+    const rejectedMrn = await setMrnStickerRejected(uid, {
+      reject_uid: rejection.qc_reject_uid,
+      user,
+      at: rejectedAt,
+    });
+
+    await log(req, "reject", uid, {
+      uid,
+      qc_reject_uid: rejection.qc_reject_uid,
+      coil_count,
+      coil_qtys,
+      heat_no,
+      remarks,
+    }, rejection);
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        uid,
+        status: "reject",
+        qc_reject_uid: rejection.qc_reject_uid,
+        sticker_rejected_by: rejectedMrn?.sticker_rejected_by ?? user,
+        sticker_rejected_at: rejectedMrn?.sticker_rejected_at ?? rejectedAt,
+      },
+      message: "MRN rejected and sent to RM Rejection register.",
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** Undo MRN Portal rejection — permanently delete register + local MRN when unused. */
+export const cancelMrnPortalRejection = async (req, res) => {
+  try {
+    const canCancel = isSuperAdminUser(req.user) || Boolean(req?.permission?.can_authorize) || String(req?.user?.type || req?.user?.role || "").toLowerCase() === "super_admin";
+    if (!canCancel) {
+      return res.status(403).json({ success: false, message: "You do not have permission to cancel this rejection." });
+    }
+
+    const uid = String(req.body?.uid ?? req.body?.mrn_uid ?? "").trim();
+    if (!uid) return res.status(400).json({ success: false, message: "MRN UID is required." });
+
+    const mrn = await findMrnByUid(uid);
+    if (!mrn || !mrn.sticker_rejected) {
+      return res.status(400).json({ success: false, message: "This MRN is not in rejected status." });
+    }
+    if (mrn.sticker_generated || (await countCoilsForMrn(uid)) > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Cancel is only allowed for rejections before sticker generation.",
+      });
+    }
+
+    const rejectId = Number(mrn.sticker_reject_uid);
+    if (!Number.isFinite(rejectId) || rejectId <= 0) {
+      return res.status(400).json({ success: false, message: "Linked rejection register not found." });
+    }
+
+    const rejection = await findQcRejection(rejectId);
+    if (!rejection || rejection.is_deleted) {
+      if (!mrn.sticker_generated && (await countCoilsForMrn(uid)) === 0) {
+        await hardDeleteMrnByUid(uid);
+      }
+      return res.json({
+        success: true,
+        message: "Local rejection data removed. MRN is back in ERP Pending.",
+        data: { uid, status: "pending" },
+      });
+    }
+
+    if (!isMrnPortalRejectionRow(rejection)) {
+      return res.status(400).json({
+        success: false,
+        message: "Only MRN Portal rejections can be cancelled from here.",
+      });
+    }
+
+    if (String(rejection.bill_no || "").trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot cancel — a bill number has already been attached.",
+      });
+    }
+
+    if (await hasApprovedRejectionStoreOut(rejectId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot cancel — Store Out has already been authorized.",
+      });
+    }
+
+    const outId = Number(rejection.out_uid);
+    if (Number.isFinite(outId) && outId > 0) {
+      const outEntry = await findOutEntry(outId);
+      if (outEntry && !outEntry.is_deleted) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot cancel — Store Out #${outId} has started. Delete Store Out first.`,
+        });
+      }
+    }
+
+    const user = auditUserName(req);
+    const removed = await permanentlyRemoveUnusedMrnPortalRejection(rejection, { mrn_uid: uid });
+    if (!removed.ok) {
+      return res.status(400).json({ success: false, message: removed.message });
+    }
+
+    await log(req, "cancel_rejection", uid, {
+      uid,
+      qc_reject_uid: rejectId,
+      permanent: true,
+      mrn_deleted: removed.mrn_deleted,
+    }, rejection);
+
+    return res.json({
+      success: true,
+      message: "Rejection permanently deleted. MRN is back in ERP Pending.",
+      data: {
+        uid,
+        status: "pending",
+        qc_reject_uid: rejectId,
+        mrn_deleted: removed.mrn_deleted,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
 
 /** TC / RMTC upload — full replace on generate; partial allowed when one file changes. */
 export const uploadMrnDocs = async (req, res) => {

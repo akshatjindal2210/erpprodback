@@ -1,7 +1,7 @@
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { IMS_TABLES as IT, RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { hasCoilJourneyFilter, appendCoilJourneyCondition } from "../../../lib/utils/logJourneyFilter.js";
-import { formatCoilNoUid, formatStockAdjustmentCoilUid } from "../../../lib/coilUidFormat.js";
+import { formatCoilNoUid, formatStockAdjustmentCoilUid, sqlStickerUidEquals } from "../../../lib/coilUidFormat.js";
 import { parseCoilNoUidMeta, resolveSerialNoForUid } from "../../../lib/coilUidHelpers.js";
 import { COIL_QC_JOIN, COIL_QC_PASSED_COND, COIL_QC_STATUS_EXPR } from "../../../lib/utils/coilQcStatusSql.js";
 import { COIL_REJECTION_JOIN, COIL_REJECTION_SELECT } from "../../../lib/utils/coilRejectionSql.js";
@@ -341,6 +341,8 @@ export const findCoils = async (options = {}) => {
 };
 
 export const findCoilByUid = async (coil_no_uid) => {
+  const val = String(coil_no_uid || "").trim();
+  if (!val) return null;
   const [row] = await dbQuery(
     `SELECT ${COIL_DETAIL_SELECT},
             lm.location_no,
@@ -353,9 +355,16 @@ export const findCoilByUid = async (coil_no_uid) => {
      ${COIL_REJECTION_JOIN}
      ${COIL_JOB_CARD_JOIN}
      LEFT JOIN ${IT.LOCATION_MASTER} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-     WHERE c.coil_no_uid = $1 AND c.is_deleted = false
+     WHERE ${sqlStickerUidEquals("c.coil_no_uid", "$1")} AND c.is_deleted = false
+     ORDER BY
+       CASE
+         WHEN trim(c.coil_no_uid::text) = trim($1::text) THEN 0
+         WHEN lower(trim(c.coil_no_uid::text)) = lower(trim($1::text)) THEN 1
+         ELSE 2
+       END,
+       c.coil_uid DESC
      LIMIT 1`,
-    [String(coil_no_uid || "").trim()]
+    [val]
   );
   return row ?? null;
 };

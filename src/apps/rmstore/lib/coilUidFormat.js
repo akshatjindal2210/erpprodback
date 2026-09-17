@@ -6,4 +6,10 @@ export {
   formatStockAdjustmentCoilUid,
   parseCoilNoUidMeta,
   resolveSerialNoForUid,
+  splitStickerUidParts,
+  stickerUidCoreKey,
+  stickerUidsMatch,
+  looksLikeStickerUid,
+  findMatchingCoilNoUid,
+  sqlStickerUidEquals,
 } from "../../../platform/utils/sticker/stickerUidFormat.js";

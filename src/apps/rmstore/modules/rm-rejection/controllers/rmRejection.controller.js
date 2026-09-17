@@ -1,4 +1,4 @@
-import { findQcRejections, findQcRejection, findIncompleteRejectionRegisters, insertQcRejection, updateQcRejection, softDeleteQcRejection, attachRejectionCoils, hasApprovedRejectionStoreOut } from "../models/rmRejection.model.js";
+import { findQcRejections, findQcRejection, findIncompleteRejectionRegisters, insertQcRejection, updateQcRejection, softDeleteQcRejection, attachRejectionCoils, hasApprovedRejectionStoreOut, isMrnPortalRejectionRow, permanentlyRemoveUnusedMrnPortalRejection } from "../models/rmRejection.model.js";
 import { findInProcessRequest, findInProcessRejectionsPendingRejection, normalizeRequestType, IPR_DOWNSTREAM, IPR_REQUEST_TYPE } from "../../in-process-request/models/inProcessRequest.model.js";
 import { findCoilByUid, findCoilUidsByQcCheck, linkCoilsToRejectionRegister, revertCoilsFromRejectionRegister, findCoils, updateCoilsAfterQcReject } from "../../coil/models/coil.model.js";
 import { findQcCheck, findFailedQcChecksPendingRejection, reopenQcChecksForRejection, linkFailedQcChecksToRejection } from "../../qc-check/models/qcCheck.model.js";
@@ -748,6 +748,26 @@ export const deleteQcRejection = async (req, res) => {
       });
     }
 
+    if (isMrnPortalRejectionRow(existing)) {
+      const removed = await permanentlyRemoveUnusedMrnPortalRejection(existing);
+      if (!removed.ok) {
+        return res.status(400).json({ success: false, message: removed.message });
+      }
+
+      log(req, "delete", String(id), {
+        qc_reject_uid: id,
+        reason: existing.reason ?? null,
+        permanent: true,
+        mrn_uid: removed.mrn_uid,
+        mrn_deleted: removed.mrn_deleted,
+      }, existing);
+
+      return res.json({
+        success: true,
+        message: "Rejection permanently deleted. MRN is back in ERP Pending.",
+      });
+    }
+
     const coils = await findCoils({ filters: { rm_uid: id }, limit: 5000 });
     await revertCoilsFromRejectionRegister(id, user);
     if (!existing.ipr_uid) {
@@ -792,7 +812,7 @@ export const updateQcRejectionBill = async (req, res) => {
     const existing = await findQcRejection(id);
     if (!existing) return res.status(404).json({ success: false, message: "QC rejection record not found." });
     const storeOutApproved = await hasApprovedRejectionStoreOut(id);
-    if (!storeOutApproved) {
+    if (!isMrnPortalRejectionRow(existing) && !storeOutApproved) {
       return res.status(400).json({
         success: false,
         message: "Complete Store Out authorization before saving a bill number.",
@@ -851,20 +871,22 @@ function normalizeImsBillNo(record) {
   const raw =
     record?.prnbillno ??
     record?.PrnBillNo ??
-    record?.bill_no ??
     record?.billno ??
+    record?.bill_no ??
+    record?.BillNo ??
+    record?.DocNo ??
     "";
   return String(raw ?? "").trim();
 }
 
-/** Live bill numbers from IMS (`requestedData: "billno"`). */
+/** Live bill numbers from IMS invfnote — same source as IMS bill dropdowns. `billno` is not a dataset. */
 export const getQcRejectionBillNumbersViews = async (req, res) => {
   try {
     const search = String(req.body?.search ?? "").trim().toLowerCase();
     const page = Math.max(1, Number(req.body?.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.body?.limit) || 50));
 
-    const records = await fetchFromIMS("billno");
+    const records = await fetchFromIMS("invfnote");
     const seen = new Set();
     const rows = [];
 
