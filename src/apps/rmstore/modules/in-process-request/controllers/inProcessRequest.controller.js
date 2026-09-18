@@ -2,7 +2,7 @@ import { findInProcessRequests, findInProcessRequest, findInProcessReasons, inse
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
-import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { findCoilByUid, revertCoilsConsumed, markCoilsInProcessRejectionPending, revertCoilsInProcessRejection, restoreCoilsToShopFloorOut, releaseCoilFromIprRejectionHoldForStoreIn, processStoreInReturnCoils, revertStoreInReturnCoils, processConsumeCoils } from "../../coil/models/coil.model.js";
 import { findQcCheck, findQcCheckItems, findQcChecks } from "../../qc-check/models/qcCheck.model.js";
@@ -283,6 +283,37 @@ const sameCoilSet = (a = [], b = []) => {
   return x.length === y.length && x.every((v, idx) => v === y[idx]);
 };
 
+const IPR_BUSINESS_KEYS = [
+  "request_type", "rejection_type", "reason", "remarks",
+  "lot_no", "mrn_uid", "mrn_no", "heat_no", "item_code", "item_desc",
+  "seed_coil_uid", "coils", "previous_coils", "proposed_coils",
+  "scanned_coil_uids", "attachments",
+];
+
+function pickIprBusinessFields(fields = {}) {
+  const out = {};
+  for (const key of IPR_BUSINESS_KEYS) {
+    if (fields[key] !== undefined) out[key] = fields[key];
+  }
+  return out;
+}
+
+const proposedCoilKeys = (coils = []) =>
+  normalizeProposedCoils(coils)
+    .map(
+      (c) =>
+        `${String(c.coil_no_uid).toLowerCase()}|${Number(c.qty)}|${String(c.from_coil_uid || c.coil_no_uid).toLowerCase()}`
+    )
+    .sort();
+
+const sameProposedCoilSet = (a = [], b = []) => {
+  const x = proposedCoilKeys(a);
+  const y = proposedCoilKeys(b);
+  return x.length === y.length && x.every((v, idx) => v === y[idx]);
+};
+
+const sameAttachments = (a = [], b = []) => JSON.stringify(a || []) === JSON.stringify(b || []);
+
 function hasConsumeQtyChanges(existing, fields) {
   if (normalizeRequestType(fields.request_type) !== IPR_REQUEST_TYPE.CONSUME) return false;
   const prev = new Map(
@@ -301,13 +332,20 @@ function hasConsumeQtyChanges(existing, fields) {
 function hasInProcessContentChanges(existing, fields) {
   if (!existing) return true;
   if (!sameCoilSet(existing.coils, fields.coils)) return true;
-  if (!sameCoilSet(existing.proposed_coils, fields.proposed_coils)) return true;
+  if (hasConsumeQtyChanges(existing, fields)) return true;
+  if (
+    normalizeRequestType(fields.request_type) === IPR_REQUEST_TYPE.STORE_IN &&
+    !sameProposedCoilSet(existing.proposed_coils, fields.proposed_coils)
+  ) {
+    return true;
+  }
   if (String(fields.reason || "") !== String(existing.reason || "")) return true;
   if (String(fields.remarks || "") !== String(existing.remarks || "")) return true;
   if (normalizeRequestType(fields.request_type) !== normalizeRequestType(existing.request_type)) {
     return true;
   }
   if (String(fields.rejection_type || "") !== String(existing.rejection_type || "")) return true;
+  if (!sameAttachments(existing.attachments, fields.attachments)) return true;
   return false;
 }
 
@@ -1234,11 +1272,12 @@ export const createInProcessRequest = async (req, res) => {
           return res.status(e.status || 400).json({ success: false, message: e.message });
         }
       }
-      applyApprovalWorkflow({
+      applyApprovalUpdateFields({
         req,
         fields: record,
         incomingApproved: true,
         hasBusinessChanges: false,
+        alreadyApproved: false,
         auditAsName: true,
         ...((isStoreIn || isConsume) ? { canAuthorize: true } : {}),
       });
@@ -1344,19 +1383,21 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     }
 
     const incomingApproved = normalizeApprovedInput(req.body?.approved);
-    const updateFields = { ...fields };
-    if (hasInProcessContentChanges(existing, fields)) {
-      updateFields.updated_by = user;
-      updateFields.updated_at = new Date();
+    const contentChanged = hasInProcessContentChanges(existing, fields);
+    const updateFields = contentChanged ? pickIprBusinessFields(fields) : {};
+    const approvalOnly = !contentChanged && incomingApproved === true;
+
+    if (incomingApproved === undefined && !contentChanged) {
+      const data = await findInProcessRequest(id);
+      return res.json({ success: true, data, message: "No change" });
     }
 
-    // Editing content re-opens approval; an explicit approve=true wins.
-    const hasBusinessChanges = incomingApproved !== true;
-    applyApprovalWorkflow({
+    applyApprovalUpdateFields({
       req,
       fields: updateFields,
       incomingApproved,
-      hasBusinessChanges,
+      hasBusinessChanges: contentChanged,
+      alreadyApproved: existing.approved === true,
       auditAsName: true,
       ...(normalizeRequestType(fields.request_type) === IPR_REQUEST_TYPE.STORE_IN ||
       normalizeRequestType(fields.request_type) === IPR_REQUEST_TYPE.CONSUME
@@ -1481,6 +1522,7 @@ export const updateInProcessRequestCtrl = async (req, res) => {
       coil_no_uids: (data?.coils || []).map((c) => c?.coil_no_uid).filter(Boolean),
       approved: data?.approved === true,
       downstream: data?.downstream ?? null,
+      approval_only: approvalOnly,
     }, data);
 
     return res.json({

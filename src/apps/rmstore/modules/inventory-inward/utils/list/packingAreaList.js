@@ -20,13 +20,22 @@ const PACKING_AREA_WHERE = (alias = "c") => [
   coilAreaEligibleSql(alias),
 ];
 
+const COIL_LAST_BY_SQL = `CASE
+  WHEN c.updated_at IS NOT NULL AND (c.created_at IS NULL OR c.updated_at >= c.created_at)
+    THEN COALESCE(NULLIF(TRIM(c.updated_by), ''), c.created_by)
+  ELSE c.created_by
+END`;
+
+const COIL_LAST_AT_SQL = "COALESCE(c.updated_at, c.created_at)";
+
 const SUMMARY_SORT = {
   mrn_uid: "mrn_uid",
   mrn_no: "mrn_no",
   source: "source",
   coil_count: "coil_count",
   stock_qty: "stock_qty",
-  created_at: "created_at",
+  last_at: "last_at",
+  created_at: "last_at",
   heat_nos: "heat_nos",
   item_code: "item_code",
 };
@@ -93,8 +102,8 @@ export async function findPackingAreaByMrn(options = {}) {
        COALESCE(SUM(c.qty), 0) AS stock_qty,
        COUNT(*)::int AS coil_count,
        MAX(${coilTotalFromUidSql("c")}) AS total_coils,
-       MIN(c.created_at) AS created_at,
-       (array_agg(c.created_by ORDER BY c.created_at ASC NULLS LAST, c.created_by ASC NULLS LAST))[1] AS created_by
+       MAX(${COIL_LAST_AT_SQL}) AS last_at,
+       (array_agg((${COIL_LAST_BY_SQL}) ORDER BY ${COIL_LAST_AT_SQL} DESC NULLS LAST, c.coil_uid DESC))[1] AS last_by
      FROM ${TABLE} c
      INNER JOIN ${T.MRN} m ON m.uid = c.mrn_uid
      WHERE ${where}

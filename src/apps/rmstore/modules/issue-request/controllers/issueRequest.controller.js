@@ -9,7 +9,7 @@ import { findCoilByUid } from "../../coil/models/coil.model.js";
 import { isCoilEligibleForIssueRequest } from "../../../lib/utils/coilQcEligibility.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
-import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { assertIssueRequestCoilsAvailable, buildAvailableCoilsForIssue, lockCoilUidsForReserve } from "../utils/stock/issueRequestCoilReserve.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
@@ -193,6 +193,44 @@ function normalizeShift(value) {
 /** Trim float artifacts from summed / subtracted quantities. */
 function round(n) {
   return Math.round((Number(n) || 0) * 1000) / 1000;
+}
+
+function normalizeIssueCoilsForCompare(coils = []) {
+  return [...coils]
+    .map((c) => ({
+      uid: String(c?.coil_no_uid || "").trim().toLowerCase(),
+      qty: round(c?.qty),
+    }))
+    .filter((c) => c.uid)
+    .sort((a, b) => a.uid.localeCompare(b.uid));
+}
+
+function normalizeIssueJobCardRowForCompare(jc) {
+  if (!jc) return null;
+  return {
+    pjobcardno: String(jc?.pjobcardno || "").trim().toUpperCase(),
+    issue_qty: round(jc?.issue_qty),
+    rm_item_code: String(jc?.rm_item_code || "").trim().toUpperCase(),
+    rm_item_dcode: jc?.rm_item_dcode != null ? Number(jc.rm_item_dcode) : null,
+    macname: String(jc?.macname || "").trim().toUpperCase(),
+    part_weight: round(jc?.part_weight),
+    rm_weight: round(jc?.rm_weight),
+    planqty: round(jc?.planqty),
+    item_code: String(jc?.item_code || "").trim().toUpperCase(),
+    itemdcode: Number(jc?.itemdcode ?? jc?.item_dcode) || null,
+    coils: normalizeIssueCoilsForCompare(jc?.coils),
+  };
+}
+
+function issueJobCardsSnapshot(jobCards = []) {
+  return (Array.isArray(jobCards) ? jobCards : [])
+    .map(normalizeIssueJobCardRowForCompare)
+    .filter((jc) => jc?.pjobcardno)
+    .sort((a, b) => a.pjobcardno.localeCompare(b.pjobcardno));
+}
+
+function issueJobCardsEqual(left = [], right = []) {
+  return JSON.stringify(issueJobCardsSnapshot(left)) === JSON.stringify(issueJobCardsSnapshot(right));
 }
 
 async function resolveProductionForItem({ itemdcode, item_code } = {}) {
@@ -697,11 +735,12 @@ export const createIssueRequest = async (req, res) => {
 
         if (normalizedApproved === true) {
           const fields = {};
-          applyApprovalWorkflow({
+          applyApprovalUpdateFields({
             req,
             fields,
             incomingApproved: true,
             hasBusinessChanges: false,
+            alreadyApproved: false,
             auditAsName: true,
           });
           await updateIssueRequest(created.issue_uid, fields, { client });
@@ -781,11 +820,13 @@ export const updateIssueRequestCtrl = async (req, res) => {
       } catch (e) {
         return res.status(e.status || 400).json({ success: false, message: e.message });
       }
-      requested_qty = built.requestedQty;
-      coil_count = built.flatCoils.length;
-      jobCards = built.jobCards;
-      coils = built.flatCoils;
-      jobCardsChanged = true;
+      if (!issueJobCardsEqual(jobCards, built.jobCards)) {
+        requested_qty = built.requestedQty;
+        coil_count = built.flatCoils.length;
+        jobCards = built.jobCards;
+        coils = built.flatCoils;
+        jobCardsChanged = true;
+      }
     } else if (Array.isArray(req.body?.coils)) {
       if (!req.body.coils.length) {
         return res.status(400).json({ success: false, message: "At least one coil is required." });
@@ -846,22 +887,33 @@ export const updateIssueRequestCtrl = async (req, res) => {
       Number(coil_count) !== Number(existing.coil_count) ||
       (req.body?.remarks !== undefined && String(remarks || "") !== String(existing.remarks || ""));
 
-    const updateFields = {
-      coil_count,
-      shift,
-      remarks,
-    };
+    const updateFields = {};
     if (hasBusinessChanges) {
-      updateFields.updated_by = user;
-      updateFields.updated_at = new Date();
+      updateFields.coil_count = coil_count;
+      updateFields.shift = shift;
+      updateFields.remarks = remarks;
+    }
+
+    const approvalOnly = !hasBusinessChanges && normalizedApproved === true;
+
+    if (normalizedApproved === undefined && !hasBusinessChanges) {
+      const data = await findIssueRequest(id);
+      const jcRows = await findIssueRequestJobCards(id);
+      const coilRows = await findIssueRequestCoils(id);
+      return res.json({
+        success: true,
+        data: { ...data, coils: coilRows, job_cards: jcRows },
+        message: "No change",
+      });
     }
 
     if (normalizedApproved !== undefined || hasBusinessChanges) {
-      applyApprovalWorkflow({
+      applyApprovalUpdateFields({
         req,
         fields: updateFields,
-        incomingApproved: normalizedApproved === true ? true : normalizedApproved === false ? false : undefined,
-        hasBusinessChanges: hasBusinessChanges && normalizedApproved !== true,
+        incomingApproved: normalizedApproved,
+        hasBusinessChanges,
+        alreadyApproved: existing.approved === true,
         auditAsName: true,
       });
     }
@@ -905,6 +957,7 @@ export const updateIssueRequestCtrl = async (req, res) => {
       job_card_count: jcRows?.length ?? 0,
       coil_count: coilRows?.length ?? 0,
       approved: data?.approved === true,
+      approval_only: approvalOnly,
     }, data);
     return res.json({
       success: true,

@@ -1,7 +1,7 @@
 import { findQcChecks, findQcCheck, findQcCheckItems, findPendingQcCheckByCoil, findPendingCoilsForQc, findLiveQcCheckByCoil, insertQcCheck, replaceQcCheckItems, updateQcCheck, softDeleteQcCheck } from "../models/qcCheck.model.js";
 import { findCoilByUid, linkCoilsToQcCheck, clearCoilQcLink, clearCoilsForQcReject, markCoilsQcFailPending, markCoilsQcPassed, findCoilUidsByQcCheck, findCoilsByQcCheckUid } from "../../coil/models/coil.model.js";
 import { findMrnByUid } from "../../mrn/models/mrn.model.js";
-import { isCoilEligibleForQc, QC_ONLY_MRN_COIL_MESSAGE } from "../../../lib/utils/coilQcEligibility.js";
+import { isCoilEligibleForQc, qcCoilIneligibilityMessage } from "../../../lib/utils/coilQcEligibility.js";
 import { findSpecItemDetail } from "../../spec/models/specMaster.model.js";
 import { softDeleteQcRejection } from "../../rm-rejection/models/rmRejection.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -289,7 +289,7 @@ export const prepareQcCheck = async (req, res) => {
           return res.status(404).json({ success: false, message: `Coil ${coilUid} was not found.` });
         }
         if (!isCoilEligibleForQc(coil)) {
-          return res.status(400).json({ success: false, message: QC_ONLY_MRN_COIL_MESSAGE });
+          return res.status(400).json({ success: false, message: qcCoilIneligibilityMessage(coil) });
         }
         const coilStatus = String(coil.status || "active").toLowerCase();
         if (coilStatus !== "active") {
@@ -447,7 +447,7 @@ export const submitQcCheck = async (req, res) => {
           return res.status(400).json({ success: false, message: `Coil ${coilUid} was not found.` });
         }
         if (!isCoilEligibleForQc(coil)) {
-          return res.status(400).json({ success: false, message: QC_ONLY_MRN_COIL_MESSAGE });
+          return res.status(400).json({ success: false, message: qcCoilIneligibilityMessage(coil) });
         }
         const coilStatus = String(coil.status || "active").toLowerCase();
         if (coilStatus !== "active") {
@@ -502,7 +502,7 @@ export const submitQcCheck = async (req, res) => {
       return res.status(400).json({ success: false, message: `Primary coil ${primaryUid} was not found.` });
     }
     if (!isCoilEligibleForQc(primaryCoil)) {
-      return res.status(400).json({ success: false, message: QC_ONLY_MRN_COIL_MESSAGE });
+      return res.status(400).json({ success: false, message: qcCoilIneligibilityMessage(primaryCoil) });
     }
 
     // Whole batch (comma list) or single coil; also recover UIDs from check / linked coils
@@ -1007,35 +1007,36 @@ export const approveQcCheck = async (req, res) => {
     }
     if (!forceFail) failure_reason = "";
 
-    await replaceQcCheckItems(id, evaluated);
+    const remarksSame = String(remarks ?? "") === String(check.remarks ?? "");
+    const failureSame = String(failure_reason ?? "") === String(check.failure_reason ?? "");
+    const priorOverall = normalizeOverallResult(check.overall_result, check.status);
+    const overallSame = overallResult === priorOverall;
+    const approvalOnly = usePriorOnly && remarksSame && failureSame && overallSame;
+
+    if (!approvalOnly) {
+      await replaceQcCheckItems(id, evaluated);
+    }
 
     const overallStatus = forceFail ? "failed" : "passed";
 
+    const approvePatch = {
+      status: overallStatus,
+      overall_result: overallResult,
+      approved: true,
+      remarks,
+      approved_by: user,
+      approved_at: new Date(),
+      qc_reject_uid: null,
+      failure_reason: forceFail ? failure_reason || null : null,
+      ...(!approvalOnly ? { updated_by: user, updated_at: new Date() } : {}),
+    };
+
     if (forceFail) {
       await markCoilsQcFailPending(id, coilList, user);
-      await updateQcCheck(id, {
-        status: "failed",
-        overall_result: overallResult,
-        approved: true,
-        failure_reason: failure_reason || null,
-        remarks,
-        approved_by: user,
-        approved_at: new Date(),
-        qc_reject_uid: null,
-      });
     } else {
       await markCoilsQcPassed(id, coilList, user);
-      await updateQcCheck(id, {
-        status: "passed",
-        overall_result: overallResult,
-        approved: true,
-        failure_reason: null,
-        remarks,
-        approved_by: user,
-        approved_at: new Date(),
-        qc_reject_uid: null,
-      });
     }
+    await updateQcCheck(id, approvePatch);
 
     logCoilTransactionSafe({
       transaction_type: forceFail ? COIL_TX_TYPES.QC_CHECK_FAIL : COIL_TX_TYPES.QC_CHECK_PASS,
@@ -1063,6 +1064,7 @@ export const approveQcCheck = async (req, res) => {
       status: overallStatus,
       failure_reason: failure_reason || null,
       approved: true,
+      approval_only: approvalOnly,
       overall_result: overallResult,
       batch_count: coilList.length,
     }, data);

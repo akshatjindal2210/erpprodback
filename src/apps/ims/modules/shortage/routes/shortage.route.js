@@ -1,5 +1,5 @@
 import express from "express";
-import { getShortages, getShortageById, createShortage, updateShortage, deleteShortage, bulkCreateShortages, previewBulkShortages, createPackingDeviation, getShortageMasterList } from "../controllers/shortage.controller.js";
+import { getShortages, getShortageById, createShortage, updateShortage, deleteShortage, bulkCreateShortages, previewBulkShortages, createPackingDeviation, autoPackingDeviation, getShortageMasterList } from "../controllers/shortage.controller.js";
 import { authenticate, authorize } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
 
@@ -15,5 +15,6 @@ router.post("/delete", authenticate, accessControl(MOD, "delete"), deleteShortag
 router.post("/bulk-preview", authenticate, authorize("super_admin"), previewBulkShortages);
 router.post("/bulk", authenticate, authorize("super_admin"), bulkCreateShortages);
 router.post("/packing-deviation", authenticate, accessControl("packing_entry", ["view", "add", "edit"]), createPackingDeviation);
+router.post("/auto-packing-deviation", authenticate, accessControl("packing_entry", ["view", "add", "edit"]), autoPackingDeviation);
 
 export default router;

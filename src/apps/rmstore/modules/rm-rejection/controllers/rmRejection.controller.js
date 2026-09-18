@@ -5,7 +5,7 @@ import { findQcCheck, findFailedQcChecksPendingRejection, reopenQcChecksForRejec
 import { findOutEntry, findOutEntries, buildOutEntryCoilSummary } from "../../out-entry/models/outEntry.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
-import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
@@ -65,22 +65,41 @@ async function finalizeRejectionRegisterForStoreOutQueue({ rejectionId, user, re
     throw err;
   }
 
-  const rejectionFields = {
-    updated_by: user,
-    updated_at: new Date(),
-    out_uid: null,
-  };
-  if (remarks !== undefined) {
-    rejectionFields.remarks = remarks != null ? String(remarks).trim() || null : null;
+  const rejectionFields = {};
+  let hasBusinessChanges = false;
+
+  if (rejection.out_uid != null) {
+    rejectionFields.out_uid = null;
+    hasBusinessChanges = true;
   }
+  if (remarks !== undefined) {
+    const nextRemarks = remarks != null ? String(remarks).trim() || null : null;
+    const prevRemarks =
+      rejection.remarks === null || rejection.remarks === undefined
+        ? null
+        : String(rejection.remarks).trim() || null;
+    if (prevRemarks !== nextRemarks) {
+      rejectionFields.remarks = nextRemarks;
+      hasBusinessChanges = true;
+    }
+  }
+
   if (rejection.approved !== true && req) {
-    applyApprovalWorkflow({
+    applyApprovalUpdateFields({
       req,
       fields: rejectionFields,
       incomingApproved: true,
-      hasBusinessChanges: false,
+      hasBusinessChanges,
+      alreadyApproved: false,
       auditAsName: true,
     });
+  } else if (hasBusinessChanges) {
+    rejectionFields.updated_by = user;
+    rejectionFields.updated_at = new Date();
+  }
+
+  if (!Object.keys(rejectionFields).length) {
+    return { rejection, outEntry: null, out_uid: rejection.out_uid ?? null };
   }
 
   await updateQcRejection(rejectId, rejectionFields);
@@ -89,17 +108,60 @@ async function finalizeRejectionRegisterForStoreOutQueue({ rejectionId, user, re
   return { rejection, outEntry: null, out_uid: null };
 }
 
-async function loadPendingRejectionQueue({ search, page = 1, limit = 5000 } = {}) {
+const PENDING_TYPE_FILTERS = new Set([
+  "all",
+  "qc_check",
+  "in_process",
+  "awaiting_store_out",
+  "awaiting_bill",
+]);
+
+function normalizePendingTypeFilter(value) {
+  const raw = String(value ?? "all").trim().toLowerCase();
+  if (!raw || raw === "all") return "all";
+  return PENDING_TYPE_FILTERS.has(raw) ? raw : "all";
+}
+
+function filterPendingRowsByType(rows, pendingType) {
+  const type = normalizePendingTypeFilter(pendingType);
+  if (type === "all") return rows;
+  return (rows || []).filter((row) => {
+    const src = String(row?.pending_source || row?.pending_type || "").trim().toLowerCase();
+    if (type === "qc_check") return src === "qc_check";
+    if (type === "in_process") return src === "in_process";
+    if (type === "awaiting_store_out") {
+      return src === "awaiting_store_out" || src === "awaiting_authorization";
+    }
+    if (type === "awaiting_bill") return src === "awaiting_bill";
+    return true;
+  });
+}
+
+async function loadPendingRejectionQueue({ search, pendingType, page = 1, limit = 5000 } = {}) {
+  const type = normalizePendingTypeFilter(pendingType);
+  const includeQc = type === "all" || type === "qc_check";
+  const includeIpr = type === "all" || type === "in_process";
+  const includeRegister = type === "all" || type === "awaiting_store_out" || type === "awaiting_bill";
+
   const [qcResult, iprResult, registerResult] = await Promise.all([
-    findFailedQcChecksPendingRejection({ search, page: 1, limit: 5000 }),
-    findInProcessRejectionsPendingRejection({ search, page: 1, limit: 5000 }),
-    findIncompleteRejectionRegisters({ search, page: 1, limit: 5000 }),
+    includeQc
+      ? findFailedQcChecksPendingRejection({ search, page: 1, limit: 5000 })
+      : Promise.resolve({ data: [] }),
+    includeIpr
+      ? findInProcessRejectionsPendingRejection({ search, page: 1, limit: 5000 })
+      : Promise.resolve({ data: [] }),
+    includeRegister
+      ? findIncompleteRejectionRegisters({ search, page: 1, limit: 5000 })
+      : Promise.resolve({ data: [] }),
   ]);
-  const merged = [
-    ...(registerResult.data || []),
-    ...(iprResult.data || []),
-    ...(qcResult.data || []),
-  ].sort((a, b) => {
+  const merged = filterPendingRowsByType(
+    [
+      ...(registerResult.data || []),
+      ...(iprResult.data || []),
+      ...(qcResult.data || []),
+    ],
+    type,
+  ).sort((a, b) => {
     const ta = new Date(a.approved_at || a.inspected_at || a.created_at || 0).getTime();
     const tb = new Date(b.approved_at || b.inspected_at || b.created_at || 0).getTime();
     return tb - ta;
@@ -119,12 +181,15 @@ async function loadPendingRejectionQueue({ search, page = 1, limit = 5000 } = {}
 /** Unified pending queue — QC fail, in-process rejection, + incomplete register workflow rows. */
 export const getPendingRejectionQueueList = async (req, res) => {
   try {
-    const { page, limit, search } = extractListParams(req.body || {}, {
+    const { page, limit, search, filters } = extractListParams(req.body || {}, {
       sortBy: "qc_check_uid",
       order: "DESC",
     });
+    const safeFilters = sanitizeFilters(filters || {}, ["pending_type", "pendingType"]);
+    const pendingType = safeFilters.pending_type ?? safeFilters.pendingType;
     const result = await loadPendingRejectionQueue({
       search: sanitizeSearch(search),
+      pendingType,
       page,
       limit,
     });
@@ -146,13 +211,17 @@ export const getQcRejections = async (req, res) => {
       "to_date",
       "status",
       "register_complete",
+      "pending_type",
+      "pendingType",
     ]);
     const status = String(safeFilters.status || "").trim().toLowerCase();
 
     // Pending = failed QC + in-process rejection + store-out done awaiting bill
     if (status === "pending") {
+      const pendingType = safeFilters.pending_type ?? safeFilters.pendingType;
       const result = await loadPendingRejectionQueue({
         search: sanitizeSearch(search),
+        pendingType,
         page,
         limit,
       });
@@ -656,6 +725,8 @@ export const approveRejectionRegister = async (req, res) => {
     }
 
     const user = auditUserName(req);
+    const rejectionFields = {};
+    let hasBusinessChanges = false;
 
     if (existing.out_uid) {
       const outEntry = await findOutEntry(existing.out_uid);
@@ -667,34 +738,49 @@ export const approveRejectionRegister = async (req, res) => {
         });
       }
       if (!hasOpenDraft) {
-        existing = await updateQcRejection(id, {
-          out_uid: null,
-          updated_by: user,
-          updated_at: new Date(),
-        });
+        rejectionFields.out_uid = null;
+        hasBusinessChanges = true;
       }
     }
 
     if (req.body?.remarks !== undefined) {
       const remarks =
         req.body.remarks != null ? String(req.body.remarks).trim() || null : null;
-      existing = await updateQcRejection(id, {
-        remarks,
-        updated_by: user,
-        updated_at: new Date(),
-      });
+      const prevRemarks =
+        existing.remarks === null || existing.remarks === undefined
+          ? null
+          : String(existing.remarks).trim() || null;
+      if (prevRemarks !== remarks) {
+        rejectionFields.remarks = remarks;
+        hasBusinessChanges = true;
+      }
     }
 
-    const rejectionFields = {};
+    const approvalOnly = !hasBusinessChanges && existing.approved !== true;
+
     if (existing.approved !== true) {
-      applyApprovalWorkflow({
+      applyApprovalUpdateFields({
         req,
         fields: rejectionFields,
         incomingApproved: true,
-        hasBusinessChanges: false,
+        hasBusinessChanges,
+        alreadyApproved: false,
         auditAsName: true,
       });
+    } else if (hasBusinessChanges) {
+      rejectionFields.updated_by = user;
+      rejectionFields.updated_at = new Date();
     }
+
+    if (!Object.keys(rejectionFields).length) {
+      const rejectionData = await findQcRejection(id);
+      return res.json({
+        success: true,
+        data: { rejection: rejectionData },
+        message: "No change",
+      });
+    }
+
     await updateQcRejection(id, rejectionFields);
 
     const rejectionData = await findQcRejection(id);
@@ -704,6 +790,7 @@ export const approveRejectionRegister = async (req, res) => {
       ipr_uid: rejectionData?.ipr_uid ?? null,
       out_uid: rejectionData?.out_uid ?? null,
       coil_count: rejectionData?.coil_count ?? null,
+      approval_only: approvalOnly,
     }, rejectionData);
 
     return res.json({

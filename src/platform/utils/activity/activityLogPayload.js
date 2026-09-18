@@ -74,6 +74,17 @@ const ENTITY_LABELS = {
   qc_hold_material: "QC hold",
   hrms_attendance: "daily attendance",
   hrms_attendance_log: "attendance log",
+  rm_mrn_portal: "MRN",
+  rm_inventory_inwards: "store in",
+  rm_qc_check: "QC check",
+  rm_issue_request: "issue request",
+  rm_in_process_request: "in-process request",
+  rm_out_entry: "store out",
+  rm_rejection: "RM rejection",
+  rm_stock_adjustment: "stock adjustment",
+  rm_production_master: "production master",
+  rm_spec_master: "RM spec",
+  rm_store_location_master: "store location",
 };
 
 const ACTION_VERBS = {
@@ -87,10 +98,21 @@ const ACTION_VERBS = {
   UNLOCK: "Unlocked",
   LOGIN: "Login",
   LOGOUT: "Logout",
+  GENERATE: "Generated stickers for",
   GENERATE_STICKERS: "Generated stickers for",
   DELETE_GENERATED_STICKERS: "Removed stickers from packing",
   BULK_DOWNLOAD: "Downloaded stickers for packing",
+  CREATE_APPROVE: "Created and approved",
+  CREATE_SUBMIT: "Created and submitted",
+  CREATE_DRAFT: "Saved draft",
+  UNAPPROVE: "Set to pending",
+  UPDATE_REVERT: "Updated and set to pending",
+  SAVE_DRAFT: "Saved draft for",
+  REJECT: "Rejected",
+  GENERATE_STORE_OUT: "Generated store out for",
 };
+
+const STOCK_ADJUSTMENT_ENTITIES = new Set(["stock_adjustment", "rm_stock_adjustment"]);
 
 const FIELD_LABELS = {
   box_no_uid: "Box no",
@@ -150,6 +172,10 @@ const FIELD_LABELS = {
   old_cust: "From customer",
   new_cust: "To customer",
   remarks: "Remarks",
+  approval_only: "Approval only",
+  coil_count: "Coil count",
+  mrn_uid: "MRN UID",
+  approved: "Approved",
 };
 
 function entityLabel(entity) {
@@ -617,11 +643,33 @@ function buildQcHoldLog(extra, record) {
   };
 }
 
+function isStockAdjustmentEntity(entity) {
+  return STOCK_ADJUSTMENT_ENTITIES.has(String(entity || "").toLowerCase());
+}
+
+function buildRmMrnPortalDescription(actionType, ref, extra) {
+  const refText = ref ? ` ${ref}` : "";
+  const n = extra?.coil_count;
+  const countBit = n != null && n !== "" ? ` (${n} coil${Number(n) === 1 ? "" : "s"})` : "";
+  if (actionType === "GENERATE") return `Generated MRN stickers${countBit}${refText}`;
+  if (actionType === "APPROVE") return `Approved MRN stickers${countBit}${refText}`;
+  if (actionType === "SAVE_DRAFT") return `Saved MRN sticker draft${refText}`;
+  if (actionType === "REJECT") return `Rejected MRN${refText}`;
+  if (actionType === "UPLOAD_DOCS") return `Uploaded MRN documents${refText}`;
+  return null;
+}
+
 function buildSimpleDescription(actionType, entity, ref, record, extra) {
   const item = entityLabel(entity);
   const refText = ref ? ` ${ref}` : "";
+  const entityKey = String(entity || "").toLowerCase();
 
-  if (entity === "stock_adjustment") {
+  if (entityKey === "rm_mrn_portal") {
+    const mrnDesc = buildRmMrnPortalDescription(actionType, ref, extra);
+    if (mrnDesc) return mrnDesc;
+  }
+
+  if (isStockAdjustmentEntity(entity)) {
     return buildStockAdjustmentDescription(actionType, ref, record, extra);
   }
 
@@ -668,7 +716,21 @@ function buildSimpleDescription(actionType, entity, ref, record, extra) {
     return hint ? `Updated ${item}, ${hint}${ref ? `, id ${ref}` : ""}` : `Updated ${item}${ref ? `, id ${ref}` : ""}`;
   }
   if (actionType === "APPROVE") {
+    if (extra?.approval_only === true) {
+      return `Approved ${item} (no field changes)${ref ? `, id ${ref}` : ""}`;
+    }
     return hint ? `Approved ${item}, ${hint}${ref ? `, id ${ref}` : ""}` : `Approved ${item}${ref ? `, id ${ref}` : ""}`;
+  }
+  if (actionType === "CREATE_APPROVE") {
+    return hint
+      ? `Created and approved ${item}, ${hint}${ref ? `, id ${ref}` : ""}`
+      : `Created and approved ${item}${ref ? `, id ${ref}` : ""}`;
+  }
+  if (ACTION_VERBS[actionType] && !["CREATE", "UPDATE", "MODIFY", "DELETE", "APPROVE"].includes(actionType)) {
+    const customVerb = ACTION_VERBS[actionType];
+    return hint
+      ? `${customVerb} ${item}, ${hint}${ref ? `, id ${ref}` : ""}`
+      : `${customVerb} ${item}${ref ? `, id ${ref}` : ""}`;
   }
 
   return hint ? `${verb} ${item}, ${hint}${ref ? `, id ${ref}` : ""}` : `${verb} ${item}${ref ? `, id ${ref}` : ""}`;
@@ -716,7 +778,7 @@ export function buildActivityLogPayload({
   const log_data = { summary: description };
   if (ref) log_data.ref = ref;
 
-  if (entity === "stock_adjustment") {
+  if (isStockAdjustmentEntity(entity)) {
     const sa = buildStockAdjustmentLog(extra, record);
     if (sa.info) log_data.info = sa.info;
     if (sa.more) log_data.more = sa.more;
@@ -731,6 +793,10 @@ export function buildActivityLogPayload({
   } else {
     const info = buildInfo(actionType, record, extra);
     if (info) log_data.info = info;
+  }
+
+  if (extra?.approval_only === true) {
+    log_data.info = { ...(log_data.info || {}), Event: "Approval only" };
   }
 
   return {

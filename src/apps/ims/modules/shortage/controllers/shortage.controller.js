@@ -8,7 +8,7 @@ import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName, applyAppr
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { canCreatePackingDeviation } from "../../../lib/utils/imsSpecialPermissions.js";
-import { getItemsMonthlyPackingUsedBatch } from "../../../lib/utils/inventory/monthlyPackingLimit.js";
+import { evaluateMonthlyPackingLimit, getItemsMonthlyPackingUsedBatch } from "../../../lib/utils/inventory/monthlyPackingLimit.js";
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 
@@ -845,6 +845,66 @@ export const createPackingDeviation = async (req, res) => {
     });
   } catch (err) {
     console.error("createPackingDeviation Error:", err);
+    return res.status(500).json({ success: false, message: err.message || "Server error." });
+  }
+};
+
+/** New Sticker Auto Deviation: check = FG + current − schedule_bal; if check ≤ item Max → create excess. */
+export const autoPackingDeviation = async (req, res) => {
+  try {
+    const b = req.body || {};
+    const itemdcode = b.itemdcode;
+    const doc_no = b.doc_no != null ? String(b.doc_no).trim() : null;
+    if (itemdcode == null || String(itemdcode).trim() === "") {
+      return res.status(400).json({ success: false, message: "itemdcode is required." });
+    }
+    const args = {
+      itemdcode,
+      item_code: b.item_code ?? b.itemcode ?? null,
+      total_qty: b.total_qty,
+      packing_config: b.packing_config,
+      doc_no,
+      doc_dt: b.doc_dt,
+      year_month: b.year_month,
+      withReorder: true,
+    };
+    const before = await evaluateMonthlyPackingLimit(args);
+    if (before.ok) return res.json({ success: true, data: { created: false, ...before } });
+
+    const check = (Number(before.fg_stock_qty) || 0) + (Number(before.requested_qty) || 0) - (Number(before.schedule_balance_qty) || 0);
+    const max = Number(before.item_max_qty) || 0;
+    const excess = Math.ceil(Number(before.excess_qty) || 0);
+    if (excess < 1 || (max > 0 && check > max)) {
+      return res.json({ success: true, data: { created: false, skipped_auto: true, auto_check_qty: check, ...before } });
+    }
+
+    const outcome = await createShortageRecordInternal(
+      {
+        itemdcode,
+        itemcode: String(b.item_code ?? b.itemcode ?? itemdcode).trim() || String(itemdcode),
+        type: "Deviation",
+        qty: excess,
+        month: normalizeShortageMonth(b.doc_dt ?? b.month, null),
+        remarks: `Auto deviation — packing #${doc_no || "—"}`,
+      },
+      req
+    );
+    if (!outcome.success) {
+      return res.status(400).json({ success: false, message: outcome.message || "Auto deviation failed.", data: before });
+    }
+
+    const after = await evaluateMonthlyPackingLimit(args);
+    if (!after.ok) {
+      await revertShortageRecordInternal(outcome.data?.id, req);
+      return res.status(400).json({ success: false, message: "Still over limit. Auto deviation removed.", data: { created: false, before, after } });
+    }
+    return res.status(201).json({
+      success: true,
+      message: `Deviation +${excess} created.`,
+      data: { created: true, excess_qty: excess, deviation: outcome.data, ...after },
+    });
+  } catch (err) {
+    console.error("autoPackingDeviation Error:", err);
     return res.status(500).json({ success: false, message: err.message || "Server error." });
   }
 };

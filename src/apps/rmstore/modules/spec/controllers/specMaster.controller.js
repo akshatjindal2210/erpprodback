@@ -14,6 +14,59 @@ const MODULE = "rm_spec_master";
 const log = (req, action, entity_id, details, record = null) =>
   logRmstoreActivity(req, { action, entity: MODULE, entity_id, details, record }).catch(() => {});
 
+const specUpper = (v) => {
+  const s = v != null ? String(v).trim() : "";
+  return s ? s.toUpperCase() : null;
+};
+
+const specLineKey = (line = {}) =>
+  JSON.stringify({
+    sno: Number(line.sno),
+    type: specUpper(line.type || "RM"),
+    spec_name: specUpper(line.spec_name),
+    remarks: specUpper(line.remarks),
+    print_val: specUpper(line.print_val),
+    inspection_method: specUpper(line.inspection_method),
+    spec_type: String(line.spec_type || "min").toLowerCase(),
+    min_value: Number(line.min_value ?? 0),
+    max_value: Number(line.max_value ?? 0),
+    correct_option: String(line.correct_option || "")
+      .split(",")
+      .map((p) => p.trim().toUpperCase())
+      .filter(Boolean)
+      .sort()
+      .join(","),
+    incorrect_option: String(line.incorrect_option || "")
+      .split(",")
+      .map((p) => p.trim().toUpperCase())
+      .filter(Boolean)
+      .sort()
+      .join(","),
+    document_required: Boolean(line.document_required),
+  });
+
+function hasSpecBusinessChanges(existingDetail, normalized, itemChanged) {
+  if (itemChanged) return true;
+  if (
+    specUpper(existingDetail?.condition) !== specUpper(normalized.condition) ||
+    specUpper(existingDetail?.grade) !== specUpper(normalized.grade) ||
+    specUpper(existingDetail?.size) !== specUpper(normalized.size) ||
+    specUpper(existingDetail?.condition_color) !== specUpper(normalized.condition_color) ||
+    specUpper(existingDetail?.grade_color) !== specUpper(normalized.grade_color)
+  ) {
+    return true;
+  }
+  const existingSpecs = existingDetail?.specs || [];
+  const nextSpecs = normalized.specs || [];
+  if (existingSpecs.length !== nextSpecs.length) return true;
+  const byId = new Map(existingSpecs.filter((l) => l?.spec_id != null).map((l) => [Number(l.spec_id), l]));
+  for (const next of nextSpecs) {
+    const prev = next?.spec_id != null ? byId.get(Number(next.spec_id)) : existingSpecs.find((l) => Number(l.sno) === Number(next.sno));
+    if (!prev || specLineKey(prev) !== specLineKey(next)) return true;
+  }
+  return false;
+}
+
 async function resolveRmItemSnapshot(item_dcode) {
   const rows = await loadMappedItems("item", { type: "rm" });
   const raw = rows.find((r) => String(r.itemdcode) === String(item_dcode));
@@ -24,20 +77,27 @@ async function resolveRmItemSnapshot(item_dcode) {
   };
 }
 
-function buildApprovalState(req, incomingApproved, hasBusinessChanges) {
-  const fields = {};
+async function applySpecApprovalOnly(req, res, itemDcode, existingDetail, incomingApproved) {
+  const approvalFields = {};
   applyApprovalWorkflow({
     req,
-    fields,
+    fields: approvalFields,
     incomingApproved,
-    hasBusinessChanges,
+    hasBusinessChanges: false,
+    alreadyApproved: existingDetail?.approved === true || existingDetail?.approval_status === "authorized",
     auditAsName: true,
   });
-  return {
-    approved: fields.approved === true,
-    approved_by: fields.approved_by ?? null,
-    approved_at: fields.approved_at ?? null,
-  };
+  await setItemApproval(itemDcode, approvalFields);
+  await log(req, "update", itemDcode, { approval_only: true, approved: approvalFields.approved });
+  const data = await findSpecItemDetail(itemDcode);
+  return res.json({
+    success: true,
+    data,
+    toast_type: "success",
+    message: approvalFields.approved
+      ? "All specification lines authorized."
+      : "All specification lines set to pending.",
+  });
 }
 
 /** List: one row per RM item (aggregated specs + approval mix). */
@@ -195,7 +255,6 @@ export const updateSpec = async (req, res) => {
       return res.status(400).json({ success: false, message: "There are no fields to update." });
     }
 
-    // Approve / keep-pending — all lines together (RM item change requires specs body)
     if (!hasSpecsBody) {
       if (itemChanged) {
         return res.status(400).json({
@@ -203,25 +262,7 @@ export const updateSpec = async (req, res) => {
           message: "To change the RM item, save the record together with its specification lines.",
         });
       }
-      const approvalFields = {};
-      applyApprovalWorkflow({
-        req,
-        fields: approvalFields,
-        incomingApproved: normalizedApproved,
-        hasBusinessChanges: false,
-        auditAsName: true,
-      });
-      await setItemApproval(sourceItemDcode, approvalFields);
-      await log(req, "update", sourceItemDcode, { approval_only: true, approved: approvalFields.approved });
-      const data = await findSpecItemDetail(sourceItemDcode);
-      return res.json({
-        success: true,
-        data,
-        toast_type: "success",
-        message: approvalFields.approved
-          ? "All specification lines authorized."
-          : "All specification lines set to pending.",
-      });
+      return applySpecApprovalOnly(req, res, sourceItemDcode, existingDetail, normalizedApproved);
     }
 
     const normalized = normalizeItemSpecsPayload({
@@ -237,12 +278,32 @@ export const updateSpec = async (req, res) => {
       return res.status(400).json({ success: false, message: normalized.error });
     }
 
+    const hasBusinessChanges = hasSpecBusinessChanges(existingDetail, normalized, itemChanged);
+
+    if (!hasBusinessChanges) {
+      if (normalizedApproved === undefined) {
+        return res.status(400).json({ success: false, message: "There are no fields to update." });
+      }
+      return applySpecApprovalOnly(req, res, sourceItemDcode, existingDetail, normalizedApproved);
+    }
+
     const itemSnap = await resolveRmItemSnapshot(targetItemDcode);
-    // Approve with edits → authorize; plain edit → pending re-authorization
-    const approveWithSpecs = normalizedApproved === true;
-    const approval = approveWithSpecs
-      ? buildApprovalState(req, true, false)
-      : { approved: false, approved_by: null, approved_at: null };
+    const approvalFields = {};
+    if (normalizedApproved === true) {
+      applyApprovalWorkflow({
+        req,
+        fields: approvalFields,
+        incomingApproved: true,
+        hasBusinessChanges: true,
+        alreadyApproved: existingDetail?.approved === true || existingDetail?.approval_status === "authorized",
+        auditAsName: true,
+      });
+    }
+    const approval = {
+      approved: approvalFields.approved === true,
+      approved_by: approvalFields.approved_by ?? null,
+      approved_at: approvalFields.approved_at ?? null,
+    };
 
     await syncItemSpecs({
       item_dcode: targetItemDcode,

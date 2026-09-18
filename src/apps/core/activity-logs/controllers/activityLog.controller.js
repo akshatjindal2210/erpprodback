@@ -2,8 +2,8 @@ import ActivityLog from "../models/activityLog.model.js";
 
 export const getActivityLogs = async (req, res) => {
   try {
-    const { 
-      app_type, module, action_type, 
+    const {
+      app_type, module, action_type,
       page = 1, limit = 100, 
       search, date_from, date_to, 
       entity, entity_id, 

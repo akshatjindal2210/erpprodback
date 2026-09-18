@@ -1,9 +1,10 @@
 import { findProductions, findProduction, insertProduction, updateProductions, deleteProductions } from "../models/productionMaster.model.js";
 import { resolveProductionSnapshot } from "../utils/erpItems.js";
-import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
+import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 
 const FILTER_FIELDS = ["production_id", "item_dcode", "approved", "from_date", "to_date"];
 const MODULE = "rm_production_master";
@@ -118,6 +119,11 @@ export const updateProduction = async (req, res) => {
     const existing = await findProduction({ production_id: id });
     if (!existing) return res.status(404).json({ success: false, message: "Production mapping not found." });
 
+    const editBlocked = assertWithinEditDays(req, existing.created_at, "edit");
+    if (editBlocked) {
+      return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
+    }
+
     const nextItemDcode = item_dcode != null && item_dcode !== "" ? Number(item_dcode) : Number(existing.item_dcode);
     const nextRmItems = Array.isArray(rm_items) ? rm_items : parseRmItems(existing.rm_items);
 
@@ -128,44 +134,41 @@ export const updateProduction = async (req, res) => {
       }
     }
 
-    const snap = await resolveProductionSnapshot(nextItemDcode, nextRmItems);
+    const hasBusinessChanges = Number(nextItemDcode) !== Number(existing.item_dcode) || rmItemsChanged(existing.rm_items, nextRmItems);
 
-    const hasBusinessChanges =
-      Number(nextItemDcode) !== Number(existing.item_dcode) ||
-      rmItemsChanged(existing.rm_items, snap.rm_items);
+    const fields = hasBusinessChanges ? { ...(await resolveProductionSnapshot(nextItemDcode, nextRmItems)) } : {};
 
-    const fields = {
-      ...snap,
-      updated_by: auditUserName(req),
-      updated_at: new Date(),
-    };
-
-    applyApprovalWorkflow({
+    applyApprovalUpdateFields({
       req,
       fields,
       incomingApproved: normalizedApproved,
       hasBusinessChanges,
+      alreadyApproved: existing.approved === true,
       auditAsName: true,
     });
 
+    if (!Object.keys(fields).length) {
+      return res.status(400).json({ success: false, message: "There are no fields to update." });
+    }
+
     const data = await updateProductions(fields, id);
     const authorized = fields.approved === true;
-    log(req, "update", String(id), {
-      production_id: id,
-      approved: data?.approved === true,
-      old_values: {
-        item_dcode: existing?.item_dcode ?? null,
-        item_code: existing?.item_code ?? null,
-        rm_items: parseRmItems(existing?.rm_items),
-        approved: existing?.approved === true,
-      },
-      new_values: {
-        item_dcode: data?.item_dcode ?? null,
-        item_code: data?.item_code ?? null,
-        rm_items: parseRmItems(data?.rm_items),
-        approved: data?.approved === true,
-      },
-    }, data);
+    log(req, "update", String(id), hasBusinessChanges
+        ? {
+            production_id: id,
+            approved: data?.approved === true,
+            old_values: {
+              item_dcode: existing?.item_dcode ?? null,
+              approved: existing?.approved === true,
+            },
+            new_values: {
+              item_dcode: data?.item_dcode ?? null,
+              approved: data?.approved === true,
+            },
+          }
+        : { production_id: id, approval_only: true, approved: data?.approved === true },
+      data
+    );
     return res.json({
       success: true,
       data,

@@ -15,12 +15,14 @@ export async function resolveMrnReceiptQtyForBudget(mrn_uid, receiptQtyHint = nu
     return Number.isFinite(hint) && hint > 0 ? hint : 0;
   }
 
-  let erpQty = 0;
+  let erpReceiptQty = 0;
+  let erpTotalQty = 0;
   let localQty = 0;
 
   try {
     const erp = await fetchErpMrnByKey(uid);
-    erpQty = roundSaQty(erp?.it_recp_qty);
+    erpReceiptQty = roundSaQty(erp?.it_recp_qty);
+    erpTotalQty = roundSaQty(erp?.totalqty ?? erp?.total_qty);
   } catch {
     /* ERP lookup optional */
   }
@@ -32,7 +34,7 @@ export async function resolveMrnReceiptQtyForBudget(mrn_uid, receiptQtyHint = nu
     /* local MRN optional */
   }
 
-  const candidates = [hint, erpQty, localQty].filter((n) => Number.isFinite(n) && n > 0);
+  const candidates = [hint, erpReceiptQty, erpTotalQty, localQty].filter((n) => Number.isFinite(n) && n > 0);
   if (!candidates.length) return 0;
   return Math.max(...candidates);
 }

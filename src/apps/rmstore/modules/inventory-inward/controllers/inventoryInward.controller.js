@@ -6,13 +6,24 @@ import { findInProcessRequests, IPR_DOWNSTREAM } from "../../in-process-request/
 import { findPackingAreaByMrn } from "../utils/list/packingAreaList.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
-import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalUpdateFields, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 
 const MODULE = "rm_inventory_inwards";
+
+/** Store In saves are final — no separate approve step (IMS inward pattern). */
+function stampInwardSave(fields, user, existing = null) {
+  fields.approved = true;
+  fields.approved_by = existing?.approved_by || user;
+  fields.approved_at = existing?.approved_at || new Date();
+  fields.updated_by = user;
+  fields.updated_at = new Date();
+  return fields;
+}
+
 const log = createRmstoreActivityLogger(MODULE);
 
 /** Client may send coils as UID strings or `{ coil_no_uid }`. */
@@ -267,10 +278,14 @@ export const createInward = async (req, res) => {
     const meta = buildInwardHeaderMeta(resolved);
     const user = auditUserName(req);
 
+    const now = new Date();
     const row = await insertInward({
       ...meta,
       remarks,
       created_by: user,
+      approved: true,
+      approved_by: user,
+      approved_at: now,
     });
 
     await Promise.all(
@@ -294,13 +309,6 @@ export const createInward = async (req, res) => {
         message: `Could not complete the Store In. Only ${linkedActiveWithLoc} of ${uids.length} coils were linked with a location, so the entry was rolled back.`,
       });
     }
-
-    // IMS Store In style — create as authorized (no separate approve gate on add)
-    await updateInward(row.in_uid, {
-      approved: true,
-      approved_by: user,
-      approved_at: new Date(),
-    });
 
     logCoilTransactionSafe({
       transaction_type: COIL_TX_TYPES.INWARD_LINK,
@@ -328,7 +336,6 @@ export const createInward = async (req, res) => {
       coil_count: resolved.length,
       coil_no_uids: uids,
       remarks,
-      approved: true,
     }, data);
     return res.status(201).json({
       success: true,
@@ -345,9 +352,9 @@ export const createInward = async (req, res) => {
 };
 
 /**
- * Update Store-In (edit / approve) — IMS update analog.
- * body: { in_uid, locations?: [{ location_id, coils }], remarks?, approved? }
- * Legacy: { in_uid, location_id?, coils?: [{ coil_no_uid }], remarks?, approved? }
+ * Update Store-In.
+ * body: { in_uid, locations?: [{ location_id, coils }], remarks? }
+ * Legacy: { in_uid, location_id?, coils?: [{ coil_no_uid }], remarks? }
  */
 export const updateInwardCtrl = async (req, res) => {
   try {
@@ -383,25 +390,32 @@ export const updateInwardCtrl = async (req, res) => {
     const locations = hasLocationsBody ? normalizeInwardLocationsBody(req.body) : [];
     const normalizedApproved =
       req.body?.approved !== undefined ? normalizeApprovedInput(req.body.approved) : undefined;
+    const remarksChanged = String(remarks ?? "") !== String(existing.remarks ?? "");
 
-    // Approve-only (no coil/location body)
+    // Approve-only (no coil/location body) — API kept for future authorize flow
     if (!hasLocationsBody && normalizedApproved !== undefined) {
-      const approvalFields = { remarks };
-      applyApprovalWorkflow({
+      const fields = {};
+      if (remarksChanged) fields.remarks = remarks;
+      applyApprovalUpdateFields({
         req,
-        fields: approvalFields,
+        fields,
         incomingApproved: normalizedApproved,
-        hasBusinessChanges: false,
+        hasBusinessChanges: remarksChanged,
+        alreadyApproved: existing.approved === true,
         auditAsName: true,
       });
-      await updateInward(id, approvalFields);
+      if (!Object.keys(fields).length) {
+        return res.status(400).json({ success: false, message: "There are no fields to update." });
+      }
+      await updateInward(id, fields);
       const data = await findInward(id);
       const register = await loadInwardRegisterPayload(id, {
         expectedCoilCount: Number(data?.coil_count) || 0,
       });
-      log(req, approvalFields.approved ? "approve" : "unapprove", String(id), {
+      log(req, fields.approved === true ? "approve" : "unapprove", String(id), {
         in_uid: id,
-        approved: approvalFields.approved === true,
+        approval_only: !remarksChanged,
+        approved: fields.approved === true,
         coil_count: register.coils.length,
         remarks,
       }, data);
@@ -413,7 +427,7 @@ export const updateInwardCtrl = async (req, res) => {
           locations: register.locations,
           history_locations: register.history_locations || [],
         },
-        message: approvalFields.approved ? "Store In authorized successfully." : "Store In set to pending.",
+        message: fields.approved === true ? "Store In authorized successfully." : "Store In set to pending.",
       });
     }
 
@@ -457,33 +471,7 @@ export const updateInwardCtrl = async (req, res) => {
       }
 
       const meta = buildInwardHeaderMeta(resolved);
-      const fields = {
-        ...meta,
-        remarks,
-        updated_by: user,
-        updated_at: new Date(),
-        // IMS: edit keeps / re-asserts authorized
-        approved: true,
-        approved_by: existing.approved_by || user,
-      };
-      // Keep original approve clock; only stamp when first authorizing.
-      if (existing.approved_at) {
-        /* leave approved_at unchanged */
-      } else {
-        fields.approved_at = new Date();
-      }
-
-      if (normalizedApproved === false) {
-        applyApprovalWorkflow({
-          req,
-          fields,
-          incomingApproved: false,
-          hasBusinessChanges: false,
-          auditAsName: true,
-        });
-      }
-
-      await updateInward(id, fields);
+      await updateInward(id, stampInwardSave({ ...meta, remarks }, user, existing));
 
       logCoilTransactionSafe({
         transaction_type: COIL_TX_TYPES.INWARD_LINK,
@@ -498,12 +486,10 @@ export const updateInwardCtrl = async (req, res) => {
           ...buildInwardRegisterLogDetails(locations, linkedAfter?.data || resolved),
         },
       });
+    } else if (remarksChanged) {
+      await updateInward(id, stampInwardSave({ remarks }, user, existing));
     } else {
-      await updateInward(id, {
-        remarks,
-        updated_by: user,
-        updated_at: new Date(),
-      });
+      return res.status(400).json({ success: false, message: "There are no fields to update." });
     }
 
     const data = await findInward(id);
@@ -515,7 +501,6 @@ export const updateInwardCtrl = async (req, res) => {
       location_count: locations.length,
       coil_count: register.coils.length,
       coil_no_uids: register.coils.map((c) => c.coil_no_uid),
-      approved: data?.approved === true,
       remarks,
     }, data);
     return res.json({

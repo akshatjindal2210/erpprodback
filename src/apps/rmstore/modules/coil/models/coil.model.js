@@ -42,7 +42,7 @@ const COIL_QC_UID_SELECT = `COALESCE(c.qc_uid, q.qc_check_uid) AS qc_uid`;
 const COIL_SA_BILL_JOIN = `LEFT JOIN ${T.STOCK_ADJUSTMENT} sa_bill ON sa_bill.adjustment_id = c.sa_id AND sa_bill.is_deleted = false`;
 const COIL_BILL_NO_SQL = `COALESCE(NULLIF(TRIM(m.bill_no), ''), NULLIF(TRIM(sa_bill.bill_no), '')) AS bill_no`;
 const COIL_BILL_DT_SQL = `COALESCE(m.bill_dt, sa_bill.bill_dt) AS bill_dt`;
-const COIL_DETAIL_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, m.mrn_dt, m.sticker_generated, ${COIL_BILL_NO_SQL}, ${COIL_BILL_DT_SQL}, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.it_unit, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, m.remarks, c.qty, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, c.status, c.download_count, c.is_deleted, c.deleted_by, c.deleted_at, c.created_by, c.created_at, c.updated_by, c.updated_at`;
+const COIL_DETAIL_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, m.mrn_dt, m.sticker_generated, m.sticker_approved, ${COIL_BILL_NO_SQL}, ${COIL_BILL_DT_SQL}, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.it_unit, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, m.remarks, c.qty, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, c.status, c.download_count, c.is_deleted, c.deleted_by, c.deleted_at, c.created_by, c.created_at, c.updated_by, c.updated_at`;
 const COIL_MRN_JOIN = `LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid`;
 
 /** Latest non-deleted issue-request job card + machine for this coil. */
@@ -82,7 +82,13 @@ export function portalMrnCoilSql(alias = "c") {
 }
 
 /** List columns only (no remarks/audit) — faster reads from coil_table. */
-const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, c.status, c.created_at, ${coilSourceSql("c")}::varchar AS source`;
+const COIL_LAST_BY_SQL = `CASE
+  WHEN c.updated_at IS NOT NULL AND (c.created_at IS NULL OR c.updated_at >= c.created_at)
+    THEN COALESCE(NULLIF(TRIM(c.updated_by), ''), c.created_by)
+  ELSE c.created_by
+END`;
+
+const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, c.status, c.created_at, ${COIL_LAST_BY_SQL} AS last_by, COALESCE(c.updated_at, c.created_at) AS last_at, ${coilSourceSql("c")}::varchar AS source`;
 
 export const findCoilUidsByQcCheck = async (qc_uid) => {
   const id = Number(qc_uid);

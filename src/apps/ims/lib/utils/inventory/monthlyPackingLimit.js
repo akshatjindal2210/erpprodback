@@ -231,12 +231,37 @@ function reorderFromItem(row) {
   return 0;
 }
 
-async function getItemReorderQty(itemdcode) {
+function maxQtyFromItem(row) {
+  if (!row || typeof row !== "object") return 0;
+  for (const [key, value] of Object.entries(row)) {
+    if (String(key).replace(/[^a-z]/gi, "").toLowerCase() !== "maxqty") continue;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function findImsItemRow(records, itemdcode, itemCode = null) {
   const code = String(itemdcode ?? "").trim();
-  if (!code) return 0;
-  const records = await fetchFromIMS("item");
-  const row = (records || []).find((r) => String(r.ItemDcode ?? r.itemdcode ?? r.Itemdcode ?? "").trim() === code);
+  const codeText = String(itemCode ?? "").trim().toUpperCase();
+  if (!code && !codeText) return null;
+  return (records || []).find((r) => {
+    const d = String(r.ItemDcode ?? r.itemdcode ?? r.Itemdcode ?? "").trim();
+    const c = String(r.Item_Code ?? r.item_code ?? r.ItemCode ?? r.itemcode ?? "").trim().toUpperCase();
+    if (code && d === code) return true;
+    if (codeText && c === codeText) return true;
+    return false;
+  }) || null;
+}
+
+async function getItemReorderQty(itemdcode, itemCode = null) {
+  const row = findImsItemRow(await fetchFromIMS("item"), itemdcode, itemCode);
   return reorderFromItem(row);
+}
+
+async function getItemMaxQty(itemdcode, itemCode = null) {
+  const row = findImsItemRow(await fetchFromIMS("item"), itemdcode, itemCode);
+  return maxQtyFromItem(row);
 }
 
 function imsScheduleRows(records, itemdcode, schmonth, itemCode) {
@@ -300,8 +325,8 @@ async function loadItemMonthSchedulePair(itemdcode, schmonth, itemCode, yearMont
 }
 
 /**
- * Evaluate monthly packing limit (Packing Entry / Daily Production only).
- * Base = approved shortage sum only; then + config tolerance %.
+ * Evaluate monthly packing limit (Packing Entry / Daily Production).
+ * withReorder: also loads schedule / FG reorder / item Max (Create Deviation + Auto).
  */
 export async function evaluateMonthlyPackingLimit({itemdcode, item_code = null, total_qty, packing_config, doc_no, doc_dt = null, year_month = null, withReorder = false}) {
   const requestedQty = resolveStickerRequestedQty({ total_qty, packing_config });
@@ -314,10 +339,13 @@ export async function evaluateMonthlyPackingLimit({itemdcode, item_code = null, 
     getShortageQtyPercentage(),
     getItemSellableQty(itemdcode),
   ]);
-  const [schedulePair, reorderQty] = await Promise.all([
-    withReorder ? loadItemMonthSchedulePair(itemdcode, month, item_code, yearMonth) : null,
-    withReorder ? getItemReorderQty(itemdcode) : 0,
-  ]);
+  const [schedulePair, reorderQty, itemMaxQty] = withReorder
+    ? await Promise.all([
+        loadItemMonthSchedulePair(itemdcode, month, item_code, yearMonth),
+        getItemReorderQty(itemdcode, item_code),
+        getItemMaxQty(itemdcode, item_code),
+      ])
+    : [null, 0, 0];
   const scheduleQty = schedulePair?.scheduleQty ?? 0;
   const dispatchQty = schedulePair?.dispatchQty ?? 0;
   const scheduleBalanceQty = schedulePair?.balanceQty ?? 0;
@@ -343,6 +371,7 @@ export async function evaluateMonthlyPackingLimit({itemdcode, item_code = null, 
     reorder_qty: reorderQty,
     fg_stock_qty: fgStockQty,
     in_hand_qty: fgStockQty,
+    item_max_qty: itemMaxQty,
     base_qty: baseQty,
     base_allowed_limit: baseQty,
     tolerance_qty: toleranceQty,

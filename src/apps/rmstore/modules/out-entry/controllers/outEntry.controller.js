@@ -5,7 +5,7 @@ import { updateQcRejection, findQcRejection } from "../../rm-rejection/models/rm
 import { updateInProcessRequest, IPR_DOWNSTREAM } from "../../in-process-request/models/inProcessRequest.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
-import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
@@ -19,6 +19,16 @@ const log = createRmstoreActivityLogger(MODULE);
 
 function isTruthyFlag(v) {
   return v === true || v === "true" || v === 1 || v === "1";
+}
+
+function normalizeUidList(list = []) {
+  return [...new Set(list.map((u) => String(u || "").trim().toLowerCase()).filter(Boolean))].sort();
+}
+
+function sameUidList(a = [], b = []) {
+  const x = normalizeUidList(a);
+  const y = normalizeUidList(b);
+  return x.length === y.length && x.every((v, idx) => v === y[idx]);
 }
 
 function assertMrnStoreOutReason(entryType, reason) {
@@ -632,8 +642,13 @@ export const createOutEntry = async (req, res) => {
     let willApprove = normalizedApproved === true && scan_complete;
     if (willApprove) {
       const fields = { scan_complete: true };
-      applyApprovalWorkflow({
-        req, fields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true,
+      applyApprovalUpdateFields({
+        req,
+        fields,
+        incomingApproved: true,
+        hasBusinessChanges: false,
+        alreadyApproved: false,
+        auditAsName: true,
       });
       await updateOutEntry(row.out_uid, fields);
 
@@ -686,6 +701,7 @@ export const createOutEntry = async (req, res) => {
       coil_no_uids: uids,
       scan_complete,
       approved: willApprove,
+      approval_only: willApprove,
       remarks,
     }, data);
     return res.status(201).json({ success: true, data, message });
@@ -841,6 +857,8 @@ export const updateOutEntryCtrl = async (req, res) => {
     }
 
     let uids = null;
+    let coilsChanged = false;
+    const existingScannedUids = hasCoilPayload ? await findOutEntryScannedCoilUids(id) : [];
     let scan_complete =
       incomingScanComplete !== undefined
         ? incomingScanComplete
@@ -859,22 +877,30 @@ export const updateOutEntryCtrl = async (req, res) => {
         excludeOutUid: id,
       });
       uids = result.uids;
+      coilsChanged = !sameUidList(existingScannedUids, uids);
       const summary = buildOutEntryCoilSummary(result.resolved);
-      await replaceOutEntryScannedCoils(id, uids);
-      await updateOutEntry(
-        id,
-        withAuthorizedEditReset(
-          {
-            ...summary,
-            remarks,
-            scan_complete,
-            updated_by: user,
-            updated_at: new Date(),
-          },
-          { revertingAuthorizedEdit, normalizedApproved, scan_complete }
-        )
-      );
-      if (existing.qc_reject_uid) {
+      const coilBusinessChanges =
+        coilsChanged || remarksChanged || reasonChanged || revertingAuthorizedEdit;
+
+      if (coilsChanged) {
+        await replaceOutEntryScannedCoils(id, uids);
+      }
+      if (coilBusinessChanges) {
+        await updateOutEntry(
+          id,
+          withAuthorizedEditReset(
+            {
+              ...(coilsChanged ? summary : {}),
+              remarks,
+              scan_complete,
+              updated_by: user,
+              updated_at: new Date(),
+            },
+            { revertingAuthorizedEdit, normalizedApproved, scan_complete }
+          )
+        );
+      }
+      if (coilsChanged && existing.qc_reject_uid) {
         await updateQcRejection(existing.qc_reject_uid, {
           item_codes: summary.item_codes,
           item_descs: summary.item_descs,
@@ -897,40 +923,56 @@ export const updateOutEntryCtrl = async (req, res) => {
           excludeOutUid: id,
         });
       }
+      coilsChanged = !sameUidList(existingScannedUids, uids);
       const summary = buildOutEntryCoilSummary(result.resolved);
-      await replaceOutEntryScannedCoils(id, uids);
-      await updateOutEntry(
-        id,
-        withAuthorizedEditReset(
-          {
-            ...summary,
-            remarks,
-            scan_complete,
-            updated_by: user,
-            updated_at: new Date(),
-          },
-          { revertingAuthorizedEdit, normalizedApproved, scan_complete }
-        )
-      );
+      const coilBusinessChanges =
+        coilsChanged || remarksChanged || reasonChanged || revertingAuthorizedEdit;
+
+      if (coilsChanged) {
+        await replaceOutEntryScannedCoils(id, uids);
+      }
+      if (coilBusinessChanges) {
+        await updateOutEntry(
+          id,
+          withAuthorizedEditReset(
+            {
+              ...(coilsChanged ? summary : {}),
+              remarks,
+              scan_complete,
+              updated_by: user,
+              updated_at: new Date(),
+            },
+            { revertingAuthorizedEdit, normalizedApproved, scan_complete }
+          )
+        );
+      }
     } else if (hasCoilPayload && !isRmRejectionOutEntry(existing.entry_type)) {
       const result = await resolveStoreOutCoils(req.body.coils, { excludeOutUid: id });
       uids = result.uids;
+      coilsChanged = !sameUidList(existingScannedUids, uids);
       const summary = buildOutEntryCoilSummary(result.resolved);
-      await replaceOutEntryScannedCoils(id, uids);
-      await updateOutEntry(
-        id,
-        withAuthorizedEditReset(
-          {
-            ...summary,
-            reason,
-            remarks,
-            scan_complete,
-            updated_by: user,
-            updated_at: new Date(),
-          },
-          { revertingAuthorizedEdit, normalizedApproved, scan_complete }
-        )
-      );
+      const coilBusinessChanges =
+        coilsChanged || remarksChanged || reasonChanged || revertingAuthorizedEdit;
+
+      if (coilsChanged) {
+        await replaceOutEntryScannedCoils(id, uids);
+      }
+      if (coilBusinessChanges) {
+        await updateOutEntry(
+          id,
+          withAuthorizedEditReset(
+            {
+              ...(coilsChanged ? summary : {}),
+              ...(coilsChanged || reasonChanged ? { reason } : {}),
+              remarks,
+              scan_complete,
+              updated_by: user,
+              updated_at: new Date(),
+            },
+            { revertingAuthorizedEdit, normalizedApproved, scan_complete }
+          )
+        );
+      }
     } else {
       const fields = { remarks, reason };
       if (incomingScanComplete !== undefined) {
@@ -1013,8 +1055,13 @@ export const updateOutEntryCtrl = async (req, res) => {
       }
 
       const approveFields = { remarks, reason };
-      applyApprovalWorkflow({
-        req, fields: approveFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true,
+      applyApprovalUpdateFields({
+        req,
+        fields: approveFields,
+        incomingApproved: true,
+        hasBusinessChanges: false,
+        alreadyApproved: alreadyApproved,
+        auditAsName: true,
       });
       approveFields.scan_complete = true;
       await updateOutEntry(id, approveFields);
@@ -1061,8 +1108,13 @@ export const updateOutEntryCtrl = async (req, res) => {
         await updateInProcessRequest(rejection.ipr_uid, { downstream: IPR_DOWNSTREAM.STORE_OUT_DONE });
       }
       const approveFields = { remarks };
-      applyApprovalWorkflow({
-        req, fields: approveFields, incomingApproved: true, hasBusinessChanges: false, auditAsName: true,
+      applyApprovalUpdateFields({
+        req,
+        fields: approveFields,
+        incomingApproved: true,
+        hasBusinessChanges: false,
+        alreadyApproved: alreadyApproved,
+        auditAsName: true,
       });
       approveFields.scan_complete = true;
       await updateOutEntry(id, approveFields);
@@ -1074,6 +1126,14 @@ export const updateOutEntryCtrl = async (req, res) => {
     else if (isTruthyFlag(data?.scan_complete)) message = "Store Out submitted and is pending authorization.";
     else if (hasCoilPayload) message = "Store Out draft saved successfully.";
 
+    const approvalOnly =
+      normalizedApproved === true &&
+      (!hasCoilPayload || !coilsChanged) &&
+      !remarksChanged &&
+      !reasonChanged &&
+      incomingScanComplete === undefined &&
+      !revertingAuthorizedEdit;
+
     log(req, data?.approved ? "approve" : isTruthyFlag(data?.scan_complete) ? "submit" : "update", String(id), {
       out_uid: id,
       entry_type: existing.entry_type || OUT_ENTRY_TYPE.STORE_OUT,
@@ -1081,6 +1141,7 @@ export const updateOutEntryCtrl = async (req, res) => {
       coil_count: data?.coils?.length ?? data?.scanned_coils?.length ?? null,
       scan_complete: isTruthyFlag(data?.scan_complete),
       approved: data?.approved === true,
+      approval_only: approvalOnly,
       remarks,
     }, data);
 

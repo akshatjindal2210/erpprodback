@@ -10,6 +10,7 @@ import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js"
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
 import { buildCoilStickerCardHtml, buildCoilStickerPrintDocument, buildCoilStickerPrintDocumentTitle, buildCoilStickerPrintRow, resolveSpecStickerFields } from "../../../lib/sticker/coilStickerDesign.js";
 import { isSaAddLikeEntryType, normalizeSaApproved } from "../utils/stockAdjustmentEntryTypes.js";
+import { buildPendingAddPreviewCoils } from "../utils/stockAdjustmentPreviewCoils.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 
 const STICKER_EMPTY = "—";
@@ -85,7 +86,63 @@ async function assertApprovedSaCoil(coil) {
     err.statusCode = 403;
     throw err;
   }
-  return adj;
+  return { adjustment: adj, coil, preview: false };
+}
+
+async function resolveSaCoilForStickerPrint(coilUid, req) {
+  const uid = String(coilUid || "").trim();
+  if (!uid) {
+    const err = new Error("Coil UID is required.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const coil = await findCoilByUid(uid);
+  if (coil && isSaStockInCoil(coil)) {
+    const { adjustment } = await assertApprovedSaCoil(coil);
+    return { adjustment, coil, preview: false };
+  }
+
+  const adjId = parsePositiveIntId(req.body?.adjustment_id);
+  if (!adjId) {
+    const err = new Error("Coil not found. For pending adjustments, pass adjustment_id with the preview coil UID.");
+    err.statusCode = 404;
+    throw err;
+  }
+  const adj = await findAdjustmentById(adjId);
+  if (!adj) {
+    const err = new Error("Stock adjustment not found.");
+    err.statusCode = 404;
+    throw err;
+  }
+  if (normalizeSaApproved(adj.approved)) {
+    const err = new Error("Coil not found in inventory for this approved adjustment.");
+    err.statusCode = 404;
+    throw err;
+  }
+  if (!isSaAddLikeEntryType(adj.entry_type)) {
+    const err = new Error("Preview stickers are only for pending Add (+) or Old adjustments.");
+    err.statusCode = 400;
+    throw err;
+  }
+  const previewCoils = await buildPendingAddPreviewCoils(adj);
+  const preview = previewCoils.find((c) => String(c.coil_no_uid || "").trim() === uid);
+  if (!preview) {
+    const err = new Error("This coil UID does not match the pending stock adjustment breakdown.");
+    err.statusCode = 400;
+    throw err;
+  }
+  return {
+    adjustment: adj,
+    coil: {
+      ...preview,
+      mrn_uid: preview.mrn_uid ?? adj.mrn_uid ?? null,
+      item_code: preview.item_code ?? adj.item_code ?? null,
+      item_desc: preview.item_desc ?? adj.item_desc ?? null,
+      heat_no: preview.heat_no ?? adj.heat_no ?? null,
+    },
+    preview: true,
+  };
 }
 
 function mergeSaStickerMeta(printRow, { adjustment, stickerMeta, coil } = {}) {
@@ -161,8 +218,8 @@ function mergeSaStickerMeta(printRow, { adjustment, stickerMeta, coil } = {}) {
   return out;
 }
 
-async function renderSaCoilStickerHtml(coil, req, { bulk = false } = {}) {
-  const adjustment = await assertApprovedSaCoil(coil);
+async function renderSaCoilStickerHtml(coilUid, req, { bulk = false } = {}) {
+  const { adjustment, coil, preview } = await resolveSaCoilForStickerPrint(coilUid, req);
   const mrn = coil.mrn_uid ? await findMrnByUid(coil.mrn_uid) : null;
   const { coil: coilSrc, mrn: mrnSrc } = enrichSaCoilSources(coil, mrn || {}, adjustment);
   const spec = await resolveSpecStickerFields(coilSrc, mrnSrc || {});
@@ -175,7 +232,7 @@ async function renderSaCoilStickerHtml(coil, req, { bulk = false } = {}) {
   const card = await buildCoilStickerCardHtml(printRow);
   const html = buildCoilStickerPrintDocument([card], { mrn_no: coilSrc.mrn_no ?? mrnSrc?.mrn_no });
   const print_title = buildCoilStickerPrintDocumentTitle(
-    coilSrc.mrn_no ?? mrnSrc?.mrn_no ?? `SA-${coil.sa_id || ""}`
+    coilSrc.mrn_no ?? mrnSrc?.mrn_no ?? `SA-${adjustment.adjustment_id || coil.sa_id || ""}`
   );
 
   if (!String(html || "").trim()) {
@@ -184,23 +241,25 @@ async function renderSaCoilStickerHtml(coil, req, { bulk = false } = {}) {
     throw err;
   }
 
-  try {
-    await insertCoilDownloadLog({
-      coil_no_uid: coil.coil_no_uid,
-      mrn_uid: coil.mrn_uid,
-      mrn_no: coilSrc.mrn_no ?? mrnSrc?.mrn_no,
-      heat_no: coilSrc.heat_no ?? mrnSrc?.heat_no,
-      item_code: printRow.item_code,
-      acc_name: printRow.acc_name,
-      downloaded_by_id: req.user?.id,
-      downloaded_by: auditUserName(req),
-      download_type: bulk ? "bulk" : "single",
-      sticker_count: 1,
-      download_source: String(req.body?.download_source || "").trim() || "stock_adjustment",
-    });
-    await incrementCoilDownloadCount([coil.coil_no_uid]);
-  } catch (logErr) {
-    console.error("[SA coil sticker download log]", logErr?.message || logErr);
+  if (!preview) {
+    try {
+      await insertCoilDownloadLog({
+        coil_no_uid: coil.coil_no_uid,
+        mrn_uid: coil.mrn_uid,
+        mrn_no: coilSrc.mrn_no ?? mrnSrc?.mrn_no,
+        heat_no: coilSrc.heat_no ?? mrnSrc?.heat_no,
+        item_code: printRow.item_code,
+        acc_name: printRow.acc_name,
+        downloaded_by_id: req.user?.id,
+        downloaded_by: auditUserName(req),
+        download_type: bulk ? "bulk" : "single",
+        sticker_count: 1,
+        download_source: String(req.body?.download_source || "").trim() || "stock_adjustment",
+      });
+      await incrementCoilDownloadCount([coil.coil_no_uid]);
+    } catch (logErr) {
+      console.error("[SA coil sticker download log]", logErr?.message || logErr);
+    }
   }
 
   return { html, print_title };
@@ -212,10 +271,7 @@ export const renderSingleSaCoilSticker = async (req, res) => {
     if (!coil_no_uid) {
       return res.status(400).json({ success: false, message: "Coil UID is required." });
     }
-    const coil = await findCoilByUid(coil_no_uid);
-    if (!coil) return res.status(404).json({ success: false, message: "Coil not found." });
-
-    const { html, print_title } = await renderSaCoilStickerHtml(coil, req);
+    const { html, print_title } = await renderSaCoilStickerHtml(coil_no_uid, req);
     return res.json({ success: true, html, print_title });
   } catch (err) {
     console.error("renderSingleSaCoilSticker Error:", err);
@@ -235,11 +291,14 @@ export const renderBulkSaCoilStickers = async (req, res) => {
     const cards = [];
     let mrnNo = null;
     let bulkMrnUid = null;
+    let anyPreview = false;
+    const approvedUids = [];
     const stickerMeta = req.body?.sticker_meta;
     for (const uid of uids) {
-      const coil = await findCoilByUid(uid);
-      if (!coil) continue;
-      const adjustment = await assertApprovedSaCoil(coil);
+      const resolved = await resolveSaCoilForStickerPrint(uid, req);
+      const { adjustment, coil, preview } = resolved;
+      if (preview) anyPreview = true;
+      else approvedUids.push(uid);
       const mrn = coil.mrn_uid ? await findMrnByUid(coil.mrn_uid) : null;
       const { coil: coilSrc, mrn: mrnSrc } = enrichSaCoilSources(coil, mrn || {}, adjustment);
       mrnNo = mrnNo ?? coilSrc.mrn_no ?? mrnSrc?.mrn_no;
@@ -256,20 +315,22 @@ export const renderBulkSaCoilStickers = async (req, res) => {
     const html = buildCoilStickerPrintDocument(cards, { mrn_no: mrnNo });
     const print_title = buildCoilStickerPrintDocumentTitle(mrnNo ?? "Stock Adjustment");
 
-    try {
-      await insertCoilDownloadLog({
-        coil_no_uid: null,
-        mrn_uid: bulkMrnUid,
-        mrn_no: mrnNo,
-        downloaded_by_id: req.user?.id,
-        downloaded_by: auditUserName(req),
-        download_type: "bulk",
-        sticker_count: cards.length,
-        download_source: String(req.body?.download_source || "").trim() || "stock_adjustment",
-      });
-      await incrementCoilDownloadCount(uids);
-    } catch (logErr) {
-      console.error("[SA bulk sticker download log]", logErr?.message || logErr);
+    if (!anyPreview && approvedUids.length) {
+      try {
+        await insertCoilDownloadLog({
+          coil_no_uid: null,
+          mrn_uid: bulkMrnUid,
+          mrn_no: mrnNo,
+          downloaded_by_id: req.user?.id,
+          downloaded_by: auditUserName(req),
+          download_type: "bulk",
+          sticker_count: cards.length,
+          download_source: String(req.body?.download_source || "").trim() || "stock_adjustment",
+        });
+        await incrementCoilDownloadCount(approvedUids);
+      } catch (logErr) {
+        console.error("[SA bulk sticker download log]", logErr?.message || logErr);
+      }
     }
 
     return res.json({ success: true, html, print_title, count: cards.length });

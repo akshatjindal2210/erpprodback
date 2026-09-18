@@ -11,7 +11,15 @@ export function portalMrnCoilBaseSql(cAlias = "c") {
   )`;
 }
 
-/** MRN Portal coils whose stickers were generated. */
+/** MRN Portal coils whose stickers were generated (approve not required). */
+export function mrnPortalGeneratedCoilSql(cAlias = "c", mAlias = "m") {
+  return `(
+    ${portalMrnCoilBaseSql(cAlias)}
+    AND ${mAlias}.sticker_generated = true
+  )`;
+}
+
+/** MRN Portal coils whose stickers were generated and scan-approved. */
 export function mrnPortalStickerCoilSql(cAlias = "c", mAlias = "m") {
   return `(
     ${portalMrnCoilBaseSql(cAlias)}
@@ -20,7 +28,17 @@ export function mrnPortalStickerCoilSql(cAlias = "c", mAlias = "m") {
   )`;
 }
 
-/** EXISTS form for queries that do not already join MRN. */
+/** EXISTS — generated stickers only (Store In / Unassigned queue). */
+export function mrnPortalGeneratedCoilExistsSql(cAlias = "c") {
+  return `EXISTS (
+    SELECT 1
+    FROM ${T.MRN} mx
+    WHERE mx.uid = ${cAlias}.mrn_uid
+      AND mx.sticker_generated = true
+  )`;
+}
+
+/** EXISTS — generated + approved stickers (QC / downstream). */
 export function mrnPortalStickerCoilExistsSql(cAlias = "c") {
   return `EXISTS (
     SELECT 1
@@ -49,7 +67,7 @@ export function coilAreaEligibleSql(cAlias = "c") {
   return `(
     (
       ${portalMrnCoilBaseSql(cAlias)}
-      AND ${mrnPortalStickerCoilExistsSql(cAlias)}
+      AND ${mrnPortalGeneratedCoilExistsSql(cAlias)}
     )
     OR LOWER(COALESCE(${cAlias}.sa_entry_type, '')) = '${PRODUCTION_RETURN}'
     OR (
@@ -59,7 +77,10 @@ export function coilAreaEligibleSql(cAlias = "c") {
   )`;
 }
 
-/** QC Pending — MRN portal sticker coils only (inspection queue; not tied to rack location). */
+/** QC Pending — stored MRN portal coils with approved stickers (after Store In). */
 export function qcPendingMrnCoilSql(cAlias = "c", mAlias = "m") {
-  return mrnPortalStickerCoilSql(cAlias, mAlias);
+  return `(
+    ${mrnPortalStickerCoilSql(cAlias, mAlias)}
+    AND ${cAlias}.location_id IS NOT NULL
+  )`;
 }

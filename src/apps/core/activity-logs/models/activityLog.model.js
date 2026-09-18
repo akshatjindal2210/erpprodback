@@ -88,7 +88,13 @@ function buildActivityLogWhere({ user_id, app_type, module, action_type, search,
     // "Update" filter covers both UPDATE and legacy MODIFY action rows.
     const normalized = String(action_type).trim().toUpperCase();
     if (normalized === "UPDATE") {
-      conditions.push(`UPPER(l.action_type) IN ('UPDATE', 'MODIFY')`);
+      conditions.push(`UPPER(l.action_type) IN ('UPDATE', 'MODIFY', 'UPDATE_REVERT')`);
+    } else if (normalized === "APPROVE") {
+      conditions.push(`UPPER(l.action_type) IN ('APPROVE', 'CREATE_APPROVE', 'APPROVE_PASS', 'APPROVE_FAIL')`);
+    } else if (normalized === "SUBMIT") {
+      conditions.push(`UPPER(l.action_type) IN ('SUBMIT', 'CREATE_SUBMIT', 'RESUBMIT')`);
+    } else if (normalized === "CREATE") {
+      conditions.push(`UPPER(l.action_type) IN ('CREATE', 'CREATE_DRAFT')`);
     } else {
       conditions.push(`l.action_type = $${params.length + 1}`);
       params.push(action_type);

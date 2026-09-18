@@ -80,15 +80,19 @@ export const findInward = async (in_uid) => {
 export const insertInward = async (data) => {
   const {
     mrn_refs, mrn_uids, heat_nos, item_codes, item_descs, qtys, total_qty, coil_count, remarks, created_by,
+    approved = true, approved_by, approved_at,
   } = data;
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE}
-     (mrn_refs, mrn_uids, heat_nos, item_codes, item_descs, qtys, total_qty, coil_count, remarks, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     (mrn_refs, mrn_uids, heat_nos, item_codes, item_descs, qtys, total_qty, coil_count, remarks, created_by, approved, approved_by, approved_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      RETURNING *`,
     [
       mrn_refs ?? null, mrn_uids ?? null, heat_nos ?? null, item_codes ?? null, item_descs ?? null, qtys ?? null,
       total_qty ?? 0, coil_count ?? 0, remarks ?? null, created_by,
+      approved === true,
+      approved_by ?? created_by ?? null,
+      approved_at ?? new Date(),
     ]
   );
   return row;

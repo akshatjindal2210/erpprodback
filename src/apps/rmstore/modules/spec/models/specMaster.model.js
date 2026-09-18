@@ -232,7 +232,7 @@ export const findSpecItems = async (options = {}) => {
        STRING_AGG(sl.spec_name, ', ' ORDER BY sl.sno) AS spec_names,
        STRING_AGG(DISTINCT sl.inspection_method, ', ') AS inspection_methods,
        si.created_at,
-       COALESCE(si.updated_at, si.created_at) AS updated_at,
+       si.updated_at,
        si.approved_at,
        si.created_by AS created_by_name,
        si.updated_by AS updated_by_name,

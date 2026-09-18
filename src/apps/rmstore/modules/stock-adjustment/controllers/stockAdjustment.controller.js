@@ -8,13 +8,16 @@ import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
-import { getMrnCoilQtyAutoCalc, getBoxNoUidPrefix } from "../../../../core/configuration/models/appConfig.model.js";
+import { getMrnCoilQtyAutoCalc } from "../../../../core/configuration/models/appConfig.model.js";
 import { resolveAddCoilQtys, assertCoilQtysMatchTotal, parseStoredCoilQtys, roundSaQty, QTY_EPS } from "../utils/stockAdjustmentQty.js";
 import { resolveEffectiveHeatNo } from "../utils/stockAdjustmentHeatNo.js";
 import { normalizeSaEntryType, isSaAddLikeEntryType, saEntryTypeNeedsFinancialYear, isSaLotGateEntryType, assertSaGateMetaFields, saMetaFieldsForSave, parseSaGateMeta } from "../utils/stockAdjustmentEntryTypes.js";
 import { requireAuthorizedRmSpecForItem } from "../../spec/models/specMaster.model.js";
-import { formatStockAdjustmentCoilUid } from "../../../lib/coilUidFormat.js";
-import { resolveSerialNoForUid } from "../../../lib/coilUidHelpers.js";
+import {
+  buildPendingAddPreviewCoils,
+  assertScannedCoilsForSaApprove,
+  getExpectedSaApproveScanUids,
+} from "../utils/stockAdjustmentPreviewCoils.js";
 import { isCoilAvailableForSaMinus } from "../../../lib/utils/saMinusInventory.js";
 import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 const MODULE = "rm_stock_adjustment";
@@ -24,9 +27,17 @@ function saCoilsEntryType(entryType) {
   return String(entryType || "").toLowerCase() === "minus" ? "stock_out" : "stock_in";
 }
 
-/** True when update body carries field edits (not approve/unapprove flag alone). */
+/** True when update body carries field edits (not approve/unapprove/scan flag alone). */
 function hasSaEditPayload(body = {}) {
-  const skip = new Set(["adjustment_id", "id", "approved", "approved_by", "approved_at"]);
+  const skip = new Set([
+    "adjustment_id",
+    "id",
+    "approved",
+    "approved_by",
+    "approved_at",
+    "scanned_coils",
+    "scannedCoils",
+  ]);
   return Object.keys(body).some((k) => !skip.has(k) && body[k] !== undefined);
 }
 
@@ -48,40 +59,6 @@ async function loadAdjustmentCoils(row) {
   }
 
   return findCoilsBySaIdWithMrn(row.adjustment_id, saCoilsEntryType(entryType));
-}
-
-async function buildPendingAddPreviewCoils(row) {
-  if (!isSaAddLikeEntryType(String(row?.entry_type || ""))) return [];
-  const n = parseInt(String(row?.coil_count_impact ?? ""), 10);
-  if (!Number.isFinite(n) || n < 1) return [];
-  const qtys = parseStoredCoilQtys(row?.coil_qtys);
-  const per = Number(row?.per_coil_qty);
-  const list =
-    qtys.length === n
-      ? qtys
-      : Number.isFinite(per) && per > 0
-        ? Array.from({ length: n }, () => roundSaQty(per))
-        : [];
-  const prefix = await getBoxNoUidPrefix();
-  const serial_no = resolveSerialNoForUid({ serial_no: row?.serial_no, mrn_uid: row?.mrn_uid });
-  const mrn_no = row?.mrn_no ?? null;
-  return list.map((qty, i) => ({
-    coil_no_uid: formatStockAdjustmentCoilUid({
-      prefix,
-      mrn_no,
-      serial_no,
-      adjustment_id: row?.adjustment_id,
-      total: n,
-      index: i + 1,
-    }),
-    index: i + 1,
-    qty: roundSaQty(qty),
-    heat_no: row?.heat_no ?? null,
-    mrn_uid: row?.mrn_uid ?? null,
-    mrn_no,
-    item_code: row?.item_code ?? null,
-    preview: true,
-  }));
 }
 
 function normalizeEntryType(raw) {
@@ -150,6 +127,12 @@ function canAuthorize(req) {
   return Boolean(req.permission?.can_authorize) || String(req.user?.type || "").toLowerCase() === "super_admin";
 }
 
+function parseScannedCoilsFromBody(body = {}) {
+  const raw = body?.scanned_coils ?? body?.scannedCoils;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((u) => String(u || "").trim()).filter(Boolean);
+}
+
 async function clearApprovalFlags(adjustmentId, user = null) {
   await updateAdjustment(
     {
@@ -162,7 +145,7 @@ async function clearApprovalFlags(adjustmentId, user = null) {
   );
 }
 
-async function approveAdjustment(id, user, userId) {
+async function approveAdjustment(id, user, userId, { scannedCoils = null } = {}) {
   const row = await findAdjustmentById(id);
   if (!row) {
     const err = new Error("Stock adjustment not found.");
@@ -174,6 +157,9 @@ async function approveAdjustment(id, user, userId) {
     return { data: row, coils };
   }
 
+  const expectedScanUids = await getExpectedSaApproveScanUids(row);
+  assertScannedCoilsForSaApprove(expectedScanUids, scannedCoils);
+
   if (isSaAddLikeEntryType(String(row.entry_type || ""))) {
     await requireAuthorizedRmSpecForItem({
       item_dcode: row.item_dcode,
@@ -181,9 +167,10 @@ async function approveAdjustment(id, user, userId) {
       item_desc: row.item_desc,
     });
     if (row.mrn_uid) {
+      // Receipt cap is resolved from ERP/local (same as MRN search) — not stored on adjustment rows.
       await assertAddQtyWithinMrnLimit({
         mrn_uid: row.mrn_uid,
-        receiptQty: row.it_recp_qty,
+        receiptQty: null,
         resolvedTotal: row.qty,
         excludeAdjustmentId: id,
       });
@@ -440,12 +427,15 @@ export const createAdjustment = async (req, res) => {
     const row = await insertAdjustment(payload);
 
     if (wantApprove) {
-      const { data, coils } = await approveAdjustment(row.adjustment_id, user, req.user?.id);
+      const { data, coils } = await approveAdjustment(row.adjustment_id, user, req.user?.id, {
+        scannedCoils: parseScannedCoilsFromBody(req.body),
+      });
       log(req, "create_approve", String(row.adjustment_id), {
         adjustment_id: row.adjustment_id,
         entry_type: row.entry_type,
         coil_count: coils?.length ?? 0,
         approved: true,
+        approval_only: true,
       }, data);
       return res.status(201).json({
         success: true,
@@ -492,12 +482,15 @@ export const updateAdjustmentCtrl = async (req, res) => {
       if (!canAuthorize(req)) {
         return res.status(403).json({ success: false, message: "You cannot approve this stock adjustment." });
       }
-      const { data, coils } = await approveAdjustment(id, user, req.user?.id);
+      const { data, coils } = await approveAdjustment(id, user, req.user?.id, {
+        scannedCoils: parseScannedCoilsFromBody(req.body),
+      });
       log(req, "approve", String(id), {
         adjustment_id: id,
         entry_type: data?.entry_type,
         coil_count: coils?.length ?? 0,
         approved: true,
+        approval_only: true,
       }, data);
       return res.json({
         success: true,
