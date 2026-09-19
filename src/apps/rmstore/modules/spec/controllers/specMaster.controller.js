@@ -88,7 +88,10 @@ async function applySpecApprovalOnly(req, res, itemDcode, existingDetail, incomi
     auditAsName: true,
   });
   await setItemApproval(itemDcode, approvalFields);
-  await log(req, "update", itemDcode, { approval_only: true, approved: approvalFields.approved });
+  await log(req, approvalFields.approved ? "authorize" : "update", itemDcode, {
+    approval_only: true,
+    approved: approvalFields.approved,
+  });
   const data = await findSpecItemDetail(itemDcode);
   return res.json({
     success: true,
@@ -153,7 +156,20 @@ export const createSpec = async (req, res) => {
     }
 
     const itemSnap = await resolveRmItemSnapshot(normalized.item_dcode);
-    const approval = buildApprovalState(req, normalizedApproved === true ? true : false, false);
+    const approvalFields = {};
+    applyApprovalWorkflow({
+      req,
+      fields: approvalFields,
+      incomingApproved: normalizedApproved === true ? true : false,
+      hasBusinessChanges: false,
+      alreadyApproved: false,
+      auditAsName: true,
+    });
+    const approval = {
+      approved: approvalFields.approved === true,
+      approved_by: approvalFields.approved_by ?? null,
+      approved_at: approvalFields.approved_at ?? null,
+    };
 
     const rows = await syncItemSpecs({
       item_dcode: normalized.item_dcode,
@@ -169,9 +185,16 @@ export const createSpec = async (req, res) => {
       req,
       "create",
       normalized.item_dcode,
-      { item_dcode: normalized.item_dcode, spec_count: rows.length },
+      { item_dcode: normalized.item_dcode, spec_count: rows.length, approved: approval.approved === true },
       data
     );
+    if (approval.approved) {
+      await log(req, "authorize", normalized.item_dcode, {
+        approval_only: true,
+        approved: true,
+        with_create: true,
+      });
+    }
     return res.status(201).json({
       success: true,
       data,
@@ -322,6 +345,13 @@ export const updateSpec = async (req, res) => {
       spec_count: normalized.specs.length,
       approved: approval.approved === true,
     });
+    if (approval.approved) {
+      await log(req, "authorize", targetItemDcode, {
+        approval_only: false,
+        approved: true,
+        with_update: true,
+      });
+    }
     const data = await findSpecItemDetail(targetItemDcode);
     return res.json({
       success: true,

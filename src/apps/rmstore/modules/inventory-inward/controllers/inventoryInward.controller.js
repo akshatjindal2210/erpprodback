@@ -4,6 +4,7 @@ import { groupRegisterCoilsIntoLocations, loadInwardRegisterPayload, buildInward
 import { validateRmInwardLocationsAgainstCoils } from "../utils/validation/inwardLocationValidation.js";
 import { findInProcessRequests, IPR_DOWNSTREAM } from "../../in-process-request/models/inProcessRequest.model.js";
 import { findPackingAreaByMrn } from "../utils/list/packingAreaList.js";
+import { materializePendingStockAdjustmentCoils } from "../../stock-adjustment/utils/apply/stockAdjustmentApply.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalUpdateFields, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
@@ -177,6 +178,10 @@ export const getPendingStoreInList = async (req, res) => {
 /** By Packing — coils in packing area grouped by mrn_uid. */
 export const getPackingAreaList = async (req, res) => {
   try {
+    await materializePendingStockAdjustmentCoils({
+      userName: auditUserName(req),
+      userId: req.user?.id,
+    });
     const { page, limit, sortBy, order, search } = extractListParams(req.body || {}, {
       sortBy: "mrn_no",
       order: "DESC",
@@ -196,6 +201,10 @@ export const getPackingAreaList = async (req, res) => {
 /** By Coil — individual coils in packing area (optional mrn_uid filter). */
 export const getCoilAreaList = async (req, res) => {
   try {
+    await materializePendingStockAdjustmentCoils({
+      userName: auditUserName(req),
+      userId: req.user?.id,
+    });
     const { page, limit, sortBy, order, search } = extractListParams(req.body || {}, {
       sortBy: "coil_uid",
       order: "DESC",

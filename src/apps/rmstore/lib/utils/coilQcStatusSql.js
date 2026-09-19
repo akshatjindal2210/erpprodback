@@ -23,7 +23,13 @@ export const COIL_QC_JOIN = coilQcJoinForAlias("c", "q");
 
 export function coilQcStatusExpr(cAlias = "c", qAlias = "q") {
   return `CASE
-  WHEN ${cAlias}.sa_id IS NOT NULL THEN 'passed'
+  WHEN ${cAlias}.sa_id IS NOT NULL AND EXISTS (
+    SELECT 1
+    FROM ${T.STOCK_ADJUSTMENT} sa
+    WHERE sa.adjustment_id = ${cAlias}.sa_id
+      AND sa.is_deleted = false
+      AND sa.approved = true
+  ) THEN 'passed'
   ELSE LOWER(TRIM(COALESCE(${qAlias}.status, '')))
 END`;
 }

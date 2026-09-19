@@ -316,7 +316,7 @@ export const findPendingQcCheckByCoil = async (coil_no_uid) => {
 };
 
 /**
- * Coils waiting for QC — stored MRN Portal coils with approved stickers only.
+ * Coils waiting for QC — MRN Portal coils with approved stickers (Store In not required).
  */
 export const findPendingCoilsForQc = async (options = {}) => {
   const { filters = {}, search, page = 1, limit = 100 } = options;

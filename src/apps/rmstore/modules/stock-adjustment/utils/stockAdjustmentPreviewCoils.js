@@ -1,6 +1,7 @@
 import { getBoxNoUidPrefix } from "../../../../core/configuration/models/appConfig.model.js";
 import { formatStockAdjustmentCoilUid } from "../../../lib/coilUidFormat.js";
 import { resolveSerialNoForUid } from "../../../lib/coilUidHelpers.js";
+import { findCoilsBySaId } from "../../coil/models/coil.model.js";
 import { parseStoredCoilQtys, roundSaQty } from "./stockAdjustmentQty.js";
 import { isSaAddLikeEntryType } from "./stockAdjustmentEntryTypes.js";
 import { parseRemovedCoilUids } from "./apply/stockAdjustmentApply.js";
@@ -45,6 +46,13 @@ export async function buildPendingAddPreviewCoils(row) {
 export async function getExpectedSaApproveScanUids(adjustment) {
   const entryType = String(adjustment?.entry_type || "").toLowerCase();
   if (isSaAddLikeEntryType(entryType)) {
+    const adjId = Number(adjustment?.adjustment_id);
+    if (Number.isFinite(adjId) && adjId > 0) {
+      const dbCoils = await findCoilsBySaId(adjId, "stock_in");
+      if (dbCoils.length) {
+        return dbCoils.map((c) => String(c.coil_no_uid || "").trim()).filter(Boolean);
+      }
+    }
     const preview = await buildPendingAddPreviewCoils(adjustment);
     return preview.map((c) => String(c.coil_no_uid || "").trim()).filter(Boolean);
   }

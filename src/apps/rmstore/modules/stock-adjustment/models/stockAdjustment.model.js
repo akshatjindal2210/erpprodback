@@ -221,7 +221,7 @@ export async function sumPriorAddQtyForMrn(mrn_uid, excludeAdjustmentId = null) 
   return Number(row?.total || 0);
 }
 
-/** Pending Add (+) qty on an MRN — not yet converted to coils (exclude when editing that row). */
+/** Pending Add (+) qty on an MRN — header saved but coils not yet in inventory (exclude when editing that row). */
 export async function sumPendingAddQtyForMrn(mrn_uid, excludeAdjustmentId = null) {
   const uid = String(mrn_uid || "").trim();
   if (!uid) return 0;
@@ -239,8 +239,38 @@ export async function sumPendingAddQtyForMrn(mrn_uid, excludeAdjustmentId = null
        AND LOWER(s.entry_type) IN ${SA_ADD_LIKE_ENTRY_TYPES_SQL}
        AND COALESCE(s.approved, false) = false
        AND TRIM(s.mrn_uid) = $1
+       AND NOT EXISTS (
+         SELECT 1
+         FROM ${T.COIL_TABLE} c
+         WHERE c.is_deleted = false
+           AND c.sa_id = s.adjustment_id
+           AND LOWER(COALESCE(c.sa_entry_type, 'stock_in')) = 'stock_in'
+       )
        ${exclude}`,
     values
   );
   return Number(row?.total || 0);
+}
+
+/** Pending Add/Old adjustments with no stock_in coils yet (legacy rows before save-time materialize). */
+export async function findPendingAddAdjustmentsWithoutCoils(limit = 100) {
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 100));
+  const rows = await dbQuery(
+    `SELECT s.*
+     FROM ${TABLE} s
+     WHERE s.is_deleted = false
+       AND COALESCE(s.approved, false) = false
+       AND LOWER(s.entry_type) IN ${SA_ADD_LIKE_ENTRY_TYPES_SQL}
+       AND NOT EXISTS (
+         SELECT 1
+         FROM ${T.COIL_TABLE} c
+         WHERE c.is_deleted = false
+           AND c.sa_id = s.adjustment_id
+           AND LOWER(COALESCE(c.sa_entry_type, 'stock_in')) = 'stock_in'
+       )
+     ORDER BY s.adjustment_id ASC
+     LIMIT $1`,
+    [safeLimit]
+  );
+  return rows || [];
 }

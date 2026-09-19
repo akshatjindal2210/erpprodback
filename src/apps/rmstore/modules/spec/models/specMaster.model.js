@@ -59,6 +59,9 @@ function mapItemGroup(row) {
   const spec_count = Number(row.spec_count || 0);
   const headerApproved = row.approved === true;
   const status = approvalStatus(spec_count, headerApproved);
+  const createdMs = row.created_at ? new Date(row.created_at).getTime() : null;
+  const updatedMs = row.updated_at ? new Date(row.updated_at).getTime() : null;
+  const hasRealUpdate = updatedMs != null && (createdMs == null || updatedMs - createdMs > 2000);
   return {
     item_dcode: row.item_dcode,
     item_code: row.item_code,
@@ -75,10 +78,10 @@ function mapItemGroup(row) {
     spec_names: row.spec_names || null,
     inspection_methods: row.inspection_methods || null,
     created_at: row.created_at,
-    updated_at: row.updated_at,
+    updated_at: hasRealUpdate ? row.updated_at : null,
     approved_at: row.approved_at,
     created_by_name: row.created_by_name ?? null,
-    updated_by_name: row.updated_by_name ?? null,
+    updated_by_name: hasRealUpdate ? row.updated_by_name ?? null : null,
     approved_by_name: row.approved_by_name ?? null,
   };
 }
@@ -433,13 +436,14 @@ export const syncItemSpecs = async ({
       );
       specItemId = sourceHeader.spec_item_id;
     } else {
+      // Create: set created_* (+ approved_* when authorized). Do not stamp updated_* until a real edit.
       const [inserted] = (await client.query(
         `INSERT INTO ${HEADER}
          (item_dcode, item_code, item_desc, condition, grade, size, condition_color, grade_color, type,
-          approved, approved_by, approved_at, created_by, updated_by, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+          approved, approved_by, approved_at, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          RETURNING spec_item_id`,
-        [...headerValues.slice(0, 12), userName ?? null, headerFields.updated_by],
+        [...headerValues.slice(0, 12), userName ?? null],
       )).rows;
       specItemId = inserted.spec_item_id;
     }

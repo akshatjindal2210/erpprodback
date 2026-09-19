@@ -1,6 +1,6 @@
 import { findAdjustments, findAdjustmentById, insertAdjustment, updateAdjustment, softDeleteAdjustment } from "../models/stockAdjustment.model.js";
 import { computeMrnQtyBudget } from "../utils/mrnQtyBudget.js";
-import { applyStockAdjustmentOnApprove, revertStockAdjustmentOnUnapprove, parseRemovedCoilUids, buildRemovedCoilUidsJson, assertSaAddCoilsUnusedForEdit } from "../utils/apply/stockAdjustmentApply.js";
+import { applyStockAdjustmentOnApprove, syncStockAdjustmentAddCoils, revertStockAdjustmentOnUnapprove, parseRemovedCoilUids, buildRemovedCoilUidsJson, assertSaAddCoilsUnusedForEdit, needsSaAddCoilResync, shouldSyncStockAdjustmentAddCoils } from "../utils/apply/stockAdjustmentApply.js";
 import { findActiveCoilsForMinus } from "../utils/minusCoilLookup.js";
 import { findCoilsBySaId, findCoilsBySaIdWithMrn, findCoilByUid } from "../../coil/models/coil.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -45,7 +45,19 @@ async function loadAdjustmentCoils(row) {
   const entryType = String(row?.entry_type || "").toLowerCase();
 
   if (isSaAddLikeEntryType(entryType)) {
-    const dbCoils = await findCoilsBySaIdWithMrn(row.adjustment_id, "stock_in");
+    let dbCoils = await findCoilsBySaIdWithMrn(row.adjustment_id, "stock_in");
+    if (!dbCoils.length && !row?.approved) {
+      try {
+        await syncStockAdjustmentAddCoils({
+          adjustment: row,
+          userName: row.updated_by || row.created_by || "system",
+          userId: null,
+        });
+        dbCoils = await findCoilsBySaIdWithMrn(row.adjustment_id, "stock_in");
+      } catch {
+        /* fall back to preview below */
+      }
+    }
     if (dbCoils.length) return dbCoils;
   }
 
@@ -426,8 +438,18 @@ export const createAdjustment = async (req, res) => {
 
     const row = await insertAdjustment(payload);
 
+    let savedRow = row;
+    if (isSaAddLikeEntryType(String(row.entry_type || ""))) {
+      await syncStockAdjustmentAddCoils({
+        adjustment: row,
+        userName: user,
+        userId: req.user?.id,
+      });
+      savedRow = (await findAdjustmentById(row.adjustment_id)) || row;
+    }
+
     if (wantApprove) {
-      const { data, coils } = await approveAdjustment(row.adjustment_id, user, req.user?.id, {
+      const { data, coils } = await approveAdjustment(savedRow.adjustment_id, user, req.user?.id, {
         scannedCoils: parseScannedCoilsFromBody(req.body),
       });
       log(req, "create_approve", String(row.adjustment_id), {
@@ -443,17 +465,21 @@ export const createAdjustment = async (req, res) => {
         message: "Stock adjustment created and approved.",
       });
     }
-    log(req, "create", String(row.adjustment_id), {
-      adjustment_id: row.adjustment_id,
-      entry_type: row.entry_type,
+    const coils = isSaAddLikeEntryType(String(savedRow.entry_type || ""))
+      ? await findCoilsBySaIdWithMrn(savedRow.adjustment_id, "stock_in")
+      : [];
+    log(req, "create", String(savedRow.adjustment_id), {
+      adjustment_id: savedRow.adjustment_id,
+      entry_type: savedRow.entry_type,
       approved: false,
-    }, row);
+      coil_count: coils.length,
+    }, savedRow);
 
     return res.status(201).json({
       success: true,
-      data: row,
+      data: { ...savedRow, coils },
       toast_type: "warning",
-      message: "Stock adjustment saved as draft.",
+      message: "Stock adjustment saved. Coils are available in Store In — approve when ready for downstream use.",
     });
   } catch (err) {
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
@@ -516,11 +542,14 @@ export const updateAdjustmentCtrl = async (req, res) => {
           message: "You do not have permission to set this stock adjustment back to pending.",
         });
       }
-      await revertStockAdjustmentOnUnapprove({
-        adjustment: existing,
-        userName: user,
-        userId: req.user?.id,
-      });
+      // Add/Old: keep coils in Store In — approval only gates downstream modules.
+      if (String(existing.entry_type || "").toLowerCase() === "minus") {
+        await revertStockAdjustmentOnUnapprove({
+          adjustment: existing,
+          userName: user,
+          userId: req.user?.id,
+        });
+      }
       await clearApprovalFlags(id, user);
       const data = await findAdjustmentById(id);
       log(req, "unapprove", String(id), {
@@ -703,31 +732,51 @@ export const updateAdjustmentCtrl = async (req, res) => {
       }
     }
 
-    // Validate first — only revert inventory after the new payload passes checks.
+    const mergedPreview = { ...existing, ...fields };
+    const addLike = isSaAddLikeEntryType(String(entry_type || existing.entry_type || ""));
+    const coilResyncNeeded = addLike && needsSaAddCoilResync(existing, mergedPreview);
+
+    // Validate first — only revert inventory when coil-defining fields change.
     if (existing.approved) {
-      if (isSaAddLikeEntryType(String(existing.entry_type || ""))) {
+      if (addLike && coilResyncNeeded) {
         await assertSaAddCoilsUnusedForEdit(id);
+        await revertStockAdjustmentOnUnapprove({
+          adjustment: existing,
+          userName: user,
+          userId: req.user?.id,
+        });
+      } else if (String(existing.entry_type || "").toLowerCase() === "minus") {
+        await revertStockAdjustmentOnUnapprove({
+          adjustment: existing,
+          userName: user,
+          userId: req.user?.id,
+        });
       }
-      await revertStockAdjustmentOnUnapprove({
-        adjustment: existing,
-        userName: user,
-        userId: req.user?.id,
-      });
     }
 
     await updateAdjustment(fields, { adjustment_id: id });
     const data = await findAdjustmentById(id);
+    if (addLike && (await shouldSyncStockAdjustmentAddCoils(existing, data))) {
+      await syncStockAdjustmentAddCoils({
+        adjustment: data,
+        userName: user,
+        userId: req.user?.id,
+      });
+    }
     log(req, existing.approved ? "update_revert" : "update", String(id), {
       adjustment_id: id,
       entry_type: data?.entry_type,
       qty: data?.qty,
       approved: false,
     }, data);
+    const coils = isSaAddLikeEntryType(String(data?.entry_type || ""))
+      ? await findCoilsBySaIdWithMrn(id, "stock_in")
+      : [];
     return res.json({
       success: true,
-      data,
+      data: { ...data, coils },
       toast_type: "warning",
-      message: "Stock adjustment updated and set to pending. Approve it to apply the change.",
+      message: "Stock adjustment updated. Coils are available in Store In — approve when ready for downstream use.",
     });
   } catch (err) {
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
@@ -742,7 +791,7 @@ export const deleteAdjustment = async (req, res) => {
     if (!existing) return res.status(404).json({ success: false, message: "Stock adjustment not found." });
 
     const user = auditUserName(req);
-    if (existing.approved) {
+    if (existing.approved || isSaAddLikeEntryType(String(existing.entry_type || ""))) {
       await revertStockAdjustmentOnUnapprove({
         adjustment: existing,
         userName: user,

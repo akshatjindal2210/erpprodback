@@ -12,6 +12,10 @@ import { findSpecItemDetail, findSpecItemDetailByItemCode, findSpecItemDetailByI
 
 export const RM_STICKER_WIDTH_MM = 65;
 export const RM_STICKER_HEIGHT_MM = 85;
+/** Printed on RM + QC sticker footer (bottom meta line). */
+export const RM_STICKER_FORM_CODE = "QA/F/56 - 01";
+/** Bottom meta line font — decrease if footer text overflows (e.g. 1.5). */
+export const RM_STICKER_FOOTER_FONT_MM = 1.7;
 
 export function rmStickerSize() {
   return { width_mm: RM_STICKER_WIDTH_MM, height_mm: RM_STICKER_HEIGHT_MM };
@@ -359,14 +363,14 @@ const CSS = `
   min-width:0;max-width:100%;overflow:visible;line-height:1.15;
 }
 .rm-sticker .st-footer .st-label{
-  display:inline;text-transform:none;font-size:1.85mm;font-weight:700;
+  display:inline;text-transform:none;font-size:${RM_STICKER_FOOTER_FONT_MM}mm;font-weight:700;
   flex-shrink:0;color:#000;letter-spacing:0;line-height:1.15;
   -webkit-print-color-adjust:exact;print-color-adjust:exact;
 }
 .rm-sticker .st-footer .st-val,
 .rm-sticker .st-footer .st-ts{
   display:inline;flex:0 1 auto;min-width:0;margin-top:0;
-  font-size:1.85mm;font-weight:800;line-height:1.15;color:#000;
+  font-size:${RM_STICKER_FOOTER_FONT_MM}mm;font-weight:800;line-height:1.15;color:#000;
   overflow:visible;text-overflow:clip;
 }
 `;
@@ -442,7 +446,11 @@ function buildCardHtml(f) {
           <span class="st-val st-ts">${f.createdBy}</span>
           <span class="st-label st-ts">||</span>
           <span class="st-val st-ts">${f.timestamp}</span>
-          </span>
+          <span class="st-label st-ts">||</span>
+          <span class="st-val st-ts">${esc(RM_STICKER_FORM_CODE)}</span>
+          <span class="st-label st-ts">||</span>
+          <span class="st-val st-ts">${f.formDate}</span>
+        </span>
         </div>`;
       }
       return "";
@@ -500,6 +508,7 @@ async function buildCard(row) {
     qrUrl,
     createdBy: esc(show(row.created_by)),
     timestamp: esc(fmtTs(row.created_at)),
+    formDate: esc(fmtDate(row.created_at ?? new Date())),
   });
 }
 

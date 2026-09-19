@@ -24,7 +24,7 @@ export function mrnPortalStickerCoilSql(cAlias = "c", mAlias = "m") {
   return `(
     ${portalMrnCoilBaseSql(cAlias)}
     AND ${mAlias}.sticker_generated = true
-    AND COALESCE(${mAlias}.sticker_approved, true) = true
+    AND ${mAlias}.sticker_approved = true
   )`;
 }
 
@@ -45,7 +45,7 @@ export function mrnPortalStickerCoilExistsSql(cAlias = "c") {
     FROM ${T.MRN} mx
     WHERE mx.uid = ${cAlias}.mrn_uid
       AND mx.sticker_generated = true
-      AND COALESCE(mx.sticker_approved, true) = true
+      AND mx.sticker_approved = true
   )`;
 }
 
@@ -77,10 +77,7 @@ export function coilAreaEligibleSql(cAlias = "c") {
   )`;
 }
 
-/** QC Pending — stored MRN portal coils with approved stickers (after Store In). */
+/** QC Pending — MRN portal coils with approved stickers (Store In not required). */
 export function qcPendingMrnCoilSql(cAlias = "c", mAlias = "m") {
-  return `(
-    ${mrnPortalStickerCoilSql(cAlias, mAlias)}
-    AND ${cAlias}.location_id IS NOT NULL
-  )`;
+  return mrnPortalStickerCoilSql(cAlias, mAlias);
 }
