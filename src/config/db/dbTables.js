@@ -116,8 +116,8 @@ export const DB_TABLES = {
     "rmstore_coil_transaction",
   ],
 
-  /** HRMS application tables — only 2. */
-  hrms: ["hrms_attendance_log", "hrms_attendance"],
+  /** HRMS application tables. */
+  hrms: ["hrms_attendance_log", "hrms_attendance", "hrms_gate_pass"],
 
   purchase: [],
   production: [],

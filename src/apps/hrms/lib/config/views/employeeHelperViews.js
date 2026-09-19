@@ -9,6 +9,7 @@ function fieldsForEmployees(mod, act) {
 
   if (mod === "hrms_attendance" && (act === VIEW || isForm(act))) return true;
   if (mod === "hrms_attendance_log" && act === VIEW) return true;
+  if (mod === "hrms_gate_pass" && (act === VIEW || isForm(act))) return true;
 
   return null;
 }
@@ -57,6 +58,7 @@ export function toEmployeePickerRow(row) {
     emp_code: row.emp_code,
     emp_name: row.emp_name,
     deptcode: row.deptcode,
+    deptname: row.deptname,
     brcode: row.brcode,
     emp_intime: row.emp_intime,
     emp_outtime: row.emp_outtime,

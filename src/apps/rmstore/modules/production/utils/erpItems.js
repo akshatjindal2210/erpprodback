@@ -1,4 +1,31 @@
 import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
+import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
+
+const MASTER_CACHE_MS = 2 * 60 * 1000; // 2 min
+const masterCache = { rm: { loadedAt: 0, data: null }, fg: { loadedAt: 0, data: null } };
+
+function isMasterCacheFresh(entry) {
+  return entry.data != null && Date.now() - entry.loadedAt < MASTER_CACHE_MS;
+}
+
+async function rmItemMap() {
+  if (isMasterCacheFresh(masterCache.rm)) return masterCache.rm.data;
+  const map = new Map();
+  for (const row of await loadMappedItems("item", { type: "rm" })) {
+    const key = canonicalCode(row.itemdcode);
+    if (!key) continue;
+    map.set(key, { item_code: row.item_code ?? null, item_desc: row.itemdesc ?? null });
+  }
+  masterCache.rm = { loadedAt: Date.now(), data: map };
+  return map;
+}
+
+async function fgItemRows() {
+  if (isMasterCacheFresh(masterCache.fg)) return masterCache.fg.data;
+  const rows = await loadMappedItems("prdprimitem");
+  masterCache.fg = { loadedAt: Date.now(), data: rows };
+  return rows;
+}
 
 // 1. Data Loaders & Mappers
 export async function loadMappedItems(reqData, filter) {
@@ -97,23 +124,19 @@ export function slicePage(rows, page = 1, limit = 1000) {
 
 // 4. DB Snapshot Resolver
 export async function resolveProductionSnapshot(item_dcode, rm_items = []) {
-  const [prodRows, rmRows] = await Promise.all([
-    loadMappedItems("prdprimitem"),
-    loadMappedItems("item", { type: "rm" }),
-  ]);
-
+  const [prodRows, rmMap] = await Promise.all([fgItemRows(), rmItemMap()]);
   const prod = prodRows.find((r) => String(r.itemdcode) === String(item_dcode));
 
   const mappedRm = rm_items
     .map((rm) => {
       const dcode = rm?.rm_item_dcode ?? rm?.itemdcode ?? rm;
-      const found = rmRows.find((r) => String(r.itemdcode) === String(dcode));
       const rm_item_dcode = Number(dcode);
       if (!Number.isFinite(rm_item_dcode) || rm_item_dcode <= 0) return null;
+      const found = rmMap.get(canonicalCode(rm_item_dcode));
       return {
         rm_item_dcode,
         rm_item_code: found?.item_code || rm?.rm_item_code || "",
-        rm_item_desc: found?.itemdesc || rm?.rm_item_desc || "",
+        rm_item_desc: found?.item_desc || rm?.rm_item_desc || "",
       };
     })
     .filter(Boolean);
@@ -130,4 +153,54 @@ export async function resolveProductionSnapshot(item_dcode, rm_items = []) {
     item_desc: prod?.itemdesc || "",
     rm_items: mappedRm,
   };
+}
+
+export async function applyRmMasterLabels(fields, existing = {}) {
+  const dcode = canonicalCode(fields.item_dcode ?? existing.item_dcode);
+  const acc = canonicalCode(fields.acc_code ?? existing.acc_code);
+  const [items, ims] = await Promise.all([dcode ? rmItemMap() : null, acc ? getImsMapsSafe() : null]);
+  if (dcode && items) Object.assign(fields, items.get(dcode) || {});
+  if (acc && ims) {
+    const name = ims.ledgerMap.get(acc);
+    if (name?.trim()) fields.acc_name = String(name).trim();
+  }
+  return fields;
+}
+
+export async function enrichRmMasterRows(rows = []) {
+  if (!rows.length) return rows;
+  const [items, { ledgerMap }] = await Promise.all([rmItemMap(), getImsMapsSafe()]);
+  return rows.map((row) => {
+    const item = items.get(canonicalCode(row.item_dcode));
+    const acc = canonicalCode(row.acc_code);
+    return {
+      ...row,
+      item_code: item?.item_code ?? row.item_code ?? null,
+      item_desc: item?.item_desc ?? row.item_desc ?? null,
+      acc_name: (acc && ledgerMap.get(acc)) || row.acc_name || null,
+    };
+  });
+}
+
+export async function mergeProductionSnapshot(base, prod, cache = null) {
+  const key = String(prod?.production_id ?? prod?.item_dcode ?? "");
+  if (cache?.has(key)) return cache.get(key);
+  try {
+    const f = await resolveProductionSnapshot(prod.item_dcode, prod.rm_items ?? base.rm_items);
+    const rm = f.rm_items;
+    const out = {
+      ...base,
+      item_code: f.item_code || base.item_code,
+      item_desc: f.item_desc || base.item_desc,
+      rm_items: rm,
+      rm_item_dcode: rm[0]?.rm_item_dcode ?? base.rm_item_dcode,
+      rm_item_code: rm[0]?.rm_item_code ?? base.rm_item_code,
+      rm_item_desc: rm[0]?.rm_item_desc ?? base.rm_item_desc,
+      rm_item_codes: rm.map((r) => r.rm_item_code).filter(Boolean),
+    };
+    cache?.set(key, out);
+    return out;
+  } catch {
+    return base;
+  }
 }

@@ -1,17 +1,18 @@
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
+import { getHrmsOvertimeBufferMinutes } from "../../../../core/configuration/models/appConfig.model.js";
 import { HRMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { extractHrmsListParams } from "../../../lib/listParams.js";
 import { formatHrmsDate, formatHrmsDateTime, formatHrmsTime } from "../../../lib/hrmsFormat.js";
 import { fetchEmpMaster } from "../../../lib/erpApi.js";
 import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { logHrmsActivity } from "../../../lib/utils/activity/logHrmsActivity.js";
-import { istTs, LOG_DATE_SQL, LOG_VALID_PUNCH_SQL, normalizeShift, shiftDisplay, countPunches, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate } from "../../../lib/attendanceCommon.js";
+import { istTs, LOG_DATE_SQL, LOG_VALID_PUNCH_SQL, normalizeShift, shiftDisplay, countPunches, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate, parseEmpDcode } from "../../../lib/attendanceCommon.js";
 
 const ENTITY = "hrms_attendance";
 const ATT = T.ATTENDANCE;
 
 const ATT_RETURN = `
-  id, employee_code, name, shift,
+  id, emp_dcode, name, shift,
   to_char(attendance_date, 'YYYY-MM-DD') AS attendance_date,
   ${istTs(ATT_COL_IN)} AS "in",
   ${istTs(ATT_COL_OUT)} AS "out",
@@ -34,13 +35,13 @@ const UPSERT_ATTENDANCE_SQL = `
       approved_by = $12,
       approved_at = $13::timestamptz,
       updated_at = NOW()
-    WHERE employee_code = $1
+    WHERE emp_dcode = $1
       AND attendance_date = $3::date
     RETURNING ${ATT_RETURN}
   ),
   inserted AS (
     INSERT INTO ${ATT} (
-      employee_code, name, attendance_date, shift, ${ATT_COL_IN}, ${ATT_COL_OUT}, punch_count,
+      emp_dcode, name, attendance_date, shift, ${ATT_COL_IN}, ${ATT_COL_OUT}, punch_count,
       entry_type, approval_status, created_by, updated_by,
       approved_by, approved_at, updated_at
     )
@@ -57,7 +58,7 @@ const UPSERT_ATTENDANCE_SQL = `
 
 const INSERT_ATTENDANCE_SQL = `
   INSERT INTO ${ATT} (
-    employee_code, name, attendance_date, shift, ${ATT_COL_IN}, ${ATT_COL_OUT}, punch_count,
+    emp_dcode, name, attendance_date, shift, ${ATT_COL_IN}, ${ATT_COL_OUT}, punch_count,
     entry_type, approval_status, created_by, updated_by,
     approved_by, approved_at, updated_at
   ) VALUES (
@@ -124,21 +125,52 @@ function toHHmm24(value) {
   return null;
 }
 
-function formatRow(row) {
-  const approval = String(row.approval_status ?? "").trim();
-  const inTs = rowInTime(row);
-  const outTs = rowOutTime(row);
+function buildMasterMaps(employees) {
+  const byDcode = new Map();
+  const codeToDcode = new Map();
+  for (const emp of employees) {
+    const dcode = parseEmpDcode(emp.emp_dcode);
+    const code = String(emp.emp_code || "").trim();
+    if (dcode) byDcode.set(dcode, emp);
+    if (code && dcode) codeToDcode.set(code, dcode);
+  }
+  return { byDcode, codeToDcode };
+}
+
+function attachEmp(row, byDcode) {
+  const emp = byDcode?.get(parseEmpDcode(row.emp_dcode));
   return {
     ...row,
+    emp_dcode: parseEmpDcode(row.emp_dcode),
+    emp_code: emp?.emp_code ?? row.emp_code ?? "",
+  };
+}
+
+function resolveSubmitEmpDcode(raw, codeToDcode) {
+  const fromBody = parseEmpDcode(raw.emp_dcode);
+  if (fromBody) return fromBody;
+  const legacyCode = String(raw.employee_code ?? "").trim();
+  if (legacyCode && codeToDcode.has(legacyCode)) return codeToDcode.get(legacyCode);
+  return null;
+}
+
+function formatRow(row, byDcode, overtimeBufferMinutes) {
+  const merged = byDcode ? attachEmp(row, byDcode) : row;
+  const approval = String(merged.approval_status ?? "").trim();
+  const inTs = rowInTime(merged);
+  const outTs = rowOutTime(merged);
+  return {
+    ...merged,
     in: inTs,
     out: outTs,
-    punch_count: row.punch_count != null ? Number(row.punch_count) : undefined,
-    attendance_date_display: formatHrmsDate(row.attendance_date),
+    punch_count: merged.punch_count != null ? Number(merged.punch_count) : undefined,
+    attendance_date_display: formatHrmsDate(merged.attendance_date),
     in_display: formatHrmsDateTime(inTs),
     out_display: formatHrmsDateTime(outTs),
-    shift_display: shiftDisplay(row.shift) || row.shift_display || "",
-    entry_type_display: entryTypeDisplay(row.entry_type),
+    shift_display: shiftDisplay(merged.shift) || merged.shift_display || "",
+    entry_type_display: entryTypeDisplay(merged.entry_type),
     approval_status_display: approval ? titleCase(approval) : "Pending",
+    overtime_buffer_minutes: overtimeBufferMinutes,
   };
 }
 
@@ -169,13 +201,13 @@ function isDateTimeAllowedForAttendanceDate(attendanceDate, inTime, outTime) {
   return true;
 }
 
-async function saveAttendanceRow(client, row, manual = false) {
+async function saveAttendanceRow(client, row, manual = false, byDcode = null, overtimeBufferMinutes = null) {
   const params = buildAttendanceParams(row);
   if (!params) return null;
   const sql = manual ? INSERT_ATTENDANCE_SQL : UPSERT_ATTENDANCE_SQL;
   const result = client ? await client.query(sql, params) : await dbQuery(sql, params);
   const saved = client ? result.rows[0] : result[0];
-  return saved ? formatRow(saved) : null;
+  return saved ? formatRow(saved, byDcode, overtimeBufferMinutes) : null;
 }
 
 function resolveApproval({ req, previous, hasBusinessChanges, incomingApproved }) {
@@ -205,6 +237,7 @@ function resolveApproval({ req, previous, hasBusinessChanges, incomingApproved }
 export async function listAttendance(req, res) {
   try {
     const { page, limit, offset, filters, search: bodySearch } = extractHrmsListParams(req.body);
+    const filterDcode = parseEmpDcode(filters?.emp_dcode);
     const employee = String(filters?.employee_code ?? filters?.employee ?? "").trim();
     const fromDate = ymd(filters?.from_date ?? filters?.fromDate);
     const toDate = ymd(filters?.to_date ?? filters?.toDate);
@@ -223,8 +256,11 @@ export async function listAttendance(req, res) {
     const params = [];
     let p = 1;
 
-    if (employee) {
-      where.push(`a.employee_code ILIKE $${p++}`);
+    if (filterDcode) {
+      where.push(`a.emp_dcode = $${p++}`);
+      params.push(filterDcode);
+    } else if (employee) {
+      where.push(`CAST(a.emp_dcode AS TEXT) ILIKE $${p++}`);
       params.push(`%${employee}%`);
     }
     if (fromDate) {
@@ -248,7 +284,7 @@ export async function listAttendance(req, res) {
     }
     if (search) {
       where.push(`(
-        a.employee_code ILIKE $${p}
+        CAST(a.emp_dcode AS TEXT) ILIKE $${p}
         OR a.name ILIKE $${p}
         OR a.shift ILIKE $${p}
         OR a.entry_type ILIKE $${p}
@@ -263,7 +299,7 @@ export async function listAttendance(req, res) {
     const rows = await dbQuery(
       `
       SELECT
-        a.id, a.employee_code, a.name,
+        a.id, a.emp_dcode, a.name,
         to_char(a.attendance_date, 'YYYY-MM-DD') AS attendance_date,
         ${istTs(`a.${ATT_COL_IN}`)} AS "in",
         ${istTs(`a.${ATT_COL_OUT}`)} AS "out",
@@ -274,15 +310,19 @@ export async function listAttendance(req, res) {
         ${istTs("a.updated_at")} AS updated_at
       FROM ${T.ATTENDANCE} a
       WHERE ${whereSql}
-      ORDER BY a.attendance_date DESC, a.employee_code ASC
+      ORDER BY a.attendance_date DESC, a.emp_dcode ASC
       LIMIT $${p++} OFFSET $${p++}
       `,
       [...params, limit, offset]
     );
 
+    const { byDcode } = buildMasterMaps(await fetchEmpMaster());
+    const overtime_buffer_minutes = await getHrmsOvertimeBufferMinutes();
+
     return res.json({
       success: true,
-      data: rows.map(formatRow),
+      data: rows.map((row) => formatRow(row, byDcode, overtime_buffer_minutes)),
+      overtime_buffer_minutes,
       total: countRows[0]?.total ?? 0,
       page,
       limit,
@@ -305,7 +345,7 @@ export async function previewAttendance(req, res) {
 
     const savedRows = await dbQuery(
       `
-      SELECT a.id, a.employee_code, a.name,
+      SELECT a.id, a.emp_dcode, a.name,
         to_char(a.attendance_date, 'YYYY-MM-DD') AS attendance_date,
         ${istTs(`a.${ATT_COL_IN}`)} AS "in",
         ${istTs(`a.${ATT_COL_OUT}`)} AS "out",
@@ -316,24 +356,32 @@ export async function previewAttendance(req, res) {
       [date]
     );
 
+    const employees = await fetchEmpMaster();
+    const { byDcode, codeToDcode } = buildMasterMaps(employees);
+    const overtime_buffer_minutes = await getHrmsOvertimeBufferMinutes();
+
     if (previewType === "manual") {
       const data = savedRows
         .map((saved) =>
-          formatRow({
-            id: saved.id,
-            employee_code: saved.employee_code,
-            name: saved.name || "",
-            attendance_date: date,
-            in: rowInTime(saved),
-            out: rowOutTime(saved),
-            punch_count: saved.punch_count ?? 0,
-            shift: saved.shift === "B" || saved.shift === "A" ? saved.shift : "A",
-            entry_type: saved.entry_type || "manual",
-            approval_status: saved.approval_status || null,
-          })
+          formatRow(
+            {
+              id: saved.id,
+              emp_dcode: saved.emp_dcode,
+              name: saved.name || "",
+              attendance_date: date,
+              in: rowInTime(saved),
+              out: rowOutTime(saved),
+              punch_count: saved.punch_count ?? 0,
+              shift: saved.shift === "B" || saved.shift === "A" ? saved.shift : "A",
+              entry_type: saved.entry_type || "manual",
+              approval_status: saved.approval_status || null,
+            },
+            byDcode,
+            overtime_buffer_minutes
+          )
         )
-        .sort((a, b) => String(a.employee_code).localeCompare(String(b.employee_code)));
-      return res.json({ success: true, date, data, total: data.length });
+        .sort((a, b) => (parseEmpDcode(a.emp_dcode) ?? 0) - (parseEmpDcode(b.emp_dcode) ?? 0));
+      return res.json({ success: true, date, data, total: data.length, overtime_buffer_minutes });
     }
 
     const punches = await dbQuery(
@@ -346,7 +394,6 @@ export async function previewAttendance(req, res) {
       [date]
     );
 
-    const employees = await fetchEmpMaster();
     const empNameMap = new Map(employees.map((row) => [String(row.emp_code || "").trim(), row.emp_name]));
     const empTimeMap = new Map(
       employees.map((row) => [
@@ -358,35 +405,41 @@ export async function previewAttendance(req, res) {
       ])
     );
     const masterCodes = new Set(employees.map((row) => String(row.emp_code || "").trim()).filter(Boolean));
-    const savedMap = new Map(savedRows.map((row) => [String(row.employee_code || "").trim(), row]));
+    const savedMap = new Map(savedRows.map((row) => [parseEmpDcode(row.emp_dcode), row]));
     const data = punches
       .map((punch) => {
         const key = String(punch.employee_code || "").trim();
         if (!key) return null;
         if (!masterCodes.has(key)) return null;
-        const saved = savedMap.get(key);
+        const empDcode = codeToDcode.get(key);
+        if (!empDcode) return null;
+        const saved = savedMap.get(empDcode);
         const alreadyExists = Boolean(saved?.id);
         const times = empTimeMap.get(key) || {};
-        return formatRow({
-          id: saved?.id || null,
-          employee_code: key,
-          name: saved?.name || punch.name || empNameMap.get(key) || "",
-          attendance_date: date,
-          in: rowInTime(punch) || null,
-          out: rowOutTime(punch) || null,
-          punch_count: punch.punch_count ?? 0,
-          shift: normalizeShift(punch?.shift) || (saved?.shift === "B" ? "B" : "A"),
-          entry_type: saved?.entry_type || "automatic",
-          approval_status: saved?.approval_status || null,
-          already_exists: alreadyExists,
-          default_in: times.default_in || null,
-          default_out: times.default_out || null,
-        });
+        return formatRow(
+          {
+            id: saved?.id || null,
+            emp_dcode: empDcode,
+            name: saved?.name || punch.name || empNameMap.get(key) || "",
+            attendance_date: date,
+            in: rowInTime(punch) || null,
+            out: rowOutTime(punch) || null,
+            punch_count: punch.punch_count ?? 0,
+            shift: normalizeShift(punch?.shift) || (saved?.shift === "B" ? "B" : "A"),
+            entry_type: saved?.entry_type || "automatic",
+            approval_status: saved?.approval_status || null,
+            already_exists: alreadyExists,
+            default_in: times.default_in || null,
+            default_out: times.default_out || null,
+          },
+          byDcode,
+          overtime_buffer_minutes
+        );
       })
       .filter(Boolean)
-      .sort((a, b) => String(a.employee_code).localeCompare(String(b.employee_code)));
+      .sort((a, b) => (parseEmpDcode(a.emp_dcode) ?? 0) - (parseEmpDcode(b.emp_dcode) ?? 0));
 
-    return res.json({ success: true, date, data, total: data.length });
+    return res.json({ success: true, date, data, total: data.length, overtime_buffer_minutes });
   } catch (err) {
     console.error("[HRMS] previewAttendance:", err);
     return res.status(500).json({ success: false, message: err.message || "Server error." });
@@ -398,7 +451,7 @@ export async function submitAttendance(req, res) {
     const body = req.body || {};
     const date = ymd(body.date ?? body.attendance_date);
     const entryType = String(body.entry_type ?? body.type ?? "automatic").toLowerCase() === "manual" ? "manual" : "automatic";
-    const list = Array.isArray(body.rows) ? body.rows : body.employee_code ? [body] : [];
+    const list = Array.isArray(body.rows) ? body.rows : body.emp_dcode || body.employee_code ? [body] : [];
     if (!date) return res.status(400).json({ success: false, message: "Date is required." });
     if (isFutureAttendanceDate(date)) {
       return res.status(400).json({ success: false, message: "Future date is not allowed." });
@@ -407,7 +460,8 @@ export async function submitAttendance(req, res) {
 
     const userName = auditUserName(req);
     const employees = await fetchEmpMaster();
-    const masterCodes = new Set(employees.map((row) => String(row.emp_code || "").trim()).filter(Boolean));
+    const { byDcode, codeToDcode } = buildMasterMaps(employees);
+    const dcodeToCode = new Map([...codeToDcode.entries()].map(([code, dcode]) => [dcode, code]));
     let baselineMap = new Map();
 
     if (entryType === "automatic") {
@@ -426,20 +480,24 @@ export async function submitAttendance(req, res) {
 
     let existingSet = new Set();
     if (entryType === "automatic") {
-      const codes = list.map((raw) => String(raw.employee_code ?? "").trim()).filter(Boolean);
-      if (codes.length) {
-        const existingRows = await dbQuery(`SELECT employee_code FROM ${T.ATTENDANCE} WHERE attendance_date = $1::date AND employee_code = ANY($2::text[])`, [date, codes]);
-        existingSet = new Set(existingRows.map((row) => String(row.employee_code || "").trim()).filter(Boolean));
+      const dcodes = list.map((raw) => resolveSubmitEmpDcode(raw, codeToDcode)).filter(Boolean);
+      if (dcodes.length) {
+        const existingRows = await dbQuery(
+          `SELECT emp_dcode FROM ${T.ATTENDANCE} WHERE attendance_date = $1::date AND emp_dcode = ANY($2::int[])`,
+          [date, dcodes]
+        );
+        existingSet = new Set(existingRows.map((row) => parseEmpDcode(row.emp_dcode)).filter(Boolean));
       }
     }
 
     for (const raw of list) {
-      const code = String(raw.employee_code ?? "").trim();
-      if (!code || !normalizeShift(raw.shift) || seenKeys.has(code)) continue;
-      if (!masterCodes.has(code)) continue;
-      seenKeys.add(code);
+      const empDcode = resolveSubmitEmpDcode(raw, codeToDcode);
+      const empCode = dcodeToCode.get(empDcode) || String(raw.emp_code ?? raw.employee_code ?? "").trim();
+      if (!empDcode || !normalizeShift(raw.shift) || seenKeys.has(empDcode)) continue;
+      if (!byDcode.has(empDcode)) continue;
+      seenKeys.add(empDcode);
 
-      const exists = existingSet.has(code);
+      const exists = existingSet.has(empDcode);
       const override = raw.override === true || raw.override === 1 || raw.override === "true" || raw.override === "1";
       if (entryType === "automatic" && exists && !override) {
         skippedExisting += 1;
@@ -448,14 +506,14 @@ export async function submitAttendance(req, res) {
 
       const { in: inTime, out: outTime } = parseAttendanceInOut(raw, null, date);
       if (!inTime || !outTime) {
-        return res.status(400).json({ success: false, message: `In and Out both required for ${code}.` });
+        return res.status(400).json({ success: false, message: `In and Out both required for ${empCode || empDcode}.` });
       }
       if (!isDateTimeAllowedForAttendanceDate(date, inTime, outTime)) {
-        return res.status(400).json({ success: false, message: `Invalid in/out datetime for ${code}.` });
+        return res.status(400).json({ success: false, message: `Invalid in/out datetime for ${empCode || empDcode}.` });
       }
       const clientChanged = raw.edited === true || raw.edited === 1 || raw.edited === "true" || raw.edited === "1";
 
-      const logFp = baselineMap.get(code);
+      const logFp = baselineMap.get(empCode);
       const submittedFp = punchFingerprint({ in: inTime, out: outTime, shift: raw.shift });
       const matchesLog = logFp != null && logFp === submittedFp;
       const rowEntryType =
@@ -464,8 +522,8 @@ export async function submitAttendance(req, res) {
       const approvalStatus = needsApproval ? "unapproved" : "approved";
 
       normalizedRows.push({
-        employee_code: code,
-        name: String(raw.name ?? "").trim() || null,
+        emp_dcode: empDcode,
+        name: String(raw.name ?? "").trim() || byDcode.get(empDcode)?.emp_name || null,
         attendance_date: date,
         shift: normalizeShift(raw.shift),
         in: inTime,
@@ -496,20 +554,23 @@ export async function submitAttendance(req, res) {
 
     if (entryType === "manual") {
       const existingRows = await dbQuery(
-        `SELECT employee_code FROM ${T.ATTENDANCE}
-         WHERE attendance_date = $1::date AND employee_code = ANY($2::text[])`,
-        [date, normalizedRows.map((row) => row.employee_code)]
+        `SELECT emp_dcode FROM ${T.ATTENDANCE}
+         WHERE attendance_date = $1::date AND emp_dcode = ANY($2::int[])`,
+        [date, normalizedRows.map((row) => row.emp_dcode)]
       );
       if (existingRows.length) {
-        const existingCodes = existingRows.map((row) => String(row.employee_code || "").trim()).filter(Boolean);
-        return res.status(409).json({ success: false, message: `Already exists: ${existingCodes.join(", ")}`, existing_codes: existingCodes });
+        const existingDcodes = existingRows.map((row) => parseEmpDcode(row.emp_dcode)).filter(Boolean);
+        const labels = existingDcodes.map((d) => dcodeToCode.get(d) || d);
+        return res.status(409).json({ success: false, message: `Already exists: ${labels.join(", ")}`, existing_dcodes: existingDcodes });
       }
     }
+
+    const overtime_buffer_minutes = await getHrmsOvertimeBufferMinutes();
 
     const result = await withTransaction(async (client) => {
       const saved = [];
       for (const row of normalizedRows) {
-        const stored = await saveAttendanceRow(client, row, entryType === "manual");
+        const stored = await saveAttendanceRow(client, row, entryType === "manual", byDcode, overtime_buffer_minutes);
         if (stored) saved.push({ ...stored, needs_approval: row.needsApproval });
       }
       return saved;
@@ -517,10 +578,19 @@ export async function submitAttendance(req, res) {
 
     if (!result.length) return res.status(400).json({ success: false, message: "Save failed." });
 
+    const firstRow = result[0] || null;
     await logAttendance(req, {
       action: "create",
       entity_id: date,
-      record: { attendance_date: date, entry_type: entryType },
+      record: firstRow
+        ? {
+            attendance_date: date,
+            entry_type: entryType,
+            emp_dcode: firstRow.emp_dcode,
+            emp_code: firstRow.emp_code,
+            name: firstRow.name,
+          }
+        : { attendance_date: date, entry_type: entryType },
       details: { total: result.length, skipped_existing: skippedExisting },
     });
 
@@ -531,6 +601,7 @@ export async function submitAttendance(req, res) {
       date,
       entry_type: entryType,
       data: result,
+      overtime_buffer_minutes,
       total: result.length,
       skipped_existing: skippedExisting,
     });
@@ -547,7 +618,7 @@ export async function updateAttendance(req, res) {
 
     const found = await dbQuery(
       `
-      SELECT id, employee_code, name, shift,
+      SELECT id, emp_dcode, name, shift,
         to_char(attendance_date, 'YYYY-MM-DD') AS attendance_date,
         ${istTs(ATT_COL_IN)} AS "in",
         ${istTs(ATT_COL_OUT)} AS "out",
@@ -614,7 +685,9 @@ export async function updateAttendance(req, res) {
       ]
     );
 
-    const data = formatRow(rows[0] || previous);
+    const { byDcode } = buildMasterMaps(await fetchEmpMaster());
+    const overtime_buffer_minutes = await getHrmsOvertimeBufferMinutes();
+    const data = formatRow(rows[0] || previous, byDcode, overtime_buffer_minutes);
     await logAttendance(req, {
       action: incomingApproved === true ? "approve" : "update",
       entity_id: data.id,
@@ -626,6 +699,7 @@ export async function updateAttendance(req, res) {
       success: true,
       message: "Saved.",
       data,
+      overtime_buffer_minutes,
     });
   } catch (err) {
     console.error("[HRMS] updateAttendance:", err);
@@ -640,7 +714,7 @@ export async function deleteAttendance(req, res) {
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ success: false, message: "id is required." });
 
     const found = await dbQuery(
-      `SELECT id, employee_code, name, shift,
+      `SELECT id, emp_dcode, name, shift,
         to_char(attendance_date, 'YYYY-MM-DD') AS attendance_date,
         entry_type, approval_status
        FROM ${T.ATTENDANCE} WHERE id = $1`,

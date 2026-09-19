@@ -1,13 +1,4 @@
-const SENSITIVE_KEYS = new Set([
-  "password",
-  "confirmpassword",
-  "oldpassword",
-  "token",
-  "otp",
-  "secret",
-  "refresh_token",
-  "access_token",
-]);
+const SENSITIVE_KEYS = new Set(["password", "confirmpassword", "oldpassword", "token", "otp", "secret", "refresh_token", "access_token"]);
 
 const SKIP_KEYS = new Set([
   "created_at",
@@ -52,6 +43,8 @@ const RECORD_KEYS = [
   "po_number",
   "bill_no",
   "employee_code",
+  "emp_code",
+  "emp_name",
   "attendance_date",
 ];
 
@@ -74,6 +67,8 @@ const ENTITY_LABELS = {
   qc_hold_material: "QC hold",
   hrms_attendance: "daily attendance",
   hrms_attendance_log: "attendance log",
+  hrms_employee: "employee",
+  hrms_gate_pass: "gate pass",
   rm_mrn_portal: "MRN",
   rm_inventory_inwards: "store in",
   rm_qc_check: "QC check",
@@ -154,7 +149,11 @@ const FIELD_LABELS = {
   sticker_count: "Download count",
   item_count: "Item count",
   employee_code: "Emp code",
+  emp_code: "Emp code",
+  emp_name: "Emp name",
   attendance_date: "Date",
+  operation: "Operation",
+  machine_matched: "Machine matched",
   approval_status: "Approval",
   in: "In",
   out: "Out",
@@ -219,6 +218,8 @@ const ENTITY_ID_KEYS = [
   "item_dcode",
   "source_item_dcode",
   "doc_no",
+  "emp_code",
+  "employee_code",
 ];
 
 function hasEntityIdValue(value) {
@@ -699,6 +700,7 @@ function buildSimpleDescription(actionType, entity, ref, record, extra) {
   const hint =
     recordBits?.["Box no"] ||
     recordBits?.["Packing no"] ||
+    recordBits?.["Emp name"] ||
     recordBits?.["Name"] ||
     recordBits?.["Username"] ||
     null;
@@ -762,14 +764,7 @@ function buildInfo(actionType, record, extra) {
   return Object.keys(info).length ? info : null;
 }
 
-export function buildActivityLogPayload({
-  action,
-  entity,
-  entity_id = null,
-  record = null,
-  details = null,
-  meta = null,
-}) {
+export function buildActivityLogPayload({ action, entity, entity_id = null, record = null, details = null, meta = null }) {
   const actionType = toActionType(action);
   const { numeric, ref } = parseEntityId(entity_id);
   const extra = normalizeExtra(details, meta);
@@ -807,27 +802,24 @@ export function buildActivityLogPayload({
   };
 }
 
-export function buildMiddlewareLogPayload({
-  actionType,
-  module,
-  entityId = null,
-  body = null,
-  responseData = null,
-  route = "",
-}) {
+function normalizeMiddlewareBody(body) {
+  if (!isPlainObject(body)) return body;
+  if (isPlainObject(body.employee)) return { ...body, ...body.employee };
+  return body;
+}
+
+export function buildMiddlewareLogPayload({actionType, module, entityId = null, body = null, responseData = null, route = ""}) {
+  const normalizedBody = normalizeMiddlewareBody(body);
   const payload = buildActivityLogPayload({
     action: actionType,
     entity: module,
     entity_id: entityId,
-    record: actionType === "DELETE" ? summarizeRecord(responseData) : summarizeRecord(responseData) || summarizeRecord(body),
-    details: summarizeRecord(body),
+    record: actionType === "DELETE" ? summarizeRecord(responseData) : summarizeRecord(responseData) || summarizeRecord(normalizedBody),
+    details: summarizeRecord(normalizedBody),
   });
 
   if (actionType === "DELETE" && route.includes("bulk") && Array.isArray(body?.ids)) {
-    payload.log_data.info = {
-      ...(payload.log_data.info || {}),
-      Count: String(body.ids.length),
-    };
+    payload.log_data.info = {...(payload.log_data.info || {}), Count: String(body.ids.length)};
     payload.description = `Deleted ${body.ids.length} ${entityLabel(module)} record(s)`;
     payload.log_data.summary = payload.description;
   }

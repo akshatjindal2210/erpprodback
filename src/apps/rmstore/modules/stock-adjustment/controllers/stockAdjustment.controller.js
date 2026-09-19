@@ -20,6 +20,7 @@ import {
 } from "../utils/stockAdjustmentPreviewCoils.js";
 import { isCoilAvailableForSaMinus } from "../../../lib/utils/saMinusInventory.js";
 import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
+import { applyRmMasterLabels, enrichRmMasterRows } from "../../production/utils/erpItems.js";
 const MODULE = "rm_stock_adjustment";
 const log = createRmstoreActivityLogger(MODULE);
 
@@ -261,7 +262,7 @@ async function buildCreatePayload(body, user) {
       item_desc: body?.item_desc,
     });
 
-    return {
+    const payload = {
       entry_type,
       ...saMetaFieldsForSave(body, entry_type),
       item_dcode: Number.isFinite(item_dcode) ? item_dcode : null,
@@ -289,6 +290,7 @@ async function buildCreatePayload(body, user) {
       created_by: user,
       approved: false,
     };
+    return applyRmMasterLabels(payload);
   }
 
   // minus
@@ -337,7 +339,7 @@ async function buildCreatePayload(body, user) {
     coils: loadedCoils,
   });
 
-  return {
+  const payload = {
     entry_type,
     item_dcode,
     item_code,
@@ -359,6 +361,7 @@ async function buildCreatePayload(body, user) {
     created_by: user,
     approved: false,
   };
+  return applyRmMasterLabels(payload);
 }
 
 export const getAdjustments = async (req, res) => {
@@ -382,7 +385,8 @@ export const getAdjustments = async (req, res) => {
       limit,
       permission: req.permission,
     });
-    return res.json({ success: true, ...result });
+    const data = await enrichRmMasterRows(result.data || []);
+    return res.json({ success: true, ...result, data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -399,7 +403,8 @@ export const getAdjustmentById = async (req, res) => {
 
     const coil_qtys = parseStoredCoilQtys(data.coil_qtys);
 
-    return res.json({ success: true, data: { ...data, coil_qtys, coils } });
+    const [enriched] = await enrichRmMasterRows([data]);
+    return res.json({ success: true, data: { ...(enriched || data), coil_qtys, coils } });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -754,6 +759,7 @@ export const updateAdjustmentCtrl = async (req, res) => {
       }
     }
 
+    await applyRmMasterLabels(fields, existing);
     await updateAdjustment(fields, { adjustment_id: id });
     const data = await findAdjustmentById(id);
     if (addLike && (await shouldSyncStockAdjustmentAddCoils(existing, data))) {

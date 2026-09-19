@@ -1,40 +1,15 @@
 import ActivityLog from "../../../apps/core/activity-logs/models/activityLog.model.js";
 import { buildActivityLogPayload } from "./activityLogPayload.js";
 
-export const logActivity = async (
-  req,
-  {
-    action,
-    entity,
-    entity_id = null,
-    record = null,
-    details = {},
-    meta = null,
-    success = true,
-    userId = null,
-    appType = "ims",
-  }
-) => {
+export const logActivity = async (req, {action, entity, entity_id = null, record = null, details = {}, meta = null, success = true, userId = null, appType = "ims" }) => {
   try {
     if (req) req._activityLogged = true;
 
-    const { description, log_data, entity_id: resolvedEntityId, entity_ref } = buildActivityLogPayload({
-      action,
-      entity,
-      entity_id,
-      record,
-      details,
-      meta,
-    });
+    const { description, log_data, entity_id: resolvedEntityId, entity_ref } = buildActivityLogPayload({action, entity, entity_id, record, details, meta});
 
     log_data.success = success;
 
-    const storedEntityId =
-      entity_ref != null && String(entity_ref).trim() !== ""
-        ? String(entity_ref).trim()
-        : resolvedEntityId != null
-          ? String(resolvedEntityId)
-          : null;
+    const storedEntityId = entity_ref != null && String(entity_ref).trim() !== "" ? String(entity_ref).trim() : resolvedEntityId != null ? String(resolvedEntityId) : null;
 
     await ActivityLog.create({
       user_id: userId || req?.user?.id || null,

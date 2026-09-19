@@ -13,7 +13,13 @@ import { getCrudModuleConfig } from "../../../lib/config/crud/crudModules.js";
 import { resolveUserViewsSelectFields } from "../../../lib/config/views/fields/user.js";
 import { extractListParams, sanitizeFilters } from "../../../lib/utils/query/queryHelper.js";
 import { cleanPermissionMap, formatPermissions, sanitizeSearch } from "../../../lib/utils/helper/helper.js";
-import { getDefaultListViewSpanDays, getBoxNoUidPrefix, isInwardLocationValidationEnabled, isLocationCapacityValidationEnabled } from "../../../configuration/models/appConfig.model.js";
+import {
+  getDefaultListViewSpanDays,
+  getBoxNoUidPrefix,
+  getHrmsOvertimeBufferMinutes,
+  isInwardLocationValidationEnabled,
+  isLocationCapacityValidationEnabled,
+} from "../../../configuration/models/appConfig.model.js";
 import { auditUserName } from "../../../lib/utils/auth/approval.js";
 
 /** DB `CHECK (auth_source IN ('local','erp'))` — keep in sync with frontend `AUTH_SOURCES`. */
@@ -624,11 +630,13 @@ export const loginUser = async (req, res) => {
     setCachedPermissions(user.id, cleanedPermissions);
 
     const { id, name, username: dbUsername, type: role, email, special_permissions } = user;
-    const [default_list_view_span_days, inward_location_validation, location_capacity_validation, box_no_uid_prefix] = await Promise.all([
+    const [default_list_view_span_days, inward_location_validation, location_capacity_validation, box_no_uid_prefix, hrms_overtime_buffer_minutes] =
+      await Promise.all([
       getDefaultListViewSpanDays(),
       isInwardLocationValidationEnabled(),
       isLocationCapacityValidationEnabled(),
       getBoxNoUidPrefix(),
+      getHrmsOvertimeBufferMinutes(),
     ]);
 
     await logActivity(req, {
@@ -661,6 +669,7 @@ export const loginUser = async (req, res) => {
         inward_location_validation,
         location_capacity_validation,
         box_no_uid_prefix,
+        hrms_overtime_buffer_minutes,
       },
     });
   } catch (err) {
@@ -715,11 +724,13 @@ export const getMe = async (req, res) => {
 
     const permissions = await findUserPermissions(req.user.id);
     const appAccess = await findUserAppAccess(req.user.id);
-    const [default_list_view_span_days, inward_location_validation, location_capacity_validation, box_no_uid_prefix] = await Promise.all([
+    const [default_list_view_span_days, inward_location_validation, location_capacity_validation, box_no_uid_prefix, hrms_overtime_buffer_minutes] =
+      await Promise.all([
       getDefaultListViewSpanDays(),
       isInwardLocationValidationEnabled(),
       isLocationCapacityValidationEnabled(),
       getBoxNoUidPrefix(),
+      getHrmsOvertimeBufferMinutes(),
     ]);
     const { password, ...safeUser } = user;
     res.json({
@@ -734,6 +745,7 @@ export const getMe = async (req, res) => {
         inward_location_validation,
         location_capacity_validation,
         box_no_uid_prefix,
+        hrms_overtime_buffer_minutes,
       },
     });
   } catch (err) {

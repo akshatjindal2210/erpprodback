@@ -5,8 +5,9 @@
  *   1. Add the column to CREATE TABLE (for new databases)
  *   2. Use patchTableSchema + patchCol (for existing databases)
  *   3. Optionally backfill/fix old data with runIfColumnExists (same file)
+ *   4. dropColumnsIfExist, ensureColumnInteger, applyTablePatches (renames/drops/indexes in one call)
  *
- * Example: audit.table.js, box_table.table.js
+ * Example: audit.table.js, box_table.table.js, hrms attendance.table.js
  */
 
 export async function columnExists(query, tableName, columnName) {
@@ -120,6 +121,82 @@ export async function dropColumnIfExists(query, tableName, columnName) {
   if (!tableName || !columnName) return;
   if (!(await columnExists(query, tableName, columnName))) return;
   await query(`ALTER TABLE ${tableName} DROP COLUMN ${columnName}`);
+}
+
+/** Drop many columns (skips missing). */
+export async function dropColumnsIfExist(query, tableName, columnNames = []) {
+  for (const columnName of columnNames) {
+    await dropColumnIfExists(query, tableName, columnName);
+  }
+}
+
+function tableNameStem(tableName) {
+  const s = String(tableName ?? "").trim();
+  const dot = s.lastIndexOf(".");
+  return dot >= 0 ? s.slice(dot + 1) : s;
+}
+
+async function columnDataType(query, tableName, columnName) {
+  const stem = tableNameStem(tableName);
+  const rows = await query(
+    `SELECT data_type, udt_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+     LIMIT 1`,
+    [stem, columnName]
+  );
+  if (!Array.isArray(rows) || !rows.length) return "";
+  return String(rows[0].udt_name || rows[0].data_type || "").toLowerCase();
+}
+
+/**
+ * ALTER COLUMN → INTEGER (from text/varchar). Optional: delete rows where value is not numeric.
+ */
+export async function ensureColumnInteger(query, tableName, columnName, { purgeNonNumeric = false } = {}) {
+  if (!tableName || !columnName) return;
+  if (!(await columnExists(query, tableName, columnName))) return;
+
+  const current = await columnDataType(query, tableName, columnName);
+  if (current === "int4" || current === "integer") return;
+
+  const col = sqlColumnIdent(columnName);
+  if (purgeNonNumeric) {
+    await query(`
+      DELETE FROM ${tableName}
+      WHERE ${col}::text !~ '^[0-9]+$'
+         OR NULLIF(TRIM(${col}::text), '') IS NULL
+    `);
+  }
+
+  await query(`
+    ALTER TABLE ${tableName}
+    ALTER COLUMN ${col} TYPE INTEGER
+    USING NULLIF(TRIM(${col}::text), '')::integer
+  `);
+}
+
+/**
+ * One-shot legacy schema fixes after CREATE TABLE (renames, drops, int columns, indexes).
+ */
+export async function applyTablePatches(
+  query,
+  tableName,
+  { renameColumns = [], dropColumns = [], integerColumns = [], indexes = [], logPrefix = "" } = {}
+) {
+  for (const { from, to } of renameColumns) {
+    if (from && to) await renameColumnIfExists(query, tableName, from, to);
+  }
+  await dropColumnsIfExist(query, tableName, dropColumns);
+  for (const item of integerColumns) {
+    const name = typeof item === "string" ? item : item?.name;
+    if (!name) continue;
+    const purgeNonNumeric = typeof item === "object" && Boolean(item.purgeNonNumeric);
+    try {
+      await ensureColumnInteger(query, tableName, name, { purgeNonNumeric });
+    } catch (err) {
+      if (logPrefix) console.warn(logPrefix, err?.message || err);
+    }
+  }
+  await ensureIndexes(query, indexes);
 }
 
 function sqlColumnIdent(name) {

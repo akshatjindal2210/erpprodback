@@ -4,6 +4,7 @@ import { getCachedAppConfig, setCachedAppConfig, invalidateAppConfigCache } from
 import { CORE_APP_CONFIG_KEYS } from "../app.config.js";
 import { IMS_APP_CONFIG_KEYS, IMS_LIST_VIEW_SPAN } from "../../../ims/lib/config/app.config.js";
 import { RMSTORE_APP_CONFIG_KEYS } from "../../../rmstore/lib/config/app.config.js";
+import { HRMS_APP_CONFIG_KEYS, HRMS_OVERTIME_BUFFER } from "../../../hrms/lib/config/app.config.js";
 
 /*
   Post-deploy settings (`ims_app_config` table). Read at runtime from DB.
@@ -16,6 +17,7 @@ export const APP_CONFIG_KEYS = {
   ...CORE_APP_CONFIG_KEYS,
   ...IMS_APP_CONFIG_KEYS,
   ...RMSTORE_APP_CONFIG_KEYS,
+  ...HRMS_APP_CONFIG_KEYS,
 };
 
 const COMPANY_INFO_DEFAULTS = Object.freeze({
@@ -111,6 +113,21 @@ export async function getAppConfigValues(config_keys = []) {
 /** Prefix for new sticker `box_no_uid` values — from current Indian FY (e.g. FY 2026-2027 → `26`). */
 export async function getBoxNoUidPrefix() {
   return getBoxNoUidPrefixFromFinancialYear();
+}
+
+export async function getHrmsOvertimeBufferMinutes() {
+  try {
+    const raw = await getAppConfigValue(APP_CONFIG_KEYS.OVERTIME_BUFFER_MINUTES);
+    if (raw != null && String(raw).trim() !== "") {
+      const n = parseInt(String(raw).trim(), 10);
+      if (Number.isFinite(n)) {
+        return Math.max(HRMS_OVERTIME_BUFFER.MIN, Math.min(HRMS_OVERTIME_BUFFER.MAX, n));
+      }
+    }
+  } catch {
+    /* table missing */
+  }
+  return HRMS_OVERTIME_BUFFER.DEFAULT;
 }
 
 export async function getDefaultListViewSpanDays() {

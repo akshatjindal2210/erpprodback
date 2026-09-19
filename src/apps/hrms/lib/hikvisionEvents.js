@@ -57,24 +57,12 @@ export function deviceEventToRecord(event) {
   };
 }
 
+/** Hikvision ACS snap — usual field is AccessControllerEvent.pictureURL. */
 export function extractDeviceEventImage(event) {
-  const acs = event?.AccessControllerEvent || event || {};
-  const candidates = [
-    acs.pictureURL,
-    acs.picURL,
-    acs.snapURL,
-    acs.faceURL,
-    acs.captureURL,
-    acs.imageURL,
-    acs.imageUrl,
-    acs.photoURL,
-    acs.bkgUrl,
-    event?.pictureURL,
-    event?.picURL,
-    event?.snapURL,
-  ];
-  for (const v of candidates) {
-    const url = String(v ?? "").trim();
+  const acs = event?.AccessControllerEvent || event;
+  if (!acs || typeof acs !== "object") return "";
+  for (const key of ["pictureURL", "picURL", "snapURL"]) {
+    const url = String(acs[key] ?? "").trim();
     if (url) return url;
   }
   return "";

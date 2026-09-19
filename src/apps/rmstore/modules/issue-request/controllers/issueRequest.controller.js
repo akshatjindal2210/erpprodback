@@ -3,7 +3,7 @@ import { ISSUE_REQUEST_MACHINE_JOB_CARD_LOCK } from "../../../lib/config/app.con
 import { replaceIssueRequestJobCards } from "../models/issueRequestJobCard.model.js";
 import { findProduction, findProductions } from "../../production/models/productionMaster.model.js";
 import { normalizeRmItems, productionAllowedRmCodes, rmFieldList } from "../../production/utils/productionRmHelpers.js";
-import { loadMappedItems } from "../../production/utils/erpItems.js";
+import { loadMappedItems, mergeProductionSnapshot } from "../../production/utils/erpItems.js";
 import { hasIssueRmMappedPermission, isSuperAdminUser } from "../../../lib/utils/rmstoreSpecialPermissions.js";
 import { findCoilByUid } from "../../coil/models/coil.model.js";
 import { isCoilEligibleForIssueRequest } from "../../../lib/utils/coilQcEligibility.js";
@@ -305,6 +305,7 @@ async function buildJobCardsPayload(rawCards, { excludeIssueUid = null, user = n
   const issuedByJc = new Map(
     (issuedRows || []).map((r) => [String(r.pjobcardno || "").toUpperCase(), Number(r.issued_qty) || 0])
   );
+  const prodFieldsCache = new Map();
 
   for (const raw of rawCards) {
     const pjobcardno = String(raw?.pjobcardno || "").trim();
@@ -388,7 +389,7 @@ async function buildJobCardsPayload(rawCards, { excludeIssueUid = null, user = n
         { status: 400 }
       );
     }
-    const prodFields = mapProductionFields(prod);
+    const prodFields = await mergeProductionSnapshot(mapProductionFields(prod), prod, prodFieldsCache);
     const selectedRm = resolveRequestedRm(raw, prodFields);
     await assertRmSelectionAllowed(user, prodFields, selectedRm);
 
@@ -444,9 +445,9 @@ async function buildJobCardsPayload(rawCards, { excludeIssueUid = null, user = n
     jobCards.push({
       pjobcardno,
       pldt: raw?.pldt ?? null,
-      item_code: raw?.item_code || prodFields.item_code || null,
-      itemdcode: Number(itemdcode) || prodFields.item_dcode || null,
-      itemdesc: raw?.itemdesc || raw?.item_desc || prodFields.item_desc || null,
+      item_code: prodFields.item_code || null,
+      itemdcode: prodFields.item_dcode || Number(itemdcode) || null,
+      itemdesc: prodFields.item_desc || null,
       planqty: Number(raw?.planqty ?? raw?.plan_qty ?? 0) || 0,
       macname: raw?.macname || null,
       part_weight,
@@ -497,7 +498,7 @@ export const getProductionMapping = async (req, res) => {
         message: `No production-to-RM mapping exists for item ${item_code || itemdcode || "—"}. Map it in the Production master first.`,
       });
     }
-    return res.json({ success: true, data: prod });
+    return res.json({ success: true, data: await mergeProductionSnapshot(mapProductionFields(prod), prod) });
   } catch (err) {
     const status = err.status || 500;
     return res.status(status).json({ success: false, message: err.message });

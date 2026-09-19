@@ -1,6 +1,17 @@
 import { extractHrmsListParams } from "../../../lib/listParams.js";
 import { toEmployeePickerRow } from "../../../lib/config/views/employeeHelperViews.js";
 import { attachMachineSync, fetchEmpMaster, fetchEmpMasterRaw, fetchLiveMachineMatch, filterEmployeesLocal, hikvisionAddUser, hikvisionBlockUser, mapEmployeeRecord, sortEmployeesLocal } from "../../../lib/erpApi.js";
+import { createHrmsActivityLogger } from "../../../lib/utils/activity/logHrmsActivity.js";
+
+const ENTITY = "hrms_employee";
+const logEmployee = createHrmsActivityLogger(ENTITY);
+
+function employeeRecord(row = {}) {
+  return {
+    emp_code: String(row.emp_code ?? row.employeeNo ?? "").trim(),
+    emp_name: String(row.emp_name ?? row.name ?? "").trim(),
+  };
+}
 
 function hikvisionValidWindow(enable) {
   return {
@@ -37,6 +48,13 @@ async function saveMachineUserStatus(req, res, { enable, successMessage, failMes
       return res.status(502).json({ success: false, message: errMsg, data: userInfo, response: response?.json ?? null, requestedData: ["add"] });
     }
 
+    logEmployee(
+      req,
+      "update",
+      employeeNo,
+      { operation: enable ? "machine_update" : "machine_deactivate" },
+      employeeRecord(row)
+    );
     return res.json({ success: true, message: response?.json?.message || successMessage, data: userInfo, response: response?.json ?? null, requestedData: ["add"] });
   } catch (err) {
     console.error(logTag, err);
@@ -75,6 +93,7 @@ export async function deactivateEmployeeOnMachine(req, res) {
         requestedData: ["block"],
       });
     }
+    logEmployee(req, "update", userInfo.employeeNo, { operation: "machine_deactivate" }, employeeRecord(row));
     return res.json({
       success: true,
       message: response?.json?.message || "Machine user deactivated.",
@@ -96,6 +115,14 @@ async function listEmployeesBase(req, res, syncMachine = false) {
     const sorted = sortEmployeesLocal(filtered, sortBy, order);
     const merged = attachMachineSync(sorted, machineCodes);
     const data = merged.slice(offset, offset + limit);
+
+    if (syncMachine) {
+      logEmployee(req, "update", "sync", {
+        operation: "machine_sync",
+        total: sorted.length,
+        machine_matched: machineCodes?.length ?? 0,
+      });
+    }
 
     return res.json({ success: true, data, total: sorted.length, page, limit });
   } catch (err) {

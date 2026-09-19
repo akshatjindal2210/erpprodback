@@ -21,6 +21,7 @@ export const LOG_DATE_SQL = `(event_timestamp AT TIME ZONE '${HRMS_ATTENDANCE_TZ
 export const LOG_VALID_PUNCH_SQL = `
   employee_code IS NOT NULL AND TRIM(employee_code) <> ''
   AND event_timestamp IS NOT NULL
+  AND deleted_at IS NULL
   AND COALESCE(status, '') NOT ILIKE '%failed%'
   AND COALESCE(status, '') NOT ILIKE '%mismatch%'
   AND COALESCE(event_name, '') NOT ILIKE '%failed%'
@@ -53,7 +54,7 @@ export function ymd(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : "";
 }
 
-function istNowDate() {
+export function istNowDate() {
   // Keep all attendance date validations in IST, independent of server timezone.
   return new Date(Date.now() + 330 * 60 * 1000).toISOString().slice(0, 10);
 }
@@ -108,7 +109,7 @@ function isFullTimestamp(value) {
   return /^\d{4}-\d{2}-\d{2}T/.test(String(value ?? "").trim());
 }
 
-function addDaysYmd(dateStr, days) {
+export function addDaysYmd(dateStr, days) {
   const base = ymd(dateStr);
   if (!base) return dateStr;
   const d = new Date(`${base}T12:00:00+05:30`);
@@ -167,13 +168,18 @@ export function resolveEntryTypeOnUpdate(previous, changed) {
   return prev === "automatic_edit" ? "automatic_edit" : "automatic";
 }
 
+export function parseEmpDcode(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
+}
+
 export function buildAttendanceParams(row = {}) {
-  const code = String(row.employee_code || "").trim();
+  const empDcode = parseEmpDcode(row.emp_dcode);
   const shift = normalizeShift(row.shift);
-  if (!code || !row.attendance_date || !shift) return null;
+  if (!empDcode || !row.attendance_date || !shift) return null;
   const entryType = normalizeEntryType(row.entry_type);
   return [
-    code,
+    empDcode,
     row.name != null && String(row.name).trim() !== "" ? String(row.name).trim() : null,
     row.attendance_date,
     shift,

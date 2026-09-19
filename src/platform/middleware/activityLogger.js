@@ -3,6 +3,32 @@ import { buildMiddlewareLogPayload, resolveMiddlewareEntityId } from "../utils/a
 
 const ACTION_LABELS = { POST: "CREATE", PUT: "UPDATE", PATCH: "MODIFY", DELETE: "DELETE" };
 
+const ROUTE_SKIP = new Set([
+  "api", "core", "ims", "task", "hrms", "rmstore", "purchase", "production", "portal",
+  "list", "get", "fetch", "search", "filter", "details", "report", "export", "download",
+  "history", "summary", "meta", "helper", "create", "add", "insert", "save", "update",
+  "edit", "modify", "delete", "remove", "approve", "authorize", "generate", "machine",
+  "submit", "sync",
+]);
+
+const HRMS_MODULES = {
+  employees: "hrms_employee",
+  attendance: "hrms_attendance",
+  "attendance-log": "hrms_attendance_log",
+  "gate-pass": "hrms_gate_pass",
+};
+
+function resolveMiddlewareModule(originalUrl, appType) {
+  const parts = originalUrl
+    .split("/")
+    .filter((part) => part && !ROUTE_SKIP.has(part.toLowerCase()));
+
+  const first = (parts[0] || "").toLowerCase();
+  if (appType === "hrms" && HRMS_MODULES[first]) return HRMS_MODULES[first];
+
+  return (parts[0] || "general").replace(/-/g, "_");
+}
+
 export const activityLogger = (appType) => {
   return (req, res, next) => {
     if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return next();
@@ -44,19 +70,7 @@ export const activityLogger = (appType) => {
         const userId = req.user?.id;
         if (userId) {
           const routeUrl = req.originalUrl.toLowerCase();
-          const parts = req.originalUrl
-            .split("/")
-            .filter(
-              (p) =>
-                p &&
-                ![
-                  "api", "core", "ims", "task", "list", "get", "fetch", "search", "filter",
-                  "details", "report", "export", "download", "history", "summary", "meta",
-                  "helper", "create", "add", "insert", "save", "update", "edit", "modify",
-                  "delete", "remove", "approve", "authorize", "generate",
-                ].includes(p.toLowerCase())
-            );
-          const module = (parts[0] || "general").replace(/-/g, " ");
+          const module = resolveMiddlewareModule(req.originalUrl, appType);
 
           let actionType = ACTION_LABELS[req.method] || req.method;
 
@@ -71,7 +85,13 @@ export const activityLogger = (appType) => {
               routeUrl.includes("/authorize");
 
             if (isApproval) actionType = "APPROVE";
-            else if (routeUrl.includes("/update") || routeUrl.includes("/edit") || routeUrl.includes("/modify")) {
+            else if (
+              routeUrl.includes("/update") ||
+              routeUrl.includes("/edit") ||
+              routeUrl.includes("/modify") ||
+              routeUrl.includes("/sync") ||
+              routeUrl.includes("/deactivate")
+            ) {
               actionType = "UPDATE";
             } else if (routeUrl.includes("/delete") || routeUrl.includes("/remove")) {
               actionType = "DELETE";
