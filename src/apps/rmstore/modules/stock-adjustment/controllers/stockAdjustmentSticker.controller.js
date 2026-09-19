@@ -73,17 +73,18 @@ function enrichSaCoilSources(coil = {}, mrn = {}, adjustment = {}) {
   };
 }
 
-async function assertApprovedSaCoil(coil) {
+/** Saved SA Add/Old coil — printable while pending or approved (same as MRN generate → print). */
+async function resolveSaStockInCoil(coil) {
   if (!isSaStockInCoil(coil)) {
-    const err = new Error("This coil is not linked to an approved stock adjustment.");
+    const err = new Error("This coil is not linked to a Stock Adjustment Add (+) or Old entry.");
     err.statusCode = 400;
     throw err;
   }
   const saId = Number(coil.sa_id);
   const adj = await findAdjustmentById(saId);
-  if (!adj || !normalizeSaApproved(adj.approved) || !isSaAddLikeEntryType(adj.entry_type)) {
-    const err = new Error("Approve the stock adjustment before printing coil stickers.");
-    err.statusCode = 403;
+  if (!adj || adj.is_deleted || !isSaAddLikeEntryType(adj.entry_type)) {
+    const err = new Error("Sticker print is only for Add (+) or Old stock adjustments.");
+    err.statusCode = 400;
     throw err;
   }
   return { adjustment: adj, coil, preview: false };
@@ -99,8 +100,7 @@ async function resolveSaCoilForStickerPrint(coilUid, req) {
 
   const coil = await findCoilByUid(uid);
   if (coil && isSaStockInCoil(coil)) {
-    const { adjustment } = await assertApprovedSaCoil(coil);
-    return { adjustment, coil, preview: false };
+    return resolveSaStockInCoil(coil);
   }
 
   const adjId = parsePositiveIntId(req.body?.adjustment_id);
