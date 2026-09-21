@@ -62,24 +62,49 @@ function locationLabelSql(cAlias, lmAlias = "lm") {
 
 function locationDetailsSubquerySql(mrnUidRef) {
   const rules = buildCoilRules("c2", "q2");
+  const { IN_STORE, UNASSIGNED, SHOP_FLOOR, PENDING_QC } = rules;
   const label = locationLabelSql("c2", "lm2");
+  const mrnMatch = `COALESCE(NULLIF(TRIM(c2.mrn_uid::text), ''), '—') = ${mrnUidRef}`;
+  const coilBase = `
+      FROM ${T.COIL_TABLE} c2
+      ${coilQcJoinForAlias("c2", "q2")}
+      WHERE c2.is_deleted = false AND ${mrnMatch}`;
+
   return `(
     SELECT NULLIF(
       STRING_AGG(loc_parts.part, ', ' ORDER BY loc_parts.sort_key, loc_parts.part_label),
       ''
     )
     FROM (
-      SELECT
-        CASE WHEN c2.location_id IS NULL THEN 0 ELSE 1 END AS sort_key,
-        ${label} AS part_label,
+      SELECT 1 AS sort_key, ${label} AS part_label,
         ${label} || ' (' || COUNT(*)::text || ')' AS part
       FROM ${T.COIL_TABLE} c2
       LEFT JOIN ${IT.LOCATION_MASTER} lm2 ON lm2.location_id = c2.location_id AND lm2.is_deleted = false
       ${coilQcJoinForAlias("c2", "q2")}
-      WHERE c2.is_deleted = false
-        AND COALESCE(NULLIF(TRIM(c2.mrn_uid::text), ''), '—') = ${mrnUidRef}
-        AND (${rules.ISSUABLE})
+      WHERE c2.is_deleted = false AND ${mrnMatch}
+        AND (${IN_STORE})
       GROUP BY c2.location_id, ${label}
+
+      UNION ALL
+
+      SELECT 2, 'UA', 'UA (' || COUNT(*)::text || ')'
+      ${coilBase}
+        AND (${UNASSIGNED})
+      HAVING COUNT(*) > 0
+
+      UNION ALL
+
+      SELECT 3, 'SF', 'SF (' || COUNT(*)::text || ')'
+      ${coilBase}
+        AND (${SHOP_FLOOR})
+      HAVING COUNT(*) > 0
+
+      UNION ALL
+
+      SELECT 4, 'QC', 'QC (' || COUNT(*)::text || ')'
+      ${coilBase}
+        AND (${PENDING_QC})
+      HAVING COUNT(*) > 0
     ) loc_parts
   )`;
 }

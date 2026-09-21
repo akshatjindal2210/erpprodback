@@ -513,10 +513,7 @@ export const updateCoilsAfterInward = async (in_uid, location_id, coil_no_uids =
      WHERE coil_no_uid = ANY($4::text[])
        AND is_deleted = false
        AND COALESCE(status, 'active') = 'active'
-       AND (
-         location_id IS NULL
-         OR in_uid = $2
-       )`,
+       AND out_uid IS NULL`,
     [location_id, in_uid, userName ?? null, uids]
   );
 };
@@ -585,10 +582,7 @@ export const syncInwardRegisterCoils = async (in_uid, locations = [], userName) 
          WHERE coil_no_uid = ANY($4::text[])
            AND is_deleted = false
            AND COALESCE(status, 'active') = 'active'
-           AND (
-             location_id IS NULL
-             OR in_uid = $2
-           )`,
+           AND out_uid IS NULL`,
         [lid, id, userName ?? null, uids]
       );
     }

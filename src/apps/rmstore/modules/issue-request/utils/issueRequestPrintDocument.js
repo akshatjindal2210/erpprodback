@@ -87,50 +87,60 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
   const gstLine = gstin ? `<div class="fn-co-sub">GSTIN : ${escapeHtml(gstin)}</div>` : "";
 
   const issueUid = String(data.issue_uid ?? "");
-  const shift = String(data.shift || "—").toUpperCase();
   const docDate = fmtShortDate(data.approved_at || data.created_at);
   const jobCards = Array.isArray(data.job_cards) ? data.job_cards : [];
 
-  const fgCode = String(data.item_code || jobCards[0]?.item_code || "—");
-  const fgDesc = String(data.item_desc || jobCards[0]?.item_desc || jobCards[0]?.itemdesc || "");
-  const rmCode = String(data.rm_item_code || jobCards[0]?.rm_item_code || "—");
-  const rmDesc = String(data.rm_item_desc || jobCards[0]?.rm_item_desc || "");
-  const partWt = fmtWeight(data.part_weight ?? jobCards[0]?.part_weight);
-  const rmWt = fmtWeight(data.rm_weight ?? jobCards[0]?.rm_weight);
-
   let grandIssueQty = 0;
   let grandCoilQty = 0;
-  let coilLineCount = 0;
   const rowChunks = [];
   let jcSr = 0;
 
+  /** Print slip — FG: code only; RM: description only. */
+  const fgLineForJc = (jc) => {
+    const code = String(jc?.item_code || data.item_code || "").trim();
+    // Future: show code + description on FG column:
+    // const desc = String(jc?.item_desc || jc?.itemdesc || data.item_desc || "").trim();
+    // if (code && desc) return `${code} — ${desc}`;
+    return code || "—";
+  };
+
+  const rmLineForJc = (jc) => {
+    const desc = String(jc?.rm_item_desc || data.rm_item_desc || "").trim();
+    // Future: show code + description on RM column:
+    // const code = String(jc?.rm_item_code || data.rm_item_code || "").trim();
+    // if (code && desc) return `${code} — ${desc}`;
+    return desc || "—";
+  };
+
   for (const jc of jobCards) {
-    const coils = Array.isArray(jc?.coils) && jc.coils.length ? jc.coils : [null];
+    const coils = (Array.isArray(jc?.coils) ? jc.coils : []).filter((c) => c != null);
+    const coilLines = coils.length ? coils : [null];
+    const coilCount = coils.length;
+    const coilQtySum = coils.reduce((s, c) => s + (Number(c?.qty) || 0), 0);
     const issueQty = Number(jc?.issue_qty) || 0;
-    if (Number.isFinite(issueQty)) grandIssueQty += issueQty;
+    const rowTotalQty = issueQty > 0 ? issueQty : coilQtySum;
+    if (Number.isFinite(rowTotalQty)) grandIssueQty += rowTotalQty;
     jcSr += 1;
 
-    coils.forEach((coil, idx) => {
+    const fgLine = escapeHtml(fgLineForJc(jc));
+    const rmLine = escapeHtml(rmLineForJc(jc));
+    const totalQtyLabel = fmtQty(rowTotalQty);
+
+    coilLines.forEach((coil, idx) => {
       const isFirst = idx === 0;
       const coilQty = coil ? Number(coil.qty) || 0 : 0;
-      if (coil && Number.isFinite(coilQty)) {
-        grandCoilQty += coilQty;
-        coilLineCount += 1;
-      }
+      if (coil && Number.isFinite(coilQty)) grandCoilQty += coilQty;
 
       const snCell = isFirst ? String(jcSr) : "&#160;";
       const jcCell = isFirst ? escapeHtml(jc?.pjobcardno || "—") : "&#160;";
       const macCell = isFirst ? escapeHtml(jc?.macname || "—") : "&#160;";
-      const issueQtyCell = isFirst
-        ? `<td class="fn-td fn-r fn-bold">${fmtQty(issueQty)}</td>`
-        : `<td class="fn-td fn-c">&#160;</td>`;
+      const fgCell = isFirst ? fgLine : "&#160;";
+      const rmCell = isFirst ? rmLine : "&#160;";
+      const coilCountCell = isFirst ? String(coilCount || "—") : "&#160;";
 
-      const coilNo = coil ? escapeHtml(String(coil.coil_no_uid || "").trim() || "—") : "—";
-      const heatNo = coil ? escapeHtml(String(coil.heat_no || "").trim() || "—") : "—";
-      const mrnNo = coil
-        ? escapeHtml(String(coil.mrn_no ?? coil.mrn_uid ?? "").trim() || "—")
-        : "—";
+      const mrnUid = coil ? escapeHtml(String(coil.mrn_uid ?? coil.mrn_no ?? "").trim() || "—") : "—";
       const coilQtyCell = coil ? fmtQty(coilQty) : "—";
+      const totalQtyCell = isFirst ? totalQtyLabel : "&#160;";
       const rowClass = !isFirst ? ` class="fn-tr-pack"` : "";
 
       rowChunks.push(`
@@ -138,45 +148,38 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
           <td class="fn-td fn-c">${snCell}</td>
           <td class="fn-td fn-l">${jcCell}</td>
           <td class="fn-td fn-l">${macCell}</td>
-          ${issueQtyCell}
-          <td class="fn-td fn-l fn-wrap">${coilNo}</td>
-          <td class="fn-td fn-l fn-wrap">${heatNo}</td>
-          <td class="fn-td fn-c fn-wrap">${mrnNo}</td>
+          <td class="fn-td fn-l fn-wrap">${fgCell}</td>
+          <td class="fn-td fn-l fn-wrap fn-col-rm">${rmCell}</td>
+          <td class="fn-td fn-c fn-col-count">${coilCountCell}</td>
+          <td class="fn-td fn-c fn-wrap">${mrnUid}</td>
           <td class="fn-td fn-r">${coilQtyCell}</td>
+          <td class="fn-td fn-r fn-bold">${totalQtyCell}</td>
         </tr>`);
     });
   }
 
   if (!rowChunks.length) {
     rowChunks.push(`
-      <tr><td colspan="8" class="fn-td fn-c" style="padding:10px;font-style:italic;">No job cards on this issue request.</td></tr>`);
+      <tr><td colspan="9" class="fn-td fn-c" style="padding:10px;font-style:italic;">No job cards on this issue request.</td></tr>`);
   } else {
     rowChunks.push(`
       <tr class="fn-tr-total">
-        <td colspan="3" class="fn-td fn-total-lbl">Total</td>
-        <td class="fn-td fn-r fn-bold fn-total-num">${fmtQty(grandIssueQty)}</td>
-        <td class="fn-td fn-c fn-bold" colspan="2">${coilLineCount || Number(data.coil_count) || 0} coil(s)</td>
-        <td class="fn-td fn-c">&#160;</td>
+        <td colspan="7" class="fn-td fn-total-lbl">Total</td>
         <td class="fn-td fn-r fn-bold fn-total-num">${fmtQty(grandCoilQty)}</td>
+        <td class="fn-td fn-r fn-bold fn-total-num">${fmtQty(grandIssueQty)}</td>
       </tr>`);
   }
 
   const remarks = data.remarks ? escapeHtml(String(data.remarks)) : "";
-  const createdBy = escapeHtml(String(data.created_by_name || data.created_by || "").trim());
-  const createdAt = escapeHtml(fmtAt(data.created_at));
   const approvedBy = escapeHtml(String(data.approved_by_name || data.approved_by || "").trim());
   const approvedAt = escapeHtml(fmtAt(data.approved_at));
   const logoBlock = getLogoBlock();
-
-  const partyLine = [
-    fgDesc ? `${fgCode} — ${fgDesc}` : fgCode,
-  ].join("");
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Issue Request ${escapeHtml(issueUid)}</title>
+  <title>RM Issue Request ${escapeHtml(issueUid)}</title>
   <style>
     @page {
       size: A4 portrait;
@@ -312,6 +315,18 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
       line-height: 1.25;
     }
     .fn-c { text-align: center; }
+    .fn-col-rm { width: 28%; }
+    .fn-tbl thead th.fn-col-count {
+      font-size: 8pt;
+      line-height: 1.15;
+      padding: 3px 2px;
+      white-space: normal;
+      overflow: hidden;
+    }
+    .fn-tbl tbody td.fn-col-count {
+      padding: 3px 2px;
+      white-space: nowrap;
+    }
     .fn-l { text-align: left; }
     .fn-r { text-align: right; font-variant-numeric: tabular-nums; }
     .fn-bold { font-weight: 700; }
@@ -368,50 +383,50 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
       <div class="fn-body-stack">
         <div class="fn-tbl-wrap">
           <table class="fn-tbl" cellspacing="0">
+            <colgroup>
+              <col style="width:5%" />
+              <col style="width:10%" />
+              <col style="width:12%" />
+              <col style="width:12%" />
+              <col style="width:20%" />
+              <col style="width:6%" />
+              <col style="width:8%" />
+              <col style="width:7%" />
+              <col style="width:8%" />
+            </colgroup>
             <thead>
               <tr class="fn-page-head">
-                <td colspan="8">
+                <td colspan="9">
                   <div class="fn-border">
                     <div class="fn-head-row">
                       <div class="fn-logo-cell">${logoBlock}</div>
                       <div class="fn-head-main">
                         <div class="fn-co-name">${escapeHtml(companyName)}</div>
-                        <div class="fn-fn-title">Issue Request</div>
+                        <div class="fn-fn-title">RM Issue Request</div>
                         <div class="fn-co-sub">${escapeHtml(companyAddr)}</div>
                         ${gstLine}
-                        <div class="fn-co-sub">${escapeHtml(phone)}</div>
                       </div>
                       <div class="fn-logo-cell" aria-hidden="true"></div>
                     </div>
                     <div class="fn-meta-bar">
                       <div class="fn-meta-row">
                         <div><span class="k">S. No.</span> ${escapeHtml(issueUid)}</div>
-                        <div><span class="k">Shift</span> ${escapeHtml(shift)}</div>
                         <div class="fn-meta-date"><span class="k">Date</span> ${escapeHtml(docDate)}</div>
-                      </div>
-                      <div class="fn-meta-cust">
-                        <span class="k">FG Item</span>
-                        <span class="fn-cust-name">${escapeHtml(partyLine)}</span>
-                      </div>
-                      <div class="fn-meta-cust">
-                        <span class="k">RM Item</span>
-                        <span class="fn-cust-name">${escapeHtml(rmDesc ? `${rmCode} — ${rmDesc}` : rmCode)}</span>
-                        <span class="k" style="margin-left:8mm;">Part Wt</span> ${escapeHtml(partWt)}
-                        <span class="k" style="margin-left:4mm;">RM Wt</span> ${escapeHtml(rmWt)}
                       </div>
                     </div>
                   </div>
                 </td>
               </tr>
               <tr>
-                <th style="width:6%">S.No.</th>
-                <th style="width:12%">Job Card</th>
-                <th style="width:11%">Machine</th>
-                <th style="width:10%">Issue Qty</th>
-                <th style="width:20%">Coil No</th>
-                <th style="width:22%">Heat No</th>
-                <th style="width:10%">MRN No</th>
-                <th style="width:9%">Coil Qty</th>
+                <th>S.No.</th>
+                <th>Job Card</th>
+                <th>Machine</th>
+                <th>FG Item</th>
+                <th class="fn-col-rm">RM Item</th>
+                <th class="fn-col-count">Count</th>
+                <th>MRN UID</th>
+                <th>Coil Qty</th>
+                <th>Total Qty</th>
               </tr>
             </thead>
             <tbody>
@@ -423,12 +438,8 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
         <div class="fn-foot-wrap">
           <table class="fn-foot" cellspacing="0">
             <tr>
-              <td class="fn-fl" style="width:14%">Created By</td>
-              <td class="fn-fv" style="width:24%"><span class="fn-under">${createdBy || "&#160;"}</span></td>
-              <td class="fn-fl" style="width:6%">At</td>
-              <td class="fn-fv" style="width:20%"><span class="fn-under">${createdAt || "&#160;"}</span></td>
-              <td class="fn-fl" style="width:10%">Req. Qty</td>
-              <td class="fn-fv fn-fv-last" style="width:26%"><span class="fn-under">${escapeHtml(fmtQty(data.requested_qty ?? grandIssueQty))}</span></td>
+              <td class="fn-fl" style="width:14%">Req. Qty</td>
+              <td class="fn-fv fn-fv-last" colspan="5"><span class="fn-under">${escapeHtml(fmtQty(data.requested_qty ?? grandIssueQty))}</span></td>
             </tr>
             <tr>
               <td class="fn-fl">Approved By</td>

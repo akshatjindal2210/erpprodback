@@ -99,15 +99,8 @@ async function resolveCoilsForInward(uids, { editInUid = null } = {}) {
       }
       return { error: `Coil ${uid} is not available. Its current status is ${status}.` };
     }
-    // Store In is allowed with or without QC pass — QC only gates Issue / Total Stock.
-    if (coil.location_id) {
-      if (!belongsToEditInward && (editInUid == null || coilInUid !== Number(editInUid))) {
-        return {
-          error: editInUid
-            ? `Coil ${uid} is already stored on another store-in entry.`
-            : `Coil ${uid} has already been stored in.`,
-        };
-      }
+    if (coil.out_uid != null || status === "out") {
+      return { error: `Coil ${uid} is on Store Out. Revert Store Out before Store In.` };
     }
     resolved.push(coil);
   }

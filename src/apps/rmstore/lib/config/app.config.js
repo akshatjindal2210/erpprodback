@@ -13,6 +13,11 @@ export const RMSTORE_APP_CONFIG_KEYS = Object.freeze({
   MRN_STICKER_MODE: "mrn_sticker_mode",
   MRN_COIL_QTY_EDITABLE: "mrn_coil_qty_editable",
   MRN_COIL_QTY_AUTO_CALC: "mrn_coil_qty_auto_calc",
+  /**
+   * true  = QC Check Pending requires QC / coil sticker scan before Spec form
+   * false = open Spec form directly (no scan gate)
+   */
+  QC_CHECK_REQUIRE_STICKER_SCAN: "qc_check_require_sticker_scan",
   /** Shared with IMS App Console (same DB keys) */
   LOCATION_VALIDATION: "inward_location_validation",
   LOCATION_CAPACITY_VALIDATION: "location_capacity_validation",
@@ -85,6 +90,15 @@ export const RMSTORE_APP_CONFIG_DEFINITIONS = Object.freeze([
     description:
       "Enabled = uneven system split (middle coils higher). Disabled = equal qty per coil when editing is locked, or manual entry when editing is allowed.",
   },
+  {
+    key: RMSTORE_APP_CONFIG_KEYS.QC_CHECK_REQUIRE_STICKER_SCAN,
+    scope: "rmstore",
+    section: "rmstore",
+    label: "QC Check — require sticker scan",
+    value_type: "boolean",
+    description:
+      "Enabled = scan QC or coil sticker before opening Spec Check. Disabled = open Spec Check directly from Pending (no scan).",
+  },
 ]);
 
 export const RMSTORE_APP_CONFIG_SEEDS = Object.freeze({
@@ -93,4 +107,6 @@ export const RMSTORE_APP_CONFIG_SEEDS = Object.freeze({
   [RMSTORE_APP_CONFIG_KEYS.MRN_STICKER_MODE]: RMSTORE_STICKER_MODES.BATCH,
   [RMSTORE_APP_CONFIG_KEYS.MRN_COIL_QTY_EDITABLE]: "true",
   [RMSTORE_APP_CONFIG_KEYS.MRN_COIL_QTY_AUTO_CALC]: "true",
+  /** Default true — keep current scan-first QC Check behaviour */
+  [RMSTORE_APP_CONFIG_KEYS.QC_CHECK_REQUIRE_STICKER_SCAN]: "true",
 });

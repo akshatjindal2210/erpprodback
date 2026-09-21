@@ -273,3 +273,14 @@ export async function getMrnStickerMode() {
     return "batch";
   }
 }
+
+/** When true, QC Check Pending requires sticker scan before Spec form (default true). */
+export async function getQcCheckRequireStickerScan() {
+  try {
+    const raw = await getAppConfigValue(APP_CONFIG_KEYS.QC_CHECK_REQUIRE_STICKER_SCAN);
+    if (raw == null || String(raw).trim() === "") return true;
+    return String(raw).trim().toLowerCase() === "true";
+  } catch {
+    return true;
+  }
+}

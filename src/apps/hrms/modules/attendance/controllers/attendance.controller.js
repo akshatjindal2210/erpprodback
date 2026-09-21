@@ -380,7 +380,7 @@ export async function previewAttendance(req, res) {
             overtime_buffer_minutes
           )
         )
-        .sort((a, b) => (parseEmpDcode(a.emp_dcode) ?? 0) - (parseEmpDcode(b.emp_dcode) ?? 0));
+        .sort((a, b) => String(a.emp_code || "").localeCompare(String(b.emp_code || ""), undefined, { numeric: true }));
       return res.json({ success: true, date, data, total: data.length, overtime_buffer_minutes });
     }
 
@@ -437,7 +437,7 @@ export async function previewAttendance(req, res) {
         );
       })
       .filter(Boolean)
-      .sort((a, b) => (parseEmpDcode(a.emp_dcode) ?? 0) - (parseEmpDcode(b.emp_dcode) ?? 0));
+      .sort((a, b) => String(a.emp_code || "").localeCompare(String(b.emp_code || ""), undefined, { numeric: true }));
 
     return res.json({ success: true, date, data, total: data.length, overtime_buffer_minutes });
   } catch (err) {
