@@ -21,6 +21,37 @@ function mrnGroupKey(c) {
  * Same FIFO order as Issue Request modal (IMS packing style):
  * mrn_uid/mrn_no → stored before unassigned → created_at → coil_uid.
  */
+function orderedMrnKeysFromSorted(sorted = []) {
+  const keys = [];
+  const seen = new Set();
+  for (const c of sorted) {
+    const k = mrnGroupKey(c);
+    if (!seen.has(k)) {
+      seen.add(k);
+      keys.push(k);
+    }
+  }
+  return keys;
+}
+
+/** Rotate MRN groups: start MRN first, then wrap (4→5→1→2…). */
+export function applyFifoStartMrn(pool, startKey) {
+  const sorted = sortCoilsFifo(pool || []);
+  const start = String(startKey || "").trim();
+  if (!start || !sorted.length) return sorted;
+  const keys = orderedMrnKeysFromSorted(sorted);
+  const idx = keys.indexOf(start);
+  if (idx <= 0) return sorted;
+  const rotated = [...keys.slice(idx), ...keys.slice(0, idx)];
+  const byMrn = new Map();
+  for (const c of sorted) {
+    const k = mrnGroupKey(c);
+    if (!byMrn.has(k)) byMrn.set(k, []);
+    byMrn.get(k).push(c);
+  }
+  return rotated.flatMap((k) => byMrn.get(k) || []);
+}
+
 export function sortCoilsFifo(coils = []) {
   return [...(coils || [])].sort((a, b) => {
     const keyA = mrnGroupKey(a);
@@ -45,10 +76,13 @@ export function sortCoilsFifo(coils = []) {
  * Whole-coil FIFO to cover targetQty (may overshoot, e.g. 751 → 800).
  * Typed dispatch is capped at required RM separately — not here.
  */
-export function pickCoilsFifo(pool, targetQty, excludeUids = new Set()) {
+export function pickCoilsFifo(pool, targetQty, excludeUids = new Set(), fifoStartMrnKey = null) {
   const exclude = new Set([...excludeUids].map((u) => String(u).toLowerCase()));
-  const sorted = sortCoilsFifo(pool || []).filter(
-    (c) => c?.coil_no_uid && !exclude.has(String(c.coil_no_uid).toLowerCase())
+  const sorted = applyFifoStartMrn(
+    (pool || []).filter(
+      (c) => c?.coil_no_uid && !exclude.has(String(c.coil_no_uid).toLowerCase())
+    ),
+    fifoStartMrnKey
   );
 
   const storeQty = sorted.reduce((s, c) => s + (Number(c.qty) || 0), 0);
@@ -68,8 +102,8 @@ export function pickCoilsFifo(pool, targetQty, excludeUids = new Set()) {
 }
 
 /** First N coils in FIFO order. */
-export function pickCoilsByCount(pool, count, excludeUids = new Set()) {
-  const { available, storeQty } = pickCoilsFifo(pool, 0, excludeUids);
+export function pickCoilsByCount(pool, count, excludeUids = new Set(), fifoStartMrnKey = null) {
+  const { available, storeQty } = pickCoilsFifo(pool, 0, excludeUids, fifoStartMrnKey);
   const n = Math.max(0, Math.min(Number(count) || 0, available.length));
   const picked = available.slice(0, n);
   const pickedQty = picked.reduce((s, c) => s + (Number(c.qty) || 0), 0);
@@ -244,7 +278,13 @@ export function mrnCoilCountSignature(coils = []) {
  * Exact coil UIDs / within-MRN order are free (any coil from the MRN).
  * Totals may differ from the canonical FIFO pick when coil weights differ inside an MRN.
  */
-export function assertMrnLevelFifo(pool, selectedCoils, targetQty, excludeUids = new Set()) {
+export function assertMrnLevelFifo(
+  pool,
+  selectedCoils,
+  targetQty,
+  excludeUids = new Set(),
+  fifoStartMrnKey = null
+) {
   const exclude = new Set([...(excludeUids || [])].map((u) => String(u).toLowerCase()));
   const poolByUid = new Map(
     (pool || [])
@@ -267,7 +307,7 @@ export function assertMrnLevelFifo(pool, selectedCoils, targetQty, excludeUids =
     });
   }
 
-  const { picked } = pickCoilsFifo(pool, targetQty, excludeUids || new Set());
+  const { picked } = pickCoilsFifo(pool, targetQty, excludeUids || new Set(), fifoStartMrnKey);
   if (enriched.length !== picked.length) return false;
   if (!mrnCountMapsEqual(mrnCoilCountMap(picked), mrnCoilCountMap(enriched))) return false;
   const selectedQty = enriched.reduce((s, c) => s + (Number(c.qty) || 0), 0);
@@ -407,7 +447,8 @@ export async function assertIssueRequestCoilsAvailable(
 
     const pool = await getPool(jc);
     const fifoTarget = dispatchQty > 0 ? dispatchQty : issueQty;
-    if (!assertMrnLevelFifo(pool, coils, fifoTarget, pickedInRequest)) {
+    const fifoStart = String(jc?.fifo_start_mrn_uid || "").trim() || null;
+    if (!assertMrnLevelFifo(pool, coils, fifoTarget, pickedInRequest, fifoStart)) {
       throw Object.assign(
         new Error(
           `Coils for job card ${pjobcardno} must follow MRN FIFO. Please refresh and try again.`

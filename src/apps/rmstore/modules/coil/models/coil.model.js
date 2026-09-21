@@ -135,6 +135,8 @@ export const findCoils = async (options = {}) => {
     filters.coil_area === "true" ||
     filters.only_stock === true ||
     filters.only_stock === "true" ||
+    filters.shop_floor === true ||
+    filters.shop_floor === "true" ||
     (filters.out_uid != null && filters.out_uid !== "") ||
     (filters.in_uid != null && filters.in_uid !== "") ||
     (filters.rm_uid != null && filters.rm_uid !== "") ||
@@ -158,6 +160,12 @@ export const findCoils = async (options = {}) => {
   }
   if (filters.stored === true || filters.stored === "true") {
     conditions.push("c.location_id IS NOT NULL");
+  }
+
+  /** Issued to shop floor (Store Out) — not SA-minus write-offs that lack out_uid. */
+  if (filters.shop_floor === true || filters.shop_floor === "true") {
+    conditions.push(`LOWER(COALESCE(c.status, 'active')) = 'out'`);
+    conditions.push(`c.out_uid IS NOT NULL`);
   }
 
   if (filters.only_stock === true || filters.only_stock === "true") {
@@ -345,6 +353,27 @@ export const findCoils = async (options = {}) => {
 
   return { data: rows, total, page: safePage, limit: safeLimit, totalPages: Math.ceil(total / safeLimit) };
 };
+
+/** Latest issue-request machine per coil — for pending store-in display only. */
+export async function findMacnamesForCoilUids(coilNoUids = []) {
+  const uids = [...new Set((coilNoUids || []).map((u) => String(u || "").trim()).filter(Boolean))];
+  if (!uids.length) return new Map();
+  const rows = await dbQuery(
+    `SELECT c.coil_no_uid, jc.macname
+     FROM ${TABLE} c
+     ${COIL_JOB_CARD_JOIN}
+     WHERE c.coil_no_uid = ANY($1::text[])
+       AND c.is_deleted = false`,
+    [uids]
+  );
+  const map = new Map();
+  for (const r of rows || []) {
+    const uid = String(r.coil_no_uid || "").trim();
+    const mac = String(r.macname || "").trim();
+    if (uid && mac) map.set(uid, mac);
+  }
+  return map;
+}
 
 export const findCoilByUid = async (coil_no_uid) => {
   const val = String(coil_no_uid || "").trim();

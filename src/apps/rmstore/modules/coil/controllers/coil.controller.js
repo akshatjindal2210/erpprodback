@@ -33,7 +33,7 @@ export const getCoils = async (req, res) => {
       order: "DESC",
     });
     const result = await findCoils({
-      filters: sanitizeFilters(filters || {}, [ "mrn_uid", "mrn_id", "mrn_no", "heat_no", "in_uid", "location_id", "coil_area", "stored", "status", "item_code", "item_dcode", "from_date", "to_date", "journey", "only_stock", "pjobcardno", "macname"]),
+      filters: sanitizeFilters(filters || {}, [ "mrn_uid", "mrn_id", "mrn_no", "heat_no", "in_uid", "location_id", "coil_area", "stored", "shop_floor", "status", "item_code", "item_dcode", "from_date", "to_date", "journey", "only_stock", "pjobcardno", "macname"]),
       search: sanitizeSearch(search),
       page,
       limit,

@@ -454,7 +454,7 @@ async function enrichCoilsFromMaster(coils = []) {
   if (!need.length) return list;
 
   const rows = await dbQuery(
-    `SELECT c.coil_no_uid, c.qty, c.mrn_uid, m.mrn_no, m.heat_no, m.item_code, c.location_id, c.created_at, c.coil_uid
+    `SELECT c.coil_no_uid, c.qty, c.mrn_uid, m.mrn_no, m.heat_no, m.item_code, m.acc_name, c.location_id, c.created_at, c.coil_uid
      FROM ${COIL} c
      LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
      WHERE c.is_deleted = false
@@ -475,6 +475,7 @@ async function enrichCoilsFromMaster(coils = []) {
       mrn_no: c.mrn_no ?? full.mrn_no ?? null,
       heat_no: c.heat_no || full.heat_no || null,
       item_code: c.item_code || full.item_code || null,
+      acc_name: c.acc_name || full.acc_name || null,
       location_id: c.location_id ?? full.location_id ?? null,
       created_at: c.created_at || full.created_at || null,
       coil_uid: c.coil_uid ?? full.coil_uid ?? null,

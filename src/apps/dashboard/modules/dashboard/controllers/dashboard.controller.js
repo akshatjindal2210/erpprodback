@@ -48,6 +48,8 @@ const TABLE_MODULE_OVERRIDES = {
   ims_audit_master: "audit",
   ims_audit_locations: "audit",
   ims_audit_scans: "audit",
+  rmstore_audit_master: "rm_inventory_audit",
+  rmstore_audit_locations: "rm_inventory_audit",
   hrms_attendance: "hrms_attendance",
   hrms_attendance_log: "hrms_attendance_log",
 };

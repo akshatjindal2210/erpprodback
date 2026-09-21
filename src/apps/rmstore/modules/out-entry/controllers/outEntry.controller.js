@@ -13,6 +13,7 @@ import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmst
 import { OUT_ENTRY_TYPE, normalizeOutEntryType, isRmRejectionOutEntry, isJobCardOutEntry, isMrnStoreOutEntry, normalizeStoreOutReason } from "../../../lib/constants/outEntryTypes.js";
 import { assertMrnScanFifoOrder } from "../../../lib/utils/mrnFifoOrder.js";
 import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
+import { isCoilEligibleForIssueRequest } from "../../../lib/utils/coilQcEligibility.js";
 
 const MODULE = "rm_out_entry";
 const log = createRmstoreActivityLogger(MODULE);
@@ -64,19 +65,15 @@ async function resolveStoreOutCoils(coilInputs, { excludeOutUid = null } = {}) {
       err.statusCode = 400;
       throw err;
     }
-    if (!coil.location_id) {
-      // Unassigned / coil-area coils are allowed for MRN store-out (IMS packing style)
-      const qc = String(coil.qc_check_status || "").trim().toLowerCase();
-      const saType = String(coil.sa_entry_type || "").trim().toLowerCase();
-      const okUnassigned =
-        qc === "passed" || (coil.sa_id != null && saType === "stock_in");
-      if (!okUnassigned) {
-        const err = new Error(
-          `Coil ${uid} is unassigned and not eligible for store out (QC must be passed).`
-        );
-        err.statusCode = 400;
-        throw err;
-      }
+    if (!isCoilEligibleForIssueRequest(coil)) {
+      const saAdd =
+        coil.sa_id != null && String(coil.sa_entry_type || "").toLowerCase() === "stock_in";
+      const hint = saAdd
+        ? "Authorize the Stock Adjustment first."
+        : "Approve MRN stickers and complete QC Check first.";
+      const err = new Error(`Coil ${uid} is not available for store out. ${hint}`);
+      err.statusCode = 400;
+      throw err;
     }
     const openDraft = await findOpenOutDraftForCoil(uid, excludeOutUid);
     if (openDraft) {

@@ -212,6 +212,16 @@ export const CRUD_MODULES = {
     filterFields: ["audit_id", "status", "approved", "from_date", "to_date"],
     searchFields: ["am.remarks"]
   },
+  rm_inventory_audit: {
+    idField: "audit_id",
+    listFields: [
+      "am.audit_id", "am.start_date", "am.end_date", "am.remarks", "am.status",
+      "am.approved", "am.approved_by", "am.approved_at", "am.created_by", "am.created_at", "am.updated_by", "am.updated_at",
+      "am.created_by AS created_by_name", "am.updated_by AS updated_by_name", "am.approved_by AS approved_by_name", "am.deleted_by AS deleted_by_name"
+    ],
+    filterFields: ["audit_id", "status", "approved", "from_date", "to_date"],
+    searchFields: ["am.remarks"]
+  },
   qc_hold_material: {
     idField: "hold_id",
     listFields: [

@@ -1,5 +1,5 @@
 import express from "express";
-import { getIssueRequests, getIssueRequestJobCardRows, getIssueRequestById, getJobCardIssueSummary, getAvailableCoils, getProductionMapping, createIssueRequest, updateIssueRequestCtrl, deleteIssueRequest, lockIssueRequestForStoreOut, unlockIssueRequestForStoreOut } from "../controllers/issueRequest.controller.js";
+import { getIssueRequests, getIssueRequestJobCardRows, getIssueRequestById, printIssueRequest, getJobCardIssueSummary, getAvailableCoils, getProductionMapping, createIssueRequest, updateIssueRequestCtrl, deleteIssueRequest, lockIssueRequestForStoreOut, unlockIssueRequestForStoreOut } from "../controllers/issueRequest.controller.js";
 import { authenticate, authorize } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
 import { helperAccess } from "../../../lib/config/views/helperViews.js";
@@ -11,6 +11,7 @@ router.post("/production-mapping", authenticate, accessControl(MODULE, "view"), 
 router.post("/list", authenticate, accessControl(MODULE, "view"), getIssueRequests);
 router.post("/list-job-cards", authenticate, accessControl(MODULE, "view"), getIssueRequestJobCardRows);
 router.post("/get", authenticate, accessControl(MODULE, "view"), getIssueRequestById);
+router.post("/print", authenticate, accessControl(MODULE, "view"), printIssueRequest);
 router.post("/job-card-summary", authenticate, accessControl(MODULE, "view"), getJobCardIssueSummary);
 router.post("/available-coils", authenticate, accessControl(MODULE, "view"), getAvailableCoils);
 router.post("/create", authenticate, accessControl(MODULE, "add"), createIssueRequest);

@@ -4,7 +4,7 @@ import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/q
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
-import { findCoilByUid, revertCoilsConsumed, markCoilsInProcessRejectionPending, revertCoilsInProcessRejection, restoreCoilsToShopFloorOut, releaseCoilFromIprRejectionHoldForStoreIn, processStoreInReturnCoils, revertStoreInReturnCoils, processConsumeCoils } from "../../coil/models/coil.model.js";
+import { findCoils, findCoilByUid, revertCoilsConsumed, markCoilsInProcessRejectionPending, revertCoilsInProcessRejection, restoreCoilsToShopFloorOut, releaseCoilFromIprRejectionHoldForStoreIn, processStoreInReturnCoils, revertStoreInReturnCoils, processConsumeCoils } from "../../coil/models/coil.model.js";
 import { findQcCheck, findQcCheckItems, findQcChecks } from "../../qc-check/models/qcCheck.model.js";
 import { formatExpected } from "../../../lib/utils/qc/evaluateSpec.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
@@ -14,6 +14,7 @@ import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmst
 import { isCoilEligibleForIprRejection, iprRejectionIneligibleMessage } from "../../../lib/utils/iprRejectionEligibility.js";
 import { isIssuedToShopFloor, isSaMinusWriteOff } from "../../../lib/utils/saMinusInventory.js";
 import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
+import { enrichIprWithMachineLabels } from "../../inventory-inward/utils/enrichIprMachineLabels.js";
 
 const MODULE = "rm_in_process_request";
 const log = createRmstoreActivityLogger(MODULE);
@@ -1020,6 +1021,10 @@ export const getInProcessRequestById = async (req, res) => {
     let data = await findInProcessRequest(id);
     if (!data) return res.status(404).json({ success: false, message: "In-process request not found." });
     data = await attachQcChecksToIprRejection(data);
+    if (data?.downstream === IPR_DOWNSTREAM.PENDING_STORE_IN) {
+      const [enriched] = await enrichIprWithMachineLabels([data]);
+      data = enriched ?? data;
+    }
     return res.json({ success: true, data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -1068,20 +1073,16 @@ export const getInProcessReasons = async (req, res) => {
   }
 };
 
-/** Approved requests still sitting in a downstream queue. */
-async function getPendingQueue(res, downstream) {
-  const result = await findInProcessRequests({
-    pendingStoreInQueue: true,
-    filters: { approved: true, downstream },
-    page: 1,
-    limit: 1000,
-  });
-  return res.json({ success: true, data: result.data, total: result.total });
-}
-
 export const getPendingStoreIn = async (req, res) => {
   try {
-    return await getPendingQueue(res, IPR_DOWNSTREAM.PENDING_STORE_IN);
+    const result = await findInProcessRequests({
+      pendingStoreInQueue: true,
+      filters: { approved: true, downstream: IPR_DOWNSTREAM.PENDING_STORE_IN },
+      page: 1,
+      limit: 1000,
+    });
+    result.data = await enrichIprWithMachineLabels(result.data);
+    return res.json({ success: true, data: result.data, total: result.total });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -1099,6 +1100,28 @@ export const getPendingStoreOut = async (req, res) => {
       limit: 1000,
     });
     return res.json({ success: true, data: result.data, total: result.total });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** Shop-floor coils (status=out + out_uid) — IPR Pending tab work queue. */
+export const getPendingShopFloor = async (req, res) => {
+  try {
+    const { page, limit, search } = extractListParams(req.body || {}, {
+      sortBy: "coil_no_uid",
+      order: "ASC",
+    });
+    const result = await findCoils({
+      filters: { shop_floor: true },
+      search: sanitizeSearch(search),
+      page,
+      limit,
+      sortBy: "coil_no_uid",
+      order: "ASC",
+      permission: req.permission,
+    });
+    return res.json({ success: true, ...result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

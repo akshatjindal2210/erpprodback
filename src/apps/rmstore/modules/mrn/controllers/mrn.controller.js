@@ -57,6 +57,11 @@ export function mapErpMrnRecord(r = {}) {
   };
 }
 
+/** IMS live row + RM saved row — DB fields (incl. it_lot_no) win over ERP. */
+function mergeImsMrnListRow(imsRow, dbRow, decorated) {
+  return { ...imsRow, ...decorated, uid: dbRow.uid, id: dbRow.uid };
+}
+
 function matchesSearch(row, search) {
   const q = String(search || "").trim().toLowerCase();
   if (!q) return true;
@@ -215,7 +220,7 @@ function hasStickerDraft(dbRow) {
 
 function decoratePendingListRow(erpRow, dbRow) {
   const draft = hasStickerDraft(dbRow);
-  return {
+  const row = {
     ...erpRow,
     status: resolveMrnPortalStatus(dbRow, { draft }),
     id: erpRow.uid,
@@ -225,6 +230,14 @@ function decoratePendingListRow(erpRow, dbRow) {
     sticker_draft_at: dbRow?.sticker_draft_at ?? null,
     sticker_draft_by: dbRow?.sticker_draft_by ?? null,
   };
+  if (dbRow?.it_lot_no != null && String(dbRow.it_lot_no).trim()) {
+    row.it_lot_no = String(dbRow.it_lot_no).trim();
+    row.itLotNo = row.it_lot_no;
+  }
+  if (dbRow?.heat_no != null && String(dbRow.heat_no).trim()) {
+    row.heat_no = String(dbRow.heat_no).trim();
+  }
+  return row;
 }
 
 function decorateGenerateListRow(dbRow, { qty_editable, qty_auto_calc, imsRow = null } = {}) {
@@ -290,9 +303,10 @@ function buildMrnComparison(imsRow, localRow) {
 }
 
 function decorateRejectedListRow(dbRow, imsRow = null) {
+  const it_lot_no = dbRow.it_lot_no ?? imsRow?.it_lot_no ?? null;
   return {
-    ...dbRow,
     ...(imsRow || {}),
+    ...dbRow,
     uid: dbRow.uid,
     id: dbRow.uid,
     status: "reject",
@@ -307,7 +321,9 @@ function decorateRejectedListRow(dbRow, imsRow = null) {
     item_code: dbRow.item_code ?? imsRow?.item_code ?? null,
     item_desc: dbRow.item_desc ?? imsRow?.item_desc ?? null,
     it_recp_qty: dbRow.it_recp_qty ?? imsRow?.it_recp_qty ?? null,
-    it_lot_no: dbRow.it_lot_no ?? imsRow?.it_lot_no ?? null,
+    it_lot_no,
+    heat_no: dbRow.heat_no ?? imsRow?.heat_no ?? null,
+    ...(it_lot_no ? { itLotNo: it_lot_no } : {}),
   };
 }
 
@@ -363,9 +379,9 @@ export const getMrnList = async (req, res) => {
         getMrnCoilQtyAutoCalc(),
         getMrnStickerMode(),
       ]);
-      const data = (result.data || []).map((row) => ({
-        ...decorateGeneratedListRow(row, { qty_editable, qty_auto_calc }),
-      }));
+      const data = (result.data || []).map((row) =>
+        decorateGeneratedListRow(row, { qty_editable, qty_auto_calc })
+      );
       return res.json({ success: true, ...result, data, qty_editable, qty_auto_calc, sticker_mode });
     }
 
@@ -503,7 +519,7 @@ export const getMrnList = async (req, res) => {
       rows = rows.map((r) => {
         const saved = dbMap.get(r.uid);
         if (isAwaitingStickerApproval(saved)) {
-          return { ...decorateGenerateListRow(saved, { imsRow: r }), ...r, uid: saved.uid };
+          return mergeImsMrnListRow(r, saved, decorateGenerateListRow(saved, { imsRow: r }));
         }
         return decoratePendingListRow(r, saved);
       });
@@ -516,9 +532,9 @@ export const getMrnList = async (req, res) => {
         if (isDbStickerGenerated(saved)) {
           const cfg = { imsRow: r };
           if (isDbStickerApproved(saved)) {
-            return { ...decorateGeneratedListRow(saved, cfg), ...r, uid: saved.uid };
+            return mergeImsMrnListRow(r, saved, decorateGeneratedListRow(saved, cfg));
           }
-          return { ...decorateGenerateListRow(saved, cfg), ...r, uid: saved.uid };
+          return mergeImsMrnListRow(r, saved, decorateGenerateListRow(saved, cfg));
         }
         return decoratePendingListRow(r, saved);
       });
@@ -718,7 +734,7 @@ function normalizeLotSearchKey(raw) {
   return String(raw ?? "")
     .trim()
     .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "");
+    .replace(/[^A-Z0-9#_-]/g, "");
 }
 
 function deriveFinancialYearFromMrnRow(row) {
@@ -827,10 +843,10 @@ async function fetchMrnRowsForAdjustmentSearch(financial_year, { entry_type = ""
   return { success: true, rows: [...byUid.values()], filter: null };
 }
 
-async function attachMrnAdjustmentSummary(row, excludeAdjustmentId = null) {
+async function attachMrnAdjustmentSummary(row, excludeAdjustmentId = null, entryType = null) {
   if (!row?.uid) return row;
   const receiptQty = roundSaQty(row.it_recp_qty);
-  const budget = await computeMrnQtyBudget(row.uid, { receiptQty, excludeAdjustmentId });
+  const budget = await computeMrnQtyBudget(row.uid, { receiptQty, excludeAdjustmentId, entryType });
   return {
     ...row,
     it_recp_qty: budget.receipt_qty,
@@ -864,10 +880,7 @@ export const listErpLotsForFinancialYear = async (req, res) => {
 
     const byLot = new Map();
     for (const row of rows) {
-      const lot = String(row?.it_lot_no ?? row?.heat_no ?? "")
-        .trim()
-        .toUpperCase()
-        .replace(/[^A-Z0-9]/g, "");
+      const lot = normalizeLotSearchKey(row?.it_lot_no ?? row?.heat_no ?? "");
       if (!lot) continue;
       const prev = byLot.get(lot);
       if (prev) {
@@ -1046,7 +1059,7 @@ export const searchAdjustmentMrns = async (req, res) => {
           financial_year: (deriveFinancialYearFromMrnRow(hit) ?? financial_year) || null,
           ...(erpCoils != null && erpCoils !== "" ? { coils: erpCoils } : {}),
         };
-        const row = enrichAdd ? await attachMrnAdjustmentSummary(base, excludeAdjustmentId) : base;
+        const row = enrichAdd ? await attachMrnAdjustmentSummary(base, excludeAdjustmentId, entry_type) : base;
         return decorateErpMrnPickerRow(row);
       })
     );

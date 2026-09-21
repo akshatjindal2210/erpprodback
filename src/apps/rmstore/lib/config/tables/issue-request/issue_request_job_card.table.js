@@ -1,5 +1,4 @@
 import dbQuery from "../../../../../../config/db/db.js";
-import { patchTableSchema, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
 /** One row per job card — FG/RM mapping, qty, and assigned coils (JSONB). */

@@ -9,6 +9,17 @@ function isSaAdjustmentApproved(coil) {
   return coil?.adjustment_approved === true;
 }
 
+function isSaStockInCoil(coil) {
+  return coil?.sa_id != null && String(coil?.sa_entry_type || "").toLowerCase() === "stock_in";
+}
+
+function isMrnPortalCoil(coil) {
+  const entryType = String(coil?.sa_entry_type || "").toLowerCase();
+  if (coil?.sa_id != null) return false;
+  if (entryType === "production_return") return false;
+  return Boolean(String(coil?.mrn_uid || "").trim());
+}
+
 /** QC is only for MRN Portal sticker coils with approved stickers (Store In not required). */
 export function isCoilEligibleForQc(coil) {
   if (!coil) return false;
@@ -39,17 +50,24 @@ export function qcCoilIneligibilityMessage(coil) {
   return "This coil is not ready for QC.";
 }
 
-/** QC status from joined qc_check row (or approved SA stock_in → passed). */
+/**
+ * Issuable flag on coil reads — MRN: QC Check module status.
+ * SA Add: authorized adjustment only (SQL `passed`; not QC Check).
+ */
 export function resolveCoilQcStatus(coil) {
   if (!coil) return "";
-  if (coil.sa_id != null && isSaAdjustmentApproved(coil)) return "passed";
+  if (isSaStockInCoil(coil) && isSaAdjustmentApproved(coil)) return "passed";
   return String(coil.qc_check_status || "").trim().toLowerCase();
 }
 
-/** Issue Request pool — active + QC passed. */
+/** Issue / Store Out. Pending entry → Store In only. SA Add → authorize. MRN → sticker approve + QC Check. */
 export function isCoilEligibleForIssueRequest(coil) {
   if (!coil) return false;
   const status = String(coil.status || "active").toLowerCase();
   if (status !== "active") return false;
+  if (isSaStockInCoil(coil)) {
+    return resolveCoilQcStatus(coil) === "passed";
+  }
+  if (isMrnPortalCoil(coil) && !isMrnStickerApproved(coil)) return false;
   return resolveCoilQcStatus(coil) === "passed";
 }

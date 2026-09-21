@@ -149,7 +149,8 @@ export function mapCoilToStickerPrintRow(coil = {}, mrn = {}) {
     doc_dt: coil.mrn_dt ?? mrn.mrn_dt ?? coil.created_at ?? null,
     coil_no_uid: first(coil.coil_no_uid),
     coil_uid: coil.coil_uid ?? null,
-    lot_no: first(coil.it_lot_no ?? mrn.it_lot_no ?? coil.heat_no),
+    // Heat No on print = RM Store save (generate / MRN heat_no), not ERP it_lot_no.
+    lot_no: first(coil.heat_no, mrn.heat_no, coil.it_lot_no, mrn.it_lot_no),
     grade: first(coil.grade ?? mrn.grade),
     base_size: first(coil.base_size ?? mrn.base_size),
     finish_size: first(coil.finish_size ?? mrn.finish_size),

@@ -133,6 +133,7 @@ export const getMrnDetail = async (req, res) => {
       success: true,
       data: {
         ...mrn,
+        itLotNo: mrn.it_lot_no ?? null,
         userc: mrn.internal_create_user ?? null,
         datec: mrn.internal_create_date ?? null,
         coils: coils.data || [],

@@ -16,6 +16,8 @@ export const COIL_TX_TYPES = {
   STOCK_ADJUSTMENT_MINUS_REVERT: "stock_adjustment_minus_revert",
   CONSUME: "consume",
   CONSUME_REVERT: "consume_revert",
+  AUDIT_MISSING: "audit_missing",
+  AUDIT_EXTRA: "audit_extra",
   /** Kept out of the main transaction list — it has its own download-log view. */
   STICKER_DOWNLOAD: "sticker_download",
 };
@@ -39,4 +41,6 @@ export const COIL_TX_TYPE_LABELS = {
   [COIL_TX_TYPES.CONSUME]: "IPR — Consumed",
   [COIL_TX_TYPES.CONSUME_REVERT]: "IPR — Consume Reverted",
   [COIL_TX_TYPES.STICKER_DOWNLOAD]: "Stickers — Download",
+  [COIL_TX_TYPES.AUDIT_MISSING]: "Inventory Audit — Remove from location",
+  [COIL_TX_TYPES.AUDIT_EXTRA]: "Inventory Audit — Assign to location",
 };

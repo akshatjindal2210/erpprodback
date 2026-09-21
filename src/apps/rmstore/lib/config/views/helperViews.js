@@ -29,7 +29,7 @@ function fieldsForLocations(mod, act) {
   if (mod === "rm_store_location_master" && act === VIEW) return [...locPicker];
   if (mod === "rm_store_location_master" && isForm(act)) return [...locModal];
   // Store-In + Coil Finder need location nos
-  if ((mod === "rm_inventory_inwards" || mod === "rm_coils") && (act === VIEW || isForm(act))) {
+  if ((mod === "rm_inventory_inwards" || mod === "rm_coils" || mod === "rm_inventory_audit") && (act === VIEW || isForm(act))) {
     return [...locPicker];
   }
   return null;
@@ -69,6 +69,7 @@ function fieldsForCoils(mod, act) {
     "rm_coil_transaction_logs",
     "rm_coil_download_logs",
     "rm_inventory_report",
+    "rm_inventory_audit",
   ];
   if (allowedModules.includes(mod) && (act === VIEW || isForm(act))) {
     return [];

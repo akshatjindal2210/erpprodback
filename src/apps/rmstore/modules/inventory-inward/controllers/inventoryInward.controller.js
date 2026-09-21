@@ -12,6 +12,7 @@ import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js"
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
+import { enrichIprWithMachineLabels } from "../utils/enrichIprMachineLabels.js";
 
 const MODULE = "rm_inventory_inwards";
 
@@ -169,6 +170,7 @@ export const getPendingStoreInList = async (req, res) => {
       page,
       limit: limit || 1000,
     });
+    result.data = await enrichIprWithMachineLabels(result.data);
     return res.json({ success: true, ...result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

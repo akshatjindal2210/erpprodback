@@ -15,6 +15,7 @@ import { assertIssueRequestCoilsAvailable, buildAvailableCoilsForIssue, lockCoil
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { withTransaction } from "../../../../../config/db/db.js";
 import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
+import { buildIssueRequestPrintDocument, sanitizeIssueRequestPrintCompanyInfo } from "../utils/issueRequestPrintDocument.js";
 
 const MODULE = "rm_issue_request";
 const log = createRmstoreActivityLogger(MODULE);
@@ -48,13 +49,20 @@ async function resolveCoils(coilInputs, { allowedRmItemCodes = null } = {}) {
     }
     if (!isCoilEligibleForIssueRequest(coil)) {
       const status = String(coil.status || "active").toLowerCase();
+      const saAdd = coil.sa_id != null && String(coil.sa_entry_type || "").toLowerCase() === "stock_in";
       const qc = String(coil.qc_check_status || "").trim().toLowerCase();
       const reason =
         status !== "active"
           ? `Its current status is ${status}.`
-          : qc
-            ? `QC status is ${qc}. Approve QC as passed first.`
-            : "It is not available for issue.";
+          : saAdd
+            ? "Authorize this Stock Adjustment first (only Store In is allowed while pending)."
+            : coil.sticker_approved !== true &&
+                coil.sa_id == null &&
+                String(coil.mrn_uid || "").trim()
+              ? "Approve stickers in MRN Portal first."
+              : qc
+                ? `QC Check status is ${qc}. Pass QC in MRN Portal flow first.`
+                : "Approve MRN stickers and complete QC Check first.";
       throw Object.assign(new Error(`Coil ${uid} is not available. ${reason}`), { status: 400 });
     }
     // Issue Request FG pool = store-in (location set) + unassigned / coil area (no location)
@@ -442,6 +450,13 @@ async function buildJobCardsPayload(rawCards, { excludeIssueUid = null, user = n
       rm_item_code: selectedRm.rm_item_code,
       rm_item_desc: selectedRm.rm_item_desc,
     };
+    const fifoStartMrnUid =
+      isSuperAdminUser(user) &&
+      raw?.fifo_start_mrn_uid != null &&
+      String(raw.fifo_start_mrn_uid).trim() !== ""
+        ? String(raw.fifo_start_mrn_uid).trim()
+        : null;
+
     jobCards.push({
       pjobcardno,
       pldt: raw?.pldt ?? null,
@@ -458,6 +473,7 @@ async function buildJobCardsPayload(rawCards, { excludeIssueUid = null, user = n
       rm_item_dcode: rmFields.rm_item_dcode,
       rm_item_code: rmFields.rm_item_code,
       rm_item_desc: rmFields.rm_item_desc,
+      fifo_start_mrn_uid: fifoStartMrnUid,
       coils: resolved.map((c) => ({
         coil_no_uid: c.coil_no_uid,
         qty: c.qty,
@@ -553,6 +569,36 @@ export const getIssueRequestById = async (req, res) => {
     const coils = await findIssueRequestCoils(id);
     const job_cards = await findIssueRequestJobCards(id);
     return res.json({ success: true, data: { ...data, coils, job_cards } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** POST body: { issue_uid, company_info? } — master slip HTML (works from Job Card Wise via issue_uid). */
+export const printIssueRequest = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.issue_uid ?? req.body?.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "A valid issue request ID is required." });
+    }
+
+    const data = await findIssueRequest(id);
+    if (!data) return res.status(404).json({ success: false, message: "Issue request not found." });
+    if (!data.approved) {
+      return res.status(409).json({
+        success: false,
+        message: "Approve the issue request before printing.",
+      });
+    }
+
+    const job_cards = await findIssueRequestJobCards(id);
+    const company_info = sanitizeIssueRequestPrintCompanyInfo(req.body?.company_info);
+    const html = buildIssueRequestPrintDocument({ ...data, job_cards }, company_info);
+    return res.json({
+      success: true,
+      html,
+      print_title: `Issue Request · ${id}`,
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

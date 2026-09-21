@@ -97,6 +97,7 @@ async function assertAddQtyWithinMrnLimit({
   receiptQty,
   resolvedTotal,
   excludeAdjustmentId = null,
+  entryType = null,
 }) {
   const uid = String(mrn_uid || "").trim();
   const total = roundSaQty(resolvedTotal);
@@ -106,6 +107,7 @@ async function assertAddQtyWithinMrnLimit({
   const budget = await computeMrnQtyBudget(uid, {
     receiptQty,
     excludeAdjustmentId,
+    entryType,
   });
   const receipt = budget.receipt_qty;
   const remainingQty = budget.remaining_qty;
@@ -186,6 +188,7 @@ async function approveAdjustment(id, user, userId, { scannedCoils = null } = {})
         receiptQty: null,
         resolvedTotal: row.qty,
         excludeAdjustmentId: id,
+        entryType: row.entry_type,
       });
     }
   }
@@ -244,6 +247,7 @@ async function buildCreatePayload(body, user) {
       receiptQty,
       resolvedTotal,
       excludeAdjustmentId: excludeId,
+      entryType: entry_type,
     });
 
     const avgPer = coilCount > 0 ? resolvedTotal / coilCount : 0;
@@ -663,6 +667,7 @@ export const updateAdjustmentCtrl = async (req, res) => {
           receiptQty: req.body?.it_recp_qty ?? req.body?.mrn_receipt_qty,
           resolvedTotal: fields.qty,
           excludeAdjustmentId: id,
+          entryType: fields.entry_type ?? existing.entry_type,
         });
       }
       if (req.body?.per_coil_qty != null) {

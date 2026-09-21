@@ -1,5 +1,5 @@
 import express from "express";
-import { getInProcessRequests, getInProcessRequestById, getInProcessReasons, getCoilHelper, getPendingStoreIn, getPendingStoreOut, createInProcessRequest, updateInProcessRequestCtrl, completeStoreInCtrl, deleteInProcessRequest } from "../controllers/inProcessRequest.controller.js";
+import { getInProcessRequests, getInProcessRequestById, getInProcessReasons, getCoilHelper, getPendingStoreIn, getPendingStoreOut, getPendingShopFloor, createInProcessRequest, updateInProcessRequestCtrl, completeStoreInCtrl, deleteInProcessRequest } from "../controllers/inProcessRequest.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
 import { rmIprUpload } from "../../../lib/middleware/upload.js";
@@ -28,6 +28,7 @@ router.post("/coil-helper", authenticate, accessControl(MODULE, "view"), getCoil
 router.post("/list", authenticate, accessControl(MODULE, "view"), getInProcessRequests);
 router.post("/get", authenticate, accessControl(MODULE, "view"), getInProcessRequestById);
 router.post("/reasons", authenticate, accessControl(MODULE, "view"), getInProcessReasons);
+router.post("/pending-shop-floor", authenticate, accessControl(MODULE, "view"), getPendingShopFloor);
 router.post("/pending-store-in", authenticate, storeInReader, getPendingStoreIn);
 router.post("/pending-store-out", authenticate, storeOutReader, getPendingStoreOut);
 router.post("/create", authenticate, accessControl(MODULE, "add"), rmIprUpload.array("attachments"), createInProcessRequest);

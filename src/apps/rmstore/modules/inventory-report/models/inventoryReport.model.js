@@ -24,7 +24,7 @@ END`;
 function buildCoilRules(alias = "c", qcAlias = "q") {
   const STATUS = `LOWER(TRIM(COALESCE(${alias}.status, 'active')))`;
   const QC = coilQcStatusExpr(alias, qcAlias);
-  const QC_PASSED = `(${QC} = 'passed' OR ${alias}.sa_id IS NOT NULL)`;
+  const QC_PASSED = `(${QC} = 'passed')`;
   const NOT_CONSUMED = `${STATUS} <> 'consumed'`;
   /** In warehouse (not issued out) — includes active + rejected (RM rejection). */
   const NOT_SHOP_FLOOR = `${STATUS} NOT IN ('out', 'consumed') AND ${alias}.out_uid IS NULL`;

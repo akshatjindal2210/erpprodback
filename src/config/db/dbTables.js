@@ -114,6 +114,8 @@ export const DB_TABLES = {
     "rmstore_out_entry_scanned_coil",
     "rmstore_stock_adjustment",
     "rmstore_coil_transaction",
+    "rmstore_audit_master",
+    "rmstore_audit_locations",
   ],
 
   /** HRMS application tables. */

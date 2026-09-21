@@ -11,6 +11,7 @@ import issueRequestRoutes from "../modules/issue-request/routes/issueRequest.rou
 import inProcessRequestRoutes from "../modules/in-process-request/routes/inProcessRequest.routes.js";
 import outEntryRoutes from "../modules/out-entry/routes/outEntry.routes.js";
 import inventoryReportRoutes from "../modules/inventory-report/routes/inventoryReport.routes.js";
+import inventoryAuditRoutes from "../modules/inventory-audit/routes/audit.routes.js";
 import stockAdjustmentRoutes from "../modules/stock-adjustment/routes/stockAdjustment.routes.js";
 import coilLogRoutes from "../manage/log/routes/coilLog.routes.js";
 
@@ -29,6 +30,7 @@ router.use("/in-process-requests", inProcessRequestRoutes);
 router.use("/out-entries", outEntryRoutes);
 router.use("/stock-adjustment", stockAdjustmentRoutes);
 router.use("/inventory-report", inventoryReportRoutes);
+router.use("/inventory-audit", inventoryAuditRoutes);
 router.use("/logs", coilLogRoutes);
 
 export default router;

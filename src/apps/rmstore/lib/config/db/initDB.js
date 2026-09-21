@@ -12,6 +12,7 @@ import { createRmStoreOutEntryTable } from "../tables/out-entry/out_entry.table.
 import { createRmStoreOutEntryScannedCoilTable } from "../tables/out-entry/out_entry_scanned_coil.table.js";
 import { createRmStoreCoilTransactionTable } from "../tables/transaction-log/coil_transaction.table.js";
 import { createRmStoreStockAdjustmentTable } from "../tables/stock-adjustment/stock_adjustment.table.js";
+import { createRmStoreAuditTables } from "../tables/audit/audit.table.js";
 
 export async function initRmStoreDB() {
   await createRmStoreProductionMasterTable();
@@ -29,4 +30,5 @@ export async function initRmStoreDB() {
   await createRmStoreOutEntryScannedCoilTable();
   await createRmStoreStockAdjustmentTable();
   await createRmStoreCoilTransactionTable();
+  await createRmStoreAuditTables();
 }
