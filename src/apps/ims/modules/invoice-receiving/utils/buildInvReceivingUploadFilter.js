@@ -75,6 +75,20 @@ export function buildInvReceivingUpdateFilter(req, opts = {}) {
   };
 }
 
+/** Clear receiving on ERP — bill returns to pending (no attachment / ref). */
+export function buildInvReceivingClearFilter({ prnbillno, billdt }) {
+  const billdtOut = formatIstDateYmd(billdt);
+  return {
+    type: "update",
+    data: {
+      billdt: billdtOut,
+      prnbillno: String(prnbillno ?? "").trim(),
+      receiverefno: null,
+      receivingfile: null,
+    },
+  };
+}
+
 /**
  * IMS list — pending `{ type: "" }` · register `{ type: "register", data: "billdt >= '…' and …" }`.
  */

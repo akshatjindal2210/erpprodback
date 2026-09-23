@@ -1,11 +1,9 @@
 import { fetchImsDataRaw } from "../../../lib/services/ims.service.js";
 import { toImsIrPublicUploadPath } from "../../../lib/middleware/upload.js";
 import { formatIstDateTime } from "../../gate-entry/utils/imsBillDateFilter.js";
-import { buildInvReceivingErpPayload, buildInvReceivingListFilter, buildInvReceivingUpdateFilter, parseReceiverefnoFromIms } from "../utils/buildInvReceivingUploadFilter.js";
+import { buildInvReceivingClearFilter, buildInvReceivingErpPayload, buildInvReceivingListFilter, buildInvReceivingUpdateFilter, parseReceiverefnoFromIms } from "../utils/buildInvReceivingUploadFilter.js";
 
 const MODULE = "invoice_receiving";
-/** Set `INVOICE_RECEIVING_SEND_ERP=false` to log payload only (local dev). */
-const SEND_ERP_UPDATE = String(process.env.INVOICE_RECEIVING_SEND_ERP ?? "true").trim().toLowerCase() !== "false";
 const MODE_PERM = { add: "can_add", edit: "can_edit", approve: "can_authorize" };
 
 const DATE_KEYS = ["billdt", "uploaded_at", "approved_at"];
@@ -84,25 +82,62 @@ export async function updateInvoiceReceiving(req, res) {
     const erp_payload = buildInvReceivingErpPayload(filter);
     console.log("[invoice-receiving] IMS payload:\n", JSON.stringify(erp_payload, null, 2));
 
-    let erp = null;
-    if (SEND_ERP_UPDATE) {
-      erp = await fetchImsDataRaw("invreceiving", filter);
-      if (!erp?.success) {
-        return res.status(502).json({
-          success: false,
-          message: erp?.message || "IMS upload failed.",
-          data: { erp_payload, file_path, erp },
-        });
-      }
+    const erp = await fetchImsDataRaw("invreceiving", filter);
+    if (!erp?.success) {
+      return res.status(502).json({
+        success: false,
+        message: erp?.message || "IMS upload failed.",
+        data: { erp_payload, file_path, erp },
+      });
     }
 
     return res.json({
       success: true,
-      message: SEND_ERP_UPDATE ? erp?.message || "Uploaded to IMS." : "Upload payload ready (IMS send disabled).",
+      message: erp?.message || "Uploaded to IMS.",
       data: { mode, erp_payload, erp, ...filter },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || "Failed to update invoice receiving." });
+  }
+}
+
+/** Register only — clears receiverefno + receivingfile on ERP (returns bill to pending). */
+export async function deleteInvoiceReceiving(req, res) {
+  try {
+    const isSuper = String(req.user?.type || "").toLowerCase() === "super_admin";
+    if (!isSuper && !req.permission?.can_delete) {
+      return res.status(403).json({ success: false, message: "No access for this action." });
+    }
+
+    const prnbillno = String(req.body?.prnbillno ?? "").trim();
+    const billdt = req.body?.billdt;
+    if (!prnbillno) {
+      return res.status(400).json({ success: false, message: "Bill number (prnbillno) is required." });
+    }
+    if (billdt == null || String(billdt).trim() === "") {
+      return res.status(400).json({ success: false, message: "Bill date (billdt) is required." });
+    }
+
+    const filter = buildInvReceivingClearFilter({ prnbillno, billdt });
+    const erp_payload = buildInvReceivingErpPayload(filter);
+    console.log("[invoice-receiving] clear payload:\n", JSON.stringify(erp_payload, null, 2));
+
+    const erp = await fetchImsDataRaw("invreceiving", filter);
+    if (!erp?.success) {
+      return res.status(502).json({
+        success: false,
+        message: erp?.message || "IMS clear receiving failed.",
+        data: { erp_payload, erp },
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: erp?.message || "Receiving cleared on IMS.",
+      data: { erp_payload, erp, ...filter },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err?.message || "Failed to clear invoice receiving." });
   }
 }
 
