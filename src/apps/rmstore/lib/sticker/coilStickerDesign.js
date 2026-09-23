@@ -14,6 +14,7 @@ export const RM_STICKER_WIDTH_MM = 65;
 export const RM_STICKER_HEIGHT_MM = 85;
 /** Printed on RM + QC sticker footer (bottom meta line). */
 export const RM_STICKER_FORM_CODE = "QA/F/56 - 01";
+export const RM_STICKER_FORM_REVISION_DATE = "19/09/2026";
 /** Bottom meta line font — decrease if footer text overflows (e.g. 1.5). */
 export const RM_STICKER_FOOTER_FONT_MM = 1.7;
 
@@ -359,16 +360,19 @@ const CSS = `
 .rm-sticker .st-footer{
   border:none !important;
   background:transparent;
-  display:flex;align-items:center;gap:2mm;
+  display:flex;align-items:center;justify-content:space-between;gap:1mm;
   padding:.25mm .5mm .2mm;width:100%;min-height:0;
   overflow:visible;max-height:none;
 }
-.rm-sticker .st-footer.st-meta-left{justify-content:flex-start}
-.rm-sticker .st-footer.st-meta-center{justify-content:center}
-.rm-sticker .st-footer.st-meta-right{justify-content:flex-end}
 .rm-sticker .st-footer .st-meta-item{
   display:inline-flex;flex-direction:row;align-items:center;gap:.35mm;
-  min-width:0;max-width:100%;overflow:visible;line-height:1.15;
+  min-width:0;overflow:visible;line-height:1.15;
+}
+.rm-sticker .st-footer .st-meta-left-block{
+  flex:1 1 auto;justify-content:flex-start;text-align:left;
+}
+.rm-sticker .st-footer .st-meta-right-block{
+  flex:0 0 auto;justify-content:flex-end;text-align:right;margin-left:auto;
 }
 .rm-sticker .st-footer .st-label{
   display:inline;text-transform:none;font-size:${RM_STICKER_FOOTER_FONT_MM}mm;font-weight:700;
@@ -447,17 +451,16 @@ function buildCardHtml(f) {
       //   </div>`;
       // }
       if (row.kind === "footer") {
-        const alignRaw = String(LAYOUT.meta?.align || "left").toLowerCase();
-        const align = alignRaw === "center" || alignRaw === "right" ? alignRaw : "left";
-        return `<div class="st-row st-footer st-meta-${align}">
-        <span class="st-meta-item">
+        return `<div class="st-row st-footer">
+        <span class="st-meta-item st-meta-left-block">
           <span class="st-val st-ts">${f.createdBy}</span>
           <span class="st-label st-ts">||</span>
           <span class="st-val st-ts">${f.timestamp}</span>
-          <span class="st-label st-ts">||</span>
+        </span>
+        <span class="st-meta-item st-meta-right-block">
           <span class="st-val st-ts">${esc(RM_STICKER_FORM_CODE)}</span>
           <span class="st-label st-ts">||</span>
-          <span class="st-val st-ts">${f.formDate}</span>
+          <span class="st-val st-ts">${esc(RM_STICKER_FORM_REVISION_DATE)}</span>
         </span>
         </div>`;
       }
@@ -516,7 +519,6 @@ async function buildCard(row) {
     qrUrl,
     createdBy: esc(show(row.created_by)),
     timestamp: esc(fmtTs(row.created_at)),
-    formDate: esc(fmtDate(row.created_at ?? new Date())),
   });
 }
 
