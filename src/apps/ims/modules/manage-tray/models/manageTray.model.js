@@ -2,13 +2,20 @@ import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { sqlDailyprodDocNoMatch } from "../../box/utils/inventory/boxInventorySql.js";
 import { TRAY_OCC_JOIN, TRAY_POOL_EXPR } from "../../tray/lib/trayOccupancySql.js";
+import { MANAGE_TRAY_ENFORCE_FROM } from "../../../lib/config/manageTray.config.js";
 
 const IN_HAND = `b.out_uid IS NULL AND (b.sa_entry_type IS DISTINCT FROM 'stock_out') AND b.qc_hold_id IS NULL`;
 const PN = (alias) => `TRIM(${alias ? `${alias}.` : ""}packing_number::text)`;
 const DOC = `TRIM(dp.doc_no::text)`;
+const TRAY_ENFORCE_BY_PACKING_DATE = `EXISTS (
+  SELECT 1
+  FROM ${T.DAILYPROD} dpd
+  WHERE ${sqlDailyprodDocNoMatch("dpd.doc_no", "b.packing_number")}
+    AND dpd.doc_dt >= DATE '${MANAGE_TRAY_ENFORCE_FROM}'
+)`;
 const IS_TRAY = `(
-  LOWER(TRIM(COALESCE(dp.category_name, ''))) = 'tray'
-  OR LOWER(TRIM(COALESCE(c.name, ''))) = 'tray'
+  (LOWER(TRIM(COALESCE(dp.category_name, ''))) = 'tray' OR LOWER(TRIM(COALESCE(c.name, ''))) = 'tray')
+  AND dp.doc_dt >= DATE '${MANAGE_TRAY_ENFORCE_FROM}'
 )`;
 const TRAY_JOINS = `LEFT JOIN ${T.CATEGORY} c ON c.id = dp.category_id`;
 const DP_JOIN = sqlDailyprodDocNoMatch("dp.doc_no", "ba.packing_number");
@@ -81,14 +88,14 @@ function packingListSql({ onlyInHand = false, extraWhere = "", includeTotal = fa
         tl.updated_by AS linked_by,
         (${IN_HAND}) AS in_hand,
         (b.location_id IS NOT NULL OR b.out_uid IS NOT NULL) AS used,
-        LOWER(TRIM(COALESCE(box_cat.name, ''))) = 'tray' AS box_is_tray
+        (LOWER(TRIM(COALESCE(box_cat.name, ''))) = 'tray' AND ${TRAY_ENFORCE_BY_PACKING_DATE}) AS box_is_tray
       FROM ${T.BOX_TABLE} b
       LEFT JOIN ${T.CATEGORY} box_cat ON box_cat.id = b.category_id
       LEFT JOIN ${T.TRAY_MASTER} tl ON tl.box_uid = b.box_uid
       WHERE b.is_deleted = false
         AND NULLIF(${PN("b")}, '') IS NOT NULL
         AND (
-          LOWER(TRIM(COALESCE(box_cat.name, ''))) = 'tray'
+          (LOWER(TRIM(COALESCE(box_cat.name, ''))) = 'tray' AND ${TRAY_ENFORCE_BY_PACKING_DATE})
           OR EXISTS (
             SELECT 1 FROM tray_packings tp
             WHERE tp.packing_number = ${PN("b")}

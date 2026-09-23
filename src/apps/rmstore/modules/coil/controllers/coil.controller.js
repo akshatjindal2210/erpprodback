@@ -144,7 +144,7 @@ export const printCoilFinderReport = async (req, res) => {
     return res.json({
       success: true,
       html,
-      print_title: `Coil Report · ${coil_no_uid}`,
+      print_title: `RM Quality Check Report · ${coil_no_uid}`,
     });
   } catch (err) {
     console.error("[coil finder-report]", err);

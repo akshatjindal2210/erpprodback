@@ -45,25 +45,47 @@ const COIL_BILL_DT_SQL = `COALESCE(m.bill_dt, sa_bill.bill_dt) AS bill_dt`;
 const COIL_DETAIL_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, m.mrn_dt, m.sticker_generated, m.sticker_approved, ${COIL_BILL_NO_SQL}, ${COIL_BILL_DT_SQL}, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.it_unit, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, m.remarks, c.qty, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, c.status, c.download_count, c.is_deleted, c.deleted_by, c.deleted_at, c.created_by, c.created_at, c.updated_by, c.updated_at`;
 const COIL_MRN_JOIN = `LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid`;
 
-/** Latest non-deleted issue-request job card + machine for this coil. */
+/**
+ * Job card + machine for a coil.
+ * Prefer Store Out (actual shop-floor assignment via out_uid) — job-card store-out
+ * may scan any coil from reserved MRNs, so the coil may not appear in jc.coils JSON.
+ * Fall back to the latest issue-request job card that lists this coil_no_uid.
+ */
 const COIL_JOB_CARD_JOIN = `
 LEFT JOIN LATERAL (
-  SELECT jc.pjobcardno, jc.macname
-  FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
-  INNER JOIN ${T.ISSUE_REQUEST} ir
-    ON ir.issue_uid = jc.issue_uid AND ir.is_deleted = false
-  WHERE jc.is_deleted = false
-    AND EXISTS (
-      SELECT 1
-      FROM jsonb_array_elements(
-        CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
-      ) e
-      WHERE TRIM(e->>'coil_no_uid') = c.coil_no_uid
-    )
-  ORDER BY ir.approved DESC NULLS LAST,
-           COALESCE(jc.updated_at, jc.created_at) DESC NULLS LAST,
-           jc.id DESC
-  LIMIT 1
+  SELECT
+    COALESCE(NULLIF(TRIM(o.pjobcardno), ''), jc_reserve.pjobcardno) AS pjobcardno,
+    COALESCE(jc_out.macname, jc_reserve.macname) AS macname
+  FROM (SELECT 1) AS _
+  LEFT JOIN ${T.OUT_ENTRY} o
+    ON o.out_uid = c.out_uid AND o.is_deleted = false
+  LEFT JOIN LATERAL (
+    SELECT jc.macname
+    FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
+    WHERE jc.issue_uid = o.issue_uid
+      AND jc.is_deleted = false
+      AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(COALESCE(o.pjobcardno, '')))
+    ORDER BY jc.id DESC
+    LIMIT 1
+  ) jc_out ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT jc.pjobcardno, jc.macname
+    FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
+    INNER JOIN ${T.ISSUE_REQUEST} ir
+      ON ir.issue_uid = jc.issue_uid AND ir.is_deleted = false
+    WHERE jc.is_deleted = false
+      AND EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(
+          CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
+        ) e
+        WHERE LOWER(TRIM(e->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
+      )
+    ORDER BY ir.approved DESC NULLS LAST,
+             COALESCE(jc.updated_at, jc.created_at) DESC NULLS LAST,
+             jc.id DESC
+    LIMIT 1
+  ) jc_reserve ON TRUE
 ) jc ON TRUE`;
 
 /** Shared SOURCE label for list/group queries (alias = coil table alias). */

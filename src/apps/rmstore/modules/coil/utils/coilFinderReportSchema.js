@@ -7,14 +7,15 @@
  *  - Add a whole section → add to REPORT_SECTIONS + render it in HTML/PDF builders
  *  - Empty values are dropped automatically (hasValue)
  *
- * Both HTML preview and PDF download read from this file so they stay in sync.
+ * Both HTML print (QC Check / Coil Finder / Rejection) read from this file so they stay in sync.
+ * There is one document builder: coilFinderReportDocument.js — do not add alternate report HTML.
  */
 
 export const REPORT_SECTIONS = [
   { id: "ipr_photos", title: "In-process rejection photos" },
   { id: "coil_details", title: "Coil Details" },
-  { id: "qc_checks", title: "QC N Check Details" },
-  { id: "attachments", title: "Attached Documents (TC / RMTC / QC)" },
+  { id: "qc_checks", title: "QC Check Details" },
+  { id: "attachments", title: "Attached Documents" },
 ];
 
 export function numberedSectionTitle(id, { hasIprPhotos } = {}) {
@@ -22,8 +23,8 @@ export function numberedSectionTitle(id, { hasIprPhotos } = {}) {
   const titles = {
     ipr_photos: "1. In-process rejection photos",
     coil_details: `${1 + shift}. Coil Details`,
-    qc_checks: `${2 + shift}. QC N Check Details`,
-    attachments: `${3 + shift}. Attached Documents (TC / RMTC / QC)`,
+    qc_checks: `${2 + shift}. QC Check Details`,
+    attachments: `${3 + shift}. Attached Documents`,
   };
   return titles[id] || sectionTitle(id);
 }
@@ -43,7 +44,12 @@ export function formatHumanDate(v) {
   if (v == null || v === "") return null;
   try {
     if (v instanceof Date && !Number.isNaN(v.getTime())) {
-      return `${String(v.getDate()).padStart(2, "0")}/${String(v.getMonth() + 1).padStart(2, "0")}/${v.getFullYear()}`;
+      return v.toLocaleDateString("en-GB", {
+        timeZone: "Asia/Kolkata",
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+      });
     }
     const s = String(v).trim();
     if (!s || /invalid/i.test(s)) return null;
@@ -54,14 +60,17 @@ export function formatHumanDate(v) {
     if (ymd) return `${ymd[3]}/${ymd[2]}/${ymd[1]}`;
     const iso = /^(\d{4})-(\d{2})-(\d{2})T/.exec(s);
     if (iso) {
-      const d = new Date(s);
-      if (!Number.isNaN(d.getTime())) {
-        return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
-      }
+      // Use calendar date from ISO — same on every server / laptop TZ.
+      return `${iso[3]}/${iso[2]}/${iso[1]}`;
     }
     const d = new Date(s);
     if (!Number.isNaN(d.getTime())) {
-      return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+      return d.toLocaleDateString("en-GB", {
+        timeZone: "Asia/Kolkata",
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+      });
     }
   } catch {
     /* ignore */
@@ -69,7 +78,9 @@ export function formatHumanDate(v) {
   return null;
 }
 
-/** Human-readable date/time for Create / Update / Approve (en-IN). */
+/**
+ * Human-readable date/time — always Asia/Kolkata so every laptop/print matches.
+ */
 export function formatHumanDateTime(v) {
   if (v == null || v === "") return null;
   try {
@@ -81,6 +92,7 @@ export function formatHumanDateTime(v) {
     const d = v instanceof Date ? v : new Date(v);
     if (Number.isNaN(d.getTime())) return null;
     return d.toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
       day: "2-digit",
       month: "short",
       year: "numeric",
@@ -150,6 +162,19 @@ export function qcOverall(check) {
   return null;
 }
 
+/** QC check status → uppercase print label (e.g. awaiting_approval → AWAITING APPROVAL). */
+export function formatQcStatusLabel(status) {
+  const raw = status == null ? "" : String(status).trim();
+  if (!raw) return null;
+  const s = raw.toLowerCase();
+  if (s === "awaiting_approval") return "AWAITING APPROVAL";
+  if (s === "passed" || s === "pass") return "PASSED";
+  if (s === "failed" || s === "fail") return "FAILED";
+  if (s === "draft") return "DRAFT";
+  if (s === "pending") return "PENDING";
+  return raw.replace(/_/g, " ").toUpperCase();
+}
+
 /**
  * Resolve declarative field defs → { label, value }[] (empties dropped).
  * @param {Array<{ key: string, label: string, get: Function }>} fieldDefs
@@ -199,9 +224,9 @@ export function resolveRowCells(columns, rowCtx) {
 export const COIL_DETAIL_FIELDS = [
   { key: "mrn_uid", label: "MRN UID", get: (c) => c.mrn_uid || null },
   { key: "mrn_dt", label: "MRN Date", get: (c) => formatHumanDate(c.mrn_dt) || null },
-  { key: "heat_no", label: "Heat No", get: (c) => c.heat_no },
   { key: "item_code", label: "Item Code", get: (c) => c.item_code },
   { key: "item_desc", label: "Description", get: (c) => c.item_desc },
+  { key: "heat_no", label: "Heat No", get: (c) => c.heat_no },
   // Never expose internal ids: item_dcode, acc_code — only vendor name (header) + item_code/name.
   { key: "qty", label: "Qty", get: (c) => c.qty },
   { key: "bill_no", label: "Bill Number", get: (c) => c.bill_no || null },
@@ -210,21 +235,21 @@ export const COIL_DETAIL_FIELDS = [
     label: "Bill Date",
     get: (c) => formatHumanDate(c.bill_dt) || null,
   },
-  { key: "qc_id", label: "QC ID", get: (c) => (c.qc_uid != null ? `QC-${c.qc_uid}` : null) },
-  { key: "qc_status", label: "QC Status", get: (c) => c.qc_check_status },
+  // { key: "qc_id", label: "QC ID", get: (c) => (c.qc_uid != null ? `QC-${c.qc_uid}` : null) },
+  // { key: "qc_status", label: "QC Status", get: (c) => c.qc_check_status },
   // { key: "status", label: "Status", get: (c) => c.status },
-  { key: "pjobcardno", label: "Job Card", get: (c) => c.pjobcardno },
-  { key: "macname", label: "Machine", get: (c) => c.macname },
-  {
-    key: "created_at",
-    label: "Created At",
-    get: (c) => formatHumanDateTime(c.created_at),
-  },
-  {
-    key: "updated_at",
-    label: "Updated At",
-    get: (c) => formatHumanDateTime(c.updated_at),
-  },
+  // { key: "pjobcardno", label: "Job Card", get: (c) => c.pjobcardno },
+  // { key: "macname", label: "Machine", get: (c) => c.macname },
+  // {
+  //   key: "created_at",
+  //   label: "Created At",
+  //   get: (c) => formatHumanDateTime(c.created_at),
+  // },
+  // {
+  //   key: "updated_at",
+  //   label: "Updated At",
+  //   get: (c) => formatHumanDateTime(c.updated_at),
+  // },
 ];
 
 /** QC check summary (meta) — HTML + PDF. Add/remove rows here. */
@@ -234,7 +259,7 @@ export const QC_SUMMARY_FIELDS = [
     label: "QC ID",
     get: (check) => (check?.qc_check_uid != null ? `QC-${check.qc_check_uid}` : null),
   },
-  { key: "status", label: "Status", get: (check) => check?.status || null },
+  { key: "status", label: "Status", get: (check) => formatQcStatusLabel(check?.status) },
   {
     key: "inspected_by",
     label: "Inspected By",
@@ -259,16 +284,16 @@ export const QC_SUMMARY_FIELDS = [
     always: true,
     get: (check) => formatHumanDateTime(check?.approved_at),
   },
-  {
-    key: "created_at",
-    label: "Created At",
-    get: (check) => formatHumanDateTime(check?.created_at),
-  },
-  {
-    key: "updated_at",
-    label: "Updated At",
-    get: (check) => formatHumanDateTime(check?.updated_at),
-  },
+  // {
+  //   key: "created_at",
+  //   label: "Created At",
+  //   get: (check) => formatHumanDateTime(check?.created_at),
+  // },
+  // {
+  //   key: "updated_at",
+  //   label: "Updated At",
+  //   get: (check) => formatHumanDateTime(check?.updated_at),
+  // },
   { key: "failure_reason", label: "Failure Reason", get: (check) => check?.failure_reason || null },
   { key: "remarks", label: "Remarks", get: (check) => check?.remarks || null },
 ];

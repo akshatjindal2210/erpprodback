@@ -1,3 +1,5 @@
+import { MANAGE_TRAY_ENFORCE_FROM } from "../../../../lib/config/manageTray.config.js";
+
 /**
  * SQL fragments for box inventory — mirrors backend/src/utils/box/boxInventory.js
  *
@@ -21,6 +23,7 @@ export function sqlPackingIsTray(packingExpr) {
         LOWER(TRIM(COALESCE(dp.category_name, ''))) = 'tray'
         OR LOWER(TRIM(COALESCE(c.name, ''))) = 'tray'
       )
+      AND dp.doc_dt >= DATE '${MANAGE_TRAY_ENFORCE_FROM}'
   )`;
 }
 

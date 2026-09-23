@@ -87,3 +87,37 @@ export const csvUpload = multer({
   fileFilter: excelFilter,
   limits: { fileSize: 5 * 1024 * 1024 },
 });
+
+/** Public path under `uploads/…` (same idea as RM `toRmPublicUploadPath`). */
+export function toPublicUploadPath(file, fallbackParts = []) {
+  if (!file) return null;
+  if (file.path) {
+    const relativePath = path.relative(path.resolve(config.uploadPath), file.path);
+    if (relativePath && !relativePath.startsWith("..")) {
+      return path.join(config.uploadPublicPath, relativePath).replace(/\\/g, "/");
+    }
+  }
+  if (file.filename && fallbackParts.length) {
+    return path.join(config.uploadPublicPath, ...fallbackParts, file.filename).replace(/\\/g, "/");
+  }
+  return null;
+}
+
+/** Invoice Receiving — `{UPLOAD_PATH}/ims/invoice-receiving` (reuses shared fileFilter). */
+const IMS_IR_ROOT = path.join(config.uploadPath, "ims", "invoice-receiving");
+export const invoiceReceivingUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      ensureDir(IMS_IR_ROOT);
+      cb(null, IMS_IR_ROOT);
+    },
+    filename: (_req, file, cb) => {
+      const safe = String(file.originalname || "attachment").replace(/[^\w.\-]+/g, "_");
+      cb(null, `${Date.now()}_${safe}`);
+    },
+  }),
+  fileFilter,
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
+
+export const toImsIrPublicUploadPath = (file) => toPublicUploadPath(file, ["ims", "invoice-receiving"]);

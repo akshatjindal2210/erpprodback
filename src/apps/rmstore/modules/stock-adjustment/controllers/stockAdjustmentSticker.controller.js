@@ -291,6 +291,7 @@ export const renderBulkSaCoilStickers = async (req, res) => {
     const cards = [];
     let mrnNo = null;
     let bulkMrnUid = null;
+    let bulkAccName = null;
     let anyPreview = false;
     const approvedUids = [];
     const stickerMeta = req.body?.sticker_meta;
@@ -306,6 +307,7 @@ export const renderBulkSaCoilStickers = async (req, res) => {
       const spec = await resolveSpecStickerFields(coilSrc, mrnSrc || {});
       let printRow = buildCoilStickerPrintRow(coilSrc, mrnSrc || {}, { isQc: false, spec });
       printRow = mergeSaStickerMeta(printRow, { adjustment, stickerMeta, coil: coilSrc });
+      bulkAccName = bulkAccName ?? pickFirstNonEmpty(printRow.acc_name, coilSrc.acc_name, mrnSrc?.acc_name, adjustment?.acc_name);
       cards.push(await buildCoilStickerCardHtml(printRow));
     }
     if (!cards.length) {
@@ -321,6 +323,7 @@ export const renderBulkSaCoilStickers = async (req, res) => {
           coil_no_uid: null,
           mrn_uid: bulkMrnUid,
           mrn_no: mrnNo,
+          acc_name: bulkAccName,
           downloaded_by_id: req.user?.id,
           downloaded_by: auditUserName(req),
           download_type: "bulk",

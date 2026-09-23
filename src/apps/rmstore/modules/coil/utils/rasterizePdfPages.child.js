@@ -19,9 +19,9 @@ const CMAP_URL = `${pathToFileURL(path.join(PDFJS_ROOT, "cmaps")).href}/`;
 const STANDARD_FONT_DATA_URL = `${pathToFileURL(path.join(PDFJS_ROOT, "standard_fonts")).href}/`;
 const WASM_URL = `${pathToFileURL(path.join(PDFJS_ROOT, "wasm")).href}/`;
 
-const MAX_EDGE_PX = 1200;
-const MAX_PAGES = 40;
-const JPEG_QUALITY = 80;
+const MAX_EDGE_PX = 1100;
+const MAX_PAGES = 24;
+const JPEG_QUALITY = 78;
 
 class ReportCanvasFactory {
   constructor(_opts = {}) {}

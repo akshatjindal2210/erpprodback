@@ -8,11 +8,20 @@ import {
 } from "../../../lib/utils/logJourneyFilter.js";
 
 const TBL = T.COIL_TRANSACTION;
+const MRN = T.MRN;
 
 function textOrNull(val, max = 0) {
   if (val == null || String(val).trim() === "") return null;
   const s = String(val).trim();
   return max > 0 ? s.slice(0, max) : s;
+}
+
+function pickVendor(...vals) {
+  for (const v of vals) {
+    const s = v != null ? String(v).trim() : "";
+    if (s && s !== "-" && s !== "—") return s;
+  }
+  return null;
 }
 
 /** Map tx row → IMS-compatible sticker download list shape. */
@@ -38,7 +47,7 @@ function mapDownloadRow(row) {
     heat_no: d.heat_no ?? null,
     item_code: d.item_code ?? null,
     itemdcode: d.item_dcode ?? null,
-    acc_name: d.acc_name ?? null,
+    acc_name: pickVendor(d.acc_name, row.mrn_acc_name),
     downloaded_by: downloadedBy,
     downloaded_at: downloadedAt,
     download_type: type,
@@ -170,14 +179,33 @@ export async function listCoilDownloadLogs(options = {}) {
       COALESCE(l.details->>'heat_no','') ILIKE $${idx} OR
       COALESCE(l.details->>'item_code','') ILIKE $${idx} OR
       COALESCE(l.details->>'acc_name','') ILIKE $${idx} OR
+      COALESCE(m.acc_name,'') ILIKE $${idx} OR
       COALESCE(l.details->>'download_type','') ILIKE $${idx} OR
       COALESCE(l.details->>'download_source','') ILIKE $${idx}
     )`);
   }
 
+  // Prefer details.mrn_uid; else fall back to tx.mrn_no (old SA bulk logs often lack mrn_uid).
+  const mrnJoin = `LEFT JOIN LATERAL (
+      SELECT NULLIF(TRIM(mx.acc_name), '') AS acc_name
+      FROM ${MRN} mx
+      WHERE (
+        mx.uid = NULLIF(TRIM(COALESCE(l.details->>'mrn_uid', '')), '')
+        OR (
+          NULLIF(TRIM(COALESCE(l.details->>'mrn_uid', '')), '') IS NULL
+          AND NULLIF(TRIM(COALESCE(l.mrn_no::text, '')), '') IS NOT NULL
+          AND mx.mrn_no::text = TRIM(l.mrn_no::text)
+        )
+      )
+      ORDER BY CASE
+        WHEN mx.uid = NULLIF(TRIM(COALESCE(l.details->>'mrn_uid', '')), '') THEN 0
+        ELSE 1
+      END
+      LIMIT 1
+    ) m ON TRUE`;
   const where = `WHERE ${conditions.join(" AND ")}`;
   const countRes = await dbQuery(
-    `${cte ? `${cte} ` : ""}SELECT COUNT(*)::int AS count FROM ${TBL} l ${where}`,
+    `${cte ? `${cte} ` : ""}SELECT COUNT(*)::int AS count FROM ${TBL} l ${mrnJoin} ${where}`,
     values
   );
   const total = Number(countRes[0]?.count || 0);
@@ -186,8 +214,9 @@ export async function listCoilDownloadLogs(options = {}) {
   const offset = (safePage - 1) * safeLimit;
 
   const rows = await dbQuery(
-    `${cte ? `${cte} ` : ""}SELECT l.*
+    `${cte ? `${cte} ` : ""}SELECT l.*, m.acc_name AS mrn_acc_name
      FROM ${TBL} l
+     ${mrnJoin}
      ${where}
      ORDER BY l.created_at DESC, l.id DESC
      LIMIT $${i++} OFFSET $${i}`,

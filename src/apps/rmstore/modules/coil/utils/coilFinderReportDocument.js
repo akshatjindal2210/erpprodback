@@ -1,12 +1,14 @@
 /**
  * Coil Finder Report HTML — FN-identical header; body paginates cleanly.
+ * Canonical RM Coil / QC report — same HTML from QC Check, Coil Finder, Rejection.
  * Field lists / columns come from coilFinderReportSchema.js (edit there).
  */
 
 import fs from "fs";
 import path from "path";
-import { numberedSectionTitle, hasValue, buildQcSummaryRows, QC_SPEC_COLUMNS, resolveRowCells, qcLineResult, formatHumanDate } from "./coilFinderReportSchema.js";
+import { numberedSectionTitle, hasValue, buildQcSummaryRows, QC_SPEC_COLUMNS, resolveRowCells, qcLineResult, formatHumanDateTime } from "./coilFinderReportSchema.js";
 import { rasterizePdfPages } from "./rasterizePdfPages.js";
+import { getPrintLogoBlock, buildPrintLogoCss } from "../../../../core/lib/utils/print/printLogo.js";
 
 const MAX_ATTACH_BYTES = 20 * 1024 * 1024;
 
@@ -16,20 +18,6 @@ function escapeHtml(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-
-function getLogoBlock() {
-  try {
-    const logoPath = path.join(process.cwd(), "logo.png");
-    if (fs.existsSync(logoPath)) {
-      const bitmap = fs.readFileSync(logoPath);
-      const src = `data:image/png;base64,${bitmap.toString("base64")}`;
-      return `<img class="fn-logo-img" src="${src}" alt="" />`;
-    }
-  } catch {
-    /* ignore */
-  }
-  return `<div class="fn-logo-fallback" aria-hidden="true">JFL</div>`;
 }
 
 function mimeFromName(fileName) {
@@ -125,15 +113,26 @@ function renderResultBadge(result) {
   return `<span class="cfr-badge-na">—</span>`;
 }
 
+function renderStatusBadge(statusValue) {
+  const label = escapeHtml(statusValue || "—");
+  const s = String(statusValue || "").trim().toLowerCase().replace(/\s+/g, "_");
+  if (s === "passed" || s === "pass") return `<span class="cfr-status-pass">${label}</span>`;
+  if (s === "failed" || s === "fail") return `<span class="cfr-status-fail">${label}</span>`;
+  if (s === "awaiting_approval") return `<span class="cfr-status-await">${label}</span>`;
+  if (s === "draft") return `<span class="cfr-status-draft">${label}</span>`;
+  if (s === "pending") return `<span class="cfr-status-pending">${label}</span>`;
+  return `<span class="cfr-status-pending">${label}</span>`;
+}
+
 function renderQcBlocks(qcChecks = []) {
   if (!qcChecks.length) return `<p class="cfr-muted">No QC check linked to this coil.</p>`;
   return qcChecks
     .map((check) => {
       const summary = buildQcSummaryRows(check)
-        .map(
-          (row) => `
-          <div><span class="k">${escapeHtml(row.label)}:</span> ${escapeHtml(row.value)}</div>`,
-        )
+        .map((row) => {
+          const valueHtml = row.key === "status" ? renderStatusBadge(row.value) : escapeHtml(row.value);
+          return `<div><span class="k">${escapeHtml(row.label)}:</span> ${valueHtml}</div>`;
+        })
         .join("");
 
       const ths = QC_SPEC_COLUMNS.map((c) => `<th>${escapeHtml(c.title)}</th>`).join("");
@@ -175,16 +174,87 @@ function renderQcBlocks(qcChecks = []) {
     .join("");
 }
 
-function renderAttachmentsList(documents = []) {
+const DOC_KIND_LABEL = {
+  tc: "Test Certificate (TC)",
+  rmtc: "Raw Material TC (RMTC)",
+  qc: "QC Inspection Document",
+  ipr: "IPR Rejection Photo",
+};
+
+function docKindLabel(kind) {
+  const k = String(kind || "").trim().toLowerCase();
+  return DOC_KIND_LABEL[k] || "Supporting Document";
+}
+
+/** Short page heading like "QC · UTS" / "TC" / "RMTC" (no file names). */
+function attachPageHeading(docOrItem) {
+  const kind = String(docOrItem?.kind || "").trim().toLowerCase();
+  const label = String(docOrItem?.label || docOrItem?.detailLabel || "").trim();
+  const spec =
+    label &&
+    !/^QC-\d+$/i.test(label) &&
+    !/^test certificate$/i.test(label) &&
+    !/^raw material/i.test(label) &&
+    !/^qc uploaded/i.test(label) &&
+    !/^rejection photo/i.test(label)
+      ? label
+      : "";
+
+  if (kind === "qc") return spec ? `QC · ${spec}` : "QC";
+  if (kind === "tc") return "TC";
+  if (kind === "rmtc") return "RMTC";
+  if (kind === "ipr") return spec ? `IPR · ${spec}` : "IPR";
+  return docKindLabel(kind);
+}
+
+function docDisplayName(doc) {
+  const kind = String(doc?.kind || "").trim().toLowerCase();
+  const label = String(doc?.label || "").trim();
+  const file = String(doc?.fileName || "").trim();
+  const sub = String(doc?.sub || "").trim();
+
+  if (kind === "tc") return "Test Certificate";
+  if (kind === "rmtc") return "Raw Material Test Certificate";
+  if (kind === "ipr") {
+    return label || "Rejection photo";
+  }
+  if (kind === "qc") {
+    // Prefer spec name; never show a raw UUID-looking file alone as the title.
+    if (label && !/^QC-\d+$/i.test(label)) return label;
+    return "QC uploaded document";
+  }
+  return label || file || "Document";
+}
+
+function docSourceLine(doc) {
+  const sub = String(doc?.sub || "").trim();
+  if (sub) return sub;
+  const kind = String(doc?.kind || "").trim().toLowerCase();
+  if (kind === "tc" || kind === "rmtc") return "Uploaded with MRN / Stock Adjustment sticker";
+  if (kind === "qc") return "Uploaded with QC check";
+  if (kind === "ipr") return "Uploaded with in-process rejection";
+  return "";
+}
+
+function renderAttachmentsList(documents = [], { embeddedIds = null } = {}) {
   const shown = new Set(iprImageDocs(documents).map((d) => d.id));
   const ordered = sortDocs(documents).filter((doc) => !shown.has(doc.id));
-  if (!ordered.length) return `<p class="cfr-muted">No TC / RMTC / QC documents found.</p>`;
-  return `<ol class="cfr-attach-list">${ordered
-    .map(
-      (doc, idx) =>
-        `<li><strong>${escapeHtml(String(doc.kind || "doc").toUpperCase())}</strong> — ${escapeHtml(doc.label || doc.fileName || `File ${idx + 1}`)} <span class="cfr-muted">(${escapeHtml(doc.fileName || "")})</span></li>`,
-    )
-    .join("")}</ol>`;
+  if (!ordered.length) return `<p class="cfr-muted">No Test Certificate / RMTC / QC documents found.</p>`;
+  const embedded = embeddedIds instanceof Set ? embeddedIds : null;
+  return `
+    <ol class="cfr-attach-list">${ordered
+      .map((doc) => {
+        const typeName = docKindLabel(doc.kind);
+        const onDisk = Boolean(doc.diskPath);
+        const willEmbed = embedded ? embedded.has(doc.id) : onDisk;
+        const status = !onDisk
+          ? `<span class="cfr-attach-miss"> · missing</span>`
+          : willEmbed
+            ? ""
+            : `<span class="cfr-attach-miss"> · could not embed</span>`;
+        return `<li><strong>${escapeHtml(typeName)}</strong>${status}</li>`;
+      })
+      .join("")}</ol>`;
 }
 
 function renderIprPhotosSection(documents = []) {
@@ -198,7 +268,10 @@ function renderIprPhotosSection(documents = []) {
       if (!src) return "";
       return `
         <figure class="cfr-ipr-photo">
-          <img src="${src}" alt="${escapeHtml(doc.fileName || doc.label || "Rejection photo")}" />
+          <figcaption class="cfr-ipr-cap">${escapeHtml(docDisplayName(doc))}${
+            doc.sub ? ` · ${escapeHtml(doc.sub)}` : ""
+          }</figcaption>
+          <img src="${src}" alt="${escapeHtml(docDisplayName(doc))}" />
         </figure>`;
     })
     .filter(Boolean)
@@ -211,81 +284,138 @@ function renderIprPhotosSection(documents = []) {
     </div>`;
 }
 
-function attachTitle(doc) {
-  return `${String(doc.kind || "doc").toUpperCase()} · ${doc.label || doc.fileName || "Document"}`;
+/** Clear human title for attachment page — type first, then what it is. */
+function attachTitle(doc, { page = null, pages = null } = {}) {
+  const typeName = docKindLabel(doc.kind);
+  const name = docDisplayName(doc);
+  const source = docSourceLine(doc);
+  const pageBit =
+    page != null && pages != null && pages > 1 ? ` · Page ${page} of ${pages}` : "";
+  const nameBit =
+    name && name.toLowerCase() !== typeName.toLowerCase() && !typeName.toLowerCase().includes(name.toLowerCase())
+      ? ` — ${name}`
+      : "";
+  const sourceBit = source ? ` (${source})` : "";
+  return `${typeName}${nameBit}${sourceBit}${pageBit}`;
 }
 
-function renderAttachSlot({ title, innerHtml, frameClass = "" }) {
+function renderReportChrome({
+  logoHtml,
+  companyName,
+  companyAddr,
+  gstLine,
+  phone,
+  email,
+  reportSubtitle,
+  coilUid,
+  generatedAt,
+  customer,
+  mrn_uid,
+}) {
   return `
-        <div class="cfr-attach-slot">
-          <div class="cfr-attach-title">${escapeHtml(title)}</div>
-          <div class="cfr-attach-frame${frameClass ? ` ${frameClass}` : ""}">
-            ${innerHtml}
-          </div>
-        </div>`;
-}
-
-function renderImageSlot({ title, src, fileName }) {
-  return renderAttachSlot({
-    title,
-    innerHtml: `<img class="cfr-attach-img" src="${src}" alt="${escapeHtml(fileName || title)}" />`,
-  });
-}
-
-function renderAttachmentPage(item) {
-  return `
-      <div class="cfr-attach-page cfr-attach-page--full">
-        ${renderImageSlot(item)}
+      <div class="fn-head-row">
+        <div class="fn-logo-cell">${logoHtml}</div>
+        <div class="fn-head-main">
+          <div class="fn-co-name">${escapeHtml(companyName)}</div>
+          <div class="fn-fn-title">${escapeHtml(reportSubtitle)}</div>
+          <div class="fn-co-sub">${escapeHtml(companyAddr)}</div>
+          ${gstLine}
+          <div class="fn-co-sub">Customer Care: ${escapeHtml(email)}</div>
+          ${phone ? `<div class="fn-co-sub">Phone : ${escapeHtml(phone)}</div>` : ""}
+        </div>
+        <div class="fn-logo-cell" aria-hidden="true"></div>
+      </div>
+      <div class="fn-meta-bar">
+        <div class="fn-meta-row">
+          <div><span class="k">MRN UID</span> ${escapeHtml(mrn_uid)}</div>
+          <div class="fn-meta-date"><span class="k">Date</span> ${escapeHtml(generatedAt)}</div>
+        </div>
       </div>`;
 }
 
-function renderAttachmentPairPage(left, right) {
+/** One A4 page per attachment — short type heading, no company header / border. */
+function renderAttachmentReportPage(item) {
+  const typeLine = item.pageHeading || attachPageHeading(item);
   return `
-      <div class="cfr-attach-page cfr-attach-page--pair">
-        ${renderImageSlot(left)}
-        ${renderImageSlot(right)}
-      </div>`;
+    <div class="cfr-attach-sheet">
+      <div class="cfr-attach-type">${escapeHtml(typeLine)}</div>
+      <div class="cfr-attach-frame">
+        <img class="cfr-attach-img" src="${item.src}" alt="${escapeHtml(typeLine)}" />
+      </div>
+    </div>`;
 }
 
-function toImageItem(doc) {
+function buildAttachPageMeta(doc, { page = null, pages = null } = {}) {
+  const typeLabel = docKindLabel(doc.kind);
+  const pageHeading = attachPageHeading(doc);
+  const pageLabel =
+    page != null && pages != null && pages > 1 ? `Page ${page} of ${pages}` : "";
+  return {
+    typeLabel,
+    pageHeading,
+    label: doc.label || "",
+    pageLabel,
+    title: pageHeading,
+  };
+}
+
+function toImageItem(doc, pageMeta = {}) {
   const src = fileToDataUrl(doc.diskPath, doc.fileName);
   if (!src) return null;
-  return { title: attachTitle(doc), src, fileName: doc.fileName || "" };
+  const meta = buildAttachPageMeta(doc, pageMeta);
+  return {
+    id: doc.id,
+    kind: doc.kind,
+    src,
+    fileName: doc.fileName || "",
+    ...meta,
+  };
 }
 
+/**
+ * Build A4 attachment pages (report type) + set of successfully embedded doc ids.
+ * @returns {Promise<{ html: string, embeddedIds: Set<string> }>}
+ */
 async function renderAttachmentPages(documents = []) {
-  const parts = [];
   const shownOnFirstPage = new Set(iprImageDocs(documents).map((d) => d.id));
-  let pendingImage = null;
+  const ordered = sortDocs(documents).filter((doc) => doc?.diskPath && !shownOnFirstPage.has(doc.id));
+  const embeddedIds = new Set();
 
-  const flushPendingImage = () => {
-    if (!pendingImage) return;
-    parts.push(renderAttachmentPage(pendingImage));
-    pendingImage = null;
-  };
+  const pdfPageMap = new Map();
+  await Promise.all(
+    ordered
+      .filter((doc) => isPdfFile(doc.diskPath) || doc.isPdf)
+      .map(async (doc) => {
+        pdfPageMap.set(doc.id, await pdfToImageItems(doc));
+      })
+  );
 
-  for (const doc of sortDocs(documents)) {
-    if (shownOnFirstPage.has(doc.id) || !doc?.diskPath) continue;
-
+  const items = [];
+  for (const doc of ordered) {
     if (isPdfFile(doc.diskPath) || doc.isPdf) {
-      flushPendingImage();
-      const pdfPages = await pdfToImageItems(doc);
-      for (const item of pdfPages) parts.push(renderAttachmentPage(item));
+      const pages = pdfPageMap.get(doc.id) || [];
+      if (!pages.length) continue;
+      embeddedIds.add(doc.id);
+      pages.forEach((p, i) => {
+        const meta = buildAttachPageMeta(doc, { page: i + 1, pages: pages.length });
+        items.push({
+          src: typeof p === "string" ? p : p.src,
+          id: doc.id,
+          kind: doc.kind,
+          fileName: doc.fileName || (typeof p === "object" ? p.fileName : "") || "",
+          ...meta,
+        });
+      });
       continue;
     }
-
     const item = toImageItem(doc);
     if (!item) continue;
-    if (pendingImage) {
-      parts.push(renderAttachmentPairPage(pendingImage, item));
-      pendingImage = null;
-    } else {
-      pendingImage = item;
-    }
+    embeddedIds.add(doc.id);
+    items.push(item);
   }
 
-  flushPendingImage();
-  return parts.join("");
+  const html = items.map((item) => renderAttachmentReportPage(item)).join("");
+  return { html, embeddedIds };
 }
 
 /**
@@ -296,47 +426,78 @@ export async function buildCoilFinderReportDocument(payload = {}) {
   const companyInfo = payload.companyInfo || {};
   const companyName = companyInfo.name || "H. P. FASTENERS PVT. LTD.";
   const companyAddr = companyInfo.address || "PLOT NO. 314, SECTOR-24, FARIDABAD (HR)-121005";
-  const phone = companyInfo.phone || "Customer Care: info@jflindia.com";
+  const phone = companyInfo.phone || "";
+  const email = String(companyInfo.email || "info@jflindia.com").replace(/^Customer Care:\s*/i, "").trim() || "info@jflindia.com";
   const gstin = companyInfo.gstin || "";
   const gstLine = gstin ? `<div class="fn-co-sub">GSTIN : ${escapeHtml(gstin)}</div>` : "";
 
   const coilUid = String(coil.coil_no_uid || "—");
   const mrn_uid = String(coil.mrn_uid || "—");
-  const mrnDate = formatHumanDate(coil.mrn_dt) || "—";
   const customer = String(coil.acc_name || "—");
-  const generatedAt = payload.generatedAt || new Date().toLocaleString("en-IN");
+  const generatedAt =
+    payload.generatedAt || formatHumanDateTime(new Date()) || new Date().toISOString();
   const docs = payload.documents || [];
   const hasIprPhotos = iprImageDocs(docs).length > 0;
   const iprPhotosHtml = renderIprPhotosSection(docs);
-  const attachmentPages = await renderAttachmentPages(docs);
+
+  const chromeCtx = {
+    companyName,
+    companyAddr,
+    gstLine,
+    phone,
+    email,
+    coilUid,
+    generatedAt,
+    customer,
+    mrn_uid,
+  };
+  const { html: attachmentPages, embeddedIds } = await renderAttachmentPages(docs);
+  const logoHtml = getPrintLogoBlock();
+  const mainChrome = renderReportChrome({
+    ...chromeCtx,
+    logoHtml,
+    reportSubtitle: "RM Quality Check Report",
+  });
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Coil Finder Report ${escapeHtml(coilUid)}</title>
+  <meta name="viewport" content="width=210mm, initial-scale=1" />
+  <title>RM Quality Check Report ${escapeHtml(coilUid)}</title>
   <style>
     @page {
       size: A4 portrait;
-      margin: 10mm 12mm 12mm 12mm;
+      margin: 8mm 5mm 14mm 5mm;
+      @bottom-right {
+        content: "Page " counter(page) " of " counter(pages);
+        font-family: "Times New Roman", Times, Georgia, serif;
+        font-size: 9pt;
+        color: #000;
+      }
     }
     * { box-sizing: border-box; }
     html, body {
       margin: 0;
       padding: 0;
+      width: 210mm;
+      max-width: 210mm;
       font-family: "Times New Roman", Times, Georgia, serif;
       font-size: 11pt;
       line-height: 1.3;
       color: #000;
       background: #fff;
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
+      color-adjust: exact;
     }
-    .fn-sheet { width: 100%; max-width: 190mm; margin: 0 auto; }
+    .fn-sheet { width: 200mm; max-width: 200mm; margin: 0 auto; }
 
     .fn-border {
-      border: 3px double #000;
-      padding: 4mm 6mm 3.5mm;
+      border: 0.7mm double #000;
+      padding: 3.5mm 3.5mm 3mm;
       background: #fff;
       break-inside: auto;
       page-break-inside: auto;
@@ -350,33 +511,7 @@ export async function buildCoilFinderReportDocument(payload = {}) {
       gap: 2mm;
       width: 100%;
     }
-    .fn-logo-cell {
-      flex: 0 0 18mm;
-      width: 18mm;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .fn-logo-spacer {
-      visibility: hidden;
-      pointer-events: none;
-    }
-    .fn-logo-img {
-      max-height: 16mm;
-      max-width: 16mm;
-      width: 100%;
-      height: auto;
-      object-fit: contain;
-      display: block;
-      filter: grayscale(1) brightness(0);
-    }
-    .fn-logo-fallback {
-      width: 14mm; height: 14mm;
-      border: 2px solid #000;
-      clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
-      display: flex; align-items: center; justify-content: center;
-      font-weight: 900; font-size: 7.5pt;
-    }
+    ${buildPrintLogoCss()}
     .fn-head-main { flex: 1; min-width: 0; text-align: center; }
     .fn-co-name {
       text-align: center;
@@ -446,6 +581,13 @@ export async function buildCoilFinderReportDocument(payload = {}) {
       border: 1px solid #cbd5e1;
       background: #fff;
       overflow: hidden;
+    }
+    .cfr-ipr-cap {
+      font-size: 8pt;
+      font-weight: 700;
+      padding: 1mm 1.5mm;
+      border-bottom: 1px solid #e2e8f0;
+      background: #f8fafc;
     }
     .cfr-ipr-photo img {
       display: block;
@@ -541,83 +683,84 @@ export async function buildCoilFinderReportDocument(payload = {}) {
       text-transform: uppercase;
     }
     .cfr-badge-na { color: #94a3b8; font-size: 8pt; }
+    .cfr-status-pass,
+    .cfr-status-fail,
+    .cfr-status-await,
+    .cfr-status-draft,
+    .cfr-status-pending {
+      display: inline-block;
+      padding: 0.4mm 1.8mm;
+      border: 1px solid;
+      font-weight: 800;
+      font-size: 8.5pt;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .cfr-status-pass { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+    .cfr-status-fail { background: #fff1f2; color: #be123c; border-color: #fecdd3; }
+    .cfr-status-await { background: #eef2ff; color: #4338ca; border-color: #c7d2fe; }
+    .cfr-status-draft { background: #f0f9ff; color: #0369a1; border-color: #bae6fd; }
+    .cfr-status-pending { background: #fffbeb; color: #b45309; border-color: #fde68a; }
+    .cfr-attach-lead { margin: 0 0 2mm; font-size: 9.5pt; color: #334155; }
     .cfr-attach-list { margin: 0; padding-left: 5mm; font-size: 9.5pt; }
+    .cfr-attach-ok { color: #047857; font-style: normal; font-size: 8.5pt; }
+    .cfr-attach-miss { color: #b45309; font-style: normal; font-size: 8.5pt; }
     .cfr-muted { color: #64748b; font-size: 9pt; font-style: italic; }
 
-    .cfr-attach-page {
+    /* Attachment pages — type heading + image, no border / company header */
+    .cfr-attach-sheet {
       break-before: page;
       page-break-before: always;
-      margin: 0;
-      padding: 4mm;
-      border: 3px double #000;
-      display: flex;
-      flex-direction: column;
-      gap: 3mm;
-      overflow: visible;
-      -webkit-box-decoration-break: clone;
-      box-decoration-break: clone;
+      width: 100%;
+      max-width: 200mm;
+      margin: 0 auto;
     }
-    .cfr-attach-page--pair {
-      flex-direction: column;
-      min-height: 265mm;
-    }
-    .cfr-attach-page--pair .cfr-attach-slot {
-      flex: 1 1 50%;
-      min-width: 0;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-    }
-    .cfr-attach-page--pair .cfr-attach-frame {
-      align-items: flex-start;
-      justify-content: flex-start;
-    }
-    .cfr-attach-page--full .cfr-attach-slot {
-      flex: 1 1 auto;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-    }
-    .cfr-attach-title {
-      flex: 0 0 auto;
-      font-size: 10pt;
+    .cfr-attach-type {
+      font-size: 11pt;
       font-weight: 800;
-      margin: 0 0 1.5mm;
-      padding-bottom: 1mm;
+      letter-spacing: 0.3px;
+      margin: 0 0 2.5mm;
+      padding: 0 0 1.5mm;
       border-bottom: 1px solid #000;
+      text-align: left;
     }
     .cfr-attach-frame {
-      flex: 1 1 auto;
-      min-height: 0;
+      min-height: 250mm;
       display: flex;
       align-items: center;
       justify-content: center;
-      overflow: visible;
+      overflow: hidden;
       background: #fff;
     }
     .cfr-attach-img {
       display: block;
-      width: 100%;
+      width: auto;
       max-width: 100%;
       height: auto;
-      max-height: 265mm;
-      min-height: 1mm;
+      max-height: 250mm;
       object-fit: contain;
       object-position: center center;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
-    .cfr-attach-page--pair .cfr-attach-img {
-      width: 100%;
-      height: auto;
-      max-height: 120mm;
-      object-position: top center;
-    }
     @media print {
-      .cfr-attach-page, .cfr-attach-frame, .cfr-attach-img {
+      .cfr-attach-sheet, .cfr-attach-frame, .cfr-attach-img {
         break-inside: avoid;
         page-break-inside: avoid;
+      }
+      html, body {
+        width: 210mm !important;
+        min-width: 210mm !important;
+        max-width: 210mm !important;
+        margin: 0 !important;
+        background: #fff !important;
+      }
+      .fn-sheet, .cfr-attach-sheet {
+        max-width: 200mm !important;
+        width: 200mm !important;
+        margin: 0 auto !important;
       }
     }
   </style>
@@ -625,25 +768,7 @@ export async function buildCoilFinderReportDocument(payload = {}) {
 <body>
   <div class="fn-sheet">
     <div class="fn-border">
-      <div class="fn-head-row">
-        <div class="fn-logo-cell">${getLogoBlock()}</div>
-        <div class="fn-head-main">
-          <div class="fn-co-name">${escapeHtml(companyName)}</div>
-          <div class="fn-fn-title">Coil Finder Report</div>
-          <div class="fn-co-sub">${escapeHtml(companyAddr)}</div>
-          ${gstLine}
-          <div class="fn-co-sub">${escapeHtml(phone)}</div>
-        </div>
-        <div class="fn-logo-cell fn-logo-spacer" aria-hidden="true">${getLogoBlock()}</div>
-      </div>
-      <div class="fn-meta-bar">
-        <div class="fn-meta-row">
-          <div><span class="k">Coil UID</span> ${escapeHtml(coilUid)}</div>
-          <div class="fn-meta-date"><span class="k">Date</span> ${escapeHtml(generatedAt)}</div>
-        </div>
-        <div class="fn-meta-cust"><span class="k">Vendor</span> <span class="fn-cust-name">${escapeHtml(customer)}</span></div>
-        <div class="fn-meta-cust"><span class="k">MRN UID</span> ${escapeHtml(mrn_uid)}</div>
-      </div>
+      ${mainChrome}
 
       <div class="cfr-body">
         ${iprPhotosHtml}
@@ -659,13 +784,13 @@ export async function buildCoilFinderReportDocument(payload = {}) {
 
         <div class="cfr-section">
           <h2 class="cfr-section-title">${escapeHtml(numberedSectionTitle("attachments", { hasIprPhotos }))}</h2>
-          ${renderAttachmentsList(docs)}
+          ${renderAttachmentsList(docs, { embeddedIds })}
         </div>
       </div>
     </div>
-
-    ${attachmentPages}
   </div>
+
+  ${attachmentPages}
 </body>
 </html>`;
 }

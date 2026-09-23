@@ -48,8 +48,8 @@ const LAYOUT = {
     },
     { kind: "field", label: "Heat No", key: "lotNo" },
     { kind: "field", label: "Vendor", key: "vendor", wrap: true },
-    { kind: "field", label: "Item", key: "itemCode" },
-    { kind: "field", label: "Item Description", key: "itemDesc", wrap: true },
+    { kind: "field", label: "Item Code", key: "itemCode" },
+    { kind: "field", label: "Item", key: "itemDesc", wrap: true },
     { kind: "bottom" },
     { kind: "footer" },
   ],
@@ -120,9 +120,16 @@ function coilIndex(uid) {
 
 let logoB64 = null;
 try {
-  const p = path.join(process.cwd(), "logo.png");
-  if (fs.existsSync(p))
-    logoB64 = `data:image/png;base64,${fs.readFileSync(p).toString("base64")}`;
+  const candidates = [
+    path.join(process.cwd(), "logo.png"),
+    path.join(process.cwd(), "backend", "logo.png"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      logoB64 = `data:image/png;base64,${fs.readFileSync(p).toString("base64")}`;
+      break;
+    }
+  }
 } catch (e) {
   console.error("Error reading logo.png:", e);
 }

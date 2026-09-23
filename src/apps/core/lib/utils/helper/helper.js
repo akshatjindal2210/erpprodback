@@ -1,8 +1,7 @@
 import QRCode from "qrcode";
-import fs from "fs";
-import path from "path";
 import { docNoFromStandardBoxNoUid } from "../../../../ims/lib/stickerUidHelpers.js";
 import { getAppConfigValue, getStickerCompanyInfo, APP_CONFIG_KEYS } from "../../../configuration/models/appConfig.model.js";
+import { getPrintLogoDataUrl, getPrintLogoBlock, buildPrintLogoCss } from "../print/printLogo.js";
 
 export function resolveStickerPackingNumber(sticker = {}, fallback = null) {
   const candidates = [
@@ -73,20 +72,7 @@ export function formatStickerPackingDate(sticker = {}) {
   return formatDocDate(resolveStickerDocDt(sticker)) ?? "--";
 }
 
-const getLogoBase64 = () => {
-  try {
-    const logoPath = path.join(process.cwd(), "logo.png");
-    if (fs.existsSync(logoPath)) {
-      const bitmap = fs.readFileSync(logoPath);
-      return `data:image/png;base64,${bitmap.toString("base64")}`;
-    }
-  } catch (err) {
-    console.error("Error reading logo.png:", err);
-  }
-  return null;
-};
-
-const logoBase64 = getLogoBase64();
+const logoBase64 = getPrintLogoDataUrl();
 
 const escapeHtmlText = (s) =>
   String(s ?? "")
@@ -514,7 +500,9 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
   const companyName = companyInfo?.name || "H. P. FASTENERS PVT. LTD.";
   const companyAddr = companyInfo?.address || "PLOT NO. 314, SECTOR-24, FARIDABAD (HR)-121005";
   const gstin = companyInfo?.gstin || "";
-  const phone = companyInfo?.phone || "Customer Care: info@jflindia.com";
+  const phone = companyInfo?.phone || "";
+  const email = companyInfo?.email || "info@jflindia.com";
+  const contactLine = `Customer Care: ${phone || email || "info@jflindia.com"}`;
   const items = Array.isArray(note.items) ? note.items : [];
 
   let itemSr = 0;
@@ -612,9 +600,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
         ? String(note.total_items)
         : "";
 
-  const logoBlock = logoBase64
-    ? `<img class="fn-logo-img" src="${logoBase64}" alt="" />`
-    : `<div class="fn-logo-fallback" aria-hidden="true">JFL</div>`;
+  const logoBlock = getPrintLogoBlock();
 
   const gstLine = gstin ? `<div class="fn-co-sub">GSTIN : ${escapeHtml(gstin)}</div>` : "";
 
@@ -663,34 +649,11 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
       width: 100%;
       margin-bottom: 0;
     }
-    .fn-logo-cell {
-      flex: 0 0 20mm;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
+    ${buildPrintLogoCss()}
     .fn-head-main {
       flex: 1;
       min-width: 0;
       text-align: center;
-    }
-    .fn-logo-img {
-      max-height: 18mm;
-      max-width: 18mm;
-      width: 100%;
-      height: auto;
-      object-fit: contain;
-      display: block;
-      filter: grayscale(1) brightness(0);
-      -webkit-print-color-adjust: exact;
-      print-color-adjust: exact;
-    }
-    .fn-logo-fallback {
-      width: 15mm; height: 15mm;
-      border: 2px solid #000;
-      clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
-      display: flex; align-items: center; justify-content: center;
-      font-weight: 900; font-size: 8pt; letter-spacing: -0.5px;
     }
     .fn-co-name {
       text-align: center;
@@ -848,8 +811,9 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
                         <div class="fn-fn-title">Forwarding Note</div>
                         <div class="fn-co-sub">${escapeHtml(companyAddr)}</div>
                         ${gstLine}
-                        <div class="fn-co-sub">${escapeHtml(phone)}</div>
+                        <div class="fn-co-sub">${escapeHtml(contactLine)}</div>
                       </div>
+                      <div class="fn-logo-cell" aria-hidden="true"></div>
                     </div>
                     <div class="fn-meta-bar">
                       <div class="fn-meta-row">

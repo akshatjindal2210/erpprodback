@@ -127,24 +127,26 @@ async function loadQcChecks(coil) {
   const { data } = await findQcChecks({
     filters: { coil_no_uid: uid },
     page: 1,
-    limit: 200,
+    limit: 50,
   });
 
   for (const row of data || []) {
     if (row?.qc_check_uid == null) continue;
     const id = Number(row.qc_check_uid);
-    const items = await findQcCheckItems(id);
+    // findQcChecks already returns items + inspection methods — no N+1 re-fetch.
+    const items = (Array.isArray(row.items) ? row.items : []).map((it, idx) => ({
+      ...it,
+      qc_check_uid: id,
+      sno: it?.sno ?? idx + 1,
+    })).sort((a, b) => Number(a.sno || 0) - Number(b.sno || 0));
     map.set(id, normalizeQcCheck(row, items));
   }
 
-  // Always load linked QC with full items (list row can be incomplete).
+  // Always load linked QC if missing from the list (edge: orphaned link).
   const linked = coil.qc_uid != null ? Number(coil.qc_uid) : null;
-  if (linked && Number.isFinite(linked)) {
-    const row = await findQcCheck(linked);
-    if (row) {
-      const items = await findQcCheckItems(linked);
-      map.set(linked, normalizeQcCheck(row, items));
-    }
+  if (linked && Number.isFinite(linked) && !map.has(linked)) {
+    const [row, items] = await Promise.all([findQcCheck(linked), findQcCheckItems(linked)]);
+    if (row) map.set(linked, normalizeQcCheck(row, items));
   }
 
   return [...map.values()].sort((a, b) => Number(a.qc_check_uid) - Number(b.qc_check_uid));
@@ -152,75 +154,88 @@ async function loadQcChecks(coil) {
 
 async function loadStickerDocs(coil) {
   const docs = [];
+  const seen = new Set();
+  const pushDoc = (d) => {
+    if (!d) return;
+    const key = `${d.kind}:${d.path || d.diskPath || d.id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    docs.push(d);
+  };
+
   const mrnUid = coil.mrn_uid != null ? String(coil.mrn_uid).trim() : "";
   const saId = coil.sa_id != null ? Number(coil.sa_id) : null;
   const isSa = saId && String(coil.sa_entry_type || "").toLowerCase() === "stock_in";
 
+  const tasks = [];
   if (mrnUid) {
-    const m = await findMrnByUid(mrnUid);
-    if (m) {
-      for (const d of [
-        docFromPath({
-          id: `tc-mrn-${mrnUid}`,
-          label: "TC Document",
-          sub: "MRN sticker upload",
-          path: m.tc_file_path,
-          name: m.tc_file_name,
-          kind: "tc",
-        }),
-        docFromPath({
-          id: `rmtc-mrn-${mrnUid}`,
-          label: "RMTC Document",
-          sub: "MRN sticker upload",
-          path: m.rmtc_file_path,
-          name: m.rmtc_file_name,
-          kind: "rmtc",
-        }),
-      ]) {
-        if (d) docs.push(d);
-      }
-    }
-    return docs;
+    tasks.push(
+      findMrnByUid(mrnUid).then((m) => {
+        if (!m) return;
+        pushDoc(
+          docFromPath({
+            id: `tc-mrn-${mrnUid}`,
+            label: "Test Certificate",
+            sub: "From MRN entry",
+            path: m.tc_file_path,
+            name: m.tc_file_name,
+            kind: "tc",
+          })
+        );
+        pushDoc(
+          docFromPath({
+            id: `rmtc-mrn-${mrnUid}`,
+            label: "Raw Material Test Certificate",
+            sub: "From MRN entry",
+            path: m.rmtc_file_path,
+            name: m.rmtc_file_name,
+            kind: "rmtc",
+          })
+        );
+      })
+    );
   }
-
   if (isSa) {
-    const sa = await findAdjustmentById(saId);
-    if (sa) {
-      for (const d of [
-        docFromPath({
-          id: `tc-sa-${saId}`,
-          label: "TC Document",
-          sub: "SA sticker upload",
-          path: sa.tc_file_path,
-          name: sa.tc_file_name,
-          kind: "tc",
-        }),
-        docFromPath({
-          id: `rmtc-sa-${saId}`,
-          label: "RMTC Document",
-          sub: "SA sticker upload",
-          path: sa.rmtc_file_path,
-          name: sa.rmtc_file_name,
-          kind: "rmtc",
-        }),
-      ]) {
-        if (d) docs.push(d);
-      }
-    }
+    tasks.push(
+      findAdjustmentById(saId).then((sa) => {
+        if (!sa) return;
+        pushDoc(
+          docFromPath({
+            id: `tc-sa-${saId}`,
+            label: "Test Certificate",
+            sub: "From Stock Adjustment",
+            path: sa.tc_file_path,
+            name: sa.tc_file_name,
+            kind: "tc",
+          })
+        );
+        pushDoc(
+          docFromPath({
+            id: `rmtc-sa-${saId}`,
+            label: "Raw Material Test Certificate",
+            sub: "From Stock Adjustment",
+            path: sa.rmtc_file_path,
+            name: sa.rmtc_file_name,
+            kind: "rmtc",
+          })
+        );
+      })
+    );
   }
-
+  await Promise.all(tasks);
   return docs;
 }
 
 function collectQcDocuments(checks) {
   const docs = [];
   for (const check of checks || []) {
-    const qcLabel = check?.qc_check_uid != null ? `QC-${check.qc_check_uid}` : "QC";
+    const qcId = check?.qc_check_uid != null ? `QC-${check.qc_check_uid}` : "QC check";
     for (const spec of check.items || []) {
+      const specName = String(spec.spec_name || "").trim() || `Spec ${spec.sno ?? ""}`.trim() || "QC spec";
       const d = docFromPath({
         id: `qc-${check.qc_check_uid}-${spec.spec_id ?? spec.sno}`,
-        label: spec.spec_name || `Spec ${spec.sno ?? ""}`.trim(),
-        sub: `${qcLabel} · uploaded with check`,
+        label: specName,
+        sub: `${qcId} · inspection upload`,
         path: spec.document_note,
         name: null,
         kind: "qc",
@@ -265,12 +280,12 @@ export async function loadCoilFinderReportData(coil_no_uid) {
   if (!coil) return null;
 
   const details = buildCoilDetailRows(coil);
-  const qcChecks = await loadQcChecks(coil);
-  const documents = [
-    ...(await loadIprRejectionDocs(coil)),
-    ...collectQcDocuments(qcChecks),
-    ...(await loadStickerDocs(coil)),
-  ];
+  const [qcChecks, iprDocs, stickerDocs] = await Promise.all([
+    loadQcChecks(coil),
+    loadIprRejectionDocs(coil),
+    loadStickerDocs(coil),
+  ]);
+  const documents = [...iprDocs, ...collectQcDocuments(qcChecks), ...stickerDocs];
 
   return { coil, details, qcChecks, documents };
 }

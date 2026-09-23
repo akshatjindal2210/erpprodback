@@ -142,6 +142,17 @@ async function loadInvfnoteByBill(bill_no, bill_dt_hint = null) {
   return invfnote;
 }
 
+/** IMS bill number as stored (case-sensitive display), after case-insensitive match on input. */
+function canonicalBillFromIms(requested, invmnote, invfnote = []) {
+  const fromHeader = invmnote?.billno ?? invmnote?.bill_no;
+  if (fromHeader != null && String(fromHeader).trim()) return String(fromHeader).trim();
+  for (const line of invfnote) {
+    const b = invfnoteBillNo(line);
+    if (b) return b;
+  }
+  return String(requested || "").trim();
+}
+
 async function loadInvmnoteByBill(bill_no, bill_dt_hint = null) {
   const needle = String(bill_no || "").trim().toLowerCase();
   if (!needle) return null;
@@ -223,11 +234,13 @@ async function buildOpenPayload(bill_no, bill_dt_hint = null) {
     if (fromLine) invmnote.acc_name = fromLine;
   }
 
+  const canonicalBill = canonicalBillFromIms(bill, invmnote, invfnote);
+
   if (existing) {
     return {
       already_saved: true,
       gate: existing,
-      bill_no: existing.bill_no,
+      bill_no: canonicalBill || existing.bill_no,
       bill_dt: existing.bill_dt || invmnote?.billdt || invfnote[0]?.billdt || null,
       transporter_name: existing.transporter_name,
       vehicle_number: existing.vehicle_number,
@@ -239,7 +252,7 @@ async function buildOpenPayload(bill_no, bill_dt_hint = null) {
 
   return {
     already_saved: false,
-    bill_no: bill,
+    bill_no: canonicalBill || bill,
     bill_dt: invmnote?.billdt || invfnote[0]?.billdt || bill_dt_hint || null,
     transporter_name: String(invmnote?.transporter_name ?? invmnote?.transporter ?? invmnote?.transport ?? "").trim() || null,
     vehicle_number: String(invmnote?.vehicle_number ?? invmnote?.vehicleno ?? invmnote?.vehicle_no ?? "").trim() || null,

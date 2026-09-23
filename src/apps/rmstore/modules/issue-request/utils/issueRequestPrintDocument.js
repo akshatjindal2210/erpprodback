@@ -3,8 +3,7 @@
  * and Coil Finder report; body uses RM Store issue + job-card + coil fields.
  */
 
-import fs from "fs";
-import path from "path";
+import { getPrintLogoBlock, buildPrintLogoCss } from "../../../../core/lib/utils/print/printLogo.js";
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -12,20 +11,6 @@ function escapeHtml(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-
-function getLogoBlock() {
-  try {
-    const logoPath = path.join(process.cwd(), "logo.png");
-    if (fs.existsSync(logoPath)) {
-      const bitmap = fs.readFileSync(logoPath);
-      const src = `data:image/png;base64,${bitmap.toString("base64")}`;
-      return `<img class="fn-logo-img" src="${src}" alt="" />`;
-    }
-  } catch {
-    /* ignore */
-  }
-  return `<div class="fn-logo-fallback" aria-hidden="true">JFL</div>`;
 }
 
 function fmtShortDate(d) {
@@ -83,6 +68,8 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
   const companyName = companyInfo.name || "H. P. FASTENERS PVT. LTD.";
   const companyAddr = companyInfo.address || "PLOT NO. 314, SECTOR-24, FARIDABAD (HR)-121005";
   const phone = companyInfo.phone || "Customer Care: info@jflindia.com";
+  const contactLine = `Customer Care: ${companyInfo?.phone || companyInfo?.email || "info@jflindia.com"}`;
+  // <div class="fn-co-sub">${escapeHtml(contactLine)}</div>
   const gstin = companyInfo.gstin || "";
   const gstLine = gstin ? `<div class="fn-co-sub">GSTIN : ${escapeHtml(gstin)}</div>` : "";
 
@@ -173,7 +160,7 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
   const remarks = data.remarks ? escapeHtml(String(data.remarks)) : "";
   const approvedBy = escapeHtml(String(data.approved_by_name || data.approved_by || "").trim());
   const approvedAt = escapeHtml(fmtAt(data.approved_at));
-  const logoBlock = getLogoBlock();
+  const logoBlock = getPrintLogoBlock();
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -215,31 +202,8 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
       gap: 3mm;
       width: 100%;
     }
-    .fn-logo-cell {
-      flex: 0 0 20mm;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
+    ${buildPrintLogoCss()}
     .fn-head-main { flex: 1; min-width: 0; text-align: center; }
-    .fn-logo-img {
-      max-height: 18mm;
-      max-width: 18mm;
-      width: 100%;
-      height: auto;
-      object-fit: contain;
-      display: block;
-      filter: grayscale(1) brightness(0);
-      -webkit-print-color-adjust: exact;
-      print-color-adjust: exact;
-    }
-    .fn-logo-fallback {
-      width: 15mm; height: 15mm;
-      border: 2px solid #000;
-      clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
-      display: flex; align-items: center; justify-content: center;
-      font-weight: 900; font-size: 8pt;
-    }
     .fn-co-name {
       text-align: center;
       font-size: 15pt;

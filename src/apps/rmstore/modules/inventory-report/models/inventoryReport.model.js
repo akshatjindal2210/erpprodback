@@ -30,14 +30,6 @@ function buildCoilRules(alias = "c", qcAlias = "q") {
   const NOT_SHOP_FLOOR = `${STATUS} NOT IN ('out', 'consumed') AND ${alias}.out_uid IS NULL`;
   const NOT_RM_REJECTION = `NOT (${QC} = 'failed' OR ${STATUS} = 'rejected')`;
 
-  /** Physical location — QC / rejection status ignored. */
-  // const IN_STORE = `${NOT_SHOP_FLOOR} AND ${NOT_CONSUMED} AND ${alias}.location_id IS NOT NULL`;
-  // const UNASSIGNED = `${NOT_SHOP_FLOOR} AND ${NOT_CONSUMED} AND ${alias}.location_id IS NULL`;
-  // const IN_WAREHOUSE = `(${IN_STORE}) OR (${UNASSIGNED})`;
-  
-  // /** Issuable — QC passed only (subset of physical warehouse). */
-  // const ISSUABLE = `${IN_WAREHOUSE} AND ${NOT_RM_REJECTION} AND ${QC_PASSED}`;
-  
   /* Physical location — QC / rejection status ignored. */
   const IN_STORE = `(${NOT_SHOP_FLOOR} AND ${NOT_CONSUMED} AND ${alias}.location_id IS NOT NULL)`;
   const UNASSIGNED = `(${NOT_SHOP_FLOOR} AND ${NOT_CONSUMED} AND ${alias}.location_id IS NULL)`;
@@ -60,58 +52,89 @@ function locationLabelSql(cAlias, lmAlias = "lm") {
   END`;
 }
 
-function locationDetailsSubquerySql(mrnUidRef) {
-  const rules = buildCoilRules("c2", "q2");
-  const { IN_STORE, UNASSIGNED, SHOP_FLOOR, PENDING_QC } = rules;
+/**
+ * Location chips + rack hover map — computed ONCE for all MRNs (no per-row LATERAL).
+ * Same output as before; QC join only for QC chip.
+ */
+function sqlLocByMrn() {
+  const rulesNoQc = buildCoilRules("c2", "q_unused");
+  const rulesQc = buildCoilRules("c2", "q2");
+  const { IN_STORE, UNASSIGNED, SHOP_FLOOR } = rulesNoQc;
+  const { PENDING_QC } = rulesQc;
   const label = locationLabelSql("c2", "lm2");
-  const mrnMatch = `COALESCE(NULLIF(TRIM(c2.mrn_uid::text), ''), '—') = ${mrnUidRef}`;
-  const coilBase = `
-      FROM ${T.COIL_TABLE} c2
-      ${coilQcJoinForAlias("c2", "q2")}
-      WHERE c2.is_deleted = false AND ${mrnMatch}`;
+  const mrnKey = `COALESCE(NULLIF(TRIM(c2.mrn_uid::text), ''), '—')`;
 
-  return `(
-    SELECT NULLIF(
-      STRING_AGG(loc_parts.part, ', ' ORDER BY loc_parts.sort_key, loc_parts.part_label),
-      ''
-    )
-    FROM (
-      SELECT 1 AS sort_key, ${label} AS part_label,
-        ${label} || ' (' || COUNT(*)::text || ')' AS part
-      FROM ${T.COIL_TABLE} c2
-      LEFT JOIN ${IT.LOCATION_MASTER} lm2 ON lm2.location_id = c2.location_id AND lm2.is_deleted = false
-      ${coilQcJoinForAlias("c2", "q2")}
-      WHERE c2.is_deleted = false AND ${mrnMatch}
-        AND (${IN_STORE})
-      GROUP BY c2.location_id, ${label}
+  return `
+loc_parts AS (
+  SELECT
+    ${mrnKey} AS mrn_key,
+    1 AS sort_key,
+    ${label} AS part_label,
+    ${label} || ' (' || COUNT(*)::text || ')' AS part,
+    STRING_AGG(c2.coil_no_uid, E'\\n') AS uids
+  FROM ${T.COIL_TABLE} c2
+  LEFT JOIN ${IT.LOCATION_MASTER} lm2
+    ON lm2.location_id = c2.location_id AND lm2.is_deleted = false
+  WHERE c2.is_deleted = false
+    AND LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
+    AND (${IN_STORE})
+  GROUP BY ${mrnKey}, c2.location_id, ${label}
 
-      UNION ALL
+  UNION ALL
 
-      SELECT 2, 'UA', 'UA (' || COUNT(*)::text || ')'
-      ${coilBase}
-        AND (${UNASSIGNED})
-      HAVING COUNT(*) > 0
+  SELECT ${mrnKey}, 2, 'UA', 'UA (' || COUNT(*)::text || ')', NULL::text
+  FROM ${T.COIL_TABLE} c2
+  WHERE c2.is_deleted = false
+    AND LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
+    AND (${UNASSIGNED})
+  GROUP BY ${mrnKey}
+  HAVING COUNT(*) > 0
 
-      UNION ALL
+  UNION ALL
 
-      SELECT 3, 'SF', 'SF (' || COUNT(*)::text || ')'
-      ${coilBase}
-        AND (${SHOP_FLOOR})
-      HAVING COUNT(*) > 0
+  SELECT ${mrnKey}, 3, 'SF', 'SF (' || COUNT(*)::text || ')', NULL::text
+  FROM ${T.COIL_TABLE} c2
+  WHERE c2.is_deleted = false
+    AND (${SHOP_FLOOR})
+  GROUP BY ${mrnKey}
+  HAVING COUNT(*) > 0
 
-      UNION ALL
+  UNION ALL
 
-      SELECT 4, 'QC', 'QC (' || COUNT(*)::text || ')'
-      ${coilBase}
-        AND (${PENDING_QC})
-      HAVING COUNT(*) > 0
-    ) loc_parts
-  )`;
+  SELECT ${mrnKey}, 4, 'QC', 'QC (' || COUNT(*)::text || ')', NULL::text
+  FROM ${T.COIL_TABLE} c2
+  ${coilQcJoinForAlias("c2", "q2")}
+  WHERE c2.is_deleted = false
+    AND LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
+    AND (${PENDING_QC})
+  GROUP BY ${mrnKey}
+  HAVING COUNT(*) > 0
+),
+loc_by_mrn AS (
+  SELECT
+    p.mrn_key,
+    COALESCE(
+      NULLIF(STRING_AGG(p.part, ', ' ORDER BY p.sort_key, p.part_label), ''),
+      '—'
+    ) AS location_details,
+    COALESCE(
+      jsonb_object_agg(p.part_label, p.uids) FILTER (
+        WHERE p.sort_key = 1
+          AND p.uids IS NOT NULL
+          AND p.part_label IS NOT NULL
+          AND TRIM(p.part_label) <> ''
+          AND TRIM(p.part_label) <> '—'
+      ),
+      '{}'::jsonb
+    ) AS location_coil_uids_map
+  FROM loc_parts p
+  GROUP BY p.mrn_key
+)`;
 }
 
 export function buildRmInventoryReportSql() {
   const rules = buildCoilRules("c");
-  const { IN_STORE, UNASSIGNED, IN_WAREHOUSE, ISSUABLE, SHOP_FLOOR, PENDING_QC, PENDING_REJECT } = rules;
+  const { IN_STORE, UNASSIGNED, ISSUABLE, SHOP_FLOOR, PENDING_QC, PENDING_REJECT } = rules;
 
   const HEAT_DISPLAY = `COALESCE(
     NULLIF(TRIM(MAX(COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.it_lot_no), '')))), ''),
@@ -148,19 +171,20 @@ SELECT
 
   COALESCE(ARRAY_AGG(DISTINCT c.location_id::text) FILTER (WHERE ${IN_STORE}), ARRAY[]::text[]) AS in_store_location_ids,
 
-  STRING_AGG(DISTINCT c.coil_no_uid, E'\\n' ORDER BY c.coil_no_uid) FILTER (WHERE ${ISSUABLE}) AS issuable_coil_uids,
-  STRING_AGG(DISTINCT c.coil_no_uid, E'\\n' ORDER BY c.coil_no_uid) FILTER (WHERE ${IN_STORE} OR ${UNASSIGNED} OR ${SHOP_FLOOR}) AS total_stock_coil_uids,
-  STRING_AGG(DISTINCT c.coil_no_uid, E'\\n' ORDER BY c.coil_no_uid) FILTER (WHERE ${IN_STORE}) AS in_store_coil_uids,
-  STRING_AGG(DISTINCT c.coil_no_uid, E'\\n' ORDER BY c.coil_no_uid) FILTER (WHERE ${UNASSIGNED}) AS unassigned_coil_uids,
-  STRING_AGG(DISTINCT c.coil_no_uid, E'\\n' ORDER BY c.coil_no_uid) FILTER (WHERE ${SHOP_FLOOR}) AS shop_floor_coil_uids,
-  STRING_AGG(DISTINCT c.coil_no_uid, E'\\n' ORDER BY c.coil_no_uid) FILTER (WHERE ${PENDING_QC}) AS pending_qc_coil_uids,
-  STRING_AGG(DISTINCT c.coil_no_uid, E'\\n' ORDER BY c.coil_no_uid) FILTER (WHERE ${PENDING_REJECT}) AS pending_reject_coil_uids
+  STRING_AGG(c.coil_no_uid, E'\\n') FILTER (WHERE ${ISSUABLE}) AS issuable_coil_uids,
+  STRING_AGG(c.coil_no_uid, E'\\n') FILTER (WHERE ${IN_STORE} OR ${UNASSIGNED} OR ${SHOP_FLOOR}) AS total_stock_coil_uids,
+  STRING_AGG(c.coil_no_uid, E'\\n') FILTER (WHERE ${IN_STORE}) AS in_store_coil_uids,
+  STRING_AGG(c.coil_no_uid, E'\\n') FILTER (WHERE ${UNASSIGNED}) AS unassigned_coil_uids,
+  STRING_AGG(c.coil_no_uid, E'\\n') FILTER (WHERE ${SHOP_FLOOR}) AS shop_floor_coil_uids,
+  STRING_AGG(c.coil_no_uid, E'\\n') FILTER (WHERE ${PENDING_QC}) AS pending_qc_coil_uids,
+  STRING_AGG(c.coil_no_uid, E'\\n') FILTER (WHERE ${PENDING_REJECT}) AS pending_reject_coil_uids
 
 FROM ${T.COIL_TABLE} c
 LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
 ${coilQcJoinForAlias("c", "q")}
 
 WHERE c.is_deleted = false
+  AND LOWER(TRIM(COALESCE(c.status, 'active'))) <> 'consumed'
 
 GROUP BY COALESCE(NULLIF(TRIM(c.mrn_uid::text), ''), '—')
 
@@ -173,11 +197,14 @@ HAVING
 `;
 
   return `
-  SELECT
-    grouped.*,
-    COALESCE(${locationDetailsSubquerySql("grouped.mrn_uid")}, '—') AS location_details
-  FROM (${groupedSql}) grouped
-  `;
+WITH ${sqlLocByMrn()}
+SELECT
+  grouped.*,
+  COALESCE(loc.location_details, '—') AS location_details,
+  COALESCE(loc.location_coil_uids_map, '{}'::jsonb) AS location_coil_uids_map
+FROM (${groupedSql}) grouped
+LEFT JOIN loc_by_mrn loc ON loc.mrn_key = grouped.mrn_uid
+`;
 }
 
 export async function findRmInventoryReport(options = {}) {
@@ -239,6 +266,7 @@ export async function findRmInventoryReport(options = {}) {
       rep.customer_code,
       rep.customer_name,
       COALESCE(rep.location_details, '—') AS location_details,
+      COALESCE(rep.location_coil_uids_map, '{}'::jsonb) AS location_coil_uids_map,
       COALESCE(rep.in_store_location_ids, ARRAY[]::text[]) AS in_store_location_ids,
       COALESCE(rep.in_store_qty, 0) + COALESCE(rep.unassigned_qty, 0) + COALESCE(rep.shop_floor_qty, 0) AS total_stock_qty,
       COALESCE(rep.issuable_qty, 0) AS issuable_qty,

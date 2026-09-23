@@ -6,6 +6,42 @@
 
 const IMS_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+/** IMS display `29-08-2026 16:53` (Asia/Kolkata). */
+export function formatIstDateTime(v) {
+  if (v == null || v === "") return v ?? null;
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) return String(v).trim() || null;
+  return d
+    .toLocaleString("en-GB", {
+      timeZone: "Asia/Kolkata",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    })
+    .replace(/\//g, "-")
+    .replace(", ", " ");
+}
+
+/** `YYYY-MM-DD` (Asia/Kolkata) for IMS upload fields e.g. invreceiving billdt. */
+export function formatIstDateYmd(v) {
+  if (v == null || v === "") return "";
+  const s = String(v).trim();
+  const ddmmyyyy = s.match(/^(\d{2})-(\d{2})-(\d{4})/);
+  if (ddmmyyyy) return `${ddmmyyyy[3]}-${ddmmyyyy[2]}-${ddmmyyyy[1]}`;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) return s;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
 export function formatImsBilldtToken(d) {
   const dt = d instanceof Date ? d : new Date(d);
   return `${dt.getDate()}${IMS_MON[dt.getMonth()]}${dt.getFullYear()}`;

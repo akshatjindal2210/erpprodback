@@ -10,6 +10,7 @@ import inventoryInwardRoutes from "../modules/inventory-inward/routes/inventoryI
 import forwardingNoteRoutes from "../modules/forwarding-note/routes/forwardingNote.route.js";
 import outEntryRoutes from "../modules/out-entry/routes/outEntry.route.js";
 import gateEntryRoutes from "../modules/gate-entry/routes/gateEntry.route.js";
+import invoiceReceivingRoutes from "../modules/invoice-receiving/routes/invoiceReceiving.route.js";
 import stockAdjustmentRoutes from "../modules/stock-adjustment/routes/stockAdjustment.route.js";
 import transactionBoxRoutes from "../manage/log/routes/transactionBox.routes.js";
 import inventoryReportRoutes from "../modules/inventory-report/routes/inventoryReport.route.js";
@@ -33,6 +34,7 @@ router.use("/inventory-inwards", inventoryInwardRoutes);
 router.use("/forwarding-notes", forwardingNoteRoutes);
 router.use("/out-entries", outEntryRoutes);
 router.use("/gate-entries", gateEntryRoutes);
+router.use("/invoice-receiving", invoiceReceivingRoutes);
 router.use("/stock-adjustment", stockAdjustmentRoutes);
 router.use("/box-transaction-logs", transactionBoxRoutes);
 router.use("/inventory-report", inventoryReportRoutes);
