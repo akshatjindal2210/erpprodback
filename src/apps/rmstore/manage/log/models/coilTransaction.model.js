@@ -15,6 +15,7 @@ export async function findCoilTransactions(options = {}) {
     limit = 100,
     permission = {},
     user_id = null,
+    skipCount = false,
   } = options;
 
   const values = [];
@@ -88,11 +89,15 @@ export async function findCoilTransactions(options = {}) {
   const safeLimit = Math.min(100000, Math.max(1, Number(limit) || 100));
   const offset = (safePage - 1) * safeLimit;
 
-  const countValues = [...values];
-  const [{ count }] = await dbQuery(
-    `${journeyCte ? `${journeyCte} ` : ""}SELECT COUNT(*)::int AS count FROM ${TBL} tb ${whereClause}`,
-    countValues
-  );
+  let total = 0;
+  if (!skipCount) {
+    const countValues = [...values];
+    const [{ count }] = await dbQuery(
+      `${journeyCte ? `${journeyCte} ` : ""}SELECT COUNT(*)::int AS count FROM ${TBL} tb ${whereClause}`,
+      countValues
+    );
+    total = Number(count || 0);
+  }
 
   values.push(safeLimit, offset);
   const rows = await dbQuery(
@@ -107,9 +112,9 @@ export async function findCoilTransactions(options = {}) {
 
   return {
     data: rows,
-    total: Number(count || 0),
+    total: skipCount ? rows.length : total,
     page: safePage,
     limit: safeLimit,
-    totalPages: Math.ceil(Number(count || 0) / safeLimit),
+    totalPages: skipCount ? 1 : Math.ceil(total / safeLimit),
   };
 }

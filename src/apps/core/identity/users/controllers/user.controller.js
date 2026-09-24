@@ -5,6 +5,7 @@ import { findUsers, findUser, findUserByUsernameInsensitive, insertUser, updateU
 import { fetchFromIMS, fetchImsDataRaw } from "../../../../ims/lib/services/ims.service.js";
 import { findModules } from "../../modules/models/module.model.js";
 import { findUserPermissions, findUserAppAccess, findActiveUserIdsWithAppAccess, upsertBulkPermissions, upsertBulkAppAccess, syncAppGateChildPermissions } from "../../permissions/models/permission.model.js";
+import { findUserAttributes, parseAttributeInput, syncUserAttributes } from "../../attributes/models/attribute.model.js";
 import { resolveUserHelperAppKey } from "../../../lib/utils/auth/userHelperAppFilter.js";
 import { logActivity } from "../../../lib/utils/activity/logActivity.js";
 import { emitToUser } from "../../../lib/utils/realtime/socket.js";
@@ -209,6 +210,7 @@ export const getUserById = async (req, res) => {
 
     const permissions = await findUserPermissions(id);
     const appAccess = await findUserAppAccess(id);
+    const attributes = await findUserAttributes(id);
     const { password, ...safeUser } = user;
     res.json({
       success: true,
@@ -216,6 +218,7 @@ export const getUserById = async (req, res) => {
         ...safeUser,
         permissions: permissions.map(cleanPermissionMap),
         app_access: appAccess,
+        attributes,
       },
     });
   } catch (err) {
@@ -228,8 +231,13 @@ export const createUser = async (req, res) => {
   try {
     const {
       name, username, email, phone, password, type, status, permissions, app_access, auth_source, usercode,
-      department_id, designation_id, special_permissions,
+      department_id, designation_id, special_permissions, attributes,
     } = req.body;
+
+    const attributeInput = parseAttributeInput(attributes);
+    if (attributeInput === null) {
+      return res.status(400).json({ success: false, message: "Invalid attributes" });
+    }
 
     const trimmedName = String(name ?? "").trim();
     const trimmedUsername = String(username ?? "").trim().toLowerCase();
@@ -337,15 +345,17 @@ export const createUser = async (req, res) => {
       await syncAppGateChildPermissions(user.id, app_access, meta);
     }
 
+    const linkedAttributes = attributeInput ? await syncUserAttributes(user.id, attributeInput) : [];
+
     await logActivity(req, {
       action: "create",
       entity: "users",
       entity_id: user.id,
-      details: { name: user.name, username: user.username },
+      details: { name: user.name, username: user.username, attributes: linkedAttributes.map((a) => a.name) },
       appType: "portal",
     });
     const { password: _, ...safeUser } = user;
-    res.status(201).json({ success: true, data: safeUser, message: "User created successfully" });
+    res.status(201).json({ success: true, data: { ...safeUser, attributes: linkedAttributes }, message: "User created successfully" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -356,9 +366,14 @@ export const updateUser = async (req, res) => {
   try {
     const {
       id, name, username, email, phone, type, status, password, permissions, app_access, auth_source, usercode,
-      department_id, designation_id, special_permissions,
+      department_id, designation_id, special_permissions, attributes,
     } = req.body;
     if (!id) return res.status(400).json({ success: false, message: "User ID required" });
+
+    const attributeInput = parseAttributeInput(attributes);
+    if (attributeInput === null) {
+      return res.status(400).json({ success: false, message: "Invalid attributes" });
+    }
 
     const existing = await findUser({ id });
     if (!existing) return res.status(404).json({ success: false, message: "User not found" });
@@ -453,6 +468,10 @@ export const updateUser = async (req, res) => {
     const [updated] = await updateUsers(fields, { id });
     Object.assign(existing, updated);
 
+    if (attributeInput) {
+      existing.attributes = await syncUserAttributes(Number(id), attributeInput);
+    }
+
     let permissionsChanged = false;
 
     if (permissions && typeof permissions === "object" && !Array.isArray(permissions)) {
@@ -489,7 +508,10 @@ export const updateUser = async (req, res) => {
       action: "update",
       entity: "users",
       entity_id: id,
-      details: { updated_fields: fields },
+      details: {
+        updated_fields: fields,
+        ...(existing.attributes ? { attributes: existing.attributes.map((a) => a.name) } : {}),
+      },
       appType: "portal",
     });
 

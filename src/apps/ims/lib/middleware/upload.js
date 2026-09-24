@@ -103,7 +103,7 @@ export function toPublicUploadPath(file, fallbackParts = []) {
   return null;
 }
 
-/** Invoice Receiving — `{UPLOAD_PATH}/ims/invoice-receiving` (reuses shared fileFilter). */
+/** Invoice Receiving — `uploads/ims/invoice-receiving` */
 const IMS_IR_ROOT = path.join(config.uploadPath, "ims", "invoice-receiving");
 export const invoiceReceivingUpload = multer({
   storage: multer.diskStorage({
@@ -112,8 +112,12 @@ export const invoiceReceivingUpload = multer({
       cb(null, IMS_IR_ROOT);
     },
     filename: (_req, file, cb) => {
-      const safe = String(file.originalname || "attachment").replace(/[^\w.\-]+/g, "_");
-      cb(null, `${Date.now()}_${safe}`);
+      const orig = String(file.originalname || "attachment");
+      let ext = path.extname(orig).toLowerCase();
+      if (!/^\.(pdf|png|jpe?g|webp|gif)$/.test(ext)) ext = ".bin";
+      const hint = path.basename(orig, path.extname(orig)).replace(/[^\w]/g, "").slice(0, 8).toLowerCase();
+      const uniq = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 4)}`;
+      cb(null, hint ? `${uniq}_${hint}${ext}` : `${uniq}${ext}`);
     },
   }),
   fileFilter,

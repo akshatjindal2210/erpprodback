@@ -110,8 +110,11 @@ export const getSpecs = async (req, res) => {
       sortBy: "item_code",
       order: "ASC",
     });
+    const listFilters = sanitizeFilters(filters, CFG.filterFields);
+    delete listFilters.from_date;
+    delete listFilters.to_date;
     const result = await findSpecItems({
-      filters: sanitizeFilters(filters, CFG.filterFields),
+      filters: listFilters,
       search: sanitizeSearch(search),
       sort: { by: sortBy, order },
       page,

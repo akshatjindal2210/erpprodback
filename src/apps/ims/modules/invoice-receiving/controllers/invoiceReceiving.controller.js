@@ -1,7 +1,8 @@
 import { fetchImsDataRaw } from "../../../lib/services/ims.service.js";
 import { toImsIrPublicUploadPath } from "../../../lib/middleware/upload.js";
+import { findSavedGateBillSet } from "../../gate-entry/models/gateEntry.model.js";
 import { formatIstDateTime } from "../../gate-entry/utils/imsBillDateFilter.js";
-import { buildInvReceivingClearFilter, buildInvReceivingErpPayload, buildInvReceivingListFilter, buildInvReceivingUpdateFilter, parseReceiverefnoFromIms } from "../utils/buildInvReceivingUploadFilter.js";
+import { buildInvReceivingClearFilter, buildInvReceivingListFilter, buildInvReceivingUpdateFilter, isErpNullString, parseExistingPathsFromBody, parseReceiverefnoFromIms } from "../utils/buildInvReceivingUploadFilter.js";
 
 const MODULE = "invoice_receiving";
 const MODE_PERM = { add: "can_add", edit: "can_edit", approve: "can_authorize" };
@@ -23,7 +24,13 @@ const mapRow = (row) => {
   return out;
 };
 
-const canMode = (req, mode) => String(req.user?.type || "").toLowerCase() === "super_admin" || Boolean(req.permission?.[MODE_PERM[mode]]);
+const canMode = (req, mode) => {
+  if (String(req.user?.type || "").toLowerCase() === "super_admin") return true;
+  const p = req.permission || {};
+  if (mode === "approve") return Boolean(p.can_authorize);
+  if (mode === "add" || mode === "edit") return Boolean(p.can_add || p.can_edit || p.can_authorize);
+  return Boolean(p[MODE_PERM[mode]]);
+};
 
 function parseTruthyFlag(v) {
   if (v === true || v === 1) return true;
@@ -31,22 +38,24 @@ function parseTruthyFlag(v) {
   return s === "true" || s === "1" || s === "yes" || s === "y";
 }
 
-/** Pending `type:""` · Register `type:"register"` + optional `data` billdt range. */
+/** Pending `type:""` (gate-registered only) · Register `type:"register"` + optional billdt range. */
 export async function listInvoiceReceiving(req, res) {
   try {
     const type = req.body?.type == null ? "" : String(req.body.type);
     const from_date = req.body?.from_date ?? req.body?.fromDate ?? null;
     const to_date = req.body?.to_date ?? req.body?.toDate ?? null;
+    const gateOnly = type !== "register" || parseTruthyFlag(req.body?.gate_registered_only);
     const filter = buildInvReceivingListFilter(type, from_date, to_date);
     const json = await fetchImsDataRaw("invreceiving", filter);
     if (!json?.success) {
       return res.status(502).json({ success: false, message: json?.message || "Failed to load invoice receiving.", data: [] });
     }
-    return res.json({
-      success: true,
-      message: json.message,
-      data: (Array.isArray(json.records) ? json.records : []).map(mapRow),
-    });
+    let rows = (Array.isArray(json.records) ? json.records : []).map(mapRow);
+    if (gateOnly) {
+      const saved = await findSavedGateBillSet();
+      rows = rows.filter((r) => saved.has(String(r?.prnbillno ?? "").trim().toLowerCase()));
+    }
+    return res.json({ success: true, message: json.message, data: rows });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || "Failed to load invoice receiving.", data: [] });
   }
@@ -59,42 +68,40 @@ export async function updateInvoiceReceiving(req, res) {
     const mode = MODE_PERM[modeRaw] ? modeRaw : "add";
     if (!canMode(req, mode)) return res.status(403).json({ success: false, message: "No access for this action." });
 
-    const existingPath = String(req.body?.receivingfile || req.body?.file_path || "").trim();
-    if (!req.file && !existingPath) {
-      return res.status(400).json({ success: false, message: "One PDF or image attachment is required." });
-    }
+    const uploaded = Array.isArray(req.files) ? req.files : req.file ? [req.file] : [];
+    const newPaths = uploaded.map((f) => toImsIrPublicUploadPath(f)).filter(Boolean);
+    const existingPaths = parseExistingPathsFromBody(req.body).filter((p) => !isErpNullString(p));
+    const file_paths = [...existingPaths, ...newPaths];
 
-    const file_path = req.file ? toImsIrPublicUploadPath(req.file) : existingPath;
-    if (!file_path) return res.status(500).json({ success: false, message: "Failed to resolve attachment path." });
+    if (file_paths.length === 0) {
+      return res.status(400).json({ success: false, message: "At least one PDF or image attachment is required." });
+    }
 
     const wantApproved = parseTruthyFlag(req.body?.approved);
 
-    const touchUpload = Boolean(req.file) || mode === "add";
+    const touchUpload = newPaths.length > 0 || mode === "add";
     const filter = buildInvReceivingUpdateFilter(req, {
       prnbillno: req.body?.prnbillno,
       billdt: req.body?.billdt,
-      file_path,
+      file_paths,
       approved: wantApproved,
       remarks: req.body?.remarks,
       touchUpload,
     });
-
-    const erp_payload = buildInvReceivingErpPayload(filter);
-    console.log("[invoice-receiving] IMS payload:\n", JSON.stringify(erp_payload, null, 2));
 
     const erp = await fetchImsDataRaw("invreceiving", filter);
     if (!erp?.success) {
       return res.status(502).json({
         success: false,
         message: erp?.message || "IMS upload failed.",
-        data: { erp_payload, file_path, erp },
+        data: { file_paths, erp },
       });
     }
 
     return res.json({
       success: true,
       message: erp?.message || "Uploaded to IMS.",
-      data: { mode, erp_payload, erp, ...filter },
+      data: { mode, erp },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || "Failed to update invoice receiving." });
@@ -119,22 +126,19 @@ export async function deleteInvoiceReceiving(req, res) {
     }
 
     const filter = buildInvReceivingClearFilter({ prnbillno, billdt });
-    const erp_payload = buildInvReceivingErpPayload(filter);
-    console.log("[invoice-receiving] clear payload:\n", JSON.stringify(erp_payload, null, 2));
-
     const erp = await fetchImsDataRaw("invreceiving", filter);
     if (!erp?.success) {
       return res.status(502).json({
         success: false,
         message: erp?.message || "IMS clear receiving failed.",
-        data: { erp_payload, erp },
+        data: { erp },
       });
     }
 
     return res.json({
       success: true,
       message: erp?.message || "Receiving cleared on IMS.",
-      data: { erp_payload, erp, ...filter },
+      data: { erp },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || "Failed to clear invoice receiving." });

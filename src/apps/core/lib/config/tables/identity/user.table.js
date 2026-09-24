@@ -17,6 +17,7 @@ export async function createUsersTable() {
       auth_source     VARCHAR(20) CHECK (auth_source IN ('local', 'erp')) DEFAULT 'local',
       department_id   INTEGER,
       designation_id  INTEGER,
+      attribute_ids   INTEGER[] NOT NULL DEFAULT '{}',
       approved        BOOLEAN DEFAULT false,
       approved_by     TEXT,
       approved_at     TIMESTAMP,
@@ -35,6 +36,10 @@ export async function createUsersTable() {
   await patchTableSchema(dbQuery, T.USERS, {
     columns: [
       patchCol("special_permissions", "JSONB DEFAULT '{}'"),
+      patchCol("attribute_ids", "INTEGER[] NOT NULL DEFAULT '{}'"),
+    ],
+    indexes: [
+      `CREATE INDEX IF NOT EXISTS users_attribute_ids_gin ON ${T.USERS} USING GIN (attribute_ids)`,
     ],
   });
 

@@ -11,6 +11,8 @@ import { roundCoilQty } from "../../../lib/utils/coilQtySplit.js";
 import { isIssuedToShopFloor, isSaMinusWriteOff } from "../../../lib/utils/saMinusInventory.js";
 
 const TABLE = T.COIL_TABLE;
+const OUT_ENTRY = T.OUT_ENTRY;
+const IPR_TABLE = T.IN_PROCESS_REQUEST;
 const COIL_HEAT_NO_SQL = `COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.it_lot_no), ''))`;
 const COIL_QC_STATUS_SELECT = `${COIL_QC_STATUS_EXPR} AS qc_check_status`;
 const COIL_REJECTION_FIELDS = `${COIL_REJECTION_SELECT.replace(/\s+/g, " ").trim()}`;
@@ -24,6 +26,71 @@ export function enrichCoilUidMeta(row) {
   if (!row) return row;
   const meta = parseCoilNoUidMeta(row.coil_no_uid);
   return { ...row, coil_index: meta.index, total_coils: meta.total };
+}
+
+/** Job card column: single JC or reassign split (source qty → balance qty on target JC). */
+export function enrichCoilJobCardDisplay(row) {
+  if (!row) return row;
+  const base = enrichCoilUidMeta(row);
+  const source = String(base.reassign_source_pjobcardno || "").trim();
+  const target = String(base.reassign_target_pjobcardno || base.pjobcardno || "").trim();
+  const consumed = Number(base.reassign_consumed_qty);
+  const balance = Number(base.reassign_balance_qty ?? base.qty);
+  const hasSplit =
+    source &&
+    target &&
+    source.toUpperCase() !== target.toUpperCase() &&
+    (consumed > 0 || balance > 0);
+
+  const macnameFromAssignments = (list) => {
+    const macs = (list || []).map((a) => String(a?.macname || "").trim()).filter(Boolean);
+    const unique = [...new Map(macs.map((m) => [m.toUpperCase(), m])).values()];
+    return unique.length ? unique.join(", ") : null;
+  };
+
+  if (!hasSplit) {
+    return {
+      ...base,
+      pjobcardno_label: base.pjobcardno || null,
+      macname_label: base.reassign_target_macname || base.macname || null,
+      job_card_assignments: null,
+    };
+  }
+
+  const assignments = [];
+  const parts = [];
+  if (consumed > 0) {
+    parts.push(`${source} (${consumed})`);
+    assignments.push({
+      pjobcardno: source,
+      macname: base.reassign_source_macname || base.macname || null,
+      qty: consumed,
+      kind: "consumed",
+    });
+  }
+  if (balance > 0) {
+    parts.push(`${target} (${balance})`);
+    assignments.push({
+      pjobcardno: target,
+      macname: base.reassign_target_macname || base.macname || null,
+      qty: balance,
+      kind: "balance",
+    });
+  }
+
+  const pjobcardno_label = parts.length > 1 ? parts.join(", ") : parts[0] || base.pjobcardno || null;
+
+  return {
+    ...base,
+    pjobcardno_label,
+    macname_label:
+      macnameFromAssignments(assignments) ||
+      base.reassign_target_macname ||
+      base.macname ||
+      null,
+    job_card_assignments: assignments.length > 1 ? assignments : assignments.length ? assignments : null,
+    reassign: assignments.length > 1,
+  };
 }
 
 export function coilIndexFromUidSql(alias = "c") {
@@ -42,7 +109,7 @@ const COIL_QC_UID_SELECT = `COALESCE(c.qc_uid, q.qc_check_uid) AS qc_uid`;
 const COIL_SA_BILL_JOIN = `LEFT JOIN ${T.STOCK_ADJUSTMENT} sa_bill ON sa_bill.adjustment_id = c.sa_id AND sa_bill.is_deleted = false`;
 const COIL_BILL_NO_SQL = `COALESCE(NULLIF(TRIM(m.bill_no), ''), NULLIF(TRIM(sa_bill.bill_no), '')) AS bill_no`;
 const COIL_BILL_DT_SQL = `COALESCE(m.bill_dt, sa_bill.bill_dt) AS bill_dt`;
-const COIL_DETAIL_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, m.mrn_dt, m.sticker_generated, m.sticker_approved, ${COIL_BILL_NO_SQL}, ${COIL_BILL_DT_SQL}, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.it_unit, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, m.remarks, c.qty, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, c.status, c.download_count, c.is_deleted, c.deleted_by, c.deleted_at, c.created_by, c.created_at, c.updated_by, c.updated_at`;
+const COIL_DETAIL_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, m.mrn_dt, m.sticker_generated, m.sticker_approved, ${COIL_BILL_NO_SQL}, ${COIL_BILL_DT_SQL}, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.it_unit, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, m.remarks, c.qty, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, jc.fg_item_code, jc.fg_item_desc, c.status, c.download_count, c.is_deleted, c.deleted_by, c.deleted_at, c.created_by, c.created_at, c.updated_by, c.updated_at`;
 const COIL_MRN_JOIN = `LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid`;
 
 /**
@@ -55,12 +122,14 @@ const COIL_JOB_CARD_JOIN = `
 LEFT JOIN LATERAL (
   SELECT
     COALESCE(NULLIF(TRIM(o.pjobcardno), ''), jc_reserve.pjobcardno) AS pjobcardno,
-    COALESCE(jc_out.macname, jc_reserve.macname) AS macname
+    COALESCE(jc_out.macname, jc_reserve.macname) AS macname,
+    COALESCE(NULLIF(TRIM(jc_out.item_code), ''), NULLIF(TRIM(jc_reserve.item_code), '')) AS fg_item_code,
+    COALESCE(NULLIF(TRIM(jc_out.item_desc), ''), NULLIF(TRIM(jc_reserve.item_desc), '')) AS fg_item_desc
   FROM (SELECT 1) AS _
   LEFT JOIN ${T.OUT_ENTRY} o
     ON o.out_uid = c.out_uid AND o.is_deleted = false
   LEFT JOIN LATERAL (
-    SELECT jc.macname
+    SELECT jc.macname, jc.item_code, jc.item_desc
     FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
     WHERE jc.issue_uid = o.issue_uid
       AND jc.is_deleted = false
@@ -69,7 +138,7 @@ LEFT JOIN LATERAL (
     LIMIT 1
   ) jc_out ON TRUE
   LEFT JOIN LATERAL (
-    SELECT jc.pjobcardno, jc.macname
+    SELECT jc.pjobcardno, jc.macname, jc.item_code, jc.item_desc
     FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
     INNER JOIN ${T.ISSUE_REQUEST} ir
       ON ir.issue_uid = jc.issue_uid AND ir.is_deleted = false
@@ -87,6 +156,43 @@ LEFT JOIN LATERAL (
     LIMIT 1
   ) jc_reserve ON TRUE
 ) jc ON TRUE`;
+
+/** Latest approved reassign IPR line for a shop-floor coil (source JC + target JC + qty split). */
+const COIL_REASSIGN_JOIN = `
+LEFT JOIN LATERAL (
+  SELECT
+    ipr.ipr_uid AS reassign_ipr_uid,
+    NULLIF(TRIM(line->>'pjobcardno'), '') AS reassign_target_pjobcardno,
+    NULLIF(TRIM(line->>'macname'), '') AS reassign_target_macname,
+    NULLIF(TRIM(prev.val->>'pjobcardno'), '') AS reassign_source_pjobcardno,
+    NULLIF(TRIM(prev.val->>'macname'), '') AS reassign_source_macname,
+    COALESCE(NULLIF(line->>'consumed_qty', '')::numeric, 0) AS reassign_consumed_qty,
+    COALESCE(
+      NULLIF(line->>'remaining_qty', '')::numeric,
+      NULLIF(line->>'qty', '')::numeric,
+      c.qty
+    ) AS reassign_balance_qty
+  FROM ${IPR_TABLE} ipr
+  CROSS JOIN LATERAL jsonb_array_elements(
+    CASE WHEN jsonb_typeof(ipr.coils) = 'array' THEN ipr.coils ELSE '[]'::jsonb END
+  ) AS line
+  LEFT JOIN LATERAL (
+    SELECT p AS val
+    FROM jsonb_array_elements(
+      CASE WHEN jsonb_typeof(ipr.previous_coils) = 'array' THEN ipr.previous_coils ELSE '[]'::jsonb END
+    ) AS p
+    WHERE LOWER(TRIM(p->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
+    LIMIT 1
+  ) prev ON TRUE
+  WHERE ipr.is_deleted = false
+    AND ipr.request_type = 'consume'
+    AND COALESCE(ipr.approved, false) = true
+    AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
+    AND COALESCE((line->>'reassign')::boolean, false) = true
+    AND LOWER(COALESCE(c.status, 'active')) = 'out'
+  ORDER BY ipr.approved_at DESC NULLS LAST, ipr.ipr_uid DESC
+  LIMIT 1
+) ipr_r ON TRUE`;
 
 /** Shared SOURCE label for list/group queries (alias = coil table alias). */
 export function coilSourceSql(alias = "c") {
@@ -110,7 +216,7 @@ const COIL_LAST_BY_SQL = `CASE
   ELSE c.created_by
 END`;
 
-const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, c.status, c.created_at, ${COIL_LAST_BY_SQL} AS last_by, COALESCE(c.updated_at, c.created_at) AS last_at, ${coilSourceSql("c")}::varchar AS source`;
+const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, jc.fg_item_code, jc.fg_item_desc, c.status, c.created_at, ${COIL_LAST_BY_SQL} AS last_by, COALESCE(c.updated_at, c.created_at) AS last_at, ${coilSourceSql("c")}::varchar AS source`;
 
 export const findCoilUidsByQcCheck = async (qc_uid) => {
   const id = Number(qc_uid);
@@ -131,19 +237,28 @@ export const findCoilsByQcCheckUid = async (qc_uid) => {
 async function fetchCoilsWithMrnDetails(coilNoUids = []) {
   const uids = (coilNoUids || []).map((uid) => String(uid || "").trim()).filter(Boolean);
   if (!uids.length) return [];
-  return dbQuery(
-    `SELECT ${COIL_DETAIL_SELECT}
+  const rows = await dbQuery(
+    `SELECT ${COIL_DETAIL_SELECT},
+            ipr_r.reassign_ipr_uid,
+            ipr_r.reassign_target_pjobcardno,
+            ipr_r.reassign_target_macname,
+            ipr_r.reassign_source_pjobcardno,
+            ipr_r.reassign_source_macname,
+            ipr_r.reassign_consumed_qty,
+            ipr_r.reassign_balance_qty
      FROM ${TABLE} c
      ${COIL_MRN_JOIN}
      ${COIL_SA_BILL_JOIN}
      ${COIL_QC_JOIN}
      ${COIL_REJECTION_JOIN}
      ${COIL_JOB_CARD_JOIN}
+     ${COIL_REASSIGN_JOIN}
      WHERE c.coil_no_uid = ANY($1::text[])
        AND c.is_deleted = false
      ORDER BY c.created_at ASC`,
     [uids]
   );
+  return (rows || []).map(enrichCoilJobCardDisplay);
 }
 
 export const findCoils = async (options = {}) => {
@@ -337,7 +452,7 @@ export const findCoils = async (options = {}) => {
 
   const where = `WHERE ${conditions.join(" AND ")}`;
   const countRes = await dbQuery(
-    `SELECT COUNT(*) AS count FROM ${TABLE} c ${COIL_MRN_JOIN} ${COIL_QC_JOIN} ${COIL_REJECTION_JOIN} ${COIL_JOB_CARD_JOIN} ${where}`,
+    `SELECT COUNT(*) AS count FROM ${TABLE} c ${COIL_MRN_JOIN} ${COIL_QC_JOIN} ${COIL_REJECTION_JOIN} ${COIL_JOB_CARD_JOIN} ${COIL_REASSIGN_JOIN} ${where}`,
     values
   );
   const total = Number(countRes[0]?.count || 0);
@@ -358,6 +473,13 @@ export const findCoils = async (options = {}) => {
 
   const rows = await dbQuery(
     `SELECT ${COIL_LIST_SELECT},
+            ipr_r.reassign_ipr_uid,
+            ipr_r.reassign_target_pjobcardno,
+            ipr_r.reassign_target_macname,
+            ipr_r.reassign_source_pjobcardno,
+            ipr_r.reassign_source_macname,
+            ipr_r.reassign_consumed_qty,
+            ipr_r.reassign_balance_qty,
             lm.location_no,
             lm.rack_no,
             lm.shelf_no AS row_no
@@ -366,6 +488,7 @@ export const findCoils = async (options = {}) => {
      ${COIL_QC_JOIN}
      ${COIL_REJECTION_JOIN}
      ${COIL_JOB_CARD_JOIN}
+     ${COIL_REASSIGN_JOIN}
      LEFT JOIN ${IT.LOCATION_MASTER} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
      ${where}
      ORDER BY ${sortExpr} ${sortOrder} NULLS LAST
@@ -373,7 +496,13 @@ export const findCoils = async (options = {}) => {
     [...values, safeLimit, offset]
   );
 
-  return { data: rows, total, page: safePage, limit: safeLimit, totalPages: Math.ceil(total / safeLimit) };
+  return {
+    data: (rows || []).map(enrichCoilJobCardDisplay),
+    total,
+    page: safePage,
+    limit: safeLimit,
+    totalPages: Math.ceil(total / safeLimit),
+  };
 };
 
 /** Latest issue-request machine per coil — for pending store-in display only. */
@@ -402,6 +531,13 @@ export const findCoilByUid = async (coil_no_uid) => {
   if (!val) return null;
   const [row] = await dbQuery(
     `SELECT ${COIL_DETAIL_SELECT},
+            ipr_r.reassign_ipr_uid,
+            ipr_r.reassign_target_pjobcardno,
+            ipr_r.reassign_target_macname,
+            ipr_r.reassign_source_pjobcardno,
+            ipr_r.reassign_source_macname,
+            ipr_r.reassign_consumed_qty,
+            ipr_r.reassign_balance_qty,
             lm.location_no,
             lm.rack_no,
             lm.shelf_no AS row_no
@@ -411,6 +547,7 @@ export const findCoilByUid = async (coil_no_uid) => {
      ${COIL_QC_JOIN}
      ${COIL_REJECTION_JOIN}
      ${COIL_JOB_CARD_JOIN}
+     ${COIL_REASSIGN_JOIN}
      LEFT JOIN ${IT.LOCATION_MASTER} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
      WHERE ${sqlStickerUidEquals("c.coil_no_uid", "$1")} AND c.is_deleted = false
      ORDER BY
@@ -423,7 +560,7 @@ export const findCoilByUid = async (coil_no_uid) => {
      LIMIT 1`,
     [val]
   );
-  return row ?? null;
+  return row ? enrichCoilJobCardDisplay(row) : null;
 };
 
 export const findCoilsByUids = async (uids = []) => {
@@ -1030,6 +1167,18 @@ export const processConsumeCoils = async (ipr_uid, coilLines = [], userName) => 
       [balance, userName ?? null, uid]
     );
     if (rows?.[0]) {
+      const isReassign = line.reassign === true;
+      const targetJc = String(line.pjobcardno || "").trim();
+      if (isReassign && targetJc && coil.out_uid != null) {
+        await dbQuery(
+          `UPDATE ${OUT_ENTRY}
+           SET pjobcardno = $1,
+               updated_at = NOW()
+           WHERE out_uid = $2
+             AND is_deleted = false`,
+          [targetJc, Number(coil.out_uid)]
+        );
+      }
       const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
       partialConsumed.push({
        ...(detail ?? rows[0]),
@@ -1037,6 +1186,7 @@ export const processConsumeCoils = async (ipr_uid, coilLines = [], userName) => 
        original_qty: original,
        remaining_qty: balance,
        partial: true,
+       reassign: isReassign,
       });
     }
   }

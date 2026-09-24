@@ -44,10 +44,20 @@ export function resolveDownstream(requestType, approved) {
   return IPR_DOWNSTREAM.PENDING_STORE_OUT;
 }
 
-/** After consume is applied — balance stays on the same row until Store In receive. */
+/** Reassign partial consume — balance moves to another job card on shop floor (not Store In). */
+export function hasReassignShopFloorBalance(coils = []) {
+  return normalizeCoils(coils).some(
+    (c) => c.reassign === true && num(c.remaining_qty) > 0
+  );
+}
+
+/** After consume is applied — leftover return queues Store In; reassign balance stays on shop floor. */
 export function resolveConsumeDownstream(coils = []) {
-  const balance = normalizeCoils(coils).reduce((s, c) => s + num(c.remaining_qty), 0);
-  return balance > 0 ? IPR_DOWNSTREAM.PENDING_STORE_IN : IPR_DOWNSTREAM.CONSUMED;
+  const lines = normalizeCoils(coils);
+  const balance = lines.reduce((s, c) => s + num(c.remaining_qty), 0);
+  if (balance <= 0) return IPR_DOWNSTREAM.CONSUMED;
+  if (hasReassignShopFloorBalance(lines)) return IPR_DOWNSTREAM.CONSUMED;
+  return IPR_DOWNSTREAM.PENDING_STORE_IN;
 }
 
 /** Links an auto-queued store-in row back to its source consume IPR. */
@@ -109,6 +119,14 @@ export const findPendingStoreInForCoil = async (coilUid) => {
        AND r.approved = true
        AND r.downstream = '${IPR_DOWNSTREAM.PENDING_STORE_IN}'
        AND ${PENDING_STORE_IN_COIL_EXISTS}
+       AND NOT EXISTS (
+         SELECT 1
+         FROM jsonb_array_elements(
+           CASE WHEN jsonb_typeof(r.coils) = 'array' THEN r.coils ELSE '[]'::jsonb END
+         ) elem
+         WHERE COALESCE((elem->>'reassign')::boolean, false) = true
+           AND COALESCE(NULLIF(elem->>'remaining_qty', '')::numeric, 0) > 0
+       )
      ORDER BY r.ipr_uid DESC
      LIMIT 1`,
     [uid]
@@ -182,6 +200,10 @@ export function normalizeCoils(coils) {
         location_id: c.location_id ?? null,
         location_no: str(c.location_no),
         out_uid: c.out_uid ?? null,
+        pjobcardno: str(c.pjobcardno),
+        macname: str(c.macname),
+        reassign: c.reassign === true,
+        reassign_rm_item_code: str(c.reassign_rm_item_code),
         status: str(c.status),
         source: str(c.source),
         is_seed_scan: Boolean(c.is_seed_scan),
@@ -267,7 +289,13 @@ export function summarizeRow(row) {
   if (isRejection) {
     balance_status = "Rejected";
   } else if (isConsume) {
-    balance_status = balanceQty > 0 ? "Balance" : "Full";
+    if (balanceQty <= 0) {
+      balance_status = "Full";
+    } else if (hasReassignShopFloorBalance(coils)) {
+      balance_status = "Reassign";
+    } else {
+      balance_status = "Balance";
+    }
   }
 
   return {
@@ -336,6 +364,17 @@ export const findInProcessRequests = async (options = {}) => {
         r.request_type = '${IPR_REQUEST_TYPE.STORE_IN}'
         AND r.approved = true
         AND r.downstream = '${IPR_DOWNSTREAM.PENDING_STORE_IN}'
+      )
+    )`);
+    conditions.push(`NOT (
+      r.request_type = '${IPR_REQUEST_TYPE.CONSUME}'
+      AND EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(
+          CASE WHEN jsonb_typeof(r.coils) = 'array' THEN r.coils ELSE '[]'::jsonb END
+        ) elem
+        WHERE COALESCE((elem->>'reassign')::boolean, false) = true
+          AND COALESCE(NULLIF(elem->>'remaining_qty', '')::numeric, 0) > 0
       )
     )`);
   } else if (!includeAutoStoreInFromConsume) {

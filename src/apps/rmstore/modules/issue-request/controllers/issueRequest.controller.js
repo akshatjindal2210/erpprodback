@@ -1,4 +1,4 @@
-import { findIssueRequests, findIssueRequestJobCardRows, findIssueRequest, findIssueRequestCoils, findIssueRequestJobCards, findIssuedQtyByJobCards, findMachineJobCardLockConflicts, insertIssueRequest, updateIssueRequest, softDeleteIssueRequest, lockIssueRequestForStoreOut as applyIssueRequestStoreOutLock, unlockIssueRequestForStoreOut as applyIssueRequestStoreOutUnlock } from "../models/issueRequest.model.js";
+import { findIssueRequests, findIssueRequestJobCardRows, findIssueRequest, findIssueRequestCoils, findIssueRequestJobCards, findIssuedQtyByJobCards, findMachineJobCardLockConflicts, findMachineShopFloorJobCardConflicts, findMachineShopFloorDifferentWireConflicts, shopFloorJobCardConflictMessage, shopFloorDifferentWireConflictMessage, insertIssueRequest, updateIssueRequest, softDeleteIssueRequest, lockIssueRequestForStoreOut as applyIssueRequestStoreOutLock, unlockIssueRequestForStoreOut as applyIssueRequestStoreOutUnlock } from "../models/issueRequest.model.js";
 import { ISSUE_REQUEST_MACHINE_JOB_CARD_LOCK } from "../../../lib/config/app.config.js";
 import { replaceIssueRequestJobCards } from "../models/issueRequestJobCard.model.js";
 import { findProduction, findProductions } from "../../production/models/productionMaster.model.js";
@@ -494,6 +494,11 @@ async function buildJobCardsPayload(rawCards, { excludeIssueUid = null, user = n
     );
   }
 
+  const shopConflicts = await findMachineShopFloorJobCardConflicts(jobCards);
+  if (shopConflicts[0]) {
+    throw Object.assign(new Error(shopFloorJobCardConflictMessage(shopConflicts[0])), { status: 400 });
+  }
+
   return {
     jobCards,
     flatCoils,
@@ -599,6 +604,62 @@ export const printIssueRequest = async (req, res) => {
       html,
       print_title: `Issue Request · ${id}`,
     });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** body: { macname, pjobcardno, exclude_issue_uid? } — early warning when picking a job card. */
+export const checkMachineJobCardAssignment = async (req, res) => {
+  try {
+    const macname = String(req.body?.macname || "").trim();
+    const pjobcardno = String(req.body?.pjobcardno || "").trim();
+    if (!macname || !pjobcardno) {
+      return res.status(400).json({ success: false, message: "macname and pjobcardno are required." });
+    }
+    if (!ISSUE_REQUEST_MACHINE_JOB_CARD_LOCK) {
+      return res.json({ success: true, allowed: true });
+    }
+
+    const assignment = [{ macname, pjobcardno }];
+    const excludeIssueUid = parsePositiveIntId(req.body?.exclude_issue_uid ?? req.body?.issue_uid);
+
+    const irHits = await findMachineJobCardLockConflicts(assignment, { excludeIssueUid });
+    if (irHits[0]) {
+      const hit = irHits[0];
+      const message =
+        `Machine ${hit.macname} is locked to job card ${hit.pjobcardno} on Issue Request #${hit.issue_uid}. ` +
+        `Authorize Store Out for that job card before assigning another job card to this machine.`;
+      return res.json({ success: true, allowed: false, conflict: { kind: "open_issue", ...hit }, message });
+    }
+
+    const reassignWire = String(req.body?.reassign_wire ?? req.body?.item_code ?? "").trim();
+    const excludeCoilUid = String(req.body?.exclude_coil_uid ?? req.body?.coil_no_uid ?? "").trim();
+
+    if (reassignWire) {
+      const wireHits = await findMachineShopFloorDifferentWireConflicts({
+        macname,
+        wireItemCode: reassignWire,
+        excludeCoilUid,
+      });
+      if (wireHits[0]) {
+        const message = shopFloorDifferentWireConflictMessage(wireHits[0]);
+        return res.json({
+          success: true,
+          allowed: false,
+          conflict: { kind: "shop_floor_wire", ...wireHits[0] },
+          message,
+        });
+      }
+    } else {
+      const shopHits = await findMachineShopFloorJobCardConflicts(assignment);
+      if (shopHits[0]) {
+        const message = shopFloorJobCardConflictMessage(shopHits[0]);
+        return res.json({ success: true, allowed: false, conflict: { kind: "shop_floor", ...shopHits[0] }, message });
+      }
+    }
+
+    return res.json({ success: true, allowed: true });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

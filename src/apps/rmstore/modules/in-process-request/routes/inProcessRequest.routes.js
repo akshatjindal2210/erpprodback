@@ -1,5 +1,5 @@
 import express from "express";
-import { getInProcessRequests, getInProcessRequestById, getInProcessReasons, getCoilHelper, getPendingStoreIn, getPendingStoreOut, getPendingShopFloor, createInProcessRequest, updateInProcessRequestCtrl, completeStoreInCtrl, deleteInProcessRequest } from "../controllers/inProcessRequest.controller.js";
+import { getInProcessRequests, getInProcessRequestById, getInProcessReasons, getCoilHelper, getPendingStoreIn, getPendingStoreInById, getPendingStoreOut, getPendingShopFloor, createInProcessRequest, updateInProcessRequestCtrl, completeStoreInCtrl, deleteInProcessRequest } from "../controllers/inProcessRequest.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
 import { rmIprUpload } from "../../../lib/middleware/upload.js";
@@ -12,17 +12,15 @@ const MODULE = "rm_in_process_request";
 const storeInReader = accessControlAny([
   { moduleName: MODULE, actions: "view" },
   { moduleName: "rm_inventory_inwards", actions: "view" },
+  { moduleName: "rm_inventory_inwards", actions: "add" },
 ]);
 const storeOutReader = accessControlAny([
   { moduleName: MODULE, actions: "view" },
   { moduleName: "rm_out_entry", actions: "view" },
 ]);
 
-/** Store In receive — production (issue request) or store staff may complete. */
-const storeInReceiver = accessControlAny([
-  { moduleName: MODULE, actions: "authorize" },
-  { moduleName: "rm_inventory_inwards", actions: "authorize" },
-]);
+/** Store In receive — Unassigned Area (Store In module add only). */
+const storeInReceiver = accessControlAny([{ moduleName: "rm_inventory_inwards", actions: "add" }]);
 
 router.post("/coil-helper", authenticate, accessControl(MODULE, "view"), getCoilHelper);
 router.post("/list", authenticate, accessControl(MODULE, "view"), getInProcessRequests);
@@ -30,6 +28,7 @@ router.post("/get", authenticate, accessControl(MODULE, "view"), getInProcessReq
 router.post("/reasons", authenticate, accessControl(MODULE, "view"), getInProcessReasons);
 router.post("/pending-shop-floor", authenticate, accessControl(MODULE, "view"), getPendingShopFloor);
 router.post("/pending-store-in", authenticate, storeInReader, getPendingStoreIn);
+router.post("/pending-store-in/get", authenticate, storeInReader, getPendingStoreInById);
 router.post("/pending-store-out", authenticate, storeOutReader, getPendingStoreOut);
 router.post("/create", authenticate, accessControl(MODULE, "add"), rmIprUpload.array("attachments"), createInProcessRequest);
 router.post("/update", authenticate, accessControl(MODULE, "edit"), rmIprUpload.array("attachments"), updateInProcessRequestCtrl);

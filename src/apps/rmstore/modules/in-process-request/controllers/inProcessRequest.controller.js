@@ -1,4 +1,4 @@
-import { findInProcessRequests, findInProcessRequest, findInProcessReasons, insertInProcessRequest, updateInProcessRequest, softDeleteInProcessRequest, findPendingAutoStoreInForConsume, findPendingStoreInForCoil, AUTO_STORE_IN_FROM_CONSUME_PREFIX, autoConsumeFromStoreInRemarks, parseConsumeIprUidFromAutoStoreInRemarks, normalizeCoils, normalizeProposedCoils, normalizeRequestType, resolveDownstream, resolveConsumeDownstream, IPR_REQUEST_TYPE, IPR_DOWNSTREAM } from "../models/inProcessRequest.model.js";
+import { findInProcessRequests, findInProcessRequest, findInProcessReasons, insertInProcessRequest, updateInProcessRequest, softDeleteInProcessRequest, findPendingAutoStoreInForConsume, findPendingStoreInForCoil, AUTO_STORE_IN_FROM_CONSUME_PREFIX, autoConsumeFromStoreInRemarks, parseConsumeIprUidFromAutoStoreInRemarks, normalizeCoils, normalizeProposedCoils, normalizeRequestType, resolveDownstream, resolveConsumeDownstream, hasReassignShopFloorBalance, IPR_REQUEST_TYPE, IPR_DOWNSTREAM } from "../models/inProcessRequest.model.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
@@ -9,12 +9,15 @@ import { findQcCheck, findQcCheckItems, findQcChecks } from "../../qc-check/mode
 import { formatExpected } from "../../../lib/utils/qc/evaluateSpec.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
-import { hasInProcessRejectionPermission } from "../../../lib/utils/rmstoreSpecialPermissions.js";
+import { hasInProcessRejectionPermission, hasIssueRmMappedPermission, isSuperAdminUser } from "../../../lib/utils/rmstoreSpecialPermissions.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { isCoilEligibleForIprRejection, iprRejectionIneligibleMessage } from "../../../lib/utils/iprRejectionEligibility.js";
 import { isIssuedToShopFloor, isSaMinusWriteOff } from "../../../lib/utils/saMinusInventory.js";
 import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 import { enrichIprWithMachineLabels } from "../../inventory-inward/utils/enrichIprMachineLabels.js";
+import { loadMappedPrdRunJc } from "../../production/utils/erpItems.js";
+import { findProductions } from "../../production/models/productionMaster.model.js";
+import { normalizeRmItems } from "../../production/utils/productionRmHelpers.js";
 
 const MODULE = "rm_in_process_request";
 const log = createRmstoreActivityLogger(MODULE);
@@ -208,6 +211,159 @@ function validate(fields) {
   }
   if (fields.request_type === IPR_REQUEST_TYPE.REJECTION) {
     assertRejectionPhotos(fields);
+  }
+}
+
+function toUpperTrim(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+async function resolveApprovedProductionForItem({ itemdcode, item_code } = {}) {
+  const dcode = Number(itemdcode);
+  if (Number.isFinite(dcode) && dcode > 0) {
+    const approved = await findProductions({
+      filters: { item_dcode: dcode, approved: true },
+      page: 1,
+      limit: 1,
+    });
+    if (approved?.data?.[0]) return approved.data[0];
+  }
+  const code = String(item_code || "").trim();
+  if (code) {
+    const approved = await findProductions({
+      filters: { approved: true },
+      search: code,
+      page: 1,
+      limit: 50,
+    });
+    const hit = (approved?.data || []).find(
+      (r) => toUpperTrim(r?.item_code) === toUpperTrim(code)
+    );
+    if (hit) return hit;
+  }
+  return null;
+}
+
+async function assertConsumeReassignRules(fields, user) {
+
+  if (normalizeRequestType(fields.request_type) !== IPR_REQUEST_TYPE.CONSUME) return;
+  const reassignLines = normalizeCoils(fields.coils).filter((c) => c.reassign === true);
+  if (!reassignLines.length) return;
+
+  const jcRows = await loadMappedPrdRunJc();
+  const jcByNo = new Map(
+    (jcRows || []).map((row) => [toUpperTrim(row?.pjobcardno), row])
+  );
+  const machineRowsCache = new Map();
+
+  for (const line of reassignLines) {
+    const coilUid = String(line.coil_no_uid || "").trim();
+    const targetJc = String(line.pjobcardno || "").trim();
+    const targetMachine = String(line.macname || "").trim();
+    const targetWire = String(line.reassign_rm_item_code || line.item_code || "").trim();
+
+    if (!targetJc || !targetMachine) {
+      throw Object.assign(
+        new Error(`Reassign requires both job card and machine for coil ${coilUid}.`),
+        { status: 400 }
+      );
+    }
+    if (!targetWire) {
+      throw Object.assign(
+        new Error(`Coil ${coilUid} is missing wire item code for reassign validation.`),
+        { status: 400 }
+      );
+    }
+
+    const jc = jcByNo.get(toUpperTrim(targetJc));
+    if (!jc) {
+      throw Object.assign(
+        new Error(`Job card ${targetJc} was not found in production running list.`),
+        { status: 400 }
+      );
+    }
+    const jcMachine = String(jc.macname || "").trim();
+    if (jcMachine && toUpperTrim(jcMachine) !== toUpperTrim(targetMachine)) {
+      throw Object.assign(
+        new Error(
+          `Job card ${targetJc} is mapped to machine ${jcMachine}. Reassign machine must match the job card machine.`
+        ),
+        { status: 400 }
+      );
+    }
+
+    const prod = await resolveApprovedProductionForItem({
+      itemdcode: jc.itemdcode,
+      item_code: jc.item_code,
+    });
+    if (!prod) {
+      throw Object.assign(
+        new Error(`No approved production mapping found for job card ${targetJc}.`),
+        { status: 400 }
+      );
+    }
+    const mappedCodes = normalizeRmItems(prod)
+      .map((r) => String(r?.rm_item_code || "").trim())
+      .filter(Boolean);
+    if (!mappedCodes.length) {
+      throw Object.assign(
+        new Error(`Job card ${targetJc} has no mapped RM wire in production master.`),
+        { status: 400 }
+      );
+    }
+
+    const targetWireKey = toUpperTrim(targetWire);
+    const mappedCodeKeys = mappedCodes.map((c) => toUpperTrim(c));
+    const firstMappedKey = mappedCodeKeys[0] || "";
+    const isSuperAdmin = isSuperAdminUser(user);
+    const canPickMapped = hasIssueRmMappedPermission(user);
+
+    if (isSuperAdmin || canPickMapped) {
+      if (!mappedCodeKeys.includes(targetWireKey)) {
+        throw Object.assign(
+          new Error(
+            `Coil ${coilUid} wire ${targetWire} is not mapped on job card ${targetJc}.`
+          ),
+          { status: 400 }
+        );
+      }
+    } else if (firstMappedKey && targetWireKey !== firstMappedKey) {
+      throw Object.assign(
+        new Error(
+          `Normal users can reassign only mapped priority-1 wire (${mappedCodes[0]}) for job card ${targetJc}.`
+        ),
+        { status: 400 }
+      );
+    }
+
+    const machineKey = toUpperTrim(targetMachine);
+    if (!machineRowsCache.has(machineKey)) {
+      const result = await findCoils({
+        filters: { shop_floor: true, macname: targetMachine },
+        page: 1,
+        limit: 2000,
+      });
+      machineRowsCache.set(machineKey, Array.isArray(result?.data) ? result.data : []);
+    }
+
+    const machineRows = machineRowsCache.get(machineKey) || [];
+    const conflict = machineRows.find((row) => {
+      const rowUid = String(row?.coil_no_uid || "").trim().toLowerCase();
+      if (rowUid && rowUid === String(coilUid || "").trim().toLowerCase()) return false;
+      const rowWire = toUpperTrim(row?.item_code);
+      return Boolean(rowWire && rowWire !== targetWireKey);
+    });
+
+    if (conflict) {
+      const conflictWire = String(conflict?.item_code || "unknown");
+      const conflictJc = String(conflict?.pjobcardno || "unknown");
+      throw Object.assign(
+        new Error(
+          `Machine ${targetMachine} already has another wire on shop floor (${conflictWire} · ${conflictJc}). Reassign allowed only when the machine has no other wire running.`
+        ),
+        { status: 400 }
+      );
+    }
   }
 }
 
@@ -496,7 +652,26 @@ async function assertCoilsRejectable(coils = [], iprUid = null) {
 
 /** Approving a consume request — full or partial used qty per coil. */
 async function consumeCoils(row, user, req) {
-  const source = row.previous_coils?.length ? row.previous_coils : row.coils;
+  const previous = row.previous_coils?.length ? row.previous_coils : row.coils;
+  const previousByUid = new Map(
+    normalizeCoils(previous).map((p) => [String(p.coil_no_uid || "").trim().toLowerCase(), p])
+  );
+  const currentByUid = new Map(
+    normalizeCoils(row.coils).map((c) => [String(c.coil_no_uid || "").trim().toLowerCase(), c])
+  );
+  const source = normalizeCoils(previous).map((p) => {
+    const hit = currentByUid.get(String(p.coil_no_uid || "").trim().toLowerCase());
+    if (!hit) return p;
+    return {
+      ...p,
+      ...hit,
+      original_qty: p.original_qty ?? p.qty ?? hit.original_qty,
+      pjobcardno: hit.pjobcardno ?? p.pjobcardno,
+      macname: hit.macname ?? p.macname,
+      reassign: hit.reassign === true,
+      reassign_rm_item_code: hit.reassign_rm_item_code ?? p.reassign_rm_item_code,
+    };
+  });
   const { fullConsumed, partialConsumed } = await processConsumeCoils(
     row.ipr_uid,
     source,
@@ -520,14 +695,53 @@ async function consumeCoils(row, user, req) {
     });
   }
 
-  if (partialConsumed.length) {
+  const reassignPartial = partialConsumed.filter((c) => c.reassign === true);
+  const leftoverPartial = partialConsumed.filter((c) => !c.reassign);
+
+  if (reassignPartial.length) {
+    logCoilTransactionSafe({
+      transaction_type: COIL_TX_TYPES.IPR_REASSIGN,
+      source_module: MODULE,
+      source_id: String(row.ipr_uid),
+      user_name: user,
+      user_id: req.user?.id,
+      rows: reassignPartial.map((c) => ({
+        coil_no_uid: c.coil_no_uid,
+        qty: c.consumed_qty,
+        mrn_no: c.mrn_no,
+      })),
+      details: {
+        ipr_uid: row.ipr_uid,
+        reason: row.reason || null,
+        reassign: true,
+        coil_count: reassignPartial.length,
+        reassign_lines: reassignPartial.map((c) => {
+          const uidKey = String(c.coil_no_uid || "").trim().toLowerCase();
+          const prev = previousByUid.get(uidKey) || {};
+          const cur = currentByUid.get(uidKey) || {};
+          return {
+            coil_no_uid: c.coil_no_uid,
+            source_pjobcardno: prev.pjobcardno ?? null,
+            target_pjobcardno: cur.pjobcardno ?? c.pjobcardno ?? null,
+            source_macname: prev.macname ?? null,
+            target_macname: cur.macname ?? c.macname ?? null,
+            consumed_qty: c.consumed_qty,
+            balance_qty: c.remaining_qty,
+            out_uid: prev.out_uid ?? c.out_uid ?? null,
+          };
+        }),
+      },
+    });
+  }
+
+  if (leftoverPartial.length) {
     logCoilTransactionSafe({
       transaction_type: COIL_TX_TYPES.CONSUME,
       source_module: MODULE,
       source_id: String(row.ipr_uid),
       user_name: user,
       user_id: req.user?.id,
-      rows: partialConsumed.map((c) => ({
+      rows: leftoverPartial.map((c) => ({
         coil_no_uid: c.coil_no_uid,
         qty: c.consumed_qty,
         mrn_no: c.mrn_no,
@@ -536,8 +750,9 @@ async function consumeCoils(row, user, req) {
         ipr_uid: row.ipr_uid,
         reason: row.reason || null,
         partial: true,
-        coil_count: partialConsumed.length,
-        shop_floor_balance: partialConsumed.map((c) => ({
+        leftover_store_in: true,
+        coil_count: leftoverPartial.length,
+        shop_floor_balance: leftoverPartial.map((c) => ({
           coil_no_uid: c.coil_no_uid,
           remaining_qty: c.remaining_qty,
         })),
@@ -602,14 +817,19 @@ async function releaseConsumedCoils(row, user, req) {
   }
   const restored = await revertCoilsConsumed(row.ipr_uid, user);
   if (!restored.length) return 0;
+  const hadReassign = normalizeCoils(snapshot).some((c) => c.reassign === true);
   logCoilTransactionSafe({
-    transaction_type: COIL_TX_TYPES.CONSUME_REVERT,
+    transaction_type: hadReassign ? COIL_TX_TYPES.IPR_REASSIGN_REVERT : COIL_TX_TYPES.CONSUME_REVERT,
     source_module: MODULE,
     source_id: String(row.ipr_uid),
     user_name: user,
     user_id: req.user?.id,
     rows: restored,
-    details: { ipr_uid: row.ipr_uid, coil_count: restored.length },
+    details: {
+      ipr_uid: row.ipr_uid,
+      coil_count: restored.length,
+      ...(hadReassign ? { reassign_revert: true } : {}),
+    },
   });
   return restored.length;
 }
@@ -1088,6 +1308,33 @@ export const getPendingStoreIn = async (req, res) => {
   }
 };
 
+/** One pending store-in row for Receive modal — Store In module readers (no IPR view required). */
+export const getPendingStoreInById = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.ipr_uid ?? req.body?.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "A valid in-process request ID is required." });
+    }
+    const existing = await findInProcessRequest(id);
+    if (!existing || !isPendingStoreInReceivable(existing)) {
+      return res.status(404).json({
+        success: false,
+        message: "Pending store-in request not found or not receivable.",
+      });
+    }
+    if (hasReassignShopFloorBalance(existing.coils)) {
+      return res.status(400).json({
+        success: false,
+        message: "Reassign balance stays on shop floor — this request is not in the Unassigned receive queue.",
+      });
+    }
+    const [data] = await enrichIprWithMachineLabels([existing]);
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const getPendingStoreOut = async (req, res) => {
   try {
     const result = await findInProcessRequests({
@@ -1143,6 +1390,12 @@ export const completeStoreInCtrl = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Only a request in the Store In Pending queue can be received.",
+      });
+    }
+    if (hasReassignShopFloorBalance(existing.coils)) {
+      return res.status(400).json({
+        success: false,
+        message: "Reassign balance stays on shop floor — receive to Unassigned is not allowed for this request.",
       });
     }
 
@@ -1249,6 +1502,7 @@ export const createInProcessRequest = async (req, res) => {
     const fields = buildRecordFields(body);
     try {
       validate(fields);
+      await assertConsumeReassignRules(fields, req.user);
     } catch (e) {
       return res.status(e.status || 400).json({ success: false, message: e.message });
     }
@@ -1391,6 +1645,7 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     const fields = buildRecordFields(body, existing);
     try {
       validate(fields);
+      await assertConsumeReassignRules(fields, req.user);
     } catch (e) {
       return res.status(e.status || 400).json({ success: false, message: e.message });
     }

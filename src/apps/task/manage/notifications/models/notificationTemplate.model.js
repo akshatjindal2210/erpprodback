@@ -22,6 +22,7 @@ export function normalizeTemplate(t) {
     ...t,
     send_via,
     pwa_enabled: t.pwa_enabled !== undefined ? !!t.pwa_enabled : is_enabled,
+    email_enabled: !!t.email_enabled,
     api_enabled: t.api_enabled !== undefined ? !!t.api_enabled : is_enabled && send_via !== "none",
   };
 }
@@ -49,7 +50,7 @@ const NotificationTemplate = {
     if (next.send_via && !SEND_VIA_OPTIONS.includes(next.send_via)) {
       next.send_via = "none";
     }
-    delete next.email_enabled;
+    next.email_enabled = !!next.email_enabled;
     delete next.whatsapp_enabled;
     map[key] = next;
     await TaskAppConfig.set(TASK_CONFIG_KEYS.NOTIFICATION_TEMPLATES, map, updated_by);

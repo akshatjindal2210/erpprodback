@@ -69,7 +69,7 @@ export async function sendTaskNotification(
   if (!uid) return { ok: false };
 
   const tpl = tplOverride ?? (await NotificationTemplate.getByKey(template_key));
-  if (!tpl?.is_enabled || (!tpl.pwa_enabled && !tpl.api_enabled)) return { ok: false };
+  if (!tpl?.is_enabled || (!tpl.pwa_enabled && !tpl.email_enabled && !tpl.api_enabled)) return { ok: false };
 
   const user = await User.getById(uid);
   if (!user) return { ok: false };
@@ -113,6 +113,19 @@ export async function sendTaskNotification(
     } catch (err) {
       console.error(`[Task notify] PWA ${template_key}:`, err.message);
     }
+  }
+
+  if (tpl.email_enabled) {
+    writeLog({
+      task_id: task_id ?? null,
+      user_id: uid,
+      template_key,
+      channel: "email",
+      recipient: user.email || null,
+      message,
+      status: "skipped",
+      error_detail: user.email ? "Email gateway not configured" : "User has no email",
+    });
   }
 
   if (!tpl.api_enabled) return { ok: delivered };
@@ -180,6 +193,7 @@ export async function sendDirectNotification(
     subject = "",
     body = "",
     pwa_enabled = false,
+    email_enabled = false,
     api_enabled = false,
     send_via = "none",
     vars = {},
@@ -200,6 +214,7 @@ export async function sendDirectNotification(
 
   let pwaOk = false;
   let apiOk = false;
+  let emailOk = false;
   const errors = [];
 
   if (pwa_enabled) {
@@ -239,6 +254,20 @@ export async function sendDirectNotification(
         error_detail: err.message,
       });
     }
+  }
+
+  if (email_enabled) {
+    writeLog({
+      task_id: task_id ?? null,
+      user_id: uid,
+      template_key,
+      channel: "email",
+      recipient: user.email || null,
+      message,
+      status: "skipped",
+      error_detail: user.email ? "Email gateway not configured" : "User has no email",
+    });
+    if (!user.email) errors.push("No email");
   }
 
   if (api_enabled && via !== "none") {
@@ -293,13 +322,14 @@ export async function sendDirectNotification(
     }
   }
 
-  const ok = pwaOk || apiOk;
+  const ok = pwaOk || apiOk || emailOk;
   return {
     ok,
-    skipped: !pwa_enabled && (!api_enabled || via === "none"),
+    skipped: !pwa_enabled && !email_enabled && (!api_enabled || via === "none"),
     user_id: uid,
     user_name: user.name,
     pwa: pwaOk,
+    email: emailOk,
     api: apiOk,
     error: errors.length ? errors.join("; ") : null,
   };
@@ -312,6 +342,7 @@ export async function sendInstantMessage({
   subject = "",
   body = "",
   pwa_enabled = true,
+  email_enabled = false,
   api_enabled = false,
   send_via = "none",
   vars = {},
@@ -321,8 +352,8 @@ export async function sendInstantMessage({
   if (!subj && !msgBody) {
     throw new Error("Subject or message body is required");
   }
-  if (!pwa_enabled && (!api_enabled || send_via === "none")) {
-    throw new Error("Enable PWA and/or WhatsApp (Free/Paid)");
+  if (!pwa_enabled && !email_enabled && (!api_enabled || send_via === "none")) {
+    throw new Error("Enable PWA, Email, and/or WhatsApp (Free/Paid)");
   }
 
   let ids = (Array.isArray(user_ids) ? user_ids : [])
@@ -345,6 +376,7 @@ export async function sendInstantMessage({
       subject: subj,
       body: msgBody,
       pwa_enabled,
+      email_enabled,
       api_enabled,
       send_via,
       vars,

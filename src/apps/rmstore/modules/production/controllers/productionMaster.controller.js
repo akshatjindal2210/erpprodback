@@ -42,8 +42,11 @@ export const getProductions = async (req, res) => {
       sortBy: "production_id",
       order: "DESC",
     });
+    const listFilters = sanitizeFilters(filters, FILTER_FIELDS);
+    delete listFilters.from_date;
+    delete listFilters.to_date;
     const resData = await findProductions({
-      filters: sanitizeFilters(filters, FILTER_FIELDS),
+      filters: listFilters,
       search: sanitizeSearch(search),
       sort: { by: sortBy, order },
       page,

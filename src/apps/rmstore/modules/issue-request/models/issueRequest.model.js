@@ -550,10 +550,7 @@ export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid
  * Open issue requests where a machine is assigned to a different job card than requested.
  * Skipped when ISSUE_REQUEST_MACHINE_JOB_CARD_LOCK is false (app.config.js).
  */
-export const findMachineJobCardLockConflicts = async (
-  assignments = [],
-  { excludeIssueUid = null } = {}
-) => {
+export const findMachineJobCardLockConflicts = async (assignments = [], { excludeIssueUid = null } = {}) => {
   if (!ISSUE_REQUEST_MACHINE_JOB_CARD_LOCK) return [];
 
   const pairs = [
@@ -606,6 +603,128 @@ export const findMachineJobCardLockConflicts = async (
     values
   );
 };
+
+/** Shop floor coils (status out): block another job card on the same machine. */
+export const findMachineShopFloorJobCardConflicts = async (assignments = []) => {
+  if (!ISSUE_REQUEST_MACHINE_JOB_CARD_LOCK) return [];
+
+  const pairs = [
+    ...new Map(
+      (assignments || [])
+        .map((a) => ({
+          macname: String(a?.macname ?? "").trim().toUpperCase(),
+          pjobcardno: String(a?.pjobcardno ?? "").trim().toUpperCase(),
+        }))
+        .filter((p) => p.macname && p.pjobcardno)
+        .map((p) => [`${p.macname}::${p.pjobcardno}`, p])
+    ).values(),
+  ];
+  if (!pairs.length) return [];
+
+  const macnames = pairs.map((p) => p.macname);
+  const pjobcards = pairs.map((p) => p.pjobcardno);
+
+  return dbQuery(
+    `WITH req AS (
+       SELECT * FROM UNNEST($1::text[], $2::text[]) AS t(macname, pjobcardno)
+     ),
+     blocked AS (
+       SELECT
+         UPPER(TRIM(jc.macname)) AS macname,
+         TRIM(jc.pjobcardno) AS pjobcardno,
+         COUNT(*)::int AS coil_count,
+         MAX(NULLIF(TRIM(jc.rm_item_code), '')) AS wires
+       FROM ${COIL} c
+       INNER JOIN ${OUT_ENTRY} o
+         ON o.out_uid = c.out_uid
+        AND o.is_deleted = false
+       INNER JOIN ${JC_TABLE} jc
+         ON jc.issue_uid = o.issue_uid
+        AND jc.is_deleted = false
+        AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(COALESCE(o.pjobcardno, '')))
+       INNER JOIN req
+         ON req.macname = UPPER(TRIM(jc.macname))
+        AND req.pjobcardno <> UPPER(TRIM(jc.pjobcardno))
+       WHERE c.is_deleted = false
+         AND c.out_uid IS NOT NULL
+         AND LOWER(COALESCE(c.status, 'active')) = 'out'
+         AND TRIM(COALESCE(jc.macname, '')) <> ''
+         AND TRIM(COALESCE(jc.pjobcardno, '')) <> ''
+         AND UPPER(TRIM(jc.macname)) = ANY($1::text[])
+       GROUP BY UPPER(TRIM(jc.macname)), TRIM(jc.pjobcardno)
+     )
+     SELECT * FROM blocked
+     ORDER BY coil_count DESC`,
+    [macnames, pjobcards]
+  );
+};
+
+/** Shop floor coils (status out): block reassign when another wire is running on the same machine. */
+export const findMachineShopFloorDifferentWireConflicts = async ({
+  macname,
+  wireItemCode,
+  excludeCoilUid = null,
+} = {}) => {
+  if (!ISSUE_REQUEST_MACHINE_JOB_CARD_LOCK) return [];
+
+  const mac = String(macname ?? "").trim();
+  const wire = String(wireItemCode ?? "").trim().toUpperCase();
+  if (!mac || !wire) return [];
+
+  const excludeUid = String(excludeCoilUid ?? "").trim().toLowerCase();
+
+  return dbQuery(
+    `SELECT
+       UPPER(TRIM(jc.macname)) AS macname,
+       TRIM(jc.pjobcardno) AS pjobcardno,
+       COUNT(*)::int AS coil_count,
+       MAX(NULLIF(TRIM(COALESCE(m.item_code, jc.rm_item_code, '')), '')) AS wires
+     FROM ${COIL} c
+     INNER JOIN ${OUT_ENTRY} o
+       ON o.out_uid = c.out_uid
+      AND o.is_deleted = false
+     INNER JOIN ${JC_TABLE} jc
+       ON jc.issue_uid = o.issue_uid
+      AND jc.is_deleted = false
+      AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(COALESCE(o.pjobcardno, '')))
+     LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+     WHERE c.is_deleted = false
+       AND c.out_uid IS NOT NULL
+       AND LOWER(COALESCE(c.status, 'active')) = 'out'
+       AND TRIM(COALESCE(jc.macname, '')) <> ''
+       AND UPPER(TRIM(jc.macname)) = UPPER(TRIM($1))
+       AND UPPER(TRIM(COALESCE(m.item_code, jc.rm_item_code, ''))) <> $2
+       AND ($3 = '' OR LOWER(TRIM(c.coil_no_uid)) <> $3)
+     GROUP BY UPPER(TRIM(jc.macname)), TRIM(jc.pjobcardno)
+     ORDER BY coil_count DESC
+     LIMIT 5`,
+    [mac, wire, excludeUid]
+  );
+};
+
+export function shopFloorJobCardConflictMessage(hit) {
+  const machine = String(hit?.macname || "").trim() || "This machine";
+  const jc = String(hit?.pjobcardno || "").trim() || "—";
+  const n = Number(hit?.coil_count) || 0;
+  const wires = String(hit?.wires || "").trim();
+  const wirePart = wires ? ` · wire ${wires}` : "";
+  return (
+    `${machine} already has ${n} coil(s) on shop floor for job card ${jc}${wirePart}. ` +
+    `Complete Consume or Store In for those coils before issuing another job card on this machine.`
+  );
+}
+
+export function shopFloorDifferentWireConflictMessage(hit) {
+  const machine = String(hit?.macname || "").trim() || "This machine";
+  const jc = String(hit?.pjobcardno || "").trim() || "—";
+  const n = Number(hit?.coil_count) || 0;
+  const wires = String(hit?.wires || "").trim();
+  const wirePart = wires ? ` · wire ${wires}` : "";
+  return (
+    `${machine} already has ${n} coil(s) on shop floor for job card ${jc}${wirePart}. ` +
+    `Reassign is allowed only when no other wire is running on this machine. Complete Consume or Store In for those coils first.`
+  );
+}
 
 function runSql(client, sql, params) {
   if (client?.query) {

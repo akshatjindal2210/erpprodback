@@ -29,7 +29,7 @@ export async function updateTemplate(req, res) {
       return res.status(404).json({ success: false, message: "Template not found" });
     }
 
-    const { label, subject, body, is_enabled, pwa_enabled, api_enabled, send_via, trigger_time } = req.body;
+    const { label, subject, body, is_enabled, pwa_enabled, email_enabled, api_enabled, send_via, trigger_time } = req.body;
 
     if (send_via !== undefined && !SEND_VIA_OPTIONS.includes(send_via)) {
       return res.status(400).json({ success: false, message: "Invalid send_via channel" });
@@ -41,6 +41,7 @@ export async function updateTemplate(req, res) {
       body,
       is_enabled: is_enabled !== undefined ? !!is_enabled : undefined,
       pwa_enabled: pwa_enabled !== undefined ? !!pwa_enabled : undefined,
+      email_enabled: email_enabled !== undefined ? !!email_enabled : undefined,
       api_enabled: api_enabled !== undefined ? !!api_enabled : undefined,
       send_via: send_via ?? undefined,
       trigger_time: trigger_time ?? null,
@@ -93,6 +94,7 @@ export async function sendInstantNotification(req, res) {
       subject,
       body,
       pwa_enabled = true,
+      email_enabled = false,
       api_enabled = false,
       send_via = "none",
       vars = {},
@@ -115,6 +117,7 @@ export async function sendInstantNotification(req, res) {
       subject,
       body,
       pwa_enabled: !!pwa_enabled,
+      email_enabled: !!email_enabled,
       api_enabled: !!api_enabled,
       send_via: send_via || "none",
       vars: vars && typeof vars === "object" ? vars : {},

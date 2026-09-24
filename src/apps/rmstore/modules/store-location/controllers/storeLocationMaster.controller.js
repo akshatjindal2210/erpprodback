@@ -146,8 +146,11 @@ export const getLocations = async (req, res) => {
   try {
     const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, { sortBy: "location_id", order: "DESC" });
 
+    const listFilters = sanitizeFilters(filters, CFG.filterFields);
+    delete listFilters.from_date;
+    delete listFilters.to_date;
     const result = await findLocations({
-      filters: sanitizeFilters(filters, CFG.filterFields),
+      filters: listFilters,
       search: sanitizeSearch(search),
       sort: { by: sortBy, order },
       page,

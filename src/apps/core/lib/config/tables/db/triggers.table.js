@@ -21,6 +21,8 @@ export async function createCoreUpdatedAtTriggers() {
     T.MODULE_SOPS,
     T.DEPARTMENTS,
     T.DESIGNATIONS,
+    T.ATTRIBUTES,
+    T.NOTIFICATION_TEMPLATES,
   ];
 
   for (const table of tables) {

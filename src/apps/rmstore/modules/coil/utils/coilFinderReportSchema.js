@@ -238,8 +238,8 @@ export const COIL_DETAIL_FIELDS = [
   // { key: "qc_id", label: "QC ID", get: (c) => (c.qc_uid != null ? `QC-${c.qc_uid}` : null) },
   // { key: "qc_status", label: "QC Status", get: (c) => c.qc_check_status },
   // { key: "status", label: "Status", get: (c) => c.status },
-  // { key: "pjobcardno", label: "Job Card", get: (c) => c.pjobcardno },
-  // { key: "macname", label: "Machine", get: (c) => c.macname },
+  // { key: "pjobcardno", label: "Job Card", get: (c) => c?.pjobcardno_label || c?.pjobcardno || null },
+  // { key: "macname", label: "Machine", get: (c) => c?.macname_label || c?.macname || null },
   // {
   //   key: "created_at",
   //   label: "Created At",

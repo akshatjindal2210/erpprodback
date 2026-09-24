@@ -272,11 +272,13 @@ async function loadIprRejectionDocs(coil) {
  * @param {string} coil_no_uid
  * @returns {Promise<{ coil, details, qcChecks, documents } | null>}
  */
-export async function loadCoilFinderReportData(coil_no_uid) {
+/** @param {string} coil_no_uid
+ *  @param {object} [existingCoil] — skip second DB read when caller already loaded the row */
+export async function loadCoilFinderReportData(coil_no_uid, existingCoil = null) {
   const uid = String(coil_no_uid || "").trim();
   if (!uid) return null;
 
-  const coil = await findCoilByUid(uid);
+  const coil = existingCoil || (await findCoilByUid(uid));
   if (!coil) return null;
 
   const details = buildCoilDetailRows(coil);

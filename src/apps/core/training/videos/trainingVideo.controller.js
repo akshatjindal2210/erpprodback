@@ -137,8 +137,14 @@ export const getTrainingVideosViews = async (req, res) => {
 
     if (id) {
       const video = await findTrainingVideo({ id });
-      if (!video || !video.approved) return res.json({ success: true, data: null });
+      if (!video || !video.approved || video.is_active === false) {
+        return res.json({ success: true, data: null });
+      }
       return res.json({ success: true, data: video });
+    }
+
+    if (!module_slug) {
+      return res.status(400).json({ success: false, message: "module_slug is required" });
     }
 
     const result = await findTrainingVideos({
@@ -149,7 +155,7 @@ export const getTrainingVideosViews = async (req, res) => {
       page: 1,
       limit: 5000,
       sort: { by: "id", order: "DESC" },
-      is_views: true // Flag to indicate helper view logic
+      is_views: true,
     });
 
     res.json({ success: true, data: result.data });

@@ -175,3 +175,23 @@ export async function replaceIssueRequestJobCards(
   if (client) return work(client);
   return withTransaction(work);
 }
+
+/** FG product on a job card (latest row if duplicate pjobcardno). */
+export async function findJobCardFgByPjobcardno(pjobcardno) {
+  const jc = String(pjobcardno || "").trim();
+  if (!jc) return null;
+  const [row] = await dbQuery(
+    `SELECT item_code, item_desc
+     FROM ${TABLE}
+     WHERE is_deleted = false
+       AND UPPER(TRIM(pjobcardno)) = UPPER(TRIM($1))
+     ORDER BY id DESC
+     LIMIT 1`,
+    [jc]
+  );
+  if (!row) return null;
+  const fg_item_code = row.item_code ? String(row.item_code).trim() : "";
+  if (!fg_item_code) return null;
+  const fg_item_desc = row.item_desc ? String(row.item_desc).trim() : "";
+  return { fg_item_code, fg_item_desc: fg_item_desc || null };
+}

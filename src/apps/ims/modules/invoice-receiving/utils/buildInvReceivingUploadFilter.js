@@ -1,5 +1,99 @@
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
-import { buildImsBilldtRangeFilter, formatIstDateTime, formatIstDateYmd, parseBillDateHint } from "../../gate-entry/utils/imsBillDateFilter.js";
+import { MODULE_DATES } from "../../../../../config/moduleDates.config.js";
+import { buildImsBilldtRangeFilter, formatIstDateTime, formatIstDateYmd, indianFinancialYearBounds, parseBillDateHint } from "../../gate-entry/utils/imsBillDateFilter.js";
+/** Invoice receiving upload folder (change here only if path changes). */
+export const IR_RECEIVING_UPLOAD_PREFIX = "uploads/ims/invoice-receiving/";
+
+/** Read: full path as-is; filename-only → prepend invoice-receiving folder. */
+export function expandIrUploadPath(ref) {
+  const s = String(ref ?? "").trim().replace(/\\/g, "/");
+  if (isErpNullString(s)) return "";
+  if (s.startsWith("uploads/")) return s;
+  return `${IR_RECEIVING_UPLOAD_PREFIX}${s.replace(/^\/+/, "")}`;
+}
+
+/** Write ERP: our folder → filename only; any other `uploads/…` or bare name unchanged logic. */
+export function compactIrFileRefForErp(ref) {
+  const s = String(ref ?? "").trim().replace(/\\/g, "/");
+  if (isErpNullString(s)) return "";
+  if (s.startsWith(IR_RECEIVING_UPLOAD_PREFIX)) return s.slice(IR_RECEIVING_UPLOAD_PREFIX.length);
+  if (s.startsWith("uploads/")) return s;
+  return s;
+}
+
+export function isErpNullString(value) {
+  if (value == null) return true;
+  const s = String(value).trim();
+  return s === "" || s.toLowerCase() === "null";
+}
+
+function parseReceivingFileRaw(raw) {
+  const out = [];
+  if (isErpNullString(raw)) return out;
+  const s = String(raw).trim();
+  const push = (p) => {
+    const full = expandIrUploadPath(p);
+    if (full) out.push(full);
+  };
+  if (s.startsWith("{")) {
+    try {
+      const o = JSON.parse(s);
+      if (o && typeof o === "object" && !Array.isArray(o)) {
+        Object.keys(o).sort((a, b) => Number(a) - Number(b)).forEach((k) => push(o[k]));
+        return out;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  if (s.startsWith("[")) {
+    try {
+      const arr = JSON.parse(s);
+      if (Array.isArray(arr)) {
+        arr.forEach((p) => push(p));
+        return out;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  if (s.includes("|")) {
+    s.split("|")
+      .map((p) => p.trim())
+      .forEach((p) => push(p));
+    return out;
+  }
+  push(s);
+  return out;
+}
+
+/** ERP `receivingfile` — compact JSON object `{"0":"a.png","1":"b.jpg"}`. */
+export function serializeReceivingFileForErp(paths) {
+  const clean = (Array.isArray(paths) ? paths : []).map((p) => String(p).trim()).filter((p) => !isErpNullString(p));
+  if (!clean.length) return "";
+  const obj = {};
+  clean.forEach((p, i) => {
+    obj[String(i)] = compactIrFileRefForErp(p);
+  });
+  return JSON.stringify(obj);
+}
+
+export function parseExistingPathsFromBody(body) {
+  const raw = body?.existing_paths;
+  if (raw == null) return [];
+  if (Array.isArray(raw)) return raw.map(String).filter((p) => !isErpNullString(p));
+  const s = String(raw).trim();
+  if (!s) return [];
+  if (s.startsWith("[")) {
+    try {
+      const arr = JSON.parse(s);
+      if (Array.isArray(arr)) return arr.map(String).filter((p) => !isErpNullString(p));
+    } catch {
+      /* fall through */
+    }
+  }
+  return parseReceivingFileRaw(s);
+}
 
 /**
  * ERP field `receiverefno` is one string column — store JSON text inside it.
@@ -22,29 +116,31 @@ export function receiverefnoToImsString(meta) {
 
 /** List/register row → object for UI (safe if ERP already returns object). */
 export function parseReceiverefnoFromIms(raw) {
-  if (raw == null || raw === "") return null;
+  if (isErpNullString(raw)) return null;
   if (typeof raw === "object" && !Array.isArray(raw)) return raw;
   try {
-    return JSON.parse(String(raw));
+    const parsed = JSON.parse(String(raw));
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed;
   } catch {
-    return { remarks: String(raw).trim() };
+    const s = String(raw).trim();
+    return s ? { remarks: s } : null;
   }
 }
 
 /**
  * IMS internal API — filter.type "update":
- * filter.data.billdt, prnbillno, receiverefno (JSON string), receivingfile (path).
+ * filter.data.billdt, prnbillno, receiverefno (audit JSON), receivingfile (path or JSON array string).
  */
 export function buildInvReceivingUpdateFilter(req, opts = {}) {
-  const { prnbillno, billdt, file_path, approved = false, remarks = "", touchUpload = true } = opts;
+  const { prnbillno, billdt, file_paths = [], approved = false, remarks = "", touchUpload = true } = opts;
+  const paths = (Array.isArray(file_paths) ? file_paths : []).map((p) => String(p).trim()).filter((p) => !isErpNullString(p));
 
   const user = auditUserName(req) || "system";
   const now = formatIstDateTime(new Date());
   const wantApproved = !!approved;
 
-  const uploaded_by = touchUpload
-    ? user
-    : String(req.body?.uploaded_by ?? "").trim() || user;
+  const uploaded_by = touchUpload ? user : String(req.body?.uploaded_by ?? "").trim() || user;
   const uploaded_at = touchUpload
     ? now
     : (() => {
@@ -61,7 +157,7 @@ export function buildInvReceivingUpdateFilter(req, opts = {}) {
     approved_by: wantApproved ? user : "",
     approved_at: wantApproved ? now : "",
     uploaded_by,
-    uploaded_at,
+    uploaded_at
   };
 
   return {
@@ -70,7 +166,7 @@ export function buildInvReceivingUpdateFilter(req, opts = {}) {
       billdt: billdtOut,
       prnbillno: String(prnbillno ?? req.body?.prnbillno ?? "").trim(),
       receiverefno: receiverefnoToImsString(receiverefnoMeta),
-      receivingfile: String(file_path || "").trim(),
+      receivingfile: serializeReceivingFileForErp(paths),
     },
   };
 }
@@ -83,8 +179,8 @@ export function buildInvReceivingClearFilter({ prnbillno, billdt }) {
     data: {
       billdt: billdtOut,
       prnbillno: String(prnbillno ?? "").trim(),
-      receiverefno: null,
-      receivingfile: null,
+      receiverefno: "",
+      receivingfile: "",
     },
   };
 }
@@ -95,9 +191,30 @@ export function buildInvReceivingClearFilter({ prnbillno, billdt }) {
 export function buildInvReceivingListFilter(type, fromInput, toInput) {
   const t = type == null ? "" : String(type);
   if (t !== "register") return { type: t };
+
   const filter = { type: "register" };
-  const from = parseBillDateHint(fromInput);
-  const to = parseBillDateHint(toInput);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  let from = parseBillDateHint(fromInput);
+  let to = parseBillDateHint(toInput);
+
+  if (!from && !to) {
+    const fixedFromYmd = String(MODULE_DATES.ims.invoiceReceiving.pendingMergeFrom ?? "").trim();
+    if (fixedFromYmd) {
+      from = parseBillDateHint(fixedFromYmd);
+      to = today;
+    } else {
+      const fy = indianFinancialYearBounds(today);
+      from = fy.from;
+      to = today > fy.to ? fy.to : today;
+    }
+  } else if (from && !to) {
+    to = today;
+  } else if (!from && to) {
+    from = indianFinancialYearBounds(to).from;
+  }
+
   if (from && to) {
     let a = from;
     let b = to;
@@ -107,12 +224,3 @@ export function buildInvReceivingListFilter(type, fromInput, toInput) {
   return filter;
 }
 
-export function buildInvReceivingErpPayload(filter) {
-  return {
-    requestedData: "invreceiving",
-    filter,
-  };
-}
-
-/** @deprecated use buildInvReceivingUpdateFilter */
-export const buildInvReceivingUploadFilter = buildInvReceivingUpdateFilter;

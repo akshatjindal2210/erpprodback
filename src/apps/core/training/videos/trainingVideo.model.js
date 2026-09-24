@@ -39,12 +39,17 @@ export const findTrainingVideos = async ({
   let i = 1;
   const whereClauses = ["tv.is_deleted = false"];
 
-  if (is_views && module_slug) {
+  // Helper (/training/helper): only approved+active videos for modules the user can access.
+  if (is_views) {
+    if (!module_slug) return { data: [], total_count: 0, current_page: 1, last_page: 1 };
+
     const [moduleRow] = await dbQuery(`SELECT id FROM ${M.MODULES} WHERE name = $1`, [module_slug]);
-    if (!moduleRow) return { data: [], total_count: 0 };
+    if (!moduleRow) return { data: [], total_count: 0, current_page: 1, last_page: 1 };
 
     values.push(moduleRow.id);
     whereClauses.push(`tv.module_id = $${i++}`);
+    whereClauses.push("tv.approved = true");
+    whereClauses.push("tv.is_active = true");
 
     if (user_type !== "super_admin" && user_id) {
       const [perm] = await dbQuery(
@@ -54,7 +59,7 @@ export const findTrainingVideos = async ({
         [user_id, moduleRow.id]
       );
 
-      if (!perm) return { data: [], total_count: 0 };
+      if (!perm) return { data: [], total_count: 0, current_page: 1, last_page: 1 };
 
       const allowedActions = [];
       if (perm.can_view) allowedActions.push("view");
@@ -63,7 +68,7 @@ export const findTrainingVideos = async ({
       if (perm.can_delete) allowedActions.push("delete");
       if (perm.can_authorize) allowedActions.push("authorize");
 
-      if (allowedActions.length === 0) return { data: [], total_count: 0 };
+      if (allowedActions.length === 0) return { data: [], total_count: 0, current_page: 1, last_page: 1 };
 
       const placeholders = allowedActions.map(() => `$${i++}`).join(", ");
       values.push(...allowedActions);

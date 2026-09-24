@@ -8,8 +8,19 @@ const MODULE_SORT_ORDER = moduleSortOrderNumericExpr("m");
 
 import { MODULE_DISABLED_MESSAGE, NO_ACCESS_MESSAGE } from "../constants/messages.js";
 import { APP_META } from "../../config/portal/portalModules.js";
+import { attachModuleEventHook } from "../../apps/core/notifications/templates/moduleEventHook.js";
 
+/** Permission gate; allowed write requests also emit module notification events (add/edit/delete/approve). */
 export const accessControl = (moduleName, actions) => {
+  const check = checkModuleAccess(moduleName, actions);
+  return (req, res, next) =>
+    check(req, res, (...args) => {
+      if (!args.length) attachModuleEventHook(req, res, moduleName, actions);
+      next(...args);
+    });
+};
+
+function checkModuleAccess(moduleName, actions) {
   return async (req, res, next) => {
     try {
       const user = req.user;
@@ -137,7 +148,7 @@ export const accessControl = (moduleName, actions) => {
       res.status(500).json({ success: false, message: "Internal server error" });
     }
   };
-};
+}
 
 /**
  * Allow if the user satisfies ANY of the given { moduleName, actions } pairs.

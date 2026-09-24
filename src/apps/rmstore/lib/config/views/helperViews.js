@@ -52,34 +52,38 @@ function allowErpHelper(mod, act) {
   return null;
 }
 
+/** Modules that may read coil rows / journey via helper (Coil Finder, scan flows). */
+const COIL_HELPER_CALLER_MODULES = [
+  "rm_coils",
+  "rm_inventory_inwards",
+  "rm_issue_request",
+  "rm_in_process_request",
+  "rm_stock_adjustment",
+  "rm_qc_check",
+  "rm_out_entry",
+  "rm_mrn_portal",
+  "rm_store_location_master",
+  "rm_rejection",
+  "rm_coil_transaction_logs",
+  "rm_coil_download_logs",
+  "rm_inventory_report",
+  "rm_inventory_audit",
+];
+
+function coilHelperCallerAllowed(mod, act) {
+  return COIL_HELPER_CALLER_MODULES.includes(mod) && (act === VIEW || isForm(act));
+}
+
 /** Coil table helper — verify coils from pages that lack rm_coils module access. */
 function fieldsForCoils(mod, act) {
   if (mod == null || act == null) return null;
-  const allowedModules = [
-    "rm_coils",
-    "rm_inventory_inwards",
-    "rm_issue_request",
-    "rm_in_process_request",
-    "rm_stock_adjustment",
-    "rm_qc_check",
-    "rm_out_entry",
-    "rm_mrn_portal",
-    "rm_store_location_master",
-    "rm_rejection",
-    "rm_coil_transaction_logs",
-    "rm_coil_download_logs",
-    "rm_inventory_report",
-    "rm_inventory_audit",
-  ];
-  if (allowedModules.includes(mod) && (act === VIEW || isForm(act))) {
-    return [];
-  }
+  if (coilHelperCallerAllowed(mod, act)) return [];
   return null;
 }
 
 function fieldsForQcCheck(mod, act) {
   if (mod == null || act == null) return null;
-  if (mod === "rm_rejection" && (act === VIEW || isForm(act))) {
+  if ((mod === "rm_rejection" || mod === "rm_coils") && (act === VIEW || isForm(act))) {
     return [];
   }
   return null;
@@ -95,8 +99,8 @@ function fieldsForIssueRequest(mod, act) {
 
 function fieldsForinProcessRequest(mod, act) {
   if (mod == null || act == null) return null;
-  const allowed = ["rm_rejection", "rm_coils", "rm_qc_check", "rm_in_process_request"];
-  if (allowed.includes(mod) && (act === VIEW || isForm(act))) {
+  const allowed = ["rm_rejection", "rm_coils", "rm_qc_check", "rm_in_process_request", "rm_inventory_inwards"];
+  if (allowed.includes(mod) && (act === VIEW || isForm(act) || act === "add")) {
     return [];
   }
   return null;

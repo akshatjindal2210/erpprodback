@@ -7,11 +7,14 @@ import { createTrainingVideosTable } from "../tables/training/training_videos.ta
 import { createModuleSopsTable } from "../tables/training/module_sops.table.js";
 import { createDepartmentsTable } from "../tables/identity/department.table.js";
 import { createDesignationsTable } from "../tables/identity/designation.table.js";
+import { createAttributesTable } from "../tables/identity/attribute.table.js";
 import { createActivityLogsTable } from "../tables/activity-logs/activity_log.table.js";
 import { createInboxTable } from "../tables/notifications/inbox.table.js";
 import { createPushSubscriptionTable } from "../tables/notifications/push_subscription.table.js";
 import { createPushDeliveryLogTable } from "../tables/notifications/push_delivery_log.table.js";
-// import { createUserAppPreferencesTable } from "../tables/configuration/user_app_preferences.table.js";
+import { createNotificationTemplatesTable } from "../tables/notifications/notification_templates.table.js";
+import { createNotificationLogsTable } from "../tables/notifications/notification_logs.table.js";
+import { createUserAppPreferencesTable } from "../tables/configuration/user_app_preferences.table.js";
 import { createCoreUpdatedAtTriggers } from "../tables/db/triggers.table.js";
 
 export const initCoreDB = async () => {
@@ -23,15 +26,18 @@ export const initCoreDB = async () => {
   await createModuleSopsTable();
   await createDepartmentsTable();
   await createDesignationsTable();
+  await createAttributesTable();
   await createActivityLogsTable();
   await createInboxTable();
   await createPushSubscriptionTable();
   await createPushDeliveryLogTable();
+  await createNotificationTemplatesTable();
+  await createNotificationLogsTable();
   // await createUserAppPreferencesTable();
   await createCoreUpdatedAtTriggers();
 
   // One-shot cleanup — remove after next prod deploy once these old tables are gone
   // await dbQuery(`DROP TABLE IF EXISTS ims_activity_logs CASCADE`);
   // await dbQuery(`DROP TABLE IF EXISTS task_users_logs CASCADE`);
-  await dbQuery(`DROP TABLE IF EXISTS mst_widgets CASCADE`);
+  // await dbQuery(`DROP TABLE IF EXISTS mst_widgets CASCADE`);
 };

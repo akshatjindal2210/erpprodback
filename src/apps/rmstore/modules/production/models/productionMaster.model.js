@@ -118,3 +118,45 @@ export const updateProductions = async (fields, id) => {
 export const deleteProductions = async (id, deleted_by) => {
   await dbQuery(`UPDATE ${TBL} SET is_deleted = true, deleted_at = NOW(), deleted_by = $1 WHERE production_id = $2`, [deleted_by, id]);
 };
+
+/** One FG from Item RM Master (same idea as shop-floor job card): first approved link for this RM wire. */
+export const findProductionFgForRmWire = async ({ item_code, item_dcode } = {}) => {
+  const code = item_code ? String(item_code).trim() : "";
+  const dcodeNum = item_dcode != null && item_dcode !== "" ? Number(item_dcode) : NaN;
+  const dcode = Number.isFinite(dcodeNum) && dcodeNum > 0 ? dcodeNum : null;
+  if (!code && dcode == null) return null;
+
+  const values = [];
+  let i = 1;
+  const rmMatch = [];
+  if (code) {
+    rmMatch.push(`UPPER(TRIM(COALESCE(elem->>'rm_item_code', ''))) = UPPER(TRIM($${i++}::text))`);
+    values.push(code);
+  }
+  if (dcode != null) {
+    rmMatch.push(`NULLIF(TRIM(COALESCE(elem->>'rm_item_dcode', '')), '')::bigint = $${i++}::bigint`);
+    values.push(dcode);
+  }
+
+  const [row] = await dbQuery(
+    `SELECT item_code, item_desc
+     FROM ${TBL}
+     WHERE is_deleted = false
+       AND EXISTS (
+         SELECT 1 FROM jsonb_array_elements(COALESCE(rm_items, '[]'::jsonb)) elem
+         WHERE ${rmMatch.join(" OR ")}
+       )
+     ORDER BY approved DESC NULLS LAST, production_id DESC
+     LIMIT 1`,
+    values
+  );
+
+  if (!row) return null;
+  const fgCode = row.item_code ? String(row.item_code).trim() : "";
+  if (!fgCode) return null;
+  const fgDesc = row.item_desc ? String(row.item_desc).trim() : "";
+  return {
+    fg_item_code: fgCode,
+    fg_item_desc: fgDesc || null,
+  };
+};

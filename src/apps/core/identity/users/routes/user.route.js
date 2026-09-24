@@ -2,8 +2,7 @@ import { Router } from "express";
 import { loginUser, logoutUser, getUsers, getImsUsers, createUser, updateUser, deleteUser, getMe, changePassword, getUserStats, getUserById, getUsersViews } from "../controllers/user.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../lib/middleware/accessControl.js";
-import { pageHelperAccess } from "../../../lib/middleware/pageHelperAccess.js";
-import { resolveUserViewsSelectFields } from "../../../lib/config/views/fields/user.js";
+import { helperAccess } from "../../../lib/config/views/helperViews.js";
 
 const router = Router();
 
@@ -19,6 +18,6 @@ router.post("/users/get", authenticate, accessControl("users", "view"), getUserB
 router.post("/users/create", authenticate, accessControl("users", "add"), createUser);
 router.post("/users/update", authenticate, accessControl("users", "edit"), updateUser);
 router.post("/users/delete", authenticate, accessControl("users", "delete"), deleteUser);
-router.post("/users/helper", authenticate, pageHelperAccess(resolveUserViewsSelectFields), getUsersViews);
+router.post("/users/helper", authenticate, helperAccess("users"), getUsersViews);
 
 export default router;
