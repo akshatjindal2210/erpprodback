@@ -4,6 +4,7 @@
  */
 import dbQuery from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { formatIstDateYmd, GATE_BILL_DT_DATE_SQL, GATE_PENDING_MIN_BILL_DT, gateRowMeetsPendingMinBillDt } from "../utils/imsBillDateFilter.js";
 
 export async function findSavedGateBillSet() {
   const rows = await dbQuery(`SELECT LOWER(TRIM(bill_no)) AS bill_key FROM ${T.GATE_ENTRY} WHERE is_deleted = false AND NULLIF(TRIM(bill_no), '') IS NOT NULL`);
@@ -155,7 +156,7 @@ const IR_GATE_SELECT = `
 
 /** Gate Out rows not yet invoice-received (IR Pending). */
 export async function findUnmatchedOutGateRows() {
-  return dbQuery(
+  const rows = await dbQuery(
     `
     SELECT ${IR_GATE_SELECT}
     FROM ${T.GATE_ENTRY}
@@ -166,13 +167,14 @@ export async function findUnmatchedOutGateRows() {
     ORDER BY uid DESC
     `
   );
+  return (rows || []).filter(gateRowMeetsPendingMinBillDt);
 }
 
 /**
  * Gate Out rows with invoice receiving saved (IR Register).
- * Date filter = Gate Entry created_at (IR does not change updated_at).
+ * Date filter = Gate bill_dt (same business date as Gate Entry / legacy ERP register).
  */
-export async function findMatchedOutGateRows({ from_date, to_date } = {}) {
+export async function findMatchedOutGateRows({ from_date, to_date, apply_pending_min_bill_dt = false } = {}) {
   const values = [];
   let i = 1;
   const conditions = [
@@ -182,7 +184,16 @@ export async function findMatchedOutGateRows({ from_date, to_date } = {}) {
     "NULLIF(TRIM(COALESCE(receiving_file, '')), '') IS NOT NULL",
   ];
 
-  const dateExpr = `(created_at AT TIME ZONE 'Asia/Kolkata')::date`;
+  const dateExpr = GATE_BILL_DT_DATE_SQL;
+
+  if (apply_pending_min_bill_dt) {
+    values.push(formatIstDateYmd(GATE_PENDING_MIN_BILL_DT));
+    conditions.push(`${dateExpr} >= $${i++}::date`);
+  }
+
+  if (from_date || to_date) {
+    conditions.push(`${dateExpr} IS NOT NULL`);
+  }
 
   if (from_date) {
     values.push(String(from_date).slice(0, 10));
@@ -193,7 +204,7 @@ export async function findMatchedOutGateRows({ from_date, to_date } = {}) {
     conditions.push(`${dateExpr} <= $${i++}::date`);
   }
 
-  return dbQuery(
+  const rows = await dbQuery(
     `
     SELECT ${IR_GATE_SELECT}
     FROM ${T.GATE_ENTRY}
@@ -202,6 +213,8 @@ export async function findMatchedOutGateRows({ from_date, to_date } = {}) {
     `,
     values
   );
+  if (!apply_pending_min_bill_dt) return rows || [];
+  return (rows || []).filter(gateRowMeetsPendingMinBillDt);
 }
 
 /** Save invoice receiving attachment + audit meta on the gate row (no ERP).

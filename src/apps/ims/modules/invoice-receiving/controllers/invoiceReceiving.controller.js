@@ -1,7 +1,7 @@
 import { fetchImsDataRaw } from "../../../lib/services/ims.service.js";
 import { toImsIrPublicUploadPath } from "../../../lib/middleware/upload.js";
 import { clearGateInvoiceReceiving, findMatchedOutGateRows, findUnmatchedOutGateRows, saveGateInvoiceReceiving } from "../../gate-entry/models/gateEntry.model.js";
-import { formatIstDateTime, resolveGateImsBilldtFilter } from "../../gate-entry/utils/imsBillDateFilter.js";
+import { formatIstDateTime, GATE_PENDING_MIN_BILL_DT, resolveGateImsBilldtFilter } from "../../gate-entry/utils/imsBillDateFilter.js";
 import { buildGateReceivingPayload, isErpNullString, parseExistingPathsFromBody, parseReceivingMeta } from "../utils/buildInvReceivingUploadFilter.js";
 
 const MODULE = "invoice_receiving";
@@ -56,7 +56,7 @@ async function accNameByBillKeys(billKeys) {
   const map = new Map();
   if (!billKeys?.size) return map;
 
-  const fy = resolveGateImsBilldtFilter(null, { useTodayAsEnd: true });
+  const fy = resolveGateImsBilldtFilter(null, { useTodayAsEnd: true, minFrom: GATE_PENDING_MIN_BILL_DT });
   let json = await fetchImsDataRaw("invmnote", fy.filter);
   if (!json?.success) json = await fetchImsDataRaw("invmnote", null);
 
@@ -92,6 +92,7 @@ export async function listInvoiceReceiving(req, res) {
     const type = req.body?.type == null ? "" : String(req.body.type);
     const from_date = req.body?.from_date ?? req.body?.fromDate ?? null;
     const to_date = req.body?.to_date ?? req.body?.toDate ?? null;
+    const mergePending = parseTruthyFlag(req.body?.gate_registered_only);
     const isRegister = type === "register";
 
     if (!isRegister) {
@@ -101,7 +102,11 @@ export async function listInvoiceReceiving(req, res) {
     }
 
     // Register / pending-merge: gate_registered_only is always true locally (data is gate-only).
-    const gates = await findMatchedOutGateRows({ from_date, to_date });
+    const gates = await findMatchedOutGateRows({
+      from_date,
+      to_date,
+      apply_pending_min_bill_dt: mergePending && !from_date && !to_date,
+    });
     const rows = await mapGatesToIrRows(gates);
     return res.json({ success: true, message: "Gate Out invoice receiving register.", data: rows });
   } catch (err) {

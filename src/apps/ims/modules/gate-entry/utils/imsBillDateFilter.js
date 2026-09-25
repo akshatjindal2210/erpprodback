@@ -189,4 +189,26 @@ export function resolveGateImsBilldtFilter(bill_dt_hint, options = {}) {
  * Complete register (`listGateEntries` / findGateRows) does NOT use this.
  */
 export const GATE_PENDING_MIN_BILL_DT = new Date(2026, 8, 1); // 1 Sep 2026 
-// export const GATE_PENDING_MIN_BILL_DT = new Date(2026, 7, 30); // 26 Aug 2026
+export const INVOICE_RECEVING_GATE_PENDING_MIN_BILL_DT = new Date(2026, 8, 21); // 1 Sep 2026 
+// export const GATE_PENDING_MIN_BILL_DT = new Date(2026, 8, 20); // 26 Aug 2026
+
+/** Postgres: `ims_gate_entry.bill_dt` (TEXT) → date; NULL when unparseable. */
+export const GATE_BILL_DT_DATE_SQL = `
+  COALESCE(
+    NULLIF(substring(TRIM(bill_dt) from '^(\d{4}-\d{2}-\d{2})'), '')::date,
+    CASE
+      WHEN TRIM(COALESCE(bill_dt, '')) ~ '^\\d{1,2}-\\d{2}-\\d{4}'
+      THEN to_date(substring(TRIM(bill_dt) from 1 for 10), 'DD-MM-YYYY')
+      ELSE NULL
+    END
+  )
+`;
+
+/** IR / Gate pending — same cutoff as Gate Entry pending (operator-controlled constant above). */
+export function gateRowMeetsPendingMinBillDt(row) {
+  const billDate = parseBillDateHint(row?.bill_dt);
+  if (!billDate) return false;
+  const pendingMin = new Date(INVOICE_RECEVING_GATE_PENDING_MIN_BILL_DT);
+  pendingMin.setHours(0, 0, 0, 0);
+  return billDate >= pendingMin;
+}
