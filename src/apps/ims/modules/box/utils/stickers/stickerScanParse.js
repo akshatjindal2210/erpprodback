@@ -13,6 +13,13 @@ export function normalizeScanInput(rawValue) {
 function readBoxParamsFromUrl(url) {
   const noParam = url.searchParams.get("box_no_uid");
   const idParam = url.searchParams.get("id");
+  const boxUidParam = url.searchParams.get("box_uid");
+  const fuid = url.searchParams.get("fuid");
+
+  if (fuid && !noParam && !idParam && !boxUidParam) {
+    return { box_no_uid: "", box_uid: "" };
+  }
+
   let box_no_uid = "";
   let box_uid = "";
 
@@ -24,11 +31,8 @@ function readBoxParamsFromUrl(url) {
     if (/^\d+$/.test(id)) box_uid = id;
     else if (!box_no_uid) box_no_uid = id;
   }
-  if (!box_uid) {
-    const uidParam = url.searchParams.get("box_uid");
-    if (uidParam != null && /^\d+$/.test(String(uidParam).trim())) {
-      box_uid = String(uidParam).trim();
-    }
+  if (!box_uid && boxUidParam != null && /^\d+$/.test(String(boxUidParam).trim())) {
+    box_uid = String(boxUidParam).trim();
   }
 
   return { box_no_uid, box_uid };

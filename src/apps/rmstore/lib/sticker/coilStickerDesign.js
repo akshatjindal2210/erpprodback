@@ -9,6 +9,7 @@ import fs from "fs";
 import path from "path";
 import QRCode from "qrcode";
 import { findSpecItemDetail, findSpecItemDetailByItemCode, findSpecItemDetailByItemDesc } from "../../modules/spec/models/specMaster.model.js";
+import { resolveRmCoilQrPayload, resolveRmQcQrPayload } from "../../../core/lib/utils/qr/publicQrUrl.js";
 
 export const RM_STICKER_WIDTH_MM = 65;
 export const RM_STICKER_HEIGHT_MM = 85;
@@ -472,10 +473,9 @@ function buildCardHtml(f) {
 }
 
 async function buildCard(row) {
-  const isQc =
-    row.is_qc === true || String(row.sticker_kind || "").toLowerCase() === "qc";
+  const isQc = row.is_qc === true || String(row.sticker_kind || "").toLowerCase() === "qc";
   const uid = text(row.coil_no_uid || row.box_no_uid || row.coil_uid);
-  const qrPayload = isQc ? (uid ? `QC|${uid}` : "") : uid;
+  const qrPayload = isQc ? await resolveRmQcQrPayload({ coil_no_uid: uid }) : await resolveRmCoilQrPayload({ coil_no_uid: uid });
 
   let qrUrl = "";
   try {

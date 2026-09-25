@@ -2,6 +2,7 @@ import dbQuery from "../../../../../../config/db/db.js";
 import { patchTableSchema, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 import { IMS_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
+/** Gate Entry + Invoice Receiving columns (local — no ERP invreceiving). */
 export async function createGateEntryTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.GATE_ENTRY} (
@@ -21,7 +22,10 @@ export async function createGateEntryTable() {
       updated_at     TIMESTAMP,
       is_deleted     BOOLEAN DEFAULT false,
       deleted_by     TEXT,
-      deleted_at     TIMESTAMP
+      deleted_at     TIMESTAMP,
+      invoice_matched BOOLEAN NOT NULL DEFAULT false,
+      receiving_file  TEXT,
+      receiving_meta  TEXT
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_entry_bill_active
@@ -32,6 +36,9 @@ export async function createGateEntryTable() {
   await patchTableSchema(dbQuery, T.GATE_ENTRY, {
     columns: [
       patchCol("type", "VARCHAR(16) NOT NULL DEFAULT 'out'"),
+      patchCol("invoice_matched", "BOOLEAN NOT NULL DEFAULT false"),
+      patchCol("receiving_file", "TEXT"),
+      patchCol("receiving_meta", "TEXT"),
     ],
   });
 }

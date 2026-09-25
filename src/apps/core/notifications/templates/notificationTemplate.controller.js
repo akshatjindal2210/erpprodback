@@ -5,6 +5,7 @@ import { TRIGGER_EVENTS, RECIPIENT_TYPES, SEND_VIA_OPTIONS, findNotificationTemp
 import { findNotificationLogs } from "./notificationTemplateLog.model.js";
 import { findModule } from "../../identity/modules/models/module.model.js";
 import { ROLE_KEYS, invalidateTemplateCache, resolveRecipients, resolveAudience, normalizeRecipientRefs } from "./moduleNotify.service.js";
+import { recordVariableHintsByModules } from "./moduleRecordFieldsFromDb.js";
 import { extractListParams } from "../../lib/utils/query/queryHelper.js";
 import { auditUserName } from "../../lib/utils/auth/approval.js";
 
@@ -247,7 +248,7 @@ export const getNotificationTemplateLogs = async (req, res) => {
   }
 };
 
-/** Dropdown sources for the template form (existing masters only). */
+/** Dropdown data for the template form, including record field hints from database columns. */
 export const getNotificationTemplateOptions = async (req, res) => {
   try {
     const [modules, attributes, departments, designations, users] = await Promise.all([
@@ -261,6 +262,7 @@ export const getNotificationTemplateOptions = async (req, res) => {
          ORDER BY name`
       ),
     ]);
+    const record_variables_by_module = await recordVariableHintsByModules(modules);
     res.json({
       success: true,
       data: {
@@ -272,6 +274,7 @@ export const getNotificationTemplateOptions = async (req, res) => {
         roles: ROLE_KEYS,
         trigger_events: TRIGGER_EVENTS,
         recipient_types: RECIPIENT_TYPES,
+        record_variables_by_module,
       },
     });
   } catch (err) {

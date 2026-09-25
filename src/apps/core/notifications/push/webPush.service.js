@@ -6,6 +6,7 @@ import PushDeliveryLog from "./pushDeliveryLog.model.js";
 import User from "../../identity/users/models/user.model.js";
 import { toUserId } from "../../lib/utils/realtime/socket.js";
 import { formatPushTitle, resolvePushAppBrand } from "../../../../config/push/pushAppBrand.js";
+import { INBOX_DELIVERY_RECIPIENT_LABEL } from "../../lib/config/notifications/inboxConfig.js";
 
 const PUSH_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days — delivers when device comes online
 
@@ -51,6 +52,28 @@ async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function logInboxPwaSent(notification = {}, meta = {}) {
+  const app_type = meta.app_type ?? notification.app_type ?? "task";
+  const brand = resolvePushAppBrand(app_type);
+  const rawTitle = notification.title || meta.title || brand.label;
+  const title = formatPushTitle(app_type, rawTitle);
+  const body = notification.body || "";
+  return PushDeliveryLog.create({
+    tracking_id: randomUUID(),
+    user_id: meta.user_id ?? null,
+    user_name: meta.user_name ?? null,
+    device_name: INBOX_DELIVERY_RECIPIENT_LABEL,
+    inbox_id: meta.inbox_id ?? null,
+    template_key: meta.template_key ?? null,
+    channel: meta.channel ?? "pwa_push",
+    app_type,
+    title,
+    body,
+    status: "sent",
+    sent_at: new Date(),
+  });
+}
+
 async function sendToRow(row, notification = {}, meta = {}) {
   const tracking_id = randomUUID();
   const app_type = meta.app_type ?? notification.app_type ?? "task";
@@ -94,6 +117,10 @@ async function sendToRow(row, notification = {}, meta = {}) {
       });
       await PushSubscription.touchLastUsed(row.subscription_id);
 
+      if (meta.suppress_delivery_log) {
+        return { ok: true, subscription_id: row.subscription_id, tracking_id, log: null };
+      }
+
       const log = await PushDeliveryLog.create({
         tracking_id,
         user_id: row.user_id ?? meta.user_id ?? null,
@@ -120,8 +147,23 @@ async function sendToRow(row, notification = {}, meta = {}) {
 
   const err = lastErr || new Error("Push delivery failed");
   const status = err?.statusCode ?? err?.status;
-  if (status === 404 || status === 410) {
+  const errorDetail = status != null ? `${err.message} (HTTP ${status})` : err.message;
+  const staleSub = status === 404 || status === 410;
+  if (staleSub) {
     await PushSubscription.removeByEndpoint(row.endpoint);
+  }
+
+  const inboxDelivered = meta.inbox_delivered === true && inbox_id != null;
+  if (inboxDelivered || staleSub) {
+    return {
+      ok: false,
+      subscription_id: row.subscription_id,
+      tracking_id,
+      error: errorDetail,
+      status,
+      log: null,
+      noLog: true,
+    };
   }
 
   const log = await PushDeliveryLog.create({
@@ -138,7 +180,7 @@ async function sendToRow(row, notification = {}, meta = {}) {
     title,
     body,
     status: "failed",
-    error_detail: err.message,
+    error_detail: errorDetail,
     sent_at: new Date(),
   });
 
@@ -146,7 +188,7 @@ async function sendToRow(row, notification = {}, meta = {}) {
     ok: false,
     subscription_id: row.subscription_id,
     tracking_id,
-    error: err.message,
+    error: errorDetail,
     status,
     log,
   };
@@ -154,7 +196,7 @@ async function sendToRow(row, notification = {}, meta = {}) {
 
 export async function sendWebPushToSubscriptions(rows, notification = {}, meta = {}) {
   if (!initVapid() || !rows?.length) {
-    return { ok: false, sent: 0, failed: 0, skipped: !initVapid(), results: [], logs: [] };
+    return { ok: false, sent: 0, failed: 0, results: [], logs: [] };
   }
 
   const results = [];
@@ -166,7 +208,7 @@ export async function sendWebPushToSubscriptions(rows, notification = {}, meta =
   }
 
   const sent = results.filter((r) => r.ok).length;
-  const failed = results.filter((r) => !r.ok).length;
+  const failed = results.filter((r) => !r.ok && !r.noLog).length;
   return { ok: sent > 0, sent, failed, results, logs };
 }
 
@@ -180,12 +222,31 @@ export async function sendWebPushToUser(userId, notification = {}, meta = {}) {
     user_name = user?.name ?? null;
   }
 
+  const pushMeta = { ...meta, user_id: uid, user_name };
   const rows = await PushSubscription.listByUserId(uid);
+
+  // Module templates only: one Message Log row + silent multi-device push (task/manual push unchanged).
+  const moduleInboxLog =
+    meta.delivery_log === "inbox_single" && meta.inbox_delivered === true && meta.inbox_id != null;
+
+  if (moduleInboxLog) {
+    const inboxLog = await logInboxPwaSent(notification, pushMeta);
+    const logs = inboxLog ? [inboxLog] : [];
+    if (!rows.length) {
+      return { ok: true, sent: 1, failed: 0, error: null, logs };
+    }
+    const push = await sendWebPushToSubscriptions(rows, notification, {
+      ...pushMeta,
+      suppress_delivery_log: true,
+    });
+    return { ...push, ok: push.ok || Boolean(inboxLog), sent: push.sent, logs };
+  }
+
   if (!rows.length) {
     return { ok: false, sent: 0, failed: 0, error: "No linked devices for this user", logs: [] };
   }
 
-  return sendWebPushToSubscriptions(rows, notification, { ...meta, user_id: uid, user_name });
+  return sendWebPushToSubscriptions(rows, notification, pushMeta);
 }
 
 export async function sendWebPushToDevice(deviceId, notification = {}, meta = {}) {

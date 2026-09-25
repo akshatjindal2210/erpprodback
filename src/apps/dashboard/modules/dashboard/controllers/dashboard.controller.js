@@ -12,6 +12,7 @@ import { normalizeUrlRequestOptions, validateJsonUrl } from "../../../lib/utils/
 import { fetchImsDataRaw } from "../../../../ims/lib/services/ims.service.js";
 import { clearImsMetaForResponse } from "../../../../ims/lib/utils/erp-api/lookup/imsMeta.js";
 import { findUsers } from "../../../../core/identity/users/models/user.model.js";
+import { TABLE_MODULE_OVERRIDES } from "../../../../../config/db/moduleTableMap.js";
 
 const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings", "rmstore", "hrms", "purchase", "production"]);
 const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql", "hybrid", "url_json"]);
@@ -25,33 +26,6 @@ const APP_TABLE_PREFIX = {
   hrms: ["hrms_"],
   purchase: ["purchase_"],
   production: ["production_"],
-};
-
-const TABLE_MODULE_OVERRIDES = {
-  ims_location_master: "location_master",
-  ims_tray_master: "tray_master",
-  ims_tray_batch: "tray_batch",
-  rmstore_master_production: "rm_production_master",
-  rmstore_spec_master: "rm_spec_master",
-  rmstore_spec_detail: "rm_spec_master",
-  rmstore_mrn: "rm_mrn_portal",
-  ims_packing_standard: "packing_standard",
-  ims_inventory_inwards: "inventory_inwards",
-  ims_forwarding_note_master: "forwarding_note_master",
-  ims_forwarding_note_item_wise: "forwarding_note_master",
-  ims_out_entry: "out_entry",
-  ims_box_table: "boxes",
-  ims_stock_adjustment: "stock_adjustment",
-  ims_schedule_plan: "schedule_planning",
-  ims_schedule_plan_transaction: "schedule_planning",
-  ims_qc_hold_material: "qc_hold_material",
-  ims_audit_master: "audit",
-  ims_audit_locations: "audit",
-  ims_audit_scans: "audit",
-  rmstore_audit_master: "rm_inventory_audit",
-  rmstore_audit_locations: "rm_inventory_audit",
-  hrms_attendance: "hrms_attendance",
-  hrms_attendance_log: "hrms_attendance_log",
 };
 
 function extractReferencedTables(rawSql = "") {

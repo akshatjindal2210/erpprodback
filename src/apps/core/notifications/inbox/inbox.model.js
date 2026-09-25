@@ -18,7 +18,7 @@ const Inbox = {
     const params = [userId];
     let where = `user_id = ? AND is_read = FALSE`;
     if (app_type) {
-      where += ` AND app_type = ?`;
+      where += ` AND (app_type = ? OR trigger_key LIKE 'module_%')`;
       params.push(app_type);
     }
     params.push(Number(limit), Number(offset));
@@ -39,7 +39,7 @@ const Inbox = {
     const params = [userId];
     let where = `user_id = ? AND is_read = FALSE`;
     if (app_type) {
-      where += ` AND app_type = ?`;
+      where += ` AND (app_type = ? OR trigger_key LIKE 'module_%')`;
       params.push(app_type);
     }
     const rows = await dbQuery(
@@ -60,7 +60,7 @@ const Inbox = {
     const params = [userId];
     let where = `user_id = ? AND is_read = FALSE`;
     if (app_type) {
-      where += ` AND app_type = ?`;
+      where += ` AND (app_type = ? OR trigger_key LIKE 'module_%')`;
       params.push(app_type);
     }
     await dbQuery(`UPDATE ${M.INBOX} SET is_read = TRUE WHERE ${where}`, params);

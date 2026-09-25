@@ -504,18 +504,21 @@ export const updateUser = async (req, res) => {
       });
     }
 
+    const { password: pw, ...safeUser } = existing;
+
     await logActivity(req, {
       action: "update",
       entity: "users",
       entity_id: id,
+      record: safeUser,
+      responseData: safeUser,
       details: {
-        updated_fields: fields,
+        updated_fields: Object.keys(fields),
         ...(existing.attributes ? { attributes: existing.attributes.map((a) => a.name) } : {}),
       },
       appType: "portal",
     });
 
-    const { password: pw, ...safeUser } = existing;
     res.json({ success: true, data: safeUser, message: "User updated successfully" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

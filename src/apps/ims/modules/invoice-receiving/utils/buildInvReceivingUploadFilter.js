@@ -1,6 +1,6 @@
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
-import { MODULE_DATES } from "../../../../../config/moduleDates.config.js";
-import { buildImsBilldtRangeFilter, formatIstDateTime, formatIstDateYmd, indianFinancialYearBounds, parseBillDateHint } from "../../gate-entry/utils/imsBillDateFilter.js";
+import { formatIstDateTime } from "../../gate-entry/utils/imsBillDateFilter.js";
+
 /** Invoice receiving upload folder (change here only if path changes). */
 export const IR_RECEIVING_UPLOAD_PREFIX = "uploads/ims/invoice-receiving/";
 
@@ -12,8 +12,8 @@ export function expandIrUploadPath(ref) {
   return `${IR_RECEIVING_UPLOAD_PREFIX}${s.replace(/^\/+/, "")}`;
 }
 
-/** Write ERP: our folder → filename only; any other `uploads/…` or bare name unchanged logic. */
-export function compactIrFileRefForErp(ref) {
+/** Store on gate: our folder → filename only; other `uploads/…` paths kept. */
+export function compactIrFileRef(ref) {
   const s = String(ref ?? "").trim().replace(/\\/g, "/");
   if (isErpNullString(s)) return "";
   if (s.startsWith(IR_RECEIVING_UPLOAD_PREFIX)) return s.slice(IR_RECEIVING_UPLOAD_PREFIX.length);
@@ -39,7 +39,9 @@ function parseReceivingFileRaw(raw) {
     try {
       const o = JSON.parse(s);
       if (o && typeof o === "object" && !Array.isArray(o)) {
-        Object.keys(o).sort((a, b) => Number(a) - Number(b)).forEach((k) => push(o[k]));
+        Object.keys(o)
+          .sort((a, b) => Number(a) - Number(b))
+          .forEach((k) => push(o[k]));
         return out;
       }
     } catch {
@@ -67,13 +69,18 @@ function parseReceivingFileRaw(raw) {
   return out;
 }
 
-/** ERP `receivingfile` — compact JSON object `{"0":"a.png","1":"b.jpg"}`. */
-export function serializeReceivingFileForErp(paths) {
+/** Expanded attachment paths from gate/ERP `receivingfile` raw value. */
+export function parseReceivingFilePaths(raw) {
+  return parseReceivingFileRaw(raw);
+}
+
+/** Gate `receiving_file` — compact JSON object `{"0":"a.png","1":"b.jpg"}`. */
+export function serializeReceivingFile(paths) {
   const clean = (Array.isArray(paths) ? paths : []).map((p) => String(p).trim()).filter((p) => !isErpNullString(p));
   if (!clean.length) return "";
   const obj = {};
   clean.forEach((p, i) => {
-    obj[String(i)] = compactIrFileRefForErp(p);
+    obj[String(i)] = compactIrFileRef(p);
   });
   return JSON.stringify(obj);
 }
@@ -95,11 +102,7 @@ export function parseExistingPathsFromBody(body) {
   return parseReceivingFileRaw(s);
 }
 
-/**
- * ERP field `receiverefno` is one string column — store JSON text inside it.
- * App code uses a plain object; call this once before IMS update.
- */
-export function receiverefnoToImsString(meta) {
+export function receivingMetaToString(meta) {
   if (meta == null) return JSON.stringify({});
   if (typeof meta === "string") {
     const s = meta.trim();
@@ -114,8 +117,8 @@ export function receiverefnoToImsString(meta) {
   return JSON.stringify(meta);
 }
 
-/** List/register row → object for UI (safe if ERP already returns object). */
-export function parseReceiverefnoFromIms(raw) {
+/** Gate `receiving_meta` JSON → object for UI. */
+export function parseReceivingMeta(raw) {
   if (isErpNullString(raw)) return null;
   if (typeof raw === "object" && !Array.isArray(raw)) return raw;
   try {
@@ -128,12 +131,16 @@ export function parseReceiverefnoFromIms(raw) {
   }
 }
 
+/** @deprecated alias — FE/BE used ERP name; same as parseReceivingMeta */
+export function parseReceiverefnoFromIms(raw) {
+  return parseReceivingMeta(raw);
+}
+
 /**
- * IMS internal API — filter.type "update":
- * filter.data.billdt, prnbillno, receiverefno (audit JSON), receivingfile (path or JSON array string).
+ * Build local gate payload for invoice receiving save (no ERP / invreceiving).
  */
-export function buildInvReceivingUpdateFilter(req, opts = {}) {
-  const { prnbillno, billdt, file_paths = [], approved = false, remarks = "", touchUpload = true } = opts;
+export function buildGateReceivingPayload(req, opts = {}) {
+  const { file_paths = [], approved = false, remarks = "", touchUpload = true } = opts;
   const paths = (Array.isArray(file_paths) ? file_paths : []).map((p) => String(p).trim()).filter((p) => !isErpNullString(p));
 
   const user = auditUserName(req) || "system";
@@ -149,78 +156,17 @@ export function buildInvReceivingUpdateFilter(req, opts = {}) {
         return formatIstDateTime(raw);
       })();
 
-  const billdtOut = formatIstDateYmd(billdt ?? req.body?.billdt);
-
-  const receiverefnoMeta = {
+  const receiving_meta = {
     remarks: String(remarks ?? req.body?.remarks ?? "").trim(),
     approved: wantApproved,
     approved_by: wantApproved ? user : "",
     approved_at: wantApproved ? now : "",
     uploaded_by,
-    uploaded_at
+    uploaded_at,
   };
 
   return {
-    type: "update",
-    data: {
-      billdt: billdtOut,
-      prnbillno: String(prnbillno ?? req.body?.prnbillno ?? "").trim(),
-      receiverefno: receiverefnoToImsString(receiverefnoMeta),
-      receivingfile: serializeReceivingFileForErp(paths),
-    },
+    receiving_file: serializeReceivingFile(paths),
+    receiving_meta: receivingMetaToString(receiving_meta),
   };
 }
-
-/** Clear receiving on ERP — bill returns to pending (no attachment / ref). */
-export function buildInvReceivingClearFilter({ prnbillno, billdt }) {
-  const billdtOut = formatIstDateYmd(billdt);
-  return {
-    type: "update",
-    data: {
-      billdt: billdtOut,
-      prnbillno: String(prnbillno ?? "").trim(),
-      receiverefno: "",
-      receivingfile: "",
-    },
-  };
-}
-
-/**
- * IMS list — pending `{ type: "" }` · register `{ type: "register", data: "billdt >= '…' and …" }`.
- */
-export function buildInvReceivingListFilter(type, fromInput, toInput) {
-  const t = type == null ? "" : String(type);
-  if (t !== "register") return { type: t };
-
-  const filter = { type: "register" };
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  let from = parseBillDateHint(fromInput);
-  let to = parseBillDateHint(toInput);
-
-  if (!from && !to) {
-    const fixedFromYmd = String(MODULE_DATES.ims.invoiceReceiving.pendingMergeFrom ?? "").trim();
-    if (fixedFromYmd) {
-      from = parseBillDateHint(fixedFromYmd);
-      to = today;
-    } else {
-      const fy = indianFinancialYearBounds(today);
-      from = fy.from;
-      to = today > fy.to ? fy.to : today;
-    }
-  } else if (from && !to) {
-    to = today;
-  } else if (!from && to) {
-    from = indianFinancialYearBounds(to).from;
-  }
-
-  if (from && to) {
-    let a = from;
-    let b = to;
-    if (a > b) [a, b] = [b, a];
-    filter.data = buildImsBilldtRangeFilter(a, b);
-  }
-  return filter;
-}
-

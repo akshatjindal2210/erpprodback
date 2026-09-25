@@ -1,11 +1,99 @@
+// Module notifications: config + dispatch live in this file.
+// Entry: scheduleNotifyFromActivity() from logActivity / activityLogger.
+
 import dbQuery from "../../../../config/db/db.js";
 import { MST_TABLES as M } from "../../../../config/db/dbTables.js";
-import { findActiveTemplatesByModuleName, normalizeAudience, isAudienceDimActive, audienceHasAny, effectiveAudience } from "./notificationTemplate.model.js";
-import { insertNotificationLog } from "./notificationTemplateLog.model.js";
+import { findActiveTemplatesByModuleId, normalizeAudience, isAudienceDimActive, audienceHasAny, effectiveAudience } from "./notificationTemplate.model.js";
+import { insertNotificationLogsBatch } from "./notificationTemplateLog.model.js";
+import { auditUserName } from "../../lib/utils/auth/approval.js";
 import { saveInboxAlert } from "../inbox/inboxNotify.service.js";
 import { isWebPushConfigured, sendWebPushToUser } from "../push/webPush.service.js";
-import { getIO } from "../../lib/utils/realtime/socket.js";
+import { formatPushTitle, resolvePushAppBrand } from "../../../../config/push/pushAppBrand.js";
 import { postWaMessage } from "../../../task/manage/notifications/services/waGateway.service.js";
+
+// ─── Config (edit here for routing / aliases) ───────────────────────────────
+export const MODULE_NOTIFY_FROM_ACTIVITY = true;
+
+const SKIP_NOTIFY_ENTITIES = new Set(["notification_templates", "notification_template", "module_sops", "module_sop", "inbox", "push_subscriptions", "dashboard_configs"]);
+
+const ACTION_TRIGGER_ALIASES = {
+  generate_stickers: ["add"],
+  delete_generated_stickers: ["delete"],
+  bulk_download: ["edit"],
+  override_customer: ["edit"],
+  reject: ["edit"],
+};
+
+const STICKER_NOTIFY_ACTIONS = new Set(["generate_stickers", "delete_generated_stickers", "bulk_download"]);
+
+const MODULE_RESOLVE_CACHE_MS = 60_000;     // Module resolve details ko 1 minute (60s) tak memory me cache karke rakhta hai
+const TEMPLATE_CACHE_MS = 30_000;           // Notification templates ko 30 seconds tak cache me rakhta hai
+const DELIVER_CONCURRENCY = 25;             // Ek sath (parallel) maximum 25 notifications bhejta hai
+const MAX_RECIPIENTS_PER_TEMPLATE = 2000;   // Ek single batch/template execution me max 2000 users cover honge
+
+function normalizeNotifyEntity(entity) {
+  return String(entity || "")
+    .replace(/-/g, "_")
+    .toLowerCase();
+}
+
+function rawActionSlug(action) {
+  const a = String(action || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_");
+  return /^[a-z][a-z0-9_]{0,63}$/.test(a) ? a : "";
+}
+
+function moduleNameCandidates(entity, appType, action = "") {
+  const k = normalizeNotifyEntity(entity);
+  const act = rawActionSlug(action);
+  const names = [];
+  const add = (v) => {
+    const s = String(v || "").trim();
+    if (s && !names.includes(s)) names.push(s);
+  };
+
+  if (STICKER_NOTIFY_ACTIONS.has(act) && (k === "boxes" || k === "box" || k === "sticker_download_logs")) {
+    add("packing_entry");
+  }
+
+  add(k);
+  if (k.endsWith("s") && k.length > 2) add(k.slice(0, -1));
+  if (!k.endsWith("s")) add(`${k}s`);
+  if (k === "users" || k === "user") {
+    add("users");
+    add("user");
+  }
+  if (appType === "rmstore" && !k.startsWith("rm_")) {
+    add(`rm_${k}`);
+    if (!k.endsWith("s")) add(`rm_${k}s`);
+  }
+  return names;
+}
+
+function resolveNotifyEvents(action) {
+  const raw = String(action || "").trim();
+  if (!raw) return [];
+  const a = raw.toLowerCase();
+  const slug = a.replace(/\s+/g, "_");
+
+  if (a.includes("creat") || a === "add") return ["add"];
+  if (a.includes("approv") || a === "authorize") return ["approve"];
+  if (a.includes("delet") || a === "remove") return ["delete"];
+  if (a.includes("updat") || a === "edit" || a === "modify") return ["edit"];
+
+  if (!/^[a-z][a-z0-9_]{0,63}$/.test(slug)) return [];
+  return [...new Set([slug, ...(ACTION_TRIGGER_ALIASES[slug] ?? [])])];
+}
+
+function shouldSkipNotifyRequest(req, entity) {
+  if (SKIP_NOTIFY_ENTITIES.has(normalizeNotifyEntity(entity))) return true;
+  const url = String(req?.originalUrl || "").toLowerCase();
+  return url.includes("notification-templates") || url.includes("/module-sops");
+}
+
+// ─── Shared ────────────────────────────────────────────────────────────────
 
 export const ROLE_KEYS = ["super_admin", "admin", "user", "executive_assistant"];
 
@@ -16,21 +104,53 @@ export const EVENT_LABELS = {
   approve: "Approved",
 };
 
-/** When one request matches several events (e.g. update + approve), a template fires once, for the highest-priority event. */
+/** When one request matches several events, standard CRUD wins; else first matching custom action on the template. */
 const EVENT_PRIORITY = ["approve", "add", "edit", "delete"];
 
-const CACHE_TTL_MS = 30_000;
+export function humanizeTriggerEvent(event) {
+  const key = String(event || "").trim().toLowerCase();
+  if (EVENT_LABELS[key]) return EVENT_LABELS[key];
+  return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function pickTemplateEvent(requestEvents, tplEvents) {
+  const req = Array.isArray(requestEvents) ? requestEvents : [];
+  const tpl = Array.isArray(tplEvents) ? tplEvents : [];
+  const std = EVENT_PRIORITY.find((e) => req.includes(e) && tpl.includes(e));
+  if (std) return std;
+  return req.find((e) => tpl.includes(e)) ?? null;
+}
+
 const templateCache = new Map();
+const moduleResolveCache = new Map();
+
+async function runPool(items, limit, fn) {
+  if (!items.length) return;
+  let next = 0;
+  const n = Math.min(limit, items.length);
+  await Promise.all(
+    Array.from({ length: n }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        await fn(items[i], i);
+      }
+    })
+  );
+}
 
 export function invalidateTemplateCache() {
   templateCache.clear();
+  moduleResolveCache.clear();
 }
 
-async function getActiveTemplates(moduleName) {
-  const hit = templateCache.get(moduleName);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.rows;
-  const rows = await findActiveTemplatesByModuleName(moduleName);
-  templateCache.set(moduleName, { at: Date.now(), rows });
+async function getActiveTemplates(moduleId) {
+  const key = `id:${Number(moduleId)}`;
+  const hit = templateCache.get(key);
+  if (hit && Date.now() - hit.at < TEMPLATE_CACHE_MS) return hit.rows;
+  const rows = await findActiveTemplatesByModuleId(moduleId);
+  if (rows.length) {
+    templateCache.set(key, { at: Date.now(), rows });
+  }
   return rows;
 }
 
@@ -46,25 +166,75 @@ export function renderTemplate(text, vars) {
 const isPlainObject = (v) => v != null && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date);
 const isScalar = (v) => v == null || ["string", "number", "boolean"].includes(typeof v) || v instanceof Date;
 const scalarText = (v) => (v instanceof Date ? v.toISOString() : String(v));
+const SKIP_VAR_KEYS = new Set(["password", "confirmpassword", "oldpassword", "token", "otp", "secret", "refresh_token", "access_token"]);
 
-/** Flatten request/response fields into template variables (top level wins over nested). */
-export function buildRecordVars(...sources) {
-  const out = {};
-  const nested = {};
-  for (const src of sources) {
-    if (!isPlainObject(src)) continue;
-    for (const [key, value] of Object.entries(src)) {
-      if (value == null || key === "password") continue;
-      if (isScalar(value)) out[key] = scalarText(value);
-      else if (Array.isArray(value) && value.every(isScalar)) out[key] = value.map(scalarText).join(", ");
-      else if (isPlainObject(value)) {
-        for (const [nk, nv] of Object.entries(value)) {
-          if (nv != null && isScalar(nv)) nested[nk] = scalarText(nv);
-        }
-      }
+function slugVarKey(labelOrKey) {
+  return String(labelOrKey || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^\w]/g, "");
+}
+
+function mergeScalarsInto(out, src, { skipLogMeta = false } = {}) {
+  if (!isPlainObject(src)) return;
+  for (const [key, value] of Object.entries(src)) {
+    const lower = key.toLowerCase();
+    if (SKIP_VAR_KEYS.has(lower)) continue;
+    if (skipLogMeta && (key === "summary" || key === "success")) continue;
+    if (value == null) continue;
+    if (isScalar(value)) {
+      out[key] = scalarText(value);
+      const slug = slugVarKey(key);
+      if (slug && slug !== key) out[slug] = out[key];
+    } else if (Array.isArray(value) && value.every(isScalar)) {
+      out[key] = value.map(scalarText).join(", ");
+    } else if (isPlainObject(value)) {
+      mergeScalarsInto(out, value);
     }
   }
-  return { ...nested, ...out };
+}
+
+/** Activity log info/more sections use display labels; also expose snake_case keys for templates. */
+function mergeLogDataSections(out, logData) {
+  if (!isPlainObject(logData)) return;
+  for (const section of ["info", "more"]) {
+    const block = logData[section];
+    if (!isPlainObject(block)) continue;
+    for (const [label, value] of Object.entries(block)) {
+      if (value == null || !isScalar(value)) continue;
+      const text = scalarText(value);
+      const slug = slugVarKey(label);
+      if (slug) out[slug] = text;
+    }
+  }
+  if (logData.ref != null && String(logData.ref).trim() !== "") {
+    out.ref = String(logData.ref).trim();
+  }
+  if (logData.summary != null && String(logData.summary).trim() !== "") {
+    out.summary = String(logData.summary).trim();
+  }
+}
+
+function normalizeNotifyBody(body) {
+  if (!isPlainObject(body)) return body;
+  if (isPlainObject(body.employee)) return { ...body, ...body.employee };
+  return body;
+}
+
+/** Merge request body, API response, and activity log into template variables (non-empty values only). */
+function buildModuleNotifyVars({ body = {}, record = {}, logData = null, responseData = null } = {}) {
+  const out = {};
+  mergeScalarsInto(out, normalizeNotifyBody(body));
+  mergeScalarsInto(out, responseData);
+  mergeScalarsInto(out, record);
+  if (isPlainObject(logData)) {
+    mergeLogDataSections(out, logData);
+    mergeScalarsInto(out, logData, { skipLogMeta: true });
+  }
+  return Object.fromEntries(
+    Object.entries(out).filter(([, v]) => v != null && String(v).trim() !== "")
+  );
 }
 
 function nowParts() {
@@ -171,36 +341,51 @@ export async function resolveAudience(audienceInput) {
   );
 }
 
-function logDelivery(entry) {
-  return insertNotificationLog(entry).catch((err) => {
-    console.error("[Module notify] log failed:", err.message);
-  });
-}
 
 async function sendPwa({ tpl, user, title, body, appType }) {
   const trigger_key = `module_${tpl.id}`.slice(0, 50);
+  const brand = resolvePushAppBrand(appType);
+  const pushUrl = brand.defaultUrl || "/settings";
+  const pushTitle = formatPushTitle(appType, title);
+
   const { row } = await saveInboxAlert({
     userId: user.id,
     app_type: appType,
     trigger_key,
     title,
     body,
-    url: "/",
+    url: pushUrl,
   });
 
-  let ok = Boolean(getIO());
-  let error = ok ? null : "Socket not ready";
+  const inboxSaved = row?.inbox_id != null;
+  let ok = inboxSaved;
+  let error = null;
 
   if (isWebPushConfigured()) {
     const push = await sendWebPushToUser(
       user.id,
-      { title, body, url: "/", tag: row?.inbox_id ? `inbox-${row.inbox_id}` : trigger_key },
-      { inbox_id: row?.inbox_id ?? null, user_id: user.id, user_name: user.name, template_key: trigger_key, channel: "pwa_push", app_type: appType }
+      {
+        title: pushTitle,
+        body,
+        url: pushUrl,
+        tag: row?.inbox_id ? `inbox-${row.inbox_id}` : trigger_key,
+        data: { url: pushUrl, inbox_id: row?.inbox_id ?? "" },
+      },
+      {
+        inbox_id: row?.inbox_id ?? null,
+        user_id: user.id,
+        user_name: user.name,
+        template_key: trigger_key,
+        channel: "pwa_push",
+        app_type: appType,
+        inbox_delivered: inboxSaved,
+        delivery_log: "inbox_single",
+      }
     );
     if (push.ok) ok = true;
     else if (!ok) error = push.error || "Web push delivery failed";
-  } else if (!ok) {
-    error = "Socket not ready and web push not configured";
+  } else if (!inboxSaved) {
+    error = "Inbox save failed";
   }
 
   return { ok, error, inbox_id: row?.inbox_id ?? null };
@@ -232,17 +417,16 @@ async function sendEmail({ user, title, body }) {
   return { ok: false, error: "Email gateway not configured", skipped: true, title, body };
 }
 
-async function deliverTemplate(tpl, event, { recordVars, recordId, actorName }) {
-  const recipients = await resolveAudience(tpl.audience ?? effectiveAudience(tpl));
-  if (!recipients.length) return;
-
+async function deliverTemplate(tpl, event, { recordVars, recordId, actorName, sourceAction = "" }) {
+  const labelAction = sourceAction || event;
   const baseVars = {
     ...recordVars,
     ...nowParts(),
     module_name: tpl.module_name,
     module_label: tpl.module_label,
     action: event,
-    action_label: EVENT_LABELS[event] ?? event,
+    activity_action: labelAction,
+    action_label: humanizeTriggerEvent(labelAction),
     record_id: recordId ?? "",
     actor_name: actorName ?? "",
     template_name: tpl.name,
@@ -257,16 +441,44 @@ async function deliverTemplate(tpl, event, { recordVars, recordId, actorName }) 
     triggered_by: actorName,
   };
 
-  for (const user of recipients) {
+  const logBuffer = [];
+
+  let recipients = await resolveAudience(tpl.audience ?? effectiveAudience(tpl));
+  if (!recipients.length) {
+    console.warn(`[Module notify] template ${tpl.id} (${tpl.name}): no recipients for audience`);
+    logBuffer.push({
+      ...common,
+      recipient_user_id: null,
+      channel: "system",
+      recipient: null,
+      title: renderTemplate(tpl.subject || tpl.module_label, baseVars),
+      message: renderTemplate(tpl.message, baseVars),
+      status: "skipped",
+      error_detail: "No recipients matched audience",
+    });
+    await insertNotificationLogsBatch(logBuffer).catch((err) => {
+      console.error("[Module notify] batch log failed:", err.message);
+    });
+    return;
+  }
+
+  if (recipients.length > MAX_RECIPIENTS_PER_TEMPLATE) {
+    console.warn(
+      `[Module notify] template ${tpl.id}: ${recipients.length} recipients — capping at ${MAX_RECIPIENTS_PER_TEMPLATE}`
+    );
+    recipients = recipients.slice(0, MAX_RECIPIENTS_PER_TEMPLATE);
+  }
+
+  await runPool(recipients, DELIVER_CONCURRENCY, async (user) => {
     const vars = { ...baseVars, user_name: user.name ?? "" };
-    const title = renderTemplate(tpl.subject || `${tpl.module_label} — ${EVENT_LABELS[event] ?? event}`, vars);
+    const title = renderTemplate(tpl.subject || `${tpl.module_label} — ${humanizeTriggerEvent(event)}`, vars);
     const body = renderTemplate(tpl.message, vars);
     const message = title ? `${title}\n\n${body}` : body;
 
     if (tpl.pwa_enabled) {
       try {
         const pwa = await sendPwa({ tpl, user, title, body, appType });
-        await logDelivery({
+        logBuffer.push({
           ...common,
           recipient_user_id: user.id,
           channel: "pwa_push",
@@ -278,19 +490,55 @@ async function deliverTemplate(tpl, event, { recordVars, recordId, actorName }) 
           inbox_id: pwa.inbox_id,
         });
       } catch (err) {
-        await logDelivery({ ...common, recipient_user_id: user.id, channel: "pwa_push", recipient: `user:${user.id}`, title, message: body, status: "failed", error_detail: err.message });
+        logBuffer.push({
+          ...common,
+          recipient_user_id: user.id,
+          channel: "pwa_push",
+          recipient: `user:${user.id}`,
+          title,
+          message: body,
+          status: "failed",
+          error_detail: err.message,
+        });
       }
     }
 
     if (tpl.send_via && tpl.send_via !== "none") {
       if (!user.phone) {
-        await logDelivery({ ...common, recipient_user_id: user.id, channel: tpl.send_via, recipient: null, title, message: body, status: "skipped", error_detail: "User has no phone" });
+        logBuffer.push({
+          ...common,
+          recipient_user_id: user.id,
+          channel: tpl.send_via,
+          recipient: null,
+          title,
+          message: body,
+          status: "skipped",
+          error_detail: "User has no phone",
+        });
       } else {
         try {
           const wa = await sendWhatsApp({ tpl, user, title, body, message, vars });
-          await logDelivery({ ...common, recipient_user_id: user.id, channel: tpl.send_via, recipient: user.phone, title, message: body, status: wa.ok ? "sent" : "failed", error_detail: wa.error });
+          logBuffer.push({
+            ...common,
+            recipient_user_id: user.id,
+            channel: tpl.send_via,
+            recipient: user.phone,
+            title,
+            message: body,
+            status: wa.ok ? "sent" : "failed",
+            error_detail: wa.error,
+          });
         } catch (err) {
-          await logDelivery({ ...common, recipient_user_id: user.id, channel: tpl.send_via, recipient: user.phone, title, message: body, status: "failed", error_detail: err.message });
+          logBuffer.push({
+            ...common,
+            recipient_user_id: user.id,
+            channel: tpl.send_via,
+            recipient: user.phone,
+            title,
+            message: body,
+            status: "failed",
+            error_detail: err.message,
+          });
         }
       }
     }
@@ -298,7 +546,7 @@ async function deliverTemplate(tpl, event, { recordVars, recordId, actorName }) 
     if (tpl.email_enabled) {
       try {
         const mail = await sendEmail({ user, title, body });
-        await logDelivery({
+        logBuffer.push({
           ...common,
           recipient_user_id: user.id,
           channel: "email",
@@ -309,52 +557,175 @@ async function deliverTemplate(tpl, event, { recordVars, recordId, actorName }) 
           error_detail: mail.error,
         });
       } catch (err) {
-        await logDelivery({ ...common, recipient_user_id: user.id, channel: "email", recipient: user.email || null, title, message: body, status: "failed", error_detail: err.message });
+        logBuffer.push({
+          ...common,
+          recipient_user_id: user.id,
+          channel: "email",
+          recipient: user.email || null,
+          title,
+          message: body,
+          status: "failed",
+          error_detail: err.message,
+        });
       }
     }
+  });
+
+  if (!logBuffer.length) {
+    logBuffer.push({
+      ...common,
+      recipient_user_id: null,
+      channel: "system",
+      recipient: null,
+      title: renderTemplate(tpl.subject || tpl.module_label, baseVars),
+      message: renderTemplate(tpl.message, baseVars),
+      status: "skipped",
+      error_detail: "All delivery channels disabled on template",
+    });
+  }
+
+  if (logBuffer.length) {
+    await insertNotificationLogsBatch(logBuffer).catch((err) => {
+      console.error("[Module notify] batch log failed:", err.message);
+    });
   }
 }
 
-/**
- * Fire every active template of `moduleName` that listens to any of `events`.
- * Never throws — module writes must not fail because of notifications.
- */
-export async function dispatchModuleEvent({ moduleName, events = [], record = {}, body = {}, recordId = null, actorName = null }) {
+// ─── Dispatch (templates → inbox / push / WA) ───
+
+export async function dispatchModuleEvent({
+  moduleName,
+  moduleId = null,
+  events = [],
+  sourceAction = "",
+  record = {},
+  body = {},
+  logData = null,
+  responseData = null,
+  recordId = null,
+  actorName = null,
+}) {
   try {
-    if (!moduleName || !events.length) return;
-    const templates = await getActiveTemplates(moduleName);
-    if (!templates.length) return;
+    if (!events.length) return;
+    const mid = Number(moduleId);
+    if (!Number.isFinite(mid) || mid <= 0) {
+      console.warn(`[Module notify] Missing module id for "${moduleName}"`);
+      return;
+    }
+    const templates = await getActiveTemplates(mid);
+    if (!templates.length) {
+      console.warn(
+        `[Module notify] No active templates for module "${moduleName}" (id ${mid}, events: ${events.join(", ")})`
+      );
+      return;
+    }
 
-    const recordVars = buildRecordVars(body, record);
+    const recordVars = buildModuleNotifyVars({ body, record, logData, responseData });
 
+    let matched = false;
     for (const tpl of templates) {
       const tplEvents = Array.isArray(tpl.trigger_events) ? tpl.trigger_events : [];
-      const event = EVENT_PRIORITY.find((e) => events.includes(e) && tplEvents.includes(e));
+      const event = pickTemplateEvent(events, tplEvents);
       if (!event) continue;
+      matched = true;
       try {
-        await deliverTemplate(tpl, event, { recordVars, recordId, actorName });
+        await deliverTemplate(tpl, event, { recordVars, recordId, actorName, sourceAction });
       } catch (err) {
         console.error(`[Module notify] template ${tpl.id} failed:`, err.message);
       }
+    }
+    if (!matched) {
+      console.warn(
+        `[Module notify] Module "${moduleName}": no template trigger matched events [${events.join(", ")}]`
+      );
     }
   } catch (err) {
     console.error(`[Module notify] ${moduleName} dispatch failed:`, err.message);
   }
 }
 
-/**
- * Tiny helper for activity / log functions:
- *   await notifyModuleAction("users", "edit", { record, recordId, actorName });
- * Prefer the automatic accessControl hook; use this only when you need an explicit call.
- */
-export async function notifyModuleAction(moduleName, action, opts = {}) {
-  const event = String(action || "").toLowerCase() === "authorize" ? "approve" : String(action || "").toLowerCase();
-  return dispatchModuleEvent({
-    moduleName,
-    events: event ? [event] : [],
-    record: opts.record ?? {},
-    body: opts.body ?? {},
-    recordId: opts.recordId ?? opts.record?.id ?? null,
-    actorName: opts.actorName ?? null,
-  });
+async function resolveNotifyModule(entity, appType, action = "") {
+  const k = normalizeNotifyEntity(entity);
+  if (!k) return null;
+
+  const cacheKey = `${appType}:${k}:${rawActionSlug(action)}`;
+  const hit = moduleResolveCache.get(cacheKey);
+  if (hit && Date.now() - hit.t < MODULE_RESOLVE_CACHE_MS && hit.row?.id) return hit.row;
+
+  const names = moduleNameCandidates(entity, appType, action);
+  const [row] = await dbQuery(
+    `SELECT m.id, m.name, m.label, m.app_type
+     FROM ${M.MODULES} m
+     WHERE m.is_active = true AND m.name = ANY($1::text[])
+     ORDER BY
+       (EXISTS (
+          SELECT 1 FROM ${M.NOTIFICATION_TEMPLATES} nt
+          WHERE nt.module_id = m.id AND nt.is_active = true AND nt.is_deleted = false
+        )) DESC,
+       array_position($1::text[], m.name)
+     LIMIT 1`,
+    [names]
+  );
+  if (row?.id) moduleResolveCache.set(cacheKey, { t: Date.now(), row });
+  return row ?? null;
+}
+
+// ─── Activity log → notify (called from logActivity + activityLogger) ───
+export function scheduleNotifyFromActivity(req, opts = {}) {
+  try {
+    if (!MODULE_NOTIFY_FROM_ACTIVITY) return;
+    if (opts.success === false || req?._moduleNotifyDispatched) return;
+    if (shouldSkipNotifyRequest(req, opts.entity)) return;
+
+    const events = resolveNotifyEvents(opts.action);
+    if (!events.length || !opts.entity) return;
+
+    req._moduleNotifyDispatched = true;
+
+    const payload = {
+      entity: opts.entity,
+      appType: opts.appType || "ims",
+      action: opts.action,
+      events,
+      sourceAction: rawActionSlug(opts.action),
+      record: opts.record && typeof opts.record === "object" ? opts.record : {},
+      body: {
+        ...(opts.body && typeof opts.body === "object" ? opts.body : {}),
+        ...(opts.details && typeof opts.details === "object" ? opts.details : {}),
+        ...(opts.meta && typeof opts.meta === "object" ? opts.meta : {}),
+      },
+      logData: opts.log_data && typeof opts.log_data === "object" ? opts.log_data : null,
+      responseData: opts.responseData && typeof opts.responseData === "object" ? opts.responseData : null,
+      recordId: opts.entity_id != null ? String(opts.entity_id) : null,
+      actorName: req?.user?.name || auditUserName(req),
+    };
+
+    setImmediate(() => {
+      void (async () => {
+        try {
+          const mod = await resolveNotifyModule(payload.entity, payload.appType, payload.action);
+          if (!mod?.id) {
+            console.warn(`[Module notify] Unknown module for entity "${payload.entity}" (${payload.appType})`);
+            return;
+          }
+          await dispatchModuleEvent({
+            moduleId: mod.id,
+            moduleName: mod.name,
+            events: payload.events,
+            sourceAction: payload.sourceAction,
+            record: payload.record,
+            body: payload.body,
+            logData: payload.logData,
+            responseData: payload.responseData,
+            recordId: payload.recordId,
+            actorName: payload.actorName,
+          });
+        } catch (err) {
+          console.error("[Module notify]", err.message);
+        }
+      })();
+    });
+  } catch (err) {
+    console.error("[Module notify] schedule:", err.message);
+  }
 }

@@ -6,7 +6,7 @@ import { getStickerCompanyInfo } from "../../../../core/configuration/models/app
 import { loadCoilFinderReportData, formatHumanDateTime } from "../utils/loadCoilFinderReportData.js";
 import { loadCoilFinderScreenData } from "../utils/loadCoilFinderScreenData.js";
 import { enrichCoilRmSpec } from "../utils/enrichCoilRmSpec.js";
-import { enrichCoilFgFromProductionMaster } from "../utils/enrichCoilFgFromProductionMaster.js";
+import { enrichFinderCoilFg } from "../utils/enrichCoilFgFromProductionMaster.js";
 import { enrichCoilFgForReassign } from "../utils/enrichCoilFgForReassign.js";
 import { buildCoilFinderReportDocument } from "../utils/coilFinderReportDocument.js";
 
@@ -40,7 +40,6 @@ const EMPTY_FINDER = {
   qcChecks: [],
   documents: [],
   transactionLogs: [],
-  stickerLogs: [],
   typeLabels: {},
 };
 
@@ -70,7 +69,7 @@ async function loadCoilRow(coil_no_uid, { finder = false, permission = {} } = {}
     ...rmSpecPatch,
     pending_store_in_ipr_uid: pendingStoreIn?.ipr_uid ?? null,
   };
-  Object.assign(row, await enrichCoilFgFromProductionMaster(row));
+  Object.assign(row, await enrichFinderCoilFg(row));
   Object.assign(row, await enrichCoilFgForReassign(row));
   row.finder = finderBundle ?? EMPTY_FINDER;
   return row;

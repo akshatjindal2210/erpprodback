@@ -34,7 +34,7 @@ export const initDB = async () => {
     console.log("✅ All Tables Ready");
 
     await backfillShortageGrpname();  // v4.1.5 backfill Shortage.grpname from IMS.
-    // await runStartupBackfills();
+    await runStartupBackfills();
     // console.log("✅ Startup backfills finished");
   } catch (err) {
     console.error("❌ initDB Failed:", err.message);

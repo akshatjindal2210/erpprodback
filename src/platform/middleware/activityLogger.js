@@ -1,5 +1,6 @@
 import ActivityLog from "../../apps/core/activity-logs/models/activityLog.model.js";
 import { buildMiddlewareLogPayload, resolveMiddlewareEntityId } from "../utils/activity/activityLogPayload.js";
+import { scheduleNotifyFromActivity } from "../../apps/core/notifications/templates/moduleNotify.service.js";
 
 const ACTION_LABELS = { POST: "CREATE", PUT: "UPDATE", PATCH: "MODIFY", DELETE: "DELETE" };
 
@@ -129,6 +130,22 @@ export const activityLogger = (appType) => {
             entity: module,
             entity_id: storedEntityId,
           }).catch((err) => console.error("[ActivityLogger] Error:", err.message));
+
+          // Module notifications: moduleNotify.service.js (MODULE_NOTIFY_FROM_ACTIVITY).
+          try {
+            scheduleNotifyFromActivity(req, {
+              action: actionType,
+              entity: module,
+              entity_id: storedEntityId,
+              body: req.body,
+              log_data,
+              responseData: data?.data,
+              appType,
+              success: true,
+            });
+          } catch (notifyErr) {
+            console.error("[Module notify] after activity logger:", notifyErr.message);
+          }
         }
       }
       return originalJson(data);

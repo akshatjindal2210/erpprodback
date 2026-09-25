@@ -1,7 +1,8 @@
 import QRCode from "qrcode";
 import { docNoFromStandardBoxNoUid } from "../../../../ims/lib/stickerUidHelpers.js";
-import { getAppConfigValue, getStickerCompanyInfo, APP_CONFIG_KEYS } from "../../../configuration/models/appConfig.model.js";
+import { getStickerCompanyInfo } from "../../../configuration/models/appConfig.model.js";
 import { getPrintLogoDataUrl, getPrintLogoBlock, buildPrintLogoCss } from "../print/printLogo.js";
+import { resolveStickerQrPayload, resolveForwardingNoteQrPayload } from "../qr/publicQrUrl.js";
 
 export function resolveStickerPackingNumber(sticker = {}, fallback = null) {
   const candidates = [
@@ -162,43 +163,6 @@ export const STICKER_COMPANY_INFO = Object.freeze({
   name: "H.P. FASTENERS PVT. LTD.",
   address: "PLOT NO. 314, SECTOR-24, FARIDABAD (HR)-121005",
 });
-
-/** External sticker QR: `?box_no_uid=…&id=…` (`id` = panel box_uid). No `box_uid` query param. */
-async function resolveStickerQrPayload(sticker) {
-  const boxNoUid = String(sticker?.box_no_uid || "").trim();
-  const uidNum = Number(sticker?.box_uid);
-  const boxUid = Number.isFinite(uidNum) && uidNum > 0 ? String(uidNum) : "";
-  const plain = boxNoUid || boxUid;
-  try {
-    const baseRaw = await getAppConfigValue(APP_CONFIG_KEYS.BOX_QR_PUBLIC_BASE_URL);
-    let base = String(baseRaw ?? "").trim();
-    if (!base || !/^https?:\/\//i.test(base)) return plain;
-
-    // Normalize: strip trailing ? & / so we never get `...//?id=` or broken joins.
-    base = base.replace(/[?&]+$/, "").replace(/\/+$/, "");
-    try {
-      new URL(base);
-    } catch {
-      return plain;
-    }
-
-    if (!boxNoUid && !boxUid) return plain;
-
-    const params = new URLSearchParams();
-    if (boxNoUid) params.set("box_no_uid", boxNoUid);
-    if (boxUid) params.set("id", boxUid);
-    const joiner = base.includes("?") ? "&" : "?";
-    const qrPayload = `${base}${joiner}${params.toString()}`;
-    try {
-      new URL(qrPayload);
-    } catch {
-      return plain;
-    }
-    return qrPayload;
-  } catch {
-    return plain;
-  }
-}
 
 export const buildStickerCardHtml = async (sticker) => {
   const company = await getStickerCompanyInfo();
@@ -496,7 +460,7 @@ const fmtBillAtPrint = (d) => {
  * @param {object} note - `findForwardingNote` row (includes `items` with `breakdowns`)
  * @param {object} companyInfo - optional `{ name, address, gstin?, phone? }`
  */
-export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
+export const buildForwardingNoteBillDocument = async (note, companyInfo = {}) => {
   const companyName = companyInfo?.name || "H. P. FASTENERS PVT. LTD.";
   const companyAddr = companyInfo?.address || "PLOT NO. 314, SECTOR-24, FARIDABAD (HR)-121005";
   const gstin = companyInfo?.gstin || "";
@@ -574,6 +538,19 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
 
   const docDateShort = fmtBillShortDate(note.timestamp || note.created_at);
   const challanNo = String(note.fuid ?? "");
+  let qrUrl = "";
+  try {
+    if (challanNo) {
+      const qrObject = await resolveForwardingNoteQrPayload({ fuid: challanNo });
+      qrUrl = await QRCode.toDataURL(qrObject || challanNo, {
+        width: 320,
+        margin: 0,
+        color: { dark: "#000000", light: "#ffffff" },
+      });
+    }
+  } catch {
+    qrUrl = "";
+  }
   const partyName = escapeHtml(note.acc_name || "—");
   const poNumber = escapeHtml(String(note.po_number ?? "").trim() || "—");
   const { bills: printBills, dates: printDates, maker: printMaker, at: printAt } = collectPrintBillMeta(note);
@@ -601,7 +578,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
         : "";
 
   const logoBlock = getPrintLogoBlock();
-
+  const qrBlock = qrUrl ? `<img src="${qrUrl}" class="fn-qr-img" alt="QR ${escapeHtml(challanNo)}" />` : "";
   const gstLine = gstin ? `<div class="fn-co-sub">GSTIN : ${escapeHtml(gstin)}</div>` : "";
 
   return `<!DOCTYPE html>
@@ -792,6 +769,14 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
       border-top: 1px solid #ccc;
     }
     .fn-body-stack { display: flex; flex-direction: column; }
+    .fn-qr-img {
+      width: 32mm;
+      height: 32mm;
+      object-fit: contain;
+      display: block;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
   </style>
 </head>
 <body>
@@ -813,7 +798,7 @@ export const buildForwardingNoteBillDocument = (note, companyInfo = {}) => {
                         ${gstLine}
                         <div class="fn-co-sub">${escapeHtml(contactLine)}</div>
                       </div>
-                      <div class="fn-logo-cell" aria-hidden="true"></div>
+                      <div class="fn-logo-cell">${qrBlock}</div>
                     </div>
                     <div class="fn-meta-bar">
                       <div class="fn-meta-row">

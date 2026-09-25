@@ -1,7 +1,8 @@
 import ActivityLog from "../../../apps/core/activity-logs/models/activityLog.model.js";
 import { buildActivityLogPayload } from "./activityLogPayload.js";
+import { scheduleNotifyFromActivity } from "../../../apps/core/notifications/templates/moduleNotify.service.js";
 
-export const logActivity = async (req, {action, entity, entity_id = null, record = null, details = {}, meta = null, success = true, userId = null, appType = "ims" }) => {
+export const logActivity = async (req, {action, entity, entity_id = null, record = null, details = {}, meta = null, success = true, userId = null, appType = "ims", responseData = null }) => {
   try {
     if (req) req._activityLogged = true;
 
@@ -24,6 +25,27 @@ export const logActivity = async (req, {action, entity, entity_id = null, record
       entity,
       entity_id: storedEntityId,
     });
+
+    // Module notifications: see moduleNotify.service.js (MODULE_NOTIFY_FROM_ACTIVITY).
+    
+    // console.log("[Notoification Log] : ",{ action, entity, entity_id: storedEntityId, record, body: details, meta, log_data, responseData: responseData ?? record, appType, success });
+
+    try {
+      scheduleNotifyFromActivity(req, {
+        action,
+        entity,
+        entity_id: storedEntityId,
+        record,
+        body: details,
+        meta,
+        log_data,
+        responseData: responseData ?? record,
+        appType,
+        success,
+      });
+    } catch (notifyErr) {
+      console.error("[Module notify] after activity log:", notifyErr.message);
+    }
   } catch (err) {
     console.error("Activity log error:", err.message);
   }

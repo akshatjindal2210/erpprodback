@@ -217,16 +217,19 @@ export const findConflictingTemplate = async (module_id, trigger_events = [], ex
   return row ?? null;
 };
 
-/** Active templates for a module (by mst_modules.name) — used by the event dispatcher. */
-export const findActiveTemplatesByModuleName = async (moduleName) =>
-  dbQuery(
+/** Active templates for module id (module notify dispatcher). */
+export const findActiveTemplatesByModuleId = async (moduleId) => {
+  const id = Number(moduleId);
+  if (!Number.isFinite(id) || id <= 0) return [];
+  return dbQuery(
     `SELECT nt.*, m.id AS module_id, m.name AS module_name, m.label AS module_label, m.app_type AS module_app_type
      FROM ${TABLE} nt
      JOIN ${M.MODULES} m ON m.id = nt.module_id
-     WHERE m.name = $1 AND nt.is_active = true AND nt.is_deleted = false
+     WHERE nt.module_id = $1 AND nt.is_active = true AND nt.is_deleted = false
      ORDER BY nt.id ASC`,
-    [moduleName]
+    [id]
   ).then((rows) => rows.map((row) => ({ ...row, audience: effectiveAudience(row) })));
+};
 
 export const insertNotificationTemplate = async ({
   module_id,

@@ -8,6 +8,7 @@ import { columnExists, runIfColumnExists } from "../config/db/ensureDbColumns.js
 import { MST_TABLES as M, IMS_TABLES as T } from "../config/db/dbTables.js";
 import { runAuditUserNamesBackfill } from "./auditUserNames.js";
 import { runBoxDownloadLogBackfill } from "./boxDownloadLog.js";
+import { runImportErpInvoiceReceivingToGate } from "./importErpInvoiceReceivingToGate.js";
 import { backfillDailyprodStickerColumns } from "../apps/ims/lib/utils/packing-entry/stickers/backfillDailyprodStickerSnapshot.js";
 
 async function safe(label, fn) {
@@ -86,6 +87,10 @@ export async function runStartupBackfills() {
     );
     await runBoxIsLooseBackfillOnStartup();
   });
+
+  // ── Invoice Receiving: one-time ERP → Gate Entry ─────────────────────────
+  // After live backup + first successful run → COMMENT OUT this line:
+  await safe("IR ERP → gate", runImportErpInvoiceReceivingToGate);
 }
 
 export { default as backfillShortageGrpname } from "../migrations/v4.1.5/shortageGrpname.mjs";

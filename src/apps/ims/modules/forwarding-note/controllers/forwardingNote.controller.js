@@ -812,7 +812,7 @@ export const printForwardingNoteBill = async (req, res) => {
 
     const enriched = await enrichForwardingNoteDetail(data);
     await enrichBillPackingDates(enriched);
-    const html = buildForwardingNoteBillDocument(enriched, sanitizePrintCompanyInfo(company_info));
+    const html = await buildForwardingNoteBillDocument(enriched, sanitizePrintCompanyInfo(company_info));
     res.json({ success: true, html });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

@@ -124,7 +124,8 @@ LEFT JOIN LATERAL (
     COALESCE(NULLIF(TRIM(o.pjobcardno), ''), jc_reserve.pjobcardno) AS pjobcardno,
     COALESCE(jc_out.macname, jc_reserve.macname) AS macname,
     COALESCE(NULLIF(TRIM(jc_out.item_code), ''), NULLIF(TRIM(jc_reserve.item_code), '')) AS fg_item_code,
-    COALESCE(NULLIF(TRIM(jc_out.item_desc), ''), NULLIF(TRIM(jc_reserve.item_desc), '')) AS fg_item_desc
+    COALESCE(NULLIF(TRIM(jc_out.item_desc), ''), NULLIF(TRIM(jc_reserve.item_desc), '')) AS fg_item_desc,
+    CASE WHEN c.out_uid IS NOT NULL THEN COALESCE(o.approved_at, o.created_at) END AS shop_floor_at
   FROM (SELECT 1) AS _
   LEFT JOIN ${T.OUT_ENTRY} o
     ON o.out_uid = c.out_uid AND o.is_deleted = false
@@ -216,7 +217,7 @@ const COIL_LAST_BY_SQL = `CASE
   ELSE c.created_by
 END`;
 
-const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, jc.fg_item_code, jc.fg_item_desc, c.status, c.created_at, ${COIL_LAST_BY_SQL} AS last_by, COALESCE(c.updated_at, c.created_at) AS last_at, ${coilSourceSql("c")}::varchar AS source`;
+const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, jc.fg_item_code, jc.fg_item_desc, jc.shop_floor_at, c.status, c.created_at, ${COIL_LAST_BY_SQL} AS last_by, COALESCE(c.updated_at, c.created_at) AS last_at, ${coilSourceSql("c")}::varchar AS source`;
 
 export const findCoilUidsByQcCheck = async (qc_uid) => {
   const id = Number(qc_uid);

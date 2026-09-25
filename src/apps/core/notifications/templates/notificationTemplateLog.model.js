@@ -43,6 +43,47 @@ export const insertNotificationLog = async ({
   return row;
 };
 
+/** Bulk insert delivery rows (module notify — many recipients). */
+export async function insertNotificationLogsBatch(entries = []) {
+  if (!entries.length) return [];
+  const rows = [];
+  const CHUNK = 80;
+  for (let i = 0; i < entries.length; i += CHUNK) {
+    const chunk = entries.slice(i, i + CHUNK);
+    const values = [];
+    const tuples = chunk.map((e, j) => {
+      const base = j * 13;
+      values.push(
+        e.template_id ?? null,
+        e.module_id ?? null,
+        e.record_id != null ? String(e.record_id).slice(0, 100) : null,
+        e.action,
+        e.recipient_user_id ?? null,
+        e.channel,
+        e.recipient ?? null,
+        e.title ?? null,
+        e.message ?? null,
+        e.status,
+        e.error_detail ?? null,
+        e.inbox_id ?? null,
+        e.triggered_by ?? null
+      );
+      const p = Array.from({ length: 13 }, (_, k) => `$${base + k + 1}`);
+      return `(${p.join(", ")})`;
+    });
+    const inserted = await dbQuery(
+      `INSERT INTO ${TABLE}
+        (template_id, module_id, record_id, action, recipient_user_id, channel, recipient,
+         title, message, status, error_detail, inbox_id, triggered_by)
+       VALUES ${tuples.join(", ")}
+       RETURNING id`,
+      values
+    );
+    rows.push(...inserted);
+  }
+  return rows;
+};
+
 export const findNotificationLogs = async ({
   page = 1,
   limit = 20,

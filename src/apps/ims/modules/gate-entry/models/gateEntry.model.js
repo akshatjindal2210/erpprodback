@@ -6,13 +6,7 @@ import dbQuery from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 
 export async function findSavedGateBillSet() {
-  const rows = await dbQuery(
-    `
-    SELECT LOWER(TRIM(bill_no)) AS bill_key
-    FROM ${T.GATE_ENTRY}
-    WHERE is_deleted = false AND NULLIF(TRIM(bill_no), '') IS NOT NULL
-    `
-  );
+  const rows = await dbQuery(`SELECT LOWER(TRIM(bill_no)) AS bill_key FROM ${T.GATE_ENTRY} WHERE is_deleted = false AND NULLIF(TRIM(bill_no), '') IS NOT NULL`);
   return new Set((rows || []).map((r) => String(r.bill_key || "").trim()).filter(Boolean));
 }
 
@@ -45,8 +39,7 @@ export async function findGateRows({ from_date, to_date, type, permission } = {}
   return dbQuery(
     `
     SELECT
-      uid, type, bill_no, bill_dt, remarks, transporter_name, vehicle_number,
-      created_by, created_at, updated_by, updated_at, approved_at
+      uid, type, bill_no, bill_dt, remarks, transporter_name, vehicle_number, created_by, created_at, updated_by, updated_at, approved_at
     FROM ${T.GATE_ENTRY}
     WHERE ${conditions.join(" AND ")}
     ORDER BY uid DESC
@@ -150,6 +143,105 @@ export async function updateGateEntryMeta(uid, { remarks, transporter_name, vehi
       vehicle_number ?? null,
       updated_by,
     ]
+  );
+  return row || null;
+}
+
+const IR_GATE_SELECT = `
+  uid, type, bill_no, bill_dt, remarks, transporter_name, vehicle_number,
+  created_by, created_at, updated_by, updated_at, approved_at,
+  invoice_matched, receiving_file, receiving_meta
+`;
+
+/** Gate Out rows not yet invoice-received (IR Pending). */
+export async function findUnmatchedOutGateRows() {
+  return dbQuery(
+    `
+    SELECT ${IR_GATE_SELECT}
+    FROM ${T.GATE_ENTRY}
+    WHERE is_deleted = false
+      AND LOWER(COALESCE(type, 'out')) = 'out'
+      AND invoice_matched = false
+      AND NULLIF(TRIM(bill_no), '') IS NOT NULL
+    ORDER BY uid DESC
+    `
+  );
+}
+
+/**
+ * Gate Out rows with invoice receiving saved (IR Register).
+ * Date filter = Gate Entry created_at (IR does not change updated_at).
+ */
+export async function findMatchedOutGateRows({ from_date, to_date } = {}) {
+  const values = [];
+  let i = 1;
+  const conditions = [
+    "is_deleted = false",
+    "LOWER(COALESCE(type, 'out')) = 'out'",
+    "invoice_matched = true",
+    "NULLIF(TRIM(COALESCE(receiving_file, '')), '') IS NOT NULL",
+  ];
+
+  const dateExpr = `(created_at AT TIME ZONE 'Asia/Kolkata')::date`;
+
+  if (from_date) {
+    values.push(String(from_date).slice(0, 10));
+    conditions.push(`${dateExpr} >= $${i++}::date`);
+  }
+  if (to_date) {
+    values.push(String(to_date).slice(0, 10));
+    conditions.push(`${dateExpr} <= $${i++}::date`);
+  }
+
+  return dbQuery(
+    `
+    SELECT ${IR_GATE_SELECT}
+    FROM ${T.GATE_ENTRY}
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY uid DESC
+    `,
+    values
+  );
+}
+
+/** Save invoice receiving attachment + audit meta on the gate row (no ERP).
+ * Does NOT touch Gate Entry updated_at / updated_by — IR-only columns. */
+export async function saveGateInvoiceReceiving(bill_no, { receiving_file, receiving_meta }) {
+  const bill = String(bill_no || "").trim();
+  if (!bill) return null;
+  const [row] = await dbQuery(
+    `
+    UPDATE ${T.GATE_ENTRY}
+    SET
+      invoice_matched = true,
+      receiving_file = $2,
+      receiving_meta = $3
+    WHERE is_deleted = false
+      AND LOWER(TRIM(bill_no)) = LOWER($1)
+    RETURNING *
+    `,
+    [bill, receiving_file ?? null, receiving_meta ?? null]
+  );
+  return row || null;
+}
+
+/** Clear invoice receiving on gate — row returns to IR Pending.
+ * Does NOT touch Gate Entry updated_at / updated_by. */
+export async function clearGateInvoiceReceiving(bill_no) {
+  const bill = String(bill_no || "").trim();
+  if (!bill) return null;
+  const [row] = await dbQuery(
+    `
+    UPDATE ${T.GATE_ENTRY}
+    SET
+      invoice_matched = false,
+      receiving_file = NULL,
+      receiving_meta = NULL
+    WHERE is_deleted = false
+      AND LOWER(TRIM(bill_no)) = LOWER($1)
+    RETURNING *
+    `,
+    [bill]
   );
   return row || null;
 }

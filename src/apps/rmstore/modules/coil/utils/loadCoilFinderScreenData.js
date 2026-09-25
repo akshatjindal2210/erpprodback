@@ -4,18 +4,16 @@
 
 import { loadCoilFinderReportData } from "./loadCoilFinderReportData.js";
 import { findCoilTransactions } from "../../../manage/log/models/coilTransaction.model.js";
-import { listCoilDownloadLogs } from "../models/coilDownloadLog.model.js";
 import { COIL_TX_TYPE_LABELS } from "../../../lib/constants/coilTransactionTypes.js";
 
 /** Per-coil journey is usually small; avoids 10k-row scans on helper. */
 const FINDER_JOURNEY_TX_LIMIT = 500;
-const FINDER_STICKER_LOG_LIMIT = 200;
 
 export async function loadCoilFinderScreenData(coil_no_uid, permission = {}, existingCoil = null) {
   const uid = String(coil_no_uid || "").trim();
   if (!uid) return null;
 
-  const [report, txResult, stickerResult] = await Promise.all([
+  const [report, txResult] = await Promise.all([
     loadCoilFinderReportData(uid, existingCoil),
     findCoilTransactions({
       filters: { journey: uid },
@@ -23,13 +21,6 @@ export async function loadCoilFinderScreenData(coil_no_uid, permission = {}, exi
       page: 1,
       limit: FINDER_JOURNEY_TX_LIMIT,
       skipCount: true,
-      permission,
-      user_id: null,
-    }),
-    listCoilDownloadLogs({
-      filters: { journey: uid },
-      page: 1,
-      limit: FINDER_STICKER_LOG_LIMIT,
       permission,
       user_id: null,
     }),
@@ -42,7 +33,6 @@ export async function loadCoilFinderScreenData(coil_no_uid, permission = {}, exi
     qcChecks: report.qcChecks,
     documents: report.documents,
     transactionLogs: txResult?.data || [],
-    stickerLogs: stickerResult?.data || [],
     typeLabels: COIL_TX_TYPE_LABELS,
   };
 }

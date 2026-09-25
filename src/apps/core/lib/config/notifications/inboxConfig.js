@@ -6,6 +6,10 @@ export const APP_TYPE = {
 export const APP_TYPE_LABELS = {
   task: "Task",
   ims: "IMS",
+  rmstore: "RM Store",
+  core: "Admin",
+  portal: "Admin",
+  hrms: "HRMS",
 };
 
 export const TRIGGER_LABELS = {
@@ -27,5 +31,10 @@ export function getAppTypeLabel(appType) {
 }
 
 export function getTriggerLabel(key) {
-  return TRIGGER_LABELS[key] ?? "Alert";
+  const k = String(key || "");
+  if (k.startsWith("module_")) return "Module notification";
+  return TRIGGER_LABELS[k] ?? "Alert";
 }
+
+/** Message Logs: recipient when saved to bell/inbox (not a browser device push row). */
+export const INBOX_DELIVERY_RECIPIENT_LABEL = "In-app notification";
