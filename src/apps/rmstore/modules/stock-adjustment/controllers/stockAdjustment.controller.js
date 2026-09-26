@@ -98,6 +98,7 @@ async function assertAddQtyWithinMrnLimit({
   resolvedTotal,
   excludeAdjustmentId = null,
   entryType = null,
+  financialYear = null,
 }) {
   const uid = String(mrn_uid || "").trim();
   const total = roundSaQty(resolvedTotal);
@@ -108,6 +109,7 @@ async function assertAddQtyWithinMrnLimit({
     receiptQty,
     excludeAdjustmentId,
     entryType,
+    financialYear,
   });
   const receipt = budget.receipt_qty;
   const remainingQty = budget.remaining_qty;
@@ -189,6 +191,7 @@ async function approveAdjustment(id, user, userId, { scannedCoils = null } = {})
         resolvedTotal: row.qty,
         excludeAdjustmentId: id,
         entryType: row.entry_type,
+        financialYear: row.financial_year ?? null,
       });
     }
   }
@@ -248,6 +251,7 @@ async function buildCreatePayload(body, user) {
       resolvedTotal,
       excludeAdjustmentId: excludeId,
       entryType: entry_type,
+      financialYear: body?.financial_year ?? body?.financialYear ?? null,
     });
 
     const avgPer = coilCount > 0 ? resolvedTotal / coilCount : 0;
@@ -668,6 +672,12 @@ export const updateAdjustmentCtrl = async (req, res) => {
           resolvedTotal: fields.qty,
           excludeAdjustmentId: id,
           entryType: fields.entry_type ?? existing.entry_type,
+          financialYear:
+            fields.financial_year ??
+            existing.financial_year ??
+            req.body?.financial_year ??
+            req.body?.financialYear ??
+            null,
         });
       }
       if (req.body?.per_coil_qty != null) {

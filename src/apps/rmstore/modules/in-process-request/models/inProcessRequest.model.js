@@ -279,6 +279,11 @@ export function summarizeRow(row) {
 
   const firstCoilUid = coils[0]?.coil_no_uid || str(row.seed_coil_uid);
 
+  const jcNos = coils.map((c) => c.pjobcardno).filter(Boolean);
+  const macNames = coils.map((c) => c.macname).filter(Boolean);
+  const pjobcardno = uniqueJoin(jcNos) || str(coils[0]?.pjobcardno) || null;
+  const macname = uniqueJoin(macNames) || str(coils[0]?.macname) || null;
+
   const balanceQty = isConsume
     ? coils.reduce((s, c) => s + num(c.remaining_qty), 0)
     : isStoreIn
@@ -326,6 +331,8 @@ export function summarizeRow(row) {
     mrn_label,
     heat_label,
     lot_label,
+    pjobcardno,
+    macname,
     coil_label:
       coils.length === 1
         ? firstCoilUid

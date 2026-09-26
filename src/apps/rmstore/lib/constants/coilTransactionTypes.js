@@ -32,7 +32,7 @@ export const COIL_TX_TYPE_LABELS = {
   [COIL_TX_TYPES.INWARD_LINK]: "Store In — Add",
   [COIL_TX_TYPES.INWARD_UNLINK]: "Store In — Remove",
   [COIL_TX_TYPES.STORE_OUT]: "Store Out — Shop Floor",
-  [COIL_TX_TYPES.STORE_OUT_REVERT]: "Store Out — Return",
+  [COIL_TX_TYPES.STORE_OUT_REVERT]: "Return",
   [COIL_TX_TYPES.QC_CHECK_PASS]: "QC Check — Pass",
   [COIL_TX_TYPES.QC_CHECK_FAIL]: "QC Check — Fail",
   [COIL_TX_TYPES.QC_REJECT]: "QC Rejection — Remove",

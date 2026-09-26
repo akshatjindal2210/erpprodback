@@ -8,6 +8,7 @@ import { findAdjustmentById, updateAdjustment } from "../models/stockAdjustment.
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
+import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
 import { buildCoilStickerCardHtml, buildCoilStickerPrintDocument, buildCoilStickerPrintDocumentTitle, buildCoilStickerPrintRow, resolveSpecStickerFields } from "../../../lib/sticker/coilStickerDesign.js";
 import { isSaAddLikeEntryType, normalizeSaApproved } from "../utils/stockAdjustmentEntryTypes.js";
 import { buildPendingAddPreviewCoils } from "../utils/stockAdjustmentPreviewCoils.js";
@@ -359,6 +360,8 @@ export const uploadSaDocs = async (req, res) => {
     if (!tcFile && !rmtcFile) {
       return res.status(400).json({ success: false, message: "Upload at least one document (TC or RMTC)." });
     }
+
+    await stampRmstoreUploadedFiles(req);
 
     const fields = { updated_by: auditUserName(req), updated_at: new Date() };
     if (tcFile) {

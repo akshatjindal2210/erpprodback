@@ -843,10 +843,11 @@ async function fetchMrnRowsForAdjustmentSearch(financial_year, { entry_type = ""
   return { success: true, rows: [...byUid.values()], filter: null };
 }
 
-async function attachMrnAdjustmentSummary(row, excludeAdjustmentId = null, entryType = null) {
+async function attachMrnAdjustmentSummary(row, excludeAdjustmentId = null, entryType = null, financialYear = null) {
   if (!row?.uid) return row;
   const receiptQty = roundSaQty(row.it_recp_qty);
-  const budget = await computeMrnQtyBudget(row.uid, { receiptQty, excludeAdjustmentId, entryType });
+  const fy = financialYear ?? row.financial_year ?? null;
+  const budget = await computeMrnQtyBudget(row.uid, { receiptQty, excludeAdjustmentId, entryType, financialYear: fy });
   return {
     ...row,
     it_recp_qty: budget.receipt_qty,
@@ -1059,7 +1060,7 @@ export const searchAdjustmentMrns = async (req, res) => {
           financial_year: (deriveFinancialYearFromMrnRow(hit) ?? financial_year) || null,
           ...(erpCoils != null && erpCoils !== "" ? { coils: erpCoils } : {}),
         };
-        const row = enrichAdd ? await attachMrnAdjustmentSummary(base, excludeAdjustmentId, entry_type) : base;
+        const row = enrichAdd ? await attachMrnAdjustmentSummary(base, excludeAdjustmentId, entry_type, financial_year) : base;
         return decorateErpMrnPickerRow(row);
       })
     );
@@ -1128,6 +1129,7 @@ export const lookupErpMrn = async (req, res) => {
     ]);
 
     const excludeAdjustmentId = parsePositiveIntId(req.body?.exclude_adjustment_id ?? req.body?.adjustment_id);
+    const entry_type = String(req.body?.entry_type ?? req.body?.entryType ?? "").trim().toLowerCase();
     const withSummary = await attachMrnAdjustmentSummary(
       {
         ...hit,
@@ -1139,8 +1141,11 @@ export const lookupErpMrn = async (req, res) => {
         qty_editable,
         qty_auto_calc,
         sticker_mode: saved?.sticker_mode || sticker_mode,
+        financial_year,
       },
-      excludeAdjustmentId
+      excludeAdjustmentId,
+      entry_type || null,
+      financial_year
     );
 
     return res.json({

@@ -2,9 +2,7 @@ import { roundSaQty } from "./stockAdjustmentQty.js";
 import { sumApprovedAddCoilQtyForAdjustment, sumCoilQtyForMrn } from "../../coil/models/coil.model.js";
 import { sumPendingAddQtyForMrn } from "../models/stockAdjustment.model.js";
 import { findMrnByUid } from "../../mrn/models/mrn.model.js";
-import { fetchErpMrnByKey } from "../../mrn/utils/resolveMrnForSticker.js";
-import { normalizeSaEntryType } from "./stockAdjustmentEntryTypes.js";
-
+import { fetchErpMrnByKey, fetchErpMrnOldByKey } from "../../mrn/utils/resolveMrnForSticker.js";
 /** ERP Old-stock coil JSON — same qty list as FE `parseErpMrnCoils`. */
 function parseErpMrnCoilsQtyList(erpRow) {
   let raw = erpRow?.coils ?? erpRow?.Coils ?? null;
@@ -47,57 +45,65 @@ function sumErpMrnCoilsQty(erpRow) {
   return roundSaQty(qtys.reduce((s, q) => s + q, 0));
 }
 
+function erpLineReceiptCap(erpRow) {
+  if (!erpRow) return 0;
+  const receipt = roundSaQty(erpRow?.it_recp_qty);
+  const coilSum = sumErpMrnCoilsQty(erpRow);
+  const parts = [receipt, coilSum].filter((n) => Number.isFinite(n) && n > 0);
+  return parts.length ? Math.max(...parts) : 0;
+}
+
 /**
- * Resolve the MRN receipt cap for Stock Adjustment / MRN search.
- * Receipt cap for this mrn_uid from ERP/local; FE hint only when both are missing.
+ * MRN receipt cap per UID from IMS only — never above internal API line qty for that uid.
+ * Prefer `mrn_rm_old` (itrecpqty + coils) when present; else `mrn_rm`. Less than cap is OK; more is blocked.
+ * Local `rmstore_mrn` / FE hint / bill totalqty do not raise the cap above IMS.
  */
-export async function resolveMrnReceiptQtyForBudget(mrn_uid, receiptQtyHint = null) {
+export async function resolveMrnReceiptQtyForBudget(
+  mrn_uid,
+  receiptQtyHint = null,
+  { financialYear = null } = {}
+) {
   const hint = roundSaQty(receiptQtyHint);
   const uid = String(mrn_uid || "").trim();
   if (!uid) {
     return Number.isFinite(hint) && hint > 0 ? hint : 0;
   }
 
-  let erpReceiptQty = 0;
   let erpTotalQty = 0;
-  let localQty = 0;
 
   try {
-    const erp = await fetchErpMrnByKey(uid);
-    erpReceiptQty = roundSaQty(erp?.it_recp_qty);
-    erpTotalQty = roundSaQty(erp?.totalqty ?? erp?.total_qty);
-  } catch {
-    /* ERP lookup optional */
-  }
-
-  try {
-    const local = await findMrnByUid(uid);
-    localQty = roundSaQty(local?.it_recp_qty);
-  } catch {
-    /* local MRN optional */
-  }
-
-  const fromUid = [erpReceiptQty, erpTotalQty, localQty].filter((n) => Number.isFinite(n) && n > 0);
-  if (fromUid.length) {
-    // Cap for this mrn_uid only — ignore a higher FE hint from another lot serial.
-    return Math.max(...fromUid);
-  }
-  if (Number.isFinite(hint) && hint > 0) return hint;
-  return 0;
-}
-
-/** Old adjustments: ERP coil breakdown total can exceed `it_recp_qty` on the same UID row. */
-export async function resolveSaMrnReceiptCap(mrn_uid, { receiptQtyHint = null, entryType = null } = {}) {
-  const base = await resolveMrnReceiptQtyForBudget(mrn_uid, receiptQtyHint);
-  if (normalizeSaEntryType(entryType) !== "old") return base;
-  try {
-    const erp = await fetchErpMrnByKey(String(mrn_uid || "").trim());
-    const coilSum = sumErpMrnCoilsQty(erp);
-    if (coilSum > 0) return Math.max(base, coilSum);
+    const oldCap = erpLineReceiptCap(await fetchErpMrnOldByKey(uid, { financialYear }));
+    if (oldCap > 0) return oldCap;
   } catch {
     /* optional */
   }
-  return base;
+
+  try {
+    const erp = await fetchErpMrnByKey(uid);
+    const liveCap = erpLineReceiptCap(erp);
+    erpTotalQty = roundSaQty(erp?.totalqty ?? erp?.total_qty);
+    if (liveCap > 0) return liveCap;
+  } catch {
+    /* optional */
+  }
+
+  let localQty = 0;
+  try {
+    localQty = roundSaQty((await findMrnByUid(uid))?.it_recp_qty);
+  } catch {
+    /* optional */
+  }
+  if (localQty > 0) return localQty;
+  if (Number.isFinite(hint) && hint > 0) return hint;
+  if (Number.isFinite(erpTotalQty) && erpTotalQty > 0) return erpTotalQty;
+  return 0;
+}
+
+export async function resolveSaMrnReceiptCap(
+  mrn_uid,
+  { receiptQtyHint = null, financialYear = null } = {}
+) {
+  return resolveMrnReceiptQtyForBudget(mrn_uid, receiptQtyHint, { financialYear });
 }
 
 /**
@@ -107,10 +113,14 @@ export async function resolveSaMrnReceiptCap(mrn_uid, { receiptQtyHint = null, e
  */
 export async function computeMrnQtyBudget(
   mrn_uid,
-  { receiptQty, excludeAdjustmentId = null, entryType = null } = {}
+  { receiptQty, excludeAdjustmentId = null, entryType = null, financialYear = null } = {}
 ) {
   const uid = String(mrn_uid || "").trim();
-  const receipt = await resolveSaMrnReceiptCap(uid, { receiptQtyHint: receiptQty, entryType });
+  const receipt = await resolveSaMrnReceiptCap(uid, {
+    receiptQtyHint: receiptQty,
+    entryType,
+    financialYear,
+  });
   if (!uid || !Number.isFinite(receipt) || receipt <= 0) {
     return {
       receipt_qty: receipt || 0,

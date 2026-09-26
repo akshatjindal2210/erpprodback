@@ -16,6 +16,7 @@ import { logRmstoreActivity } from "../../../lib/utils/activity/logRmstoreActivi
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
+import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
 import { splitQtyAcrossCoils, equalSplitQtyAcrossCoils } from "../../../lib/utils/coilQtySplit.js";
 export { splitQtyAcrossCoils, equalSplitQtyAcrossCoils };
 
@@ -172,17 +173,17 @@ export const generateMrnStickers = async (req, res) => {
     if (!heat_no) {
       return res.status(400).json({ success: false, message: "Heat number is required." });
     }
-    const coil_count = Number(req.body?.coil_count);
-    if (!Number.isFinite(coil_count) || coil_count < 1) {
-      return res.status(400).json({ success: false, message: "The number of coils must be at least 1." });
-    }
-
     const resolved = await resolveMrnForGenerate(req);
     if (resolved.error) {
       return res.status(resolved.error.status).json({ success: false, message: resolved.error.message });
     }
     const mrn = resolved.mrn;
     const uid = String(mrn.uid);
+
+    const coil_count = Number(req.body?.coil_count);
+    if (!Number.isFinite(coil_count) || coil_count < 1) {
+      return res.status(400).json({ success: false, message: "The number of coils must be at least 1." });
+    }
 
     if (mrn.sticker_rejected) {
       return res.status(409).json({
@@ -540,6 +541,8 @@ async function mergeMrnDocUploads(req, uid, { requireBoth = false } = {}) {
   if (!tcFile && !rmtcFile) {
     return { mrn, docs: null };
   }
+
+  await stampRmstoreUploadedFiles(req);
 
   const docs = {};
   if (tcFile) {

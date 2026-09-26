@@ -1,4 +1,4 @@
-import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
+import { fetchFromIMS, fetchMrnRowsForFinancialYear } from "../../../../ims/lib/services/ims.service.js";
 import { mapErpMrnRecord } from "../controllers/mrn.controller.js";
 import { findMrnByLookup, findMrnByUid, mrnSnapshotFromCoil } from "../models/mrn.model.js";
 import { findCoilByUid, findCoils } from "../../coil/models/coil.model.js";
@@ -40,9 +40,22 @@ async function loadErpMrnRecords() {
   return erpMrnCache.records;
 }
 
+/** Live ERP row (`mrn_rm`) — cached for portal / sticker flows. */
 export async function fetchErpMrnByKey(key) {
-  const records = await loadErpMrnRecords();
-  return matchErpMrnRecord(records, key);
+  return matchErpMrnRecord(await loadErpMrnRecords(), key);
+}
+
+/** Legacy line + coils (`mrn_rm_old`) — FY-scoped fallback matches Stock Adjustment Old load. */
+export async function fetchErpMrnOldByKey(key, { financialYear = null } = {}) {
+  const k = String(key || "").trim();
+  if (!k) return null;
+  const fromFull = matchErpMrnRecord(await fetchFromIMS("mrn_rm_old"), k);
+  if (fromFull) return fromFull;
+  const fy = String(financialYear || "").trim();
+  if (!fy) return null;
+  const ims = await fetchMrnRowsForFinancialYear(fy, { requestedData: "mrn_rm_old", search: k });
+  if (!ims?.success || !ims.records?.length) return null;
+  return matchErpMrnRecord(ims.records, k);
 }
 
 /**

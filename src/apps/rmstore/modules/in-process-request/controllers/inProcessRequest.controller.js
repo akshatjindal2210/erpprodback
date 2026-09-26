@@ -1,5 +1,6 @@
 import { findInProcessRequests, findInProcessRequest, findInProcessReasons, insertInProcessRequest, updateInProcessRequest, softDeleteInProcessRequest, findPendingAutoStoreInForConsume, findPendingStoreInForCoil, AUTO_STORE_IN_FROM_CONSUME_PREFIX, autoConsumeFromStoreInRemarks, parseConsumeIprUidFromAutoStoreInRemarks, normalizeCoils, normalizeProposedCoils, normalizeRequestType, resolveDownstream, resolveConsumeDownstream, hasReassignShopFloorBalance, IPR_REQUEST_TYPE, IPR_DOWNSTREAM } from "../models/inProcessRequest.model.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
+import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
@@ -801,23 +802,29 @@ async function releaseConsumedCoils(row, user, req) {
   await cancelLegacyAutoStoreInForConsume(row.ipr_uid, user);
   const snapshot = row.previous_coils?.length ? row.previous_coils : row.coils;
   const fromOut = (snapshot || []).some((c) => c.out_uid != null);
+  const hadReassign = normalizeCoils(row.coils).some((c) => c.reassign === true)
+    || normalizeCoils(snapshot).some((c) => c.reassign === true);
   if (fromOut) {
     const { restored } = await revertStoreInReturnCoils(row.ipr_uid, snapshot, user);
     if (!restored.length) return 0;
     logCoilTransactionSafe({
-      transaction_type: COIL_TX_TYPES.CONSUME_REVERT,
+      transaction_type: hadReassign ? COIL_TX_TYPES.IPR_REASSIGN_REVERT : COIL_TX_TYPES.CONSUME_REVERT,
       source_module: MODULE,
       source_id: String(row.ipr_uid),
       user_name: user,
       user_id: req.user?.id,
       rows: restored,
-      details: { ipr_uid: row.ipr_uid, coil_count: restored.length, restore_out: true },
+      details: {
+        ipr_uid: row.ipr_uid,
+        coil_count: restored.length,
+        restore_out: true,
+        ...(hadReassign ? { reassign_revert: true } : {}),
+      },
     });
     return restored.length;
   }
   const restored = await revertCoilsConsumed(row.ipr_uid, user);
   if (!restored.length) return 0;
-  const hadReassign = normalizeCoils(snapshot).some((c) => c.reassign === true);
   logCoilTransactionSafe({
     transaction_type: hadReassign ? COIL_TX_TYPES.IPR_REASSIGN_REVERT : COIL_TX_TYPES.CONSUME_REVERT,
     source_module: MODULE,
@@ -1228,6 +1235,7 @@ export const getInProcessRequests = async (req, res) => {
       limit,
       permission: req.permission,
     });
+    result.data = await enrichIprWithMachineLabels(result.data);
     return res.json({ success: true, ...result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -1495,6 +1503,7 @@ export const createInProcessRequest = async (req, res) => {
       body.attachments = Array.isArray(body.existing_attachments) ? body.existing_attachments : [];
     }
 
+    await stampRmstoreUploadedFiles(req);
     if (Array.isArray(req.files) && req.files.length) {
       const paths = req.files.map((f) => toRmPublicUploadPath(f, "ipr"));
       body.attachments = [...(Array.isArray(body.attachments) ? body.attachments : []), ...paths];
@@ -1638,6 +1647,7 @@ export const updateInProcessRequestCtrl = async (req, res) => {
       body.attachments = Array.isArray(body.existing_attachments) ? body.existing_attachments : [];
     }
 
+    await stampRmstoreUploadedFiles(req);
     if (Array.isArray(req.files) && req.files.length) {
       const paths = req.files.map((f) => toRmPublicUploadPath(f, "ipr"));
       body.attachments = [...(Array.isArray(body.attachments) ? body.attachments : []), ...paths];

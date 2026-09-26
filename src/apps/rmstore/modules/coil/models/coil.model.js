@@ -113,49 +113,83 @@ const COIL_DETAIL_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.se
 const COIL_MRN_JOIN = `LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid`;
 
 /**
- * Job card + machine for a coil.
- * Prefer Store Out (actual shop-floor assignment via out_uid) — job-card store-out
- * may scan any coil from reserved MRNs, so the coil may not appear in jc.coils JSON.
- * Fall back to the latest issue-request job card that lists this coil_no_uid.
+ * Job card + machine — shop floor / consumed only (not Stored).
+ * JC from Store Out (live out_uid, or scanned history after consume).
+ * Machine from IR job card for that same JC (same pattern as Store Out list).
+ * Consumed fallback: IPR line pjobcardno / macname.
+ * Reassign delete restores out_entry.pjobcardno in revertStoreInReturnCoils — keep this join thin.
  */
 const COIL_JOB_CARD_JOIN = `
 LEFT JOIN LATERAL (
   SELECT
-    COALESCE(NULLIF(TRIM(o.pjobcardno), ''), jc_reserve.pjobcardno) AS pjobcardno,
-    COALESCE(jc_out.macname, jc_reserve.macname) AS macname,
-    COALESCE(NULLIF(TRIM(jc_out.item_code), ''), NULLIF(TRIM(jc_reserve.item_code), '')) AS fg_item_code,
-    COALESCE(NULLIF(TRIM(jc_out.item_desc), ''), NULLIF(TRIM(jc_reserve.item_desc), '')) AS fg_item_desc,
+    COALESCE(NULLIF(TRIM(o.pjobcardno), ''), NULLIF(TRIM(ipr_jc.pjobcardno), '')) AS pjobcardno,
+    COALESCE(NULLIF(TRIM(jc_ir.macname), ''), NULLIF(TRIM(ipr_jc.macname), '')) AS macname,
+    NULLIF(TRIM(jc_ir.item_code), '') AS fg_item_code,
+    NULLIF(TRIM(jc_ir.item_desc), '') AS fg_item_desc,
     CASE WHEN c.out_uid IS NOT NULL THEN COALESCE(o.approved_at, o.created_at) END AS shop_floor_at
-  FROM (SELECT 1) AS _
-  LEFT JOIN ${T.OUT_ENTRY} o
-    ON o.out_uid = c.out_uid AND o.is_deleted = false
+  FROM (SELECT 1) AS gate
+  LEFT JOIN LATERAL (
+    SELECT o.out_uid, o.issue_uid, o.pjobcardno, o.approved_at, o.created_at
+    FROM ${T.OUT_ENTRY} o
+    WHERE o.is_deleted = false
+      AND (
+        (c.out_uid IS NOT NULL AND o.out_uid = c.out_uid)
+        OR (
+          c.out_uid IS NULL
+          AND LOWER(COALESCE(c.status, 'active')) = 'consumed'
+          AND COALESCE(o.approved, false) = true
+          AND NULLIF(TRIM(o.pjobcardno), '') IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM ${T.OUT_ENTRY_SCANNED_COIL} s
+            WHERE s.out_uid = o.out_uid
+              AND LOWER(TRIM(s.coil_no_uid)) = LOWER(TRIM(c.coil_no_uid))
+          )
+        )
+      )
+    ORDER BY
+      CASE WHEN c.out_uid IS NOT NULL AND o.out_uid = c.out_uid THEN 0 ELSE 1 END,
+      COALESCE(o.approved_at, o.created_at) DESC NULLS LAST,
+      o.out_uid DESC
+    LIMIT 1
+  ) o ON TRUE
   LEFT JOIN LATERAL (
     SELECT jc.macname, jc.item_code, jc.item_desc
     FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
-    WHERE jc.issue_uid = o.issue_uid
+    WHERE o.out_uid IS NOT NULL
       AND jc.is_deleted = false
-      AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(COALESCE(o.pjobcardno, '')))
-    ORDER BY jc.id DESC
+      AND NULLIF(TRIM(o.pjobcardno), '') IS NOT NULL
+      AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+        = UPPER(REGEXP_REPLACE(TRIM(o.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+    ORDER BY
+      CASE WHEN o.issue_uid IS NOT NULL AND jc.issue_uid = o.issue_uid THEN 0 ELSE 1 END,
+      CASE WHEN NULLIF(TRIM(jc.macname), '') IS NOT NULL THEN 0 ELSE 1 END,
+      jc.id DESC
     LIMIT 1
-  ) jc_out ON TRUE
+  ) jc_ir ON TRUE
   LEFT JOIN LATERAL (
-    SELECT jc.pjobcardno, jc.macname, jc.item_code, jc.item_desc
-    FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
-    INNER JOIN ${T.ISSUE_REQUEST} ir
-      ON ir.issue_uid = jc.issue_uid AND ir.is_deleted = false
-    WHERE jc.is_deleted = false
-      AND EXISTS (
-        SELECT 1
-        FROM jsonb_array_elements(
-          CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
-        ) e
-        WHERE LOWER(TRIM(e->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
-      )
-    ORDER BY ir.approved DESC NULLS LAST,
-             COALESCE(jc.updated_at, jc.created_at) DESC NULLS LAST,
-             jc.id DESC
+    SELECT
+      NULLIF(TRIM(line->>'pjobcardno'), '') AS pjobcardno,
+      NULLIF(TRIM(line->>'macname'), '') AS macname
+    FROM ${IPR_TABLE} ipr
+    CROSS JOIN LATERAL jsonb_array_elements(
+      CASE WHEN jsonb_typeof(ipr.coils) = 'array' THEN ipr.coils ELSE '[]'::jsonb END
+    ) AS line
+    WHERE LOWER(COALESCE(c.status, 'active')) = 'consumed'
+      AND ipr.is_deleted = false
+      AND ipr.request_type = 'consume'
+      AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
+      AND NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
+      AND (c.ipr_uid IS NULL OR ipr.ipr_uid = c.ipr_uid)
+    ORDER BY
+      CASE WHEN c.ipr_uid IS NOT NULL AND ipr.ipr_uid = c.ipr_uid THEN 0 ELSE 1 END,
+      COALESCE(ipr.approved, false) DESC,
+      COALESCE(ipr.approved_at, ipr.updated_at, ipr.created_at) DESC NULLS LAST,
+      ipr.ipr_uid DESC
     LIMIT 1
-  ) jc_reserve ON TRUE
+  ) ipr_jc ON TRUE
+  WHERE c.out_uid IS NOT NULL
+     OR LOWER(COALESCE(c.status, 'active')) IN ('out', 'consumed')
 ) jc ON TRUE`;
 
 /** Latest approved reassign IPR line for a shop-floor coil (source JC + target JC + qty split). */
@@ -523,6 +557,34 @@ export async function findMacnamesForCoilUids(coilNoUids = []) {
     const uid = String(r.coil_no_uid || "").trim();
     const mac = String(r.macname || "").trim();
     if (uid && mac) map.set(uid, mac);
+  }
+  return map;
+}
+
+/** Machine by job-card no — Register IPR when coil join has JC but empty macname. */
+export async function findMacnamesForJobCards(jobCardNos = []) {
+  const raw = [...new Set((jobCardNos || []).map((j) => String(j || "").trim()).filter(Boolean))];
+  if (!raw.length) return new Map();
+  const normalized = raw.map((j) => j.replace(/^JC[\s\-]*/i, "").trim().toUpperCase()).filter(Boolean);
+  if (!normalized.length) return new Map();
+
+  const rows = await dbQuery(
+    `SELECT
+       UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i')) AS jc_key,
+       NULLIF(TRIM(jc.macname), '') AS macname
+     FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
+     WHERE jc.is_deleted = false
+       AND NULLIF(TRIM(jc.macname), '') IS NOT NULL
+       AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i')) = ANY($1::text[])
+     ORDER BY jc.id DESC`,
+    [normalized]
+  );
+
+  const map = new Map();
+  for (const r of rows || []) {
+    const key = String(r.jc_key || "").trim().toUpperCase();
+    const mac = String(r.macname || "").trim();
+    if (key && mac && !map.has(key)) map.set(key, mac);
   }
   return map;
 }
@@ -1313,6 +1375,7 @@ export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], user
     if (!uid) continue;
     const original = Number(line.original_qty ?? line.qty) || 0;
     const outUid = line.out_uid != null ? Number(line.out_uid) : null;
+    const sourceJc = String(line?.pjobcardno || "").trim();
 
     const coil = await findCoilByUid(uid);
     if (!coil) continue;
@@ -1335,10 +1398,7 @@ export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], user
         const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
         restored.push(detail ?? rows[0]);
       }
-      continue;
-    }
-
-    if (status === "active") {
+    } else if (status === "active") {
       const rows = await dbQuery(
         `UPDATE ${TABLE}
          SET status = 'out',
@@ -1355,10 +1415,7 @@ export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], user
         const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
         restored.push(detail ?? rows[0]);
       }
-      continue;
-    }
-
-    if (status === "out") {
+    } else if (status === "out") {
       const rows = await dbQuery(
         `UPDATE ${TABLE}
          SET qty = $1,
@@ -1373,6 +1430,20 @@ export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], user
         const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
         restored.push(detail ?? rows[0]);
       }
+    }
+
+    // Reassign approve overwrites Store Out JC to target; undo must put source JC back
+    // so IR machine join works again (macname is not stored on out_entry).
+    const restoreOutUid = outUid ?? (coil.out_uid != null ? Number(coil.out_uid) : null);
+    if (restoreOutUid && sourceJc) {
+      await dbQuery(
+        `UPDATE ${OUT_ENTRY}
+         SET pjobcardno = $1,
+             updated_at = NOW()
+         WHERE out_uid = $2
+           AND is_deleted = false`,
+        [sourceJc, restoreOutUid]
+      );
     }
   }
 

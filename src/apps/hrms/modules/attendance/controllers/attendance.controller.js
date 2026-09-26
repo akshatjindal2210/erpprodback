@@ -4,7 +4,7 @@ import { HRMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { extractHrmsListParams } from "../../../lib/listParams.js";
 import { formatHrmsDate, formatHrmsDateTime, formatHrmsTime } from "../../../lib/hrmsFormat.js";
 import { fetchEmpMaster } from "../../../lib/erpApi.js";
-import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
+import { applyApprovalUpdateFields, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { logHrmsActivity } from "../../../lib/utils/activity/logHrmsActivity.js";
 import { istTs, LOG_DATE_SQL, LOG_VALID_PUNCH_SQL, normalizeShift, shiftDisplay, countPunches, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate, parseEmpDcode } from "../../../lib/attendanceCommon.js";
 
@@ -16,7 +16,11 @@ const ATT_RETURN = `
   to_char(attendance_date, 'YYYY-MM-DD') AS attendance_date,
   ${istTs(ATT_COL_IN)} AS "in",
   ${istTs(ATT_COL_OUT)} AS "out",
-  punch_count, entry_type, approval_status
+  punch_count, entry_type, approval_status,
+  created_by, updated_by, approved_by,
+  ${istTs("created_at")} AS created_at,
+  ${istTs("updated_at")} AS updated_at,
+  ${istTs("approved_at")} AS approved_at
 `;
 
 const UPSERT_ATTENDANCE_SQL = `
@@ -170,6 +174,9 @@ function formatRow(row, byDcode, overtimeBufferMinutes) {
     shift_display: shiftDisplay(merged.shift) || merged.shift_display || "",
     entry_type_display: entryTypeDisplay(merged.entry_type),
     approval_status_display: approval ? titleCase(approval) : "Pending",
+    created_by_name: merged.created_by_name ?? merged.created_by ?? null,
+    updated_by_name: merged.updated_by_name ?? merged.updated_by ?? null,
+    approved_by_name: merged.approved_by_name ?? merged.approved_by ?? null,
     overtime_buffer_minutes: overtimeBufferMinutes,
   };
 }
@@ -210,28 +217,20 @@ async function saveAttendanceRow(client, row, manual = false, byDcode = null, ov
   return saved ? formatRow(saved, byDcode, overtimeBufferMinutes) : null;
 }
 
-function resolveApproval({ req, previous, hasBusinessChanges, incomingApproved }) {
-  const canAuthorize = Boolean(req?.permission?.can_authorize) || req?.user?.type === "super_admin";
-  const userName = auditUserName(req);
-
-  if (incomingApproved === true) {
-    if (!canAuthorize) {
-      const err = new Error("Forbidden.");
-      err.statusCode = 403;
-      throw err;
-    }
-    return { approval_status: "approved", approved_by: userName, approved_at: new Date() };
+/** Map Location Master `approved` boolean helpers onto attendance `approval_status`. */
+function applyAttendanceApprovalFields({ req, fields, incomingApproved, hasBusinessChanges, alreadyApproved }) {
+  applyApprovalUpdateFields({
+    req,
+    fields,
+    incomingApproved,
+    hasBusinessChanges,
+    alreadyApproved,
+    auditAsName: true,
+  });
+  if (Object.prototype.hasOwnProperty.call(fields, "approved")) {
+    fields.approval_status = fields.approved ? "approved" : "unapproved";
+    delete fields.approved;
   }
-
-  if (incomingApproved === false || hasBusinessChanges) {
-    return { approval_status: "unapproved", approved_by: null, approved_at: null };
-  }
-
-  return {
-    approval_status: previous.approval_status || "unapproved",
-    approved_by: isApprovedStatus(previous.approval_status) ? previous.approved_by ?? null : null,
-    approved_at: isApprovedStatus(previous.approval_status) ? previous.approved_at ?? null : null,
-  };
 }
 
 export async function listAttendance(req, res) {
@@ -648,41 +647,72 @@ export async function updateAttendance(req, res) {
       punchFingerprint(previous) !== punchFingerprint({ in: inTime, out: outTime, shift }) ||
       normalizeShift(previous.shift) !== shift;
     const incomingApproved = normalizeApprovedInput(req.body?.approved ?? req.body?.approval_status);
-    const approval = resolveApproval({ req, previous, hasBusinessChanges: changed, incomingApproved });
-    const userName = auditUserName(req);
     const nextEntryType = resolveEntryTypeOnUpdate(previous, changed);
+
+    const fields = {
+      name: String(req.body.name ?? previous.name ?? "").trim() || null,
+      shift,
+      in: inTime,
+      out: outTime,
+      punch_count: countPunches(inTime, outTime),
+      entry_type: nextEntryType,
+      approval_status: previous.approval_status || "unapproved",
+    };
+
+    applyAttendanceApprovalFields({
+      req,
+      fields,
+      incomingApproved,
+      hasBusinessChanges: changed,
+      alreadyApproved: isApprovedStatus(previous.approval_status),
+    });
+
+    const params = [
+      id,
+      fields.name,
+      fields.shift,
+      fields.in,
+      fields.out,
+      fields.punch_count,
+      fields.entry_type,
+      fields.approval_status,
+    ];
+    const setParts = [
+      "name = COALESCE($2, name)",
+      "shift = $3",
+      `${ATT_COL_IN} = $4::timestamptz`,
+      `${ATT_COL_OUT} = $5::timestamptz`,
+      "punch_count = $6",
+      "entry_type = $7",
+      "approval_status = $8",
+    ];
+
+    // Edit → updated_* only; approve → approved_* only (Location Master pattern).
+    if (fields.updated_by !== undefined) {
+      params.push(fields.updated_by);
+      setParts.push(`updated_by = $${params.length}`);
+    }
+    if (fields.updated_at !== undefined) {
+      params.push(fields.updated_at);
+      setParts.push(`updated_at = $${params.length}`);
+    }
+    if (fields.approved_by !== undefined) {
+      params.push(fields.approved_by);
+      setParts.push(`approved_by = $${params.length}`);
+    }
+    if (fields.approved_at !== undefined) {
+      params.push(fields.approved_at);
+      setParts.push(`approved_at = $${params.length}::timestamptz`);
+    }
 
     const rows = await dbQuery(
       `
       UPDATE ${ATT}
-      SET
-        name = COALESCE($2, name),
-        shift = $3,
-        ${ATT_COL_IN} = $4::timestamptz,
-        ${ATT_COL_OUT} = $5::timestamptz,
-        punch_count = $6,
-        entry_type = $7,
-        approval_status = $8,
-        updated_by = $9,
-        approved_by = $10,
-        approved_at = $11::timestamptz,
-        updated_at = NOW()
+      SET ${setParts.join(",\n        ")}
       WHERE id = $1
-      RETURNING ${ATT_RETURN}, updated_by, approved_by
+      RETURNING ${ATT_RETURN}
       `,
-      [
-        id,
-        String(req.body.name ?? previous.name ?? "").trim() || null,
-        shift,
-        inTime,
-        outTime,
-        countPunches(inTime, outTime),
-        nextEntryType,
-        approval.approval_status,
-        userName,
-        approval.approved_by,
-        approval.approved_at,
-      ]
+      params
     );
 
     const { byDcode } = buildMasterMaps(await fetchEmpMaster());
@@ -703,7 +733,9 @@ export async function updateAttendance(req, res) {
     });
   } catch (err) {
     console.error("[HRMS] updateAttendance:", err);
-    if (err.statusCode === 403) return res.status(403).json({ success: false, message: err.message || "Forbidden." });
+    if (err.statusCode === 403 || err.statusCode === 409) {
+      return res.status(err.statusCode).json({ success: false, message: err.message || "Forbidden." });
+    }
     return res.status(500).json({ success: false, message: err.message || "Server error." });
   }
 }

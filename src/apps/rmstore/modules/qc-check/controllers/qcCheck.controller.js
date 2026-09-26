@@ -17,6 +17,7 @@ import { assertWithinEditDays } from "../../../../../platform/utils/auth/permiss
 const MODULE = "rm_qc_check";
 const log = createRmstoreActivityLogger(MODULE);
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
+import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
 
 const BATCH_COIL_INDEPENDENT_QC_MSG = "This MRN is batch-wise. Scan the batch QC sticker and submit QC for the whole batch — individual coils cannot be checked independently.";
 
@@ -400,6 +401,8 @@ export const prepareQcCheck = async (req, res) => {
  */
 export const submitQcCheck = async (req, res) => {
   try {
+    await stampRmstoreUploadedFiles(req);
+
     const id = parsePositiveIntId(req.body?.qc_check_uid ?? req.body?.id);
     let coilUid = String(req.body?.coil_no_uid || "").trim();
     const user = auditUserName(req);
@@ -838,8 +841,12 @@ export const submitQcCheck = async (req, res) => {
  */
 export const approveQcCheck = async (req, res) => {
   try {
+    await stampRmstoreUploadedFiles(req);
+
     const id = parsePositiveIntId(req.body?.qc_check_uid ?? req.body?.id);
     if (!id) return res.status(400).json({ success: false, message: "A valid QC check ID is required." });
+
+    const user = auditUserName(req);
 
     const check = await findQcCheck(id);
     if (!check) return res.status(404).json({ success: false, message: "QC check not found." });
@@ -850,8 +857,6 @@ export const approveQcCheck = async (req, res) => {
       });
     }
 
-    const user = auditUserName(req);
-    
     // In batch checks, coil_no_uid might be a comma-separated list
     let primaryUid = String(check.coil_no_uid || "").split(",")[0]?.trim();
     const coil = await findCoilByUid(primaryUid);
