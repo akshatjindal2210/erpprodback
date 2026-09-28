@@ -251,7 +251,8 @@ const COIL_LAST_BY_SQL = `CASE
   ELSE c.created_by
 END`;
 
-const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, jc.fg_item_code, jc.fg_item_desc, jc.shop_floor_at, c.status, c.created_at, ${COIL_LAST_BY_SQL} AS last_by, COALESCE(c.updated_at, c.created_at) AS last_at, ${coilSourceSql("c")}::varchar AS source`;
+/** sticker_* required — Issue Request / Store Out eligibility (`isCoilEligibleForIssueRequest`) reads these from list rows. */
+const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, m.sticker_generated, m.sticker_approved, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, jc.fg_item_code, jc.fg_item_desc, jc.shop_floor_at, c.status, c.created_at, ${COIL_LAST_BY_SQL} AS last_by, COALESCE(c.updated_at, c.created_at) AS last_at, ${coilSourceSql("c")}::varchar AS source`;
 
 export const findCoilUidsByQcCheck = async (qc_uid) => {
   const id = Number(qc_uid);
@@ -540,12 +541,15 @@ export const findCoils = async (options = {}) => {
   };
 };
 
-/** Latest issue-request machine per coil — for pending store-in display only. */
+/**
+ * Latest job card + machine per coil (shop floor / consumed join).
+ * Map: coil_no_uid → { pjobcardno, macname } — used by IPR Register enrich (fill empty only).
+ */
 export async function findMacnamesForCoilUids(coilNoUids = []) {
   const uids = [...new Set((coilNoUids || []).map((u) => String(u || "").trim()).filter(Boolean))];
   if (!uids.length) return new Map();
   const rows = await dbQuery(
-    `SELECT c.coil_no_uid, jc.macname
+    `SELECT c.coil_no_uid, jc.pjobcardno, jc.macname
      FROM ${TABLE} c
      ${COIL_JOB_CARD_JOIN}
      WHERE c.coil_no_uid = ANY($1::text[])
@@ -555,8 +559,11 @@ export async function findMacnamesForCoilUids(coilNoUids = []) {
   const map = new Map();
   for (const r of rows || []) {
     const uid = String(r.coil_no_uid || "").trim();
-    const mac = String(r.macname || "").trim();
-    if (uid && mac) map.set(uid, mac);
+    if (!uid) continue;
+    const pjobcardno = String(r.pjobcardno || "").trim() || null;
+    const macname = String(r.macname || "").trim() || null;
+    if (!pjobcardno && !macname) continue;
+    map.set(uid, { pjobcardno, macname });
   }
   return map;
 }

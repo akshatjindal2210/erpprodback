@@ -461,7 +461,7 @@ export const updateOutEntry = async (req, res) => {
       });
 
       const data = await findOutEntry({ out_uid: result.out_uid });
-      await logActivity(req, { action: "update", entity: "out_entry", entity_id: out_uid });
+      await logActivity(req, { action: "update", entity: "out_entry", entity_id: out_uid, existing, record: data, responseData: data });
       return res.json({ success: true, data });
     }
 
@@ -642,7 +642,7 @@ export const updateOutEntry = async (req, res) => {
     if (data?.approved) {
       await lockForwardingNoteForOutEntry({ fuid: data.fuid, userName });
     }
-    await logActivity(req, { action: "update", entity: "out_entry", entity_id: out_uid });
+    await logActivity(req, { action: "update", entity: "out_entry", entity_id: out_uid, existing, record: data, responseData: data });
 
     res.json({ success: true, data });
   } catch (err) {

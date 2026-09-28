@@ -170,7 +170,8 @@ export const updateProduction = async (req, res) => {
             },
           }
         : { production_id: id, approval_only: true, approved: data?.approved === true },
-      data
+      data,
+      existing
     );
     return res.json({
       success: true,

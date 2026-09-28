@@ -359,6 +359,10 @@ export const updateInventoryInward = async (req, res) => {
       entity_id: in_uid,
       record: data,
       details: { updated_fields: fields },
+      existing,
+      responseData: data,
+      incomingApproved: fields.approved === true,
+      alreadyApproved: existing.approved === true,
     });
 
     res.json({ success: true, data });

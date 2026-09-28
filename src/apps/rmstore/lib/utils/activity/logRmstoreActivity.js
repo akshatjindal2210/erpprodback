@@ -7,6 +7,6 @@ export function logRmstoreActivity(req, options = {}) {
 
 /** Per-module logger — fire-and-forget; never throws. */
 export function createRmstoreActivityLogger(entity) {
-  return (req, action, entity_id, details, record = null) =>
-    logRmstoreActivity(req, { action, entity, entity_id, details, record }).catch(() => {});
+  return (req, action, entity_id, details, record = null, existing = null) =>
+    logRmstoreActivity(req, { action, entity, entity_id, details, record, existing }).catch(() => {});
 }

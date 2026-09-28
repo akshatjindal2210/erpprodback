@@ -164,7 +164,7 @@ export async function assertScheduleDispatchWithinBalance(items = [], exclude_fu
 
     const dispatchedQty = Number(dispatchMap.get(key) ?? 0);
     const balanceQty = Math.max(0, scheduleQty - dispatchedQty);
-    const maxExtraQty = Math.floor((balanceQty * shortagePct) / 100);
+    const maxExtraQty = Math.floor((scheduleQty * shortagePct) / 100);
     const toleranceCapQty = balanceQty + maxExtraQty;
     const demandQty = Number(demand?.qty) || 0;
 

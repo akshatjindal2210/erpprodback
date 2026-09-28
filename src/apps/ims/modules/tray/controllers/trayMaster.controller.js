@@ -11,13 +11,14 @@ import { isValidTrayStatus, normalizeTrayStatus } from "../config/trayStatuses.j
 
 const CFG = getCrudModuleConfig("tray_master");
 
-const log = (req, action, entity_id, details, record = null) =>
+const log = (req, action, entity_id, details, record = null, existing = null) =>
   logActivity(req, {
     action,
     entity: "tray_master",
     entity_id,
     details,
     record,
+    existing: existing ?? (action === "update" ? record : null),
   }).catch(() => {});
 
 function parseTrayIds(raw) {

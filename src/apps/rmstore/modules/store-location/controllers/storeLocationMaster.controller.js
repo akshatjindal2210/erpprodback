@@ -133,13 +133,14 @@ function locationUniqueViolationMessage(err, locationNo = "") {
   return err?.message || "Could not save location.";
 }
 
-const log = (req, action, entity_id, details, record = null) =>
+const log = (req, action, entity_id, details, record = null, existing = null) =>
   logRmstoreActivity(req, {
     action,
     entity: "rm_store_location_master",
     entity_id,
     details,
     record,
+    existing,
   }).catch(() => {});
 
 export const getLocations = async (req, res) => {
@@ -360,7 +361,9 @@ export const updateLocation = async (req, res) => {
 
     await log(req, "update", id, hasBusinessChanges
         ? { updated_fields: fields }
-        : { approval_only: true, approved: fields.approved === true }
+        : { approval_only: true, approved: fields.approved === true },
+      null,
+      existing
     );
 
     const authorized = fields.approved === true || data?.approved === true;

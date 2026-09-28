@@ -34,7 +34,23 @@ function normalizeJcKey(jc) {
     .toUpperCase();
 }
 
-/** Display-only machine names (coil join, else IR job-card macname). */
+function coilMeta(macMap, coilUid) {
+  if (!coilUid) return null;
+  const hit = macMap.get(String(coilUid).trim());
+  if (!hit) return null;
+  // Backward-compatible: older callers stored a plain macname string.
+  if (typeof hit === "string") return { pjobcardno: null, macname: hit };
+  return {
+    pjobcardno: String(hit.pjobcardno || "").trim() || null,
+    macname: String(hit.macname || "").trim() || null,
+  };
+}
+
+/**
+ * Display-only Job Card + Machine labels for IPR Register / Pending.
+ * Fills empty fields from coil UID join (and machine from JC when JC exists).
+ * Never overwrites non-empty saved values on working rows.
+ */
 export async function enrichIprWithMachineLabels(rows = []) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return list;
@@ -53,28 +69,54 @@ export async function enrichIprWithMachineLabels(rows = []) {
 
   return list.map((row) => {
     const macs = new Set();
+    const jcs = new Set();
+
     const tagCoil = (c) => {
       if (!c) return c;
-      const fromCoil = c.coil_no_uid ? macMap.get(String(c.coil_no_uid).trim()) : null;
-      const fromJc = jcMacMap.get(normalizeJcKey(c.pjobcardno));
-      const m = fromCoil || fromJc || String(c.macname || "").trim() || null;
-      if (m) macs.add(m);
-      if (!m || m === String(c.macname || "").trim()) return c;
-      return { ...c, macname: m };
+      const meta = coilMeta(macMap, c.coil_no_uid);
+      const fromCoilMac = meta?.macname || null;
+      const fromCoilJc = meta?.pjobcardno || null;
+      const existingJc = String(c.pjobcardno || "").trim();
+      const existingMac = String(c.macname || "").trim();
+      const fromJcMac = jcMacMap.get(normalizeJcKey(existingJc || fromCoilJc));
+
+      // Fill empty only — keep snapshotted values on working IPRs.
+      const pjobcardno = existingJc || fromCoilJc || null;
+      const macname = existingMac || fromCoilMac || fromJcMac || null;
+
+      if (pjobcardno) jcs.add(pjobcardno);
+      if (macname) macs.add(macname);
+
+      if (pjobcardno === existingJc && macname === existingMac) return c;
+      return {
+        ...c,
+        ...(pjobcardno && !existingJc ? { pjobcardno } : {}),
+        ...(macname && !existingMac ? { macname } : {}),
+      };
     };
+
     const coils = (row.coils || []).map(tagCoil);
     const previous_coils = (row.previous_coils || []).map(tagCoil);
+
     for (const uid of collectCoilUidsFromIpr(row)) {
-      const m = macMap.get(uid);
-      if (m) macs.add(m);
+      const meta = coilMeta(macMap, uid);
+      if (meta?.macname) macs.add(meta.macname);
+      if (meta?.pjobcardno) jcs.add(meta.pjobcardno);
     }
     for (const jc of collectJobCardsFromIpr(row)) {
       const m = jcMacMap.get(normalizeJcKey(jc));
       if (m) macs.add(m);
+      if (jc) jcs.add(String(jc).trim());
     }
-    const existing = String(row.macname || "").trim();
-    if (existing) macs.add(existing);
-    const macname = [...macs].join(" | ") || null;
-    return { ...row, macname, coils, previous_coils };
+
+    const existingMac = String(row.macname || "").trim();
+    const existingJc = String(row.pjobcardno || "").trim();
+    if (existingMac) macs.add(existingMac);
+    if (existingJc) jcs.add(existingJc);
+
+    const macname = existingMac || [...macs].join(" | ") || null;
+    const pjobcardno = existingJc || [...jcs].join(" | ") || null;
+
+    return { ...row, macname, pjobcardno, coils, previous_coils };
   });
 }

@@ -25,36 +25,39 @@ function asArray(records) {
   return Array.isArray(records) ? records : [];
 }
 
-async function getExternalRequestedData(requestedData) {
+async function getExternalRequestedData(requestedData, filter = null) {
   const key = String(requestedData || "").trim();
   if (!key) return [];
 
+  const filterKey = filter != null && String(filter).trim() !== "" ? String(filter).trim() : "";
+  const cacheKey = filterKey ? `${key}|${filterKey}` : key;
+
   const now = Date.now();
-  const cached = externalDataCache.get(key);
+  const cached = externalDataCache.get(cacheKey);
   if (cached && now - cached.at <= EXTERNAL_DATA_CACHE_TTL_MS) {
     return cached.records;
   }
 
-  if (externalDataInflight.has(key)) {
-    return externalDataInflight.get(key);
+  if (externalDataInflight.has(cacheKey)) {
+    return externalDataInflight.get(cacheKey);
   }
 
   const promise = (async () => {
-    const res = await fetchImsDataRaw(key);
+    const res = await fetchImsDataRaw(key, filterKey || null);
     if (!res?.success) {
       console.warn("[FORWARDING][EXTERNAL] IMS fetch failed:", key, res?.message || "Unknown IMS error");
-      externalDataCache.set(key, { at: Date.now(), records: [] });
+      externalDataCache.set(cacheKey, { at: Date.now(), records: [] });
       return [];
     }
     const records = asArray(res.records);
-    externalDataCache.set(key, { at: Date.now(), records });
+    externalDataCache.set(cacheKey, { at: Date.now(), records });
     return records;
   })()
     .finally(() => {
-      externalDataInflight.delete(key);
+      externalDataInflight.delete(cacheKey);
     });
 
-  externalDataInflight.set(key, promise);
+  externalDataInflight.set(cacheKey, promise);
   return promise;
 }
 
@@ -69,11 +72,11 @@ async function withTimeout(promise, timeoutMs) {
 }
 
 /** Same IMS cache + timeout as mergeRowsWithExternalData. */
-export async function fetchExternalRecords(requestedData, timeoutMs = 2000) {
+export async function fetchExternalRecords(requestedData, timeoutMs = 2000, filter = null) {
   const key = String(requestedData || "").trim();
   if (!key) return [];
   try {
-    return await withTimeout(getExternalRequestedData(key), timeoutMs);
+    return await withTimeout(getExternalRequestedData(key, filter), timeoutMs);
   } catch (err) {
     console.warn("[FORWARDING][EXTERNAL] fetchExternalRecords error:", err?.message || err);
     return [];

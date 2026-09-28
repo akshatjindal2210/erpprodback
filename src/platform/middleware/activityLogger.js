@@ -1,8 +1,18 @@
 import ActivityLog from "../../apps/core/activity-logs/models/activityLog.model.js";
 import { buildMiddlewareLogPayload, resolveMiddlewareEntityId } from "../utils/activity/activityLogPayload.js";
 import { scheduleNotifyFromActivity } from "../../apps/core/notifications/templates/moduleNotify.service.js";
+import { resolveActivityLogAction } from "../utils/activity/logActivity.js";
 
 const ACTION_LABELS = { POST: "CREATE", PUT: "UPDATE", PATCH: "MODIFY", DELETE: "DELETE" };
+
+function middlewareActionSlug(actionType) {
+  const key = String(actionType || "").trim().toUpperCase();
+  if (key === "CREATE") return "create";
+  if (key === "UPDATE" || key === "MODIFY") return "update";
+  if (key === "DELETE") return "delete";
+  if (key === "APPROVE") return "approve";
+  return String(actionType || "").trim().toLowerCase();
+}
 
 const ROUTE_SKIP = new Set([
   "api", "core", "ims", "task", "hrms", "rmstore", "purchase", "production", "portal",
@@ -118,11 +128,22 @@ export const activityLogger = (appType) => {
                 ? String(entity_id)
                 : null;
 
+          const resolvedAction = resolveActivityLogAction({
+            action: middlewareActionSlug(actionType),
+            req,
+            body: req.body,
+            record: data?.data,
+            responseData: data?.data,
+          });
+          if (req?._activityApprovalContext) delete req._activityApprovalContext;
+
+          const storedActionType = String(resolvedAction).toUpperCase();
+
           ActivityLog.create({
             user_id: userId,
             app_type: appType,
             module,
-            action_type: actionType,
+            action_type: storedActionType,
             description,
             log_data,
             ip_address: req.ip,
@@ -134,7 +155,7 @@ export const activityLogger = (appType) => {
           // Module notifications: moduleNotify.service.js (MODULE_NOTIFY_FROM_ACTIVITY).
           try {
             scheduleNotifyFromActivity(req, {
-              action: actionType,
+              action: resolvedAction,
               entity: module,
               entity_id: storedEntityId,
               body: req.body,

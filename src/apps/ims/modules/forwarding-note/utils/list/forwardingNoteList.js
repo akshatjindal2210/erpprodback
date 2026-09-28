@@ -372,9 +372,9 @@ export function assignExclusiveLiveInvfnoteBills(stubs = [], externalRecords = [
   return { liveById };
 }
 
-export async function resolveForwardingBillClaims() {
+export async function resolveForwardingBillClaims(invfnoteFilter = null) {
   const [externalRecords, stubs] = await Promise.all([
-    fetchExternalRecords("invfnote"),
+    fetchExternalRecords("invfnote", 2000, invfnoteFilter),
     loadForwardingBillClaimStubs(),
   ]);
   return assignExclusiveLiveInvfnoteBills(stubs, externalRecords);
@@ -402,10 +402,10 @@ export async function loadBillDropdownFnContext(itemIds = []) {
   return { fnCreatedAtMs, attachedBills };
 }
 
-async function mergeForwardingInvfnoteFields(rows = []) {
+async function mergeForwardingInvfnoteFields(rows = [], invfnoteFilter = null) {
   if (!Array.isArray(rows) || !rows.length) return Array.isArray(rows) ? rows : [];
 
-  const { liveById } = await resolveForwardingBillClaims();
+  const { liveById } = await resolveForwardingBillClaims(invfnoteFilter);
   return rows.map((row) => {
     if (!isForwardingInvfnoteEligible(row)) {
       return { ...row, ...EMPTY_INVFNOTE_FIELDS };
@@ -417,7 +417,7 @@ async function mergeForwardingInvfnoteFields(rows = []) {
   });
 }
 
-async function mergeForwardingSummaryInvfnoteByParent(rows = []) {
+async function mergeForwardingSummaryInvfnoteByParent(rows = [], invfnoteFilter = null) {
   const baseRows = rows.map((row) => ({ ...row, uid: null, billno: null, billdt: null, status: null, bill_source: null }));
   if (!baseRows.length) return baseRows;
 
@@ -439,7 +439,7 @@ async function mergeForwardingSummaryInvfnoteByParent(rows = []) {
   );
   if (!Array.isArray(itemRows) || !itemRows.length) return baseRows;
 
-  const mergedItems = await mergeForwardingInvfnoteFields(itemRows);
+  const mergedItems = await mergeForwardingInvfnoteFields(itemRows, invfnoteFilter);
   const byFuid = new Map();
 
   for (const row of mergedItems) {
@@ -500,15 +500,15 @@ async function mergeForwardingSummaryInvfnoteByParent(rows = []) {
   });
 }
 
-export async function enrichForwardingSummaryRows(rows = []) {
+export async function enrichForwardingSummaryRows(rows = [], invfnoteFilter = null) {
   const enriched = await enrichRowsWithIMS(rows, {
     accCodeField: "acc_code",
     accNameOut: "acc_name",
   });
-  return mergeForwardingSummaryInvfnoteByParent(enriched);
+  return mergeForwardingSummaryInvfnoteByParent(enriched, invfnoteFilter);
 }
 
-export async function enrichForwardingItemRows(rows = []) {
+export async function enrichForwardingItemRows(rows = [], invfnoteFilter = null) {
   const enriched = await enrichRowsWithIMS(rows, {
     accCodeField: "acc_code",
     accNameOut: "acc_name",
@@ -516,7 +516,7 @@ export async function enrichForwardingItemRows(rows = []) {
     itemCodeOut: "item_code",
     itemDescOut: "item_desc",
   });
-  const withBills = await mergeForwardingInvfnoteFields(enriched);
+  const withBills = await mergeForwardingInvfnoteFields(enriched, invfnoteFilter);
   return withBills;
 }
 

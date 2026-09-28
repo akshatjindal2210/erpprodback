@@ -16,9 +16,17 @@ import { fetchFromIMS } from "../../../lib/services/ims.service.js";
 import { findCategories } from "../../category/models/category.model.js";
 import { fetchErpFgStockForItem, summarizeErpFgRecords } from "../../../lib/utils/erp-api/stock/erpFgStock.js";
 import { hasDirectForwardingNotePermission, hasManageForwardingBillPermission } from "../../../lib/utils/imsSpecialPermissions.js";
+import { buildImsBilldtRangeFilter, parseBillDateHint } from "../../gate-entry/utils/imsBillDateFilter.js";
 
 const FORWARDING_CFG = getCrudModuleConfig("forwarding_note_master");
 const FORWARDING_ITEM_CFG = getCrudModuleConfig("forwarding_note_item_wise");
+
+function invfnoteImsFilterFromDateRange(fromInput, toInput) {
+  const from = parseBillDateHint(fromInput);
+  const to = parseBillDateHint(toInput);
+  if (!from && !to) return null;
+  return buildImsBilldtRangeFilter(from || to, to || from);
+}
 
 function parseForwardingPackingCategoryId(value) {
   if (value == null || value === "") return null;
@@ -39,8 +47,9 @@ export const getForwardingNotes = async (req, res) => {
       sortBy: "created_at", order: "DESC"
     });
 
+    const safeFilters = sanitizeFilters(filters, FORWARDING_CFG.filterFields);
     const result = await findForwardingNotes({
-      filters: sanitizeFilters(filters, FORWARDING_CFG.filterFields),
+      filters: safeFilters,
       search: sanitizeSearch(search),
       sort: { by: sortBy, order },
       page, limit,
@@ -48,7 +57,8 @@ export const getForwardingNotes = async (req, res) => {
       permission: req.permission // Pass permission to model
     });
 
-    const enrichedRows = await enrichForwardingSummaryRows(result.data || []);
+    const invfnoteFilter = invfnoteImsFilterFromDateRange(safeFilters?.from_date, safeFilters?.to_date);
+    const enrichedRows = await enrichForwardingSummaryRows(result.data || [], invfnoteFilter);
     res.json({ success: true, ...result, data: enrichedRows });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -61,8 +71,9 @@ export const getForwardingNoteItems = async (req, res) => {
       sortBy: "created_at", order: "DESC"
     });
 
+    const safeFilters = sanitizeFilters(filters, FORWARDING_ITEM_CFG.filterFields);
     const result = await findForwardingNoteItems({
-      filters: sanitizeFilters(filters, FORWARDING_ITEM_CFG.filterFields),
+      filters: safeFilters,
       search: sanitizeSearch(search),
       sort: { by: sortBy, order },
       page, limit,
@@ -70,7 +81,8 @@ export const getForwardingNoteItems = async (req, res) => {
       permission: req.permission
     });
 
-    const enrichedRows = await enrichForwardingItemRows(result.data || []);
+    const invfnoteFilter = invfnoteImsFilterFromDateRange(safeFilters?.from_date, safeFilters?.to_date);
+    const enrichedRows = await enrichForwardingItemRows(result.data || [], invfnoteFilter);
     res.json({ success: true, ...result, data: enrichedRows });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -256,7 +268,12 @@ export const assignForwardingNoteItemBill = async (req, res) => {
     }
 
     const matchMode = resolveBillDropdownMatchForUser(req.user);
-    const invfnoteRecords = await fetchFromIMS("invfnote");
+    const billdtHint = body.billdt ?? body.bill_dt;
+    const invfnoteFilter = invfnoteImsFilterFromDateRange(
+      billdtHint || body.from_date,
+      billdtHint || body.to_date
+    );
+    const invfnoteRecords = await fetchFromIMS("invfnote", invfnoteFilter);
     if (
       !invfnoteHasGreenBillForItems(
         invfnoteRecords,
@@ -410,7 +427,14 @@ export const updateForwardingNote = async (req, res) => {
 
     const data = await findForwardingNote({ fuid });
     const enrichedData = await enrichForwardingNoteDetail(data);
-    await logActivity(req, { action: "update", entity: "forwarding_note_master", entity_id: fuid });
+    await logActivity(req, {
+      action: "update",
+      entity: "forwarding_note_master",
+      entity_id: fuid,
+      existing,
+      record: enrichedData,
+      responseData: enrichedData,
+    });
 
     res.json({ success: true, data: enrichedData });
   } catch (err) {
@@ -567,8 +591,9 @@ export const getForwardingNoteBillNumbersViews = async (req, res) => {
         if (Number.isFinite(n) && n > 0) exceptItemIds.push(n);
       }
     }
+    const invfnoteFilter = invfnoteImsFilterFromDateRange(req.body?.from_date, req.body?.to_date);
     const [records, fnCtx] = await Promise.all([
-      fetchFromIMS("invfnote"),
+      fetchFromIMS("invfnote", invfnoteFilter),
       loadBillDropdownFnContext(exceptItemIds),
     ]);
     const rows = buildInvfnoteBillOptions(records, {

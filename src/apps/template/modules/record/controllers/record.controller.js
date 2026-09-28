@@ -138,7 +138,15 @@ export const updateRecord = async (req, res) => {
 
     await updateRecords(fields, { record_id });
     const data = await findRecord({ record_id });
-    await logActivity(req, { action: "update", entity: MODULE, entity_id: record_id, details: { updated_fields: fields } });
+    await logActivity(req, {
+      action: "update",
+      entity: MODULE,
+      entity_id: record_id,
+      details: { updated_fields: fields },
+      existing,
+      record: data,
+      responseData: data,
+    });
     res.json({ success: true, message: "Record updated", data });
   } catch (err) {
     const status = err.statusCode || 500;

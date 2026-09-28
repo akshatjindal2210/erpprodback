@@ -110,13 +110,14 @@ function locationUniqueViolationMessage(err, locationNo = "") {
   return err?.message || "Could not save location.";
 }
 
-const log = (req, action, entity_id, details, record = null) =>
+const log = (req, action, entity_id, details, record = null, existing = null) =>
   logActivity(req, {
     action,
     entity: "location_master",
     entity_id,
     details,
     record,
+    existing,
   }).catch(() => {});
 
 export const getLocations = async (req, res) => {
@@ -339,7 +340,7 @@ export const updateLocation = async (req, res) => {
     const updated = await updateLocations(fields, { location_id: id });
     const data = await findLocation({ location_id: id, type: APP_TYPE });
 
-    await log(req, "update", id, { updated_fields: fields });
+    await log(req, "update", id, { updated_fields: fields }, null, existing);
 
     const [enriched] = await enrichLocationRows(data ? [data] : updated ? [updated] : []);
     return res.json({ success: true, data: enriched ?? data ?? updated, message: "Location updated successfully" });

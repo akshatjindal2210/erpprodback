@@ -415,14 +415,17 @@ export const updateShortage = async (req, res) => {
     const row = await updateShortages(prepared, { id });
     if (!row) return res.status(404).json({ success: false, message: "Not found" });
 
+    const [enriched] = await enrichShortageRows([row]);
+
     await logActivity(req, {
       action: "update",
       entity: ENTITY,
       entity_id: id,
       details: { fields: Object.keys(prepared) },
+      existing,
+      record: row,
+      responseData: enriched,
     });
-
-    const [enriched] = await enrichShortageRows([row]);
     res.json({ success: true, data: enriched });
   } catch (err) {
     const status = err.statusCode || 500;

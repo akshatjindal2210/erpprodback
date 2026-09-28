@@ -34,21 +34,41 @@ export function auditUserName(req) {
   return null;
 }
 
+const stampActivityApprovalContext = (req, ctx) => {
+  if (req) req._activityApprovalContext = ctx;
+};
+
 export const applyApprovalWorkflow = ({ req, fields, incomingApproved, hasBusinessChanges, canAuthorize: canAuthorizeOverride, auditAsName = false, alreadyApproved = false, approvalTimestamp }) => {
+  const priorApproved = !!alreadyApproved;
+  const businessChanged = !!hasBusinessChanges;
+
   if (incomingApproved === true) {
     if (!isAuthorizeAllowed(req, canAuthorizeOverride)) {
       throw toHttpError("You do not have approval permission", 403);
     }
-    if (alreadyApproved && !hasBusinessChanges) {
+    if (priorApproved && !businessChanged) {
       throw toHttpError("This record is already approved. Edit it before approving again.", 409);
     }
     applyApprovedFields(fields, auditAsName ? auditUserName(req) : req?.user?.id, approvalTimestamp);
+    stampActivityApprovalContext(req, {
+      incomingApproved: true,
+      alreadyApproved: priorApproved,
+      hasBusinessChanges: businessChanged,
+      appliedApprove: true,
+    });
     return;
   }
 
-  if (incomingApproved === false || hasBusinessChanges) {
+  if (incomingApproved === false || businessChanged) {
     applyPendingFields(fields);
   }
+
+  stampActivityApprovalContext(req, {
+    incomingApproved: incomingApproved ?? undefined,
+    alreadyApproved: priorApproved,
+    hasBusinessChanges: businessChanged,
+    appliedApprove: false,
+  });
 };
 
 export const normalizeApprovedInput = (value) => {
