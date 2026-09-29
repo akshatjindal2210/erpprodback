@@ -110,8 +110,16 @@ export const activityLogger = (appType) => {
           }
 
           const entityId = resolveMiddlewareEntityId(req, data?.data);
+
+          req._activityLogged = true;
+
+          const resolvedAction = resolveActivityLogAction({ action: middlewareActionSlug(actionType), req, record: data?.data });
+          if (req?._activityApprovalContext) delete req._activityApprovalContext;
+
+          const storedActionType = String(resolvedAction).toUpperCase();
+
           const { description, log_data, entity_id, entity_ref } = buildMiddlewareLogPayload({
-            actionType,
+            actionType: storedActionType,
             module,
             entityId,
             body: req.body,
@@ -119,25 +127,12 @@ export const activityLogger = (appType) => {
             route: routeUrl,
           });
 
-          req._activityLogged = true;
-
           const storedEntityId =
             entity_ref != null && String(entity_ref).trim() !== ""
               ? String(entity_ref).trim()
               : entity_id != null
                 ? String(entity_id)
                 : null;
-
-          const resolvedAction = resolveActivityLogAction({
-            action: middlewareActionSlug(actionType),
-            req,
-            body: req.body,
-            record: data?.data,
-            responseData: data?.data,
-          });
-          if (req?._activityApprovalContext) delete req._activityApprovalContext;
-
-          const storedActionType = String(resolvedAction).toUpperCase();
 
           ActivityLog.create({
             user_id: userId,

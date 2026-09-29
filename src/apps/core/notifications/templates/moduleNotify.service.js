@@ -9,6 +9,7 @@ import { auditUserName } from "../../lib/utils/auth/approval.js";
 import { saveInboxAlert } from "../inbox/inboxNotify.service.js";
 import { isWebPushConfigured, sendWebPushToUser } from "../push/webPush.service.js";
 import { formatPushTitle, resolvePushAppBrand } from "../../../../config/push/pushAppBrand.js";
+import { resolveModuleNotifyUrl } from "../../../../config/nav/moduleNotifyRoutes.js";
 import { postWaMessage } from "../../../task/manage/notifications/services/waGateway.service.js";
 
 // ─── Config (edit here for routing / aliases) ───────────────────────────────
@@ -342,10 +343,10 @@ export async function resolveAudience(audienceInput) {
 }
 
 
-async function sendPwa({ tpl, user, title, body, appType }) {
+async function sendPwa({ tpl, user, title, body, appType, notifyUrl }) {
   const trigger_key = `module_${tpl.id}`.slice(0, 50);
   const brand = resolvePushAppBrand(appType);
-  const pushUrl = brand.defaultUrl || "/settings";
+  const pushUrl = notifyUrl || brand.defaultUrl || "/settings";
   const pushTitle = formatPushTitle(appType, title);
 
   const { row } = await saveInboxAlert({
@@ -433,6 +434,7 @@ async function deliverTemplate(tpl, event, { recordVars, recordId, actorName, so
   };
 
   const appType = tpl.module_app_type || "core";
+  const notifyUrl = resolveModuleNotifyUrl({ appType, moduleName: tpl.module_name });
   const common = {
     template_id: tpl.id,
     module_id: tpl.module_id,
@@ -477,7 +479,7 @@ async function deliverTemplate(tpl, event, { recordVars, recordId, actorName, so
 
     if (tpl.pwa_enabled) {
       try {
-        const pwa = await sendPwa({ tpl, user, title, body, appType });
+        const pwa = await sendPwa({ tpl, user, title, body, appType, notifyUrl });
         logBuffer.push({
           ...common,
           recipient_user_id: user.id,

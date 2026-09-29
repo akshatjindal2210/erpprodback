@@ -160,3 +160,40 @@ export const findProductionFgForRmWire = async ({ item_code, item_dcode } = {}) 
     fg_item_desc: fgDesc || null,
   };
 };
+
+/** All distinct approved FG items whose production mapping includes this RM wire. */
+export async function findApprovedFgItemsForRmWire({ item_code, item_dcode } = {}) {
+  const code = item_code ? String(item_code).trim() : "";
+  const dcodeNum = item_dcode != null && item_dcode !== "" ? Number(item_dcode) : NaN;
+  const dcode = Number.isFinite(dcodeNum) && dcodeNum > 0 ? dcodeNum : null;
+  if (!code && dcode == null) return [];
+
+  const values = [];
+  let i = 1;
+  const rmMatch = [];
+  if (code) {
+    rmMatch.push(`UPPER(TRIM(COALESCE(elem->>'rm_item_code', ''))) = UPPER(TRIM($${i++}::text))`);
+    values.push(code);
+  }
+  if (dcode != null) {
+    rmMatch.push(`NULLIF(TRIM(COALESCE(elem->>'rm_item_dcode', '')), '')::bigint = $${i++}::bigint`);
+    values.push(dcode);
+  }
+
+  const rows = await dbQuery(
+    `SELECT DISTINCT item_dcode, item_code
+     FROM ${TBL}
+     WHERE is_deleted = false
+       AND approved = true
+       AND EXISTS (
+         SELECT 1 FROM jsonb_array_elements(COALESCE(rm_items, '[]'::jsonb)) elem
+         WHERE ${rmMatch.join(" OR ")}
+       )`,
+    values
+  );
+
+  return (rows || []).map((r) => ({
+    item_dcode: r.item_dcode ?? null,
+    item_code: r.item_code ? String(r.item_code).trim() : "",
+  }));
+}

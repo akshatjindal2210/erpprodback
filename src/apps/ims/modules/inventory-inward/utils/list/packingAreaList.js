@@ -6,7 +6,7 @@
  */
 
 import dbQuery from "../../../../../../config/db/db.js";
-import { sqlBoxSellable, sqlBoxPackingNumber, sqlDailyprodDocNoMatch, sqlDailyprodMatchOrder, sqlDocDtFromDailyprod, sqlDocDtText, boxSourceSql, sqlManageTrayPending } from "../../../box/utils/inventory/boxInventorySql.js";
+import { sqlBoxInHand, sqlBoxPackingNumber, sqlDailyprodDocNoMatch, sqlDailyprodMatchOrder, sqlDocDtFromDailyprod, sqlDocDtText, boxSourceSql, sqlManageTrayPending } from "../../../box/utils/inventory/boxInventorySql.js";
 
 const TRIM = (expr) => `NULLIF(TRIM((${expr})::text), '')`;
 const DP_ITEM_CODE = TRIM("dp.item_code");
@@ -18,7 +18,7 @@ const SA_ACC_NAME = TRIM("sa.acc_name");
 
 const PACKING_AREA_WHERE = (alias = "b") => [
   `${alias}.is_deleted = false`,
-  sqlBoxSellable(alias),
+  sqlBoxInHand(alias),
   `${alias}.location_id IS NULL`,
   `NULLIF(TRIM(${alias}.packing_number::text), '-') IS NOT NULL`,
 ];

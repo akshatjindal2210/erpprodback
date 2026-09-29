@@ -16,8 +16,8 @@ import { isCoilEligibleForIprRejection, iprRejectionIneligibleMessage } from "..
 import { isIssuedToShopFloor, isSaMinusWriteOff } from "../../../lib/utils/saMinusInventory.js";
 import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 import { enrichIprWithMachineLabels } from "../../inventory-inward/utils/enrichIprMachineLabels.js";
-import { loadMappedPrdRunJc } from "../../production/utils/erpItems.js";
-import { findProductions } from "../../production/models/productionMaster.model.js";
+import { filterPrdRunJcBySearch, loadMappedPrdRunJc, slicePage, toPrdRunJcPickerRow } from "../../production/utils/erpItems.js";
+import { findApprovedFgItemsForRmWire, findProductions } from "../../production/models/productionMaster.model.js";
 import { normalizeRmItems } from "../../production/utils/productionRmHelpers.js";
 
 const MODULE = "rm_in_process_request";
@@ -1855,6 +1855,68 @@ export const deleteInProcessRequest = async (req, res) => {
       approved: existing.approved === true,
     }, existing);
     return res.json({ success: true, message: "In-process request deleted successfully." });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+function prodKeyForJcRow(row) {
+  const itemdcode = Number(row?.itemdcode ?? row?.item_dcode);
+  const itemCode = String(row?.item_code || "").trim();
+  if (Number.isFinite(itemdcode) && itemdcode > 0) return `d:${itemdcode}`;
+  if (itemCode) return `c:${itemCode.toUpperCase()}`;
+  return null;
+}
+
+/** Reassign job card picker — one request (no per-FG production-mapping loop on client). */
+export const getReassignJobCards = async (req, res) => {
+  try {
+    const rm_item_code = String(req.body?.rm_item_code || "").trim();
+    const source_pjobcardno = String(req.body?.source_pjobcardno || "").trim();
+    const exclude_pjobcardno = String(req.body?.exclude_pjobcardno || source_pjobcardno || "").trim();
+    const search = sanitizeSearch(req.body?.search);
+    const page = Math.max(1, Number(req.body?.page) || 1);
+    const limit = Math.min(5000, Math.max(1, Number(req.body?.limit) || 50));
+
+    const primaryOnly = !isSuperAdminUser(req.user) && !hasIssueRmMappedPermission(req.user);
+
+    if (!rm_item_code) {
+      return res.json({ success: true, data: [], total: 0, page, limit });
+    }
+
+    const fgItems = await findApprovedFgItemsForRmWire({ item_code: rm_item_code });
+    const allowedFgKeys = new Set(fgItems.map((fg) => prodKeyForJcRow({ itemdcode: fg.item_dcode, item_code: fg.item_code })).filter(Boolean));
+
+    const allJcs = await loadMappedPrdRunJc();
+    let sourceProdKey = null;
+    if (source_pjobcardno) {
+      const src = allJcs.find((j) => toUpperTrim(j.pjobcardno) === toUpperTrim(source_pjobcardno));
+      sourceProdKey = prodKeyForJcRow(src);
+    }
+
+    let rows = allJcs.filter((j) => {
+      const key = prodKeyForJcRow(j);
+      if (!key || !allowedFgKeys.has(key)) return false;
+      if (primaryOnly && sourceProdKey && key !== sourceProdKey) return false;
+      if (exclude_pjobcardno && toUpperTrim(j.pjobcardno) === toUpperTrim(exclude_pjobcardno)) {
+        return false;
+      }
+      return true;
+    });
+
+    rows = filterPrdRunJcBySearch(rows, search);
+    rows = rows
+      .map((j) => {
+        const picked = toPrdRunJcPickerRow(j);
+        return {
+          ...picked,
+          _isPrimaryProd: Boolean(sourceProdKey && prodKeyForJcRow(j) === sourceProdKey),
+        };
+      })
+      .sort((a, b) => (b._isPrimaryProd ? 1 : 0) - (a._isPrimaryProd ? 1 : 0));
+
+    const paged = slicePage(rows, page, limit);
+    return res.json({ success: true, ...paged, page, limit });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

@@ -52,6 +52,12 @@ function allowErpHelper(mod, act) {
   return null;
 }
 
+/** RM product dropdown — own page or any RM page that already uses ERP item helpers. */
+function allowRmProductHelper(mod, act) {
+  if (mod === "rm_product_master" && act === VIEW) return [];
+  return allowErpHelper(mod, act);
+}
+
 /** Modules that may read coil rows / journey via helper (Coil Finder, scan flows). */
 const COIL_HELPER_CALLER_MODULES = [
   "rm_coils",
@@ -118,6 +124,7 @@ const BY_HELPER = {
   locations: fieldsForLocations,
   productionItems: allowErpHelper,
   rmItems: allowErpHelper,
+  rmProducts: allowRmProductHelper,
   prdRunJc: allowErpHelper,
   coils: fieldsForCoils,
   qcCheck: fieldsForQcCheck,

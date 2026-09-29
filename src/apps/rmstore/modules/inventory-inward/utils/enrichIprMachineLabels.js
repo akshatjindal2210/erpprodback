@@ -98,10 +98,17 @@ export async function enrichIprWithMachineLabels(rows = []) {
     const coils = (row.coils || []).map(tagCoil);
     const previous_coils = (row.previous_coils || []).map(tagCoil);
 
-    for (const uid of collectCoilUidsFromIpr(row)) {
-      const meta = coilMeta(macMap, uid);
-      if (meta?.macname) macs.add(meta.macname);
-      if (meta?.pjobcardno) jcs.add(meta.pjobcardno);
+    const savedCoilsHaveJc = (row.coils || []).some((c) => String(c?.pjobcardno || "").trim());
+    const savedCoilsHaveMac = (row.coils || []).some((c) => String(c?.macname || "").trim());
+    const rowJcFrozen = Boolean(String(row.pjobcardno || "").trim() || savedCoilsHaveJc);
+    const rowMacFrozen = Boolean(String(row.macname || "").trim() || savedCoilsHaveMac);
+
+    if (!rowJcFrozen || !rowMacFrozen) {
+      for (const uid of collectCoilUidsFromIpr(row)) {
+        const meta = coilMeta(macMap, uid);
+        if (!rowMacFrozen && meta?.macname) macs.add(meta.macname);
+        if (!rowJcFrozen && meta?.pjobcardno) jcs.add(meta.pjobcardno);
+      }
     }
     for (const jc of collectJobCardsFromIpr(row)) {
       const m = jcMacMap.get(normalizeJcKey(jc));

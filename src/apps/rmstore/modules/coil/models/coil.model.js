@@ -473,6 +473,8 @@ export const findCoils = async (options = {}) => {
     const term = `%${search}%`;
     values.push(term);
     const idx = i++;
+    const pendingJcSearch = `COALESCE(NULLIF(TRIM(ipr_r.reassign_target_pjobcardno), ''), NULLIF(TRIM(jc.pjobcardno), ''))`;
+    const pendingMacSearch = `COALESCE(NULLIF(TRIM(ipr_r.reassign_target_macname), ''), NULLIF(TRIM(jc.macname), ''))`;
     conditions.push(`(
       c.coil_uid::text ILIKE $${idx} OR
       c.coil_no_uid ILIKE $${idx} OR
@@ -481,8 +483,8 @@ export const findCoils = async (options = {}) => {
       COALESCE(m.item_code,'') ILIKE $${idx} OR
       COALESCE(m.item_desc,'') ILIKE $${idx} OR
       m.mrn_no::text ILIKE $${idx} OR
-      COALESCE(jc.pjobcardno,'') ILIKE $${idx} OR
-      COALESCE(jc.macname,'') ILIKE $${idx}
+      ${pendingJcSearch} ILIKE $${idx} OR
+      ${pendingMacSearch} ILIKE $${idx}
     )`);
   }
 
@@ -1161,24 +1163,17 @@ export const processConsumeCoils = async (ipr_uid, coilLines = [], userName) => 
     if (!uid) continue;
 
     const original = Number(line.original_qty ?? line.qty) || 0;
-    const used =
-      line.consumed_qty != null ? Number(line.consumed_qty) || 0 : original;
+    const used = line.consumed_qty != null ? Number(line.consumed_qty) || 0 : original;
     const balance =
       line.remaining_qty != null
         ? Number(line.remaining_qty) || 0
         : Math.max(0, original - used);
 
     if (used < 0) {
-      throw Object.assign(
-        new Error(`Used qty for coil ${uid} must be greater than 0.`),
-        { status: 400 }
-      );
+      throw Object.assign(new Error(`Used qty for coil ${uid} must be greater than 0.`), { status: 400 });
     }
     if (used > original) {
-      throw Object.assign(
-        new Error(`Used qty for coil ${uid} cannot exceed issued qty (${original}).`),
-        { status: 400 }
-      );
+      throw Object.assign(new Error(`Used qty for coil ${uid} cannot exceed issued qty (${original}).`), { status: 400 });
     }
 
     const coil = await findCoilByUid(uid);
@@ -1238,17 +1233,8 @@ export const processConsumeCoils = async (ipr_uid, coilLines = [], userName) => 
     );
     if (rows?.[0]) {
       const isReassign = line.reassign === true;
-      const targetJc = String(line.pjobcardno || "").trim();
-      if (isReassign && targetJc && coil.out_uid != null) {
-        await dbQuery(
-          `UPDATE ${OUT_ENTRY}
-           SET pjobcardno = $1,
-               updated_at = NOW()
-           WHERE out_uid = $2
-             AND is_deleted = false`,
-          [targetJc, Number(coil.out_uid)]
-        );
-      }
+      // Do not rewrite Store Out pjobcardno on reassign — that breaks IR fulfillment
+      // matching and makes the source JC reappear as Pending Store Out.
       const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
       partialConsumed.push({
        ...(detail ?? rows[0]),

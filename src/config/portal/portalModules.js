@@ -57,6 +57,7 @@ export const MODULES = {
     { name: "schedule_planning", label: "Schedule Planning" },
   ],
   rmstore: [
+    { name: "rm_product_master", label: "RM Product Master" },
     { name: "rm_production_master", label: "Production Master" },
     { name: "rm_spec_master", label: "RM Spec Master" },
     { name: "rm_store_location_master", label: "RM Store Location Master" },
@@ -141,6 +142,7 @@ export const SEED_MODULES = [
   { name: "red_ticket",                   label: "Red Ticket",                      sort_order: 30,       app_type: "task" },
   { name: "category",                     label: "Category",                        sort_order: 31,       app_type: "task" },
   { name: "holiday",                      label: "Holiday",                         sort_order: 32,       app_type: "task" },
+  { name: "rm_product_master",            label: "RM Product Master",               sort_order: 32,       app_type: "rmstore" },
   { name: "rm_production_master",         label: "Production Master",               sort_order: 33,       app_type: "rmstore" },
   { name: "rm_spec_master",               label: "RM Spec Master",                  sort_order: 34,       app_type: "rmstore" },
   { name: "rm_store_location_master",     label: "RM Store Location Master",        sort_order: 35,       app_type: "rmstore" },

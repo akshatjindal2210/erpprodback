@@ -333,7 +333,7 @@ export const findPackingAreaBoxesByTrayId = async (trayId) => {
      WHERE b.is_deleted = false
        AND t.id = $1
        AND b.location_id IS NULL
-       AND ${sqlBoxSellable("b")}
+       AND ${sqlBoxInHand("b")}
      ORDER BY b.box_uid ASC`,
     [id]
   );
@@ -362,9 +362,6 @@ export const findBoxesByScanCodesAny = async (scanCodes = []) => {
 /** Why an inward scan did not match {@link findInHandBoxesByScanCodes}. */
 export function inwardScanRejectMessage(row) {
   if (!row || row.is_deleted) return "Box not found";
-  if (row.qc_hold_id != null && String(row.qc_hold_id).trim() !== "") {
-    return "Box is on QC hold and cannot be scanned until the submission is approved";
-  }
   if (row.sa_entry_type === "stock_out") {
     return "Box removed via stock adjustment and cannot be stored inward";
   }

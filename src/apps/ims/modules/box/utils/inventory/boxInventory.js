@@ -77,7 +77,7 @@ export function isBoxSellable(box) {
 }
 
 export function isBoxEligibleForInward(box) {
-  return isBoxSellable(box);
+  return isBoxInHand(box);
 }
 
 // Customer override: allow in-hand and outward boxes; block deleted and SA minus (removed) only.

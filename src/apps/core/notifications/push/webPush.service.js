@@ -9,6 +9,7 @@ import { formatPushTitle, resolvePushAppBrand } from "../../../../config/push/pu
 import { INBOX_DELIVERY_RECIPIENT_LABEL } from "../../lib/config/notifications/inboxConfig.js";
 
 const PUSH_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days — delivers when device comes online
+const PUSH_SEND_TIMEOUT_MS = 8000; // fail fast so one hung endpoint cannot delay other devices
 
 let vapidReady = false;
 
@@ -75,7 +76,8 @@ async function logInboxPwaSent(notification = {}, meta = {}) {
 }
 
 async function sendToRow(row, notification = {}, meta = {}) {
-  const tracking_id = randomUUID();
+  // Reuse inbox_single tracking_id so Android SW "received" updates the Message Log row.
+  const tracking_id = meta.tracking_id || randomUUID();
   const app_type = meta.app_type ?? notification.app_type ?? "task";
   const brand = resolvePushAppBrand(app_type);
   const url = notification.url || meta.url || brand.defaultUrl || "/";
@@ -86,11 +88,13 @@ async function sendToRow(row, notification = {}, meta = {}) {
 
   const payload = JSON.stringify({
     title,
-    body,
+    body: body || title,
     icon: notification.icon || brand.icon,
     badge: notification.badge || brand.badge,
     tag: notification.tag || `push-${app_type}-${tracking_id}`,
     renotify: notification.renotify ?? true,
+    silent: false,
+    vibrate: notification.vibrate || [200, 100, 200],
     url,
     data: {
       url,
@@ -111,9 +115,11 @@ async function sendToRow(row, notification = {}, meta = {}) {
     if (attempt > 0) await sleep(1500 * attempt);
 
     try {
+      // urgency:high → FCM high priority so Android can wake on lock screen / Doze
       await webpush.sendNotification(toWebPushSubscription(row), payload, {
         TTL: PUSH_TTL_SECONDS,
         urgency: "high",
+        timeout: PUSH_SEND_TIMEOUT_MS,
       });
       await PushSubscription.touchLastUsed(row.subscription_id);
 
@@ -199,12 +205,21 @@ export async function sendWebPushToSubscriptions(rows, notification = {}, meta =
     return { ok: false, sent: 0, failed: 0, results: [], logs: [] };
   }
 
+  // Parallel per-device send — sequential awaits + retries delayed every other device (esp. Android).
+  const settled = await Promise.allSettled(rows.map((row) => sendToRow(row, notification, meta)));
   const results = [];
   const logs = [];
-  for (const row of rows) {
-    const result = await sendToRow(row, notification, meta);
-    results.push(result);
-    if (result.log) logs.push(result.log);
+  for (const entry of settled) {
+    if (entry.status === "fulfilled") {
+      results.push(entry.value);
+      if (entry.value.log) logs.push(entry.value.log);
+    } else {
+      results.push({
+        ok: false,
+        error: entry.reason?.message || "Push delivery failed",
+        noLog: true,
+      });
+    }
   }
 
   const sent = results.filter((r) => r.ok).length;
@@ -233,13 +248,28 @@ export async function sendWebPushToUser(userId, notification = {}, meta = {}) {
     const inboxLog = await logInboxPwaSent(notification, pushMeta);
     const logs = inboxLog ? [inboxLog] : [];
     if (!rows.length) {
-      return { ok: true, sent: 1, failed: 0, error: null, logs };
+      if (inboxLog?.tracking_id) {
+        await PushDeliveryLog.markFailed(inboxLog.tracking_id, "No linked devices for this user").catch(() => null);
+      }
+      return { ok: false, sent: 0, failed: 1, error: "No linked devices for this user", logs };
     }
     const push = await sendWebPushToSubscriptions(rows, notification, {
       ...pushMeta,
       suppress_delivery_log: true,
+      // Same id as In-app notification log — SW receipt updates Received/Read on that row.
+      tracking_id: inboxLog?.tracking_id || undefined,
     });
-    return { ...push, ok: push.ok || Boolean(inboxLog), sent: push.sent, logs };
+    if (!push.ok && inboxLog?.tracking_id) {
+      const err = push.results?.find((r) => r?.error)?.error || push.error || "Web push delivery failed";
+      await PushDeliveryLog.markFailed(inboxLog.tracking_id, err).catch(() => null);
+    }
+    return {
+      ...push,
+      ok: push.ok,
+      sent: push.sent,
+      logs,
+      error: push.ok ? null : push.results?.find((r) => r?.error)?.error || "Web push delivery failed",
+    };
   }
 
   if (!rows.length) {

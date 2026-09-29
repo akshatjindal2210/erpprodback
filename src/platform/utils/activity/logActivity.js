@@ -53,7 +53,12 @@ export function resolveActivityLogAction({ action, req, existing, incomingApprov
   }
 
   const was = readPriorApproved({ ctx, existing, alreadyApproved, details, record });
-  if (incoming === true && !was) return "approve";
+  if (incoming === true && !was) {
+    // Require proof of transition — avoid re-notify when body still has approved:true on an already-approved row.
+    if (existing != null && !isApprovedFlag(existing.approved)) return "approve";
+    if (alreadyApproved === false) return "approve";
+    return action;
+  }
   return action;
 }
 

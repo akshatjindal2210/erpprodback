@@ -13,6 +13,30 @@ export const PUSH_APP_BRAND = {
     badge: "/push-icons/ims.svg",
     defaultUrl: "/ims/dashboard",
   },
+  rmstore: {
+    label: "RM Store",
+    icon: "/push-icons/ims.svg",
+    badge: "/push-icons/ims.svg",
+    defaultUrl: "/rmstore/dashboard",
+  },
+  hrms: {
+    label: "HRMS",
+    icon: "/push-icons/core.svg",
+    badge: "/push-icons/core.svg",
+    defaultUrl: "/hrms/dashboard",
+  },
+  purchase: {
+    label: "Purchase",
+    icon: "/push-icons/core.svg",
+    badge: "/push-icons/core.svg",
+    defaultUrl: "/purchase/dashboard",
+  },
+  production: {
+    label: "Production",
+    icon: "/push-icons/core.svg",
+    badge: "/push-icons/core.svg",
+    defaultUrl: "/production/dashboard",
+  },
   core: {
     label: "Admin Console",
     icon: "/push-icons/core.svg",

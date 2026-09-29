@@ -101,6 +101,23 @@ const PushDeliveryLog = {
     return formatRow(rows[0]);
   },
 
+  async markFailed(tracking_id, error_detail = null) {
+    if (!tracking_id) return null;
+    const rows = await dbQuery(
+      `UPDATE ${M.PUSH_DELIVERY_LOG}
+       SET status = 'failed',
+           error_detail = COALESCE(?, error_detail),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE tracking_id = ? AND status = 'sent'
+       RETURNING push_log_id, tracking_id, status, error_detail,
+         TO_CHAR(sent_at, 'YYYY-MM-DD HH24:MI:SS') AS sent_at,
+         TO_CHAR(received_at, 'YYYY-MM-DD HH24:MI:SS') AS received_at,
+         TO_CHAR(read_at, 'YYYY-MM-DD HH24:MI:SS') AS read_at`,
+      [error_detail, tracking_id]
+    );
+    return formatRow(rows[0]);
+  },
+
   async markRead(tracking_id, { client_ip = null, on_company_network = null } = {}) {
     const rows = await dbQuery(
       `UPDATE ${M.PUSH_DELIVERY_LOG}

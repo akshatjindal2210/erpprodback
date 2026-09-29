@@ -1,5 +1,5 @@
 import express from "express";
-import { getInProcessRequests, getInProcessRequestById, getInProcessReasons, getCoilHelper, getPendingStoreIn, getPendingStoreInById, getPendingStoreOut, getPendingShopFloor, createInProcessRequest, updateInProcessRequestCtrl, completeStoreInCtrl, deleteInProcessRequest } from "../controllers/inProcessRequest.controller.js";
+import { getInProcessRequests, getInProcessRequestById, getInProcessReasons, getCoilHelper, getReassignJobCards, getPendingStoreIn, getPendingStoreInById, getPendingStoreOut, getPendingShopFloor, createInProcessRequest, updateInProcessRequestCtrl, completeStoreInCtrl, deleteInProcessRequest } from "../controllers/inProcessRequest.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
 import { rmIprUpload } from "../../../lib/middleware/upload.js";
@@ -23,6 +23,7 @@ const storeOutReader = accessControlAny([
 const storeInReceiver = accessControlAny([{ moduleName: "rm_inventory_inwards", actions: "add" }]);
 
 router.post("/coil-helper", authenticate, accessControl(MODULE, "view"), getCoilHelper);
+router.post("/reassign-job-cards", authenticate, accessControl(MODULE, "view"), getReassignJobCards);
 router.post("/list", authenticate, accessControl(MODULE, "view"), getInProcessRequests);
 router.post("/get", authenticate, accessControl(MODULE, "view"), getInProcessRequestById);
 router.post("/reasons", authenticate, accessControl(MODULE, "view"), getInProcessReasons);

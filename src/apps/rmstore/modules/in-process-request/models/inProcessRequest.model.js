@@ -279,10 +279,12 @@ export function summarizeRow(row) {
 
   const firstCoilUid = coils[0]?.coil_no_uid || str(row.seed_coil_uid);
 
-  const jcNos = coils.map((c) => c.pjobcardno).filter(Boolean);
-  const macNames = coils.map((c) => c.macname).filter(Boolean);
-  const pjobcardno = uniqueJoin(jcNos) || str(coils[0]?.pjobcardno) || null;
-  const macname = uniqueJoin(macNames) || str(coils[0]?.macname) || null;
+  const isReassignConsume = isConsume && coils.some((c) => c.reassign === true);
+  const jcMacLines = isReassignConsume && previous_coils.length ? previous_coils : coils;
+  const jcNos = jcMacLines.map((c) => c.pjobcardno).filter(Boolean);
+  const macNames = jcMacLines.map((c) => c.macname).filter(Boolean);
+  const pjobcardno = uniqueJoin(jcNos) || str(jcMacLines[0]?.pjobcardno) || null;
+  const macname = uniqueJoin(macNames) || str(jcMacLines[0]?.macname) || null;
 
   const balanceQty = isConsume
     ? coils.reduce((s, c) => s + num(c.remaining_qty), 0)
