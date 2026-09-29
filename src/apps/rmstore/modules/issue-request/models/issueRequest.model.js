@@ -10,6 +10,35 @@ const COIL = T.COIL_TABLE;
 const OUT_ENTRY = T.OUT_ENTRY;
 const OUT_SCANNED = T.OUT_ENTRY_SCANNED_COIL;
 
+/** Store-out qty from rmstore_out_entry.total_qty (fixed at approve), not live rmstore_coil_table.qty. */
+const JC_OUT_STATS_LATERAL = `
+    LEFT JOIN LATERAL (
+      SELECT
+        (
+          SELECT COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int
+          FROM ${OUT_ENTRY} o
+          INNER JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
+          WHERE o.is_deleted = false
+            AND COALESCE(o.approved, false) = true
+            AND o.issue_uid = jc.issue_uid
+            AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
+        ) AS out_coil_count,
+        COALESCE((
+          SELECT SUM(o.total_qty)::float8
+          FROM ${OUT_ENTRY} o
+          WHERE o.is_deleted = false
+            AND COALESCE(o.approved, false) = true
+            AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
+            AND o.issue_uid = jc.issue_uid
+            AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
+        ), 0)::float8 AS out_total_qty
+    ) jc_out ON true`;
+
+const JC_ISSUE_QTY_DISPLAY_SQL = `CASE
+  WHEN COALESCE(jc_out.out_coil_count, 0) > 0 THEN jc_out.out_total_qty
+  ELSE jc.issue_qty
+END`;
+
 const MASTER_COLUMNS = `
   r.issue_uid,
   r.shift,
@@ -38,10 +67,7 @@ const JC_AGG_JOIN = `
       COALESCE(jsonb_agg(
         jsonb_build_object(
           'pjobcardno', jc.pjobcardno,
-          'issue_qty', CASE
-            WHEN COALESCE(jc_out.out_coil_count, 0) > 0 THEN jc_out.out_qty
-            ELSE jc.issue_qty
-          END,
+          'issue_qty', ${JC_ISSUE_QTY_DISPLAY_SQL},
           'planqty', jc.planqty,
           'macname', jc.macname,
           'pldt', jc.pldt,
@@ -53,18 +79,13 @@ const JC_AGG_JOIN = `
           'rm_weight', jc.rm_weight
         ) ORDER BY jc.id
       ), '[]'::jsonb) AS job_cards,
-      COALESCE(SUM(
-        CASE
-          WHEN COALESCE(jc_out.out_coil_count, 0) > 0 THEN jc_out.out_qty
-          ELSE jc.issue_qty
-        END
-      ), 0)::float8 AS issued_qty_display,
+      COALESCE(SUM((${JC_ISSUE_QTY_DISPLAY_SQL})), 0)::float8 AS job_cards_issue_qty_sum,
       COALESCE(SUM(
         CASE
           WHEN COALESCE(jc_out.out_coil_count, 0) > 0 THEN jc_out.out_coil_count
           ELSE jc.coil_count
         END
-      ), 0)::int AS coil_count_display,
+      ), 0)::int AS job_cards_coil_count_sum,
       (array_agg(jc.item_code ORDER BY jc.id))[1] AS item_code,
       (array_agg(jc.item_desc ORDER BY jc.id))[1] AS item_desc,
       (array_agg(jc.rm_item_code ORDER BY jc.id))[1] AS rm_item_code,
@@ -73,21 +94,7 @@ const JC_AGG_JOIN = `
       (array_agg(jc.part_weight ORDER BY jc.id))[1] AS part_weight,
       (array_agg(jc.rm_weight ORDER BY jc.id))[1] AS rm_weight
     FROM ${JC_TABLE} jc
-    LEFT JOIN LATERAL (
-      SELECT
-        COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int AS out_coil_count,
-        COALESCE(SUM(oc.qty), 0)::float8 AS out_qty
-      FROM ${OUT_ENTRY} o
-      INNER JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
-      INNER JOIN ${COIL} oc
-        ON oc.is_deleted = false
-       AND LOWER(TRIM(oc.coil_no_uid)) = LOWER(TRIM(s.coil_no_uid))
-      WHERE o.is_deleted = false
-        AND COALESCE(o.approved, false) = true
-        AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
-        AND o.issue_uid = jc.issue_uid
-        AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(jc.pjobcardno))
-    ) jc_out ON true
+    ${JC_OUT_STATS_LATERAL}
     WHERE jc.issue_uid = r.issue_uid AND jc.is_deleted = false
   ) jc_agg ON true
 `;
@@ -126,12 +133,8 @@ const JC_STORE_OUT_JOIN = `
           AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
       ) AS out_coil_count,
       (
-        SELECT COALESCE(SUM(oc.qty), 0)::float8
+        SELECT COALESCE(SUM(o.total_qty), 0)::float8
         FROM ${OUT_ENTRY} o
-        INNER JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
-        INNER JOIN ${COIL} oc
-          ON oc.is_deleted = false
-         AND LOWER(TRIM(oc.coil_no_uid)) = LOWER(TRIM(s.coil_no_uid))
         WHERE o.is_deleted = false
           AND COALESCE(o.approved, false) = true
           AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
@@ -192,13 +195,13 @@ function normalizeJsonArray(raw) {
 
 function mapMasterRow(row) {
   if (!row) return null;
-  const issuedQtyDisplay = Number(row.issued_qty_display);
-  const coilCountDisplay = Number(row.coil_count_display);
+  const qtyDisplay = Number(row.job_cards_issue_qty_sum);
+  const coilDisplay = Number(row.job_cards_coil_count_sum);
   return {
     ...row,
     job_cards: normalizeJsonArray(row.job_cards),
-    requested_qty: Number.isFinite(issuedQtyDisplay) ? issuedQtyDisplay : Number(row.requested_qty) || 0,
-    coil_count: Number.isFinite(coilCountDisplay) ? coilCountDisplay : Number(row.coil_count) || 0,
+    requested_qty: Number.isFinite(qtyDisplay) ? qtyDisplay : Number(row.requested_qty) || 0,
+    coil_count: Number.isFinite(coilDisplay) ? coilDisplay : Number(row.coil_count) || 0,
   };
 }
 
@@ -262,8 +265,8 @@ export const findIssueRequests = async (options = {}) => {
             jc_agg.production_id,
             jc_agg.part_weight,
             jc_agg.rm_weight,
-            jc_agg.issued_qty_display,
-            jc_agg.coil_count_display,
+            jc_agg.job_cards_issue_qty_sum,
+            jc_agg.job_cards_coil_count_sum,
             COALESCE(st.assigned_coil_count, 0)::int AS assigned_coil_count,
             COALESCE(st.out_coil_count, 0)::int AS store_out_coil_count,
             (COALESCE(st.assigned_coil_count, 0) > 0
@@ -391,8 +394,8 @@ export const findIssueRequest = async (issue_uid) => {
             jc_agg.production_id,
             jc_agg.part_weight,
             jc_agg.rm_weight,
-            jc_agg.issued_qty_display,
-            jc_agg.coil_count_display
+            jc_agg.job_cards_issue_qty_sum,
+            jc_agg.job_cards_coil_count_sum
      FROM ${TABLE} r
      ${JC_AGG_JOIN}
      WHERE r.issue_uid = $1 AND r.is_deleted = false
@@ -402,7 +405,6 @@ export const findIssueRequest = async (issue_uid) => {
   return mapMasterRow(row) ?? null;
 };
 
-/** Flat coil list from normalized job-card rows. */
 export const findIssueRequestCoils = async (issue_uid) => {
   const rows = await findActiveJobCardsByIssueUid(issue_uid);
   const id = Number(issue_uid);
@@ -425,8 +427,25 @@ export const findIssueRequestCoils = async (issue_uid) => {
 };
 
 export const findIssueRequestJobCards = async (issue_uid) => {
-  const rows = await findActiveJobCardsByIssueUid(issue_uid);
-  const mapped = rows.map(jobCardRowToApi).filter(Boolean);
+  const [header, rows] = await Promise.all([
+    findIssueRequest(issue_uid),
+    findActiveJobCardsByIssueUid(issue_uid),
+  ]);
+  const qtyByJc = new Map(
+    (header?.job_cards || []).map((j) => [
+      String(j?.pjobcardno || "").trim().toUpperCase(),
+      Number(j?.issue_qty),
+    ])
+  );
+  const mapped = rows
+    .map((row) => {
+      const api = jobCardRowToApi(row);
+      if (!api) return null;
+      const q = qtyByJc.get(String(api.pjobcardno || "").trim().toUpperCase());
+      if (Number.isFinite(q)) api.issue_qty = q;
+      return api;
+    })
+    .filter(Boolean);
   const allCoils = mapped.flatMap((jc) => jc.coils || []);
   const enriched = await enrichCoilsFromMaster(allCoils);
   const byUid = new Map(
@@ -441,7 +460,6 @@ export const findIssueRequestJobCards = async (issue_uid) => {
   }));
 };
 
-/** Fill mrn_uid / mrn_no / qty from coil master (legacy JSON often stored only coil_no_uid). */
 async function enrichCoilsFromMaster(coils = []) {
   const list = Array.isArray(coils) ? coils : [];
   const need = [
@@ -454,7 +472,7 @@ async function enrichCoilsFromMaster(coils = []) {
   if (!need.length) return list;
 
   const rows = await dbQuery(
-    `SELECT c.coil_no_uid, c.qty, c.mrn_uid, m.mrn_no, m.heat_no, m.item_code, m.acc_name, c.location_id, c.created_at, c.coil_uid
+    `SELECT c.coil_no_uid, c.mrn_uid, m.mrn_no, m.heat_no, m.item_code, m.acc_name, c.location_id, c.created_at, c.coil_uid
      FROM ${COIL} c
      LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
      WHERE c.is_deleted = false
@@ -470,7 +488,7 @@ async function enrichCoilsFromMaster(coils = []) {
     if (!full) return c;
     return {
       ...c,
-      qty: c.qty ?? full.qty,
+      qty: c.qty ?? 0,
       mrn_uid: c.mrn_uid || full.mrn_uid || null,
       mrn_no: c.mrn_no ?? full.mrn_no ?? null,
       heat_no: c.heat_no || full.heat_no || null,
@@ -509,13 +527,13 @@ export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid
     `SELECT UPPER(TRIM(jc.pjobcardno)) AS pjobcardno,
             COALESCE(SUM(
               CASE
-                WHEN COALESCE(out_act.out_coil_count, 0) > 0 THEN out_act.out_qty
+                WHEN COALESCE(out_act.out_coil_count, 0) > 0 THEN out_act.out_total_qty
                 ELSE jc.issue_qty
               END
             ), 0)::float8 AS issued_qty,
             COALESCE(SUM(
               CASE
-                WHEN COALESCE(out_act.out_coil_count, 0) > 0 THEN out_act.out_qty
+                WHEN COALESCE(out_act.out_coil_count, 0) > 0 THEN out_act.out_total_qty
                 ELSE jc.issue_qty
               END
             ) FILTER (WHERE r.approved = true), 0)::float8 AS approved_qty,
@@ -525,18 +543,24 @@ export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid
      INNER JOIN ${JC_TABLE} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
      LEFT JOIN LATERAL (
        SELECT
-         COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int AS out_coil_count,
-         COALESCE(SUM(oc.qty), 0)::float8 AS out_qty
-       FROM ${OUT_ENTRY} o
-       INNER JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
-       INNER JOIN ${COIL} oc
-         ON oc.is_deleted = false
-        AND LOWER(TRIM(oc.coil_no_uid)) = LOWER(TRIM(s.coil_no_uid))
-       WHERE o.is_deleted = false
-         AND COALESCE(o.approved, false) = true
-         AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
-         AND o.issue_uid = jc.issue_uid
-         AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(jc.pjobcardno))
+         (
+           SELECT COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int
+           FROM ${OUT_ENTRY} o
+           INNER JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
+           WHERE o.is_deleted = false
+             AND COALESCE(o.approved, false) = true
+             AND o.issue_uid = jc.issue_uid
+             AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
+         ) AS out_coil_count,
+         COALESCE((
+           SELECT SUM(o.total_qty)::float8
+           FROM ${OUT_ENTRY} o
+           WHERE o.is_deleted = false
+             AND COALESCE(o.approved, false) = true
+             AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
+             AND o.issue_uid = jc.issue_uid
+             AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
+         ), 0)::float8 AS out_total_qty
      ) out_act ON true
      WHERE r.is_deleted = false
        ${excludeClause}
