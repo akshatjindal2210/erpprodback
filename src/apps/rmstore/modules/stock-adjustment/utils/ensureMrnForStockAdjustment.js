@@ -2,12 +2,6 @@ import { findMrnByUid, insertMrn, syncMrnHeatFromLot } from "../../mrn/models/mr
 import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
 import { mapErpMrnRecord } from "../../mrn/controllers/mrn.controller.js";
 
-function serialFromUid(uid) {
-  const parts = String(uid || "").trim().split("_");
-  const tail = parts[parts.length - 1];
-  return /^\d+$/.test(tail) ? Number(tail) : null;
-}
-
 function resolveAdjustmentLotNo(adjustment) {
   return (
     (adjustment?.it_lot_no != null && String(adjustment.it_lot_no).trim()) ||
@@ -20,13 +14,11 @@ function buildMrnPayloadFromAdjustment(adjustment, userName) {
   const uid = String(adjustment?.mrn_uid || "").trim();
   if (!uid) return null;
 
-  const serialRaw = adjustment?.serial_no ?? serialFromUid(uid);
   const lotNo = resolveAdjustmentLotNo(adjustment);
 
   return {
     uid,
     mrn_no: adjustment?.mrn_no ?? null,
-    serial_no: serialRaw ?? null,
     mrn_dt: adjustment?.mrn_dt ?? null,
     bill_no: adjustment?.bill_no ?? null,
     bill_dt: adjustment?.bill_dt ?? null,
@@ -36,12 +28,12 @@ function buildMrnPayloadFromAdjustment(adjustment, userName) {
     item_code: adjustment?.item_code ?? null,
     item_desc: adjustment?.item_desc ?? null,
     heat_no: lotNo,
-    it_recp_qty: adjustment?.qty ?? null,
-    it_lot_no: lotNo,
+    qty: adjustment?.qty ?? null,
+    coil_no: lotNo,
     it_unit: adjustment?.unit || "KG",
     system_generate_user: userName ?? null,
     system_generate_date: new Date(),
-    sticker_generated: false,
+    sticker_status: "pending",
   };
 }
 
@@ -64,7 +56,7 @@ export async function ensureMrnForStockAdjustment(adjustment, userName) {
 
   const existing = await findMrnByUid(uid);
   if (existing) {
-    const heat = resolveAdjustmentLotNo(adjustment) ?? existing.heat_no ?? existing.it_lot_no ?? null;
+    const heat = resolveAdjustmentLotNo(adjustment) ?? existing.heat_no ?? existing.coil_no ?? existing.it_lot_no ?? null;
     if (heat && !String(existing.heat_no || "").trim()) {
       const synced = await syncMrnHeatFromLot(uid, heat);
       if (synced) return synced;
@@ -82,7 +74,7 @@ export async function ensureMrnForStockAdjustment(adjustment, userName) {
         uid,
         system_generate_user: userName ?? null,
         system_generate_date: new Date(),
-        sticker_generated: false,
+        sticker_status: "pending",
       };
     }
   }

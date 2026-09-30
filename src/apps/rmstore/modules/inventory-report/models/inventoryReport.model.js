@@ -75,8 +75,7 @@ loc_parts AS (
   FROM ${T.COIL_TABLE} c2
   LEFT JOIN ${IT.LOCATION_MASTER} lm2
     ON lm2.location_id = c2.location_id AND lm2.is_deleted = false
-  WHERE c2.is_deleted = false
-    AND LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
+  WHERE LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
     AND (${IN_STORE})
   GROUP BY ${mrnKey}, c2.location_id, ${label}
 
@@ -84,8 +83,7 @@ loc_parts AS (
 
   SELECT ${mrnKey}, 2, 'UA', 'UA (' || COUNT(*)::text || ')', NULL::text
   FROM ${T.COIL_TABLE} c2
-  WHERE c2.is_deleted = false
-    AND LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
+  WHERE LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
     AND (${UNASSIGNED})
   GROUP BY ${mrnKey}
   HAVING COUNT(*) > 0
@@ -94,8 +92,7 @@ loc_parts AS (
 
   SELECT ${mrnKey}, 3, 'SF', 'SF (' || COUNT(*)::text || ')', NULL::text
   FROM ${T.COIL_TABLE} c2
-  WHERE c2.is_deleted = false
-    AND (${SHOP_FLOOR})
+  WHERE (${SHOP_FLOOR})
   GROUP BY ${mrnKey}
   HAVING COUNT(*) > 0
 
@@ -104,8 +101,7 @@ loc_parts AS (
   SELECT ${mrnKey}, 4, 'QC', 'QC (' || COUNT(*)::text || ')', NULL::text
   FROM ${T.COIL_TABLE} c2
   ${coilQcJoinForAlias("c2", "q2")}
-  WHERE c2.is_deleted = false
-    AND LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
+  WHERE LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
     AND (${PENDING_QC})
   GROUP BY ${mrnKey}
   HAVING COUNT(*) > 0
@@ -137,7 +133,7 @@ export function buildRmInventoryReportSql() {
   const { IN_STORE, UNASSIGNED, ISSUABLE, SHOP_FLOOR, PENDING_QC, PENDING_REJECT } = rules;
 
   const HEAT_DISPLAY = `COALESCE(
-    NULLIF(TRIM(MAX(COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.it_lot_no), '')))), ''),
+    NULLIF(TRIM(MAX(COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.coil_no), '')))), ''),
     '—'
   )`;
 
@@ -183,8 +179,7 @@ FROM ${T.COIL_TABLE} c
 LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
 ${coilQcJoinForAlias("c", "q")}
 
-WHERE c.is_deleted = false
-  AND LOWER(TRIM(COALESCE(c.status, 'active'))) <> 'consumed'
+WHERE LOWER(TRIM(COALESCE(c.status, 'active'))) <> 'consumed'
 
 GROUP BY COALESCE(NULLIF(TRIM(c.mrn_uid::text), ''), '—')
 

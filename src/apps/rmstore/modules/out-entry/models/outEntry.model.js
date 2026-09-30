@@ -15,28 +15,19 @@ const ISSUE_REQUEST_JC = T.ISSUE_REQUEST_JOB_CARD;
 const REJECTION = T.REJECTION;
 const MRN = T.MRN;
 
-/** Stored register description, else unique MRN descriptions from scanned / linked coils. */
+/** Stored desc, else from scanned coils → MRN. */
 const OUT_ITEM_DESCS_SQL = `COALESCE(
   NULLIF(TRIM(o.item_descs), ''),
   (
-    SELECT STRING_AGG(DISTINCT x.item_desc, ' | ')
-    FROM (
-      SELECT NULLIF(TRIM(m.item_desc), '') AS item_desc
-      FROM ${SCANNED} s
-      JOIN ${COIL} c ON c.coil_no_uid = s.coil_no_uid AND c.is_deleted = false
-      JOIN ${MRN} m ON m.uid = c.mrn_uid
-      WHERE s.out_uid = o.out_uid
-      UNION
-      SELECT NULLIF(TRIM(m.item_desc), '') AS item_desc
-      FROM ${COIL} c
-      JOIN ${MRN} m ON m.uid = c.mrn_uid
-      WHERE c.out_uid = o.out_uid AND c.is_deleted = false
-    ) x
-    WHERE x.item_desc IS NOT NULL
+    SELECT STRING_AGG(DISTINCT NULLIF(TRIM(m.item_desc), ''), ' | ')
+    FROM ${SCANNED} s
+    JOIN ${COIL} c ON c.coil_no_uid = s.coil_no_uid
+    JOIN ${MRN} m ON m.uid = c.mrn_uid
+    WHERE s.out_uid = o.out_uid
   )
 )`;
 
-/** Job-card machine for Store Out list/get — not stored on the out-entry row. */
+/** Job-card machine — NOT on out_entry. Read from issue_request_job_card by issue_uid + pjobcardno. */
 const OUT_ENTRY_JC_JOIN = `
 LEFT JOIN LATERAL (
   SELECT jc.macname
@@ -47,6 +38,23 @@ LEFT JOIN LATERAL (
   ORDER BY jc.id DESC
   LIMIT 1
 ) jc ON TRUE`;
+
+/** From scanned_coil: count / heat / mrn (via coil → MRN). */
+const OUT_SCANNED_COIL_COUNT_SQL = `(SELECT COUNT(*)::int FROM ${SCANNED} s WHERE s.out_uid = o.out_uid)`;
+const OUT_SCANNED_HEAT_NOS_SQL = `(
+  SELECT STRING_AGG(DISTINCT COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.coil_no), '')), ' | ')
+  FROM ${SCANNED} s
+  JOIN ${COIL} c ON c.coil_no_uid = s.coil_no_uid
+  LEFT JOIN ${MRN} m ON m.uid = c.mrn_uid
+  WHERE s.out_uid = o.out_uid
+)`;
+const OUT_SCANNED_MRN_REFS_SQL = `(
+  SELECT STRING_AGG(DISTINCT NULLIF(TRIM(m.mrn_no::text), ''), ' | ')
+  FROM ${SCANNED} s
+  JOIN ${COIL} c ON c.coil_no_uid = s.coil_no_uid
+  LEFT JOIN ${MRN} m ON m.uid = c.mrn_uid
+  WHERE s.out_uid = o.out_uid
+)`;
 
 /**
  * Open store-out reservation scope — draft AND scan-complete pending authorize.
@@ -121,9 +129,7 @@ export const findOutEntries = async (options = {}) => {
     values.push(term);
     const idx = i++;
     conditions.push(`(
-      COALESCE(o.mrn_refs,'') ILIKE $${idx} OR
       COALESCE(o.mrn_uids,'') ILIKE $${idx} OR
-      COALESCE(o.heat_nos,'') ILIKE $${idx} OR
       COALESCE(o.item_codes,'') ILIKE $${idx} OR
       COALESCE(o.item_descs,'') ILIKE $${idx} OR
       COALESCE(o.location_refs,'') ILIKE $${idx} OR
@@ -132,7 +138,20 @@ export const findOutEntries = async (options = {}) => {
       COALESCE(o.entry_type,'') ILIKE $${idx} OR
       COALESCE(o.pjobcardno,'') ILIKE $${idx} OR
       COALESCE(jc.macname,'') ILIKE $${idx} OR
-      o.out_uid::text ILIKE $${idx}
+      o.out_uid::text ILIKE $${idx} OR
+      EXISTS (
+        SELECT 1 FROM ${REJECTION} rx
+        LEFT JOIN ${MRN} mx ON mx.uid = NULLIF(TRIM(split_part(COALESCE(o.mrn_uids, rx.mrn_uids, ''), '|', 1)), '')
+        WHERE rx.qc_reject_uid = o.qc_reject_uid AND rx.is_deleted = false
+          AND (
+            COALESCE(mx.acc_name,'') ILIKE $${idx} OR
+            COALESCE(mx.acc_code::text,'') ILIKE $${idx}
+          )
+      ) OR
+      EXISTS (
+        SELECT 1 FROM ${SCANNED} s
+        WHERE s.out_uid = o.out_uid AND s.coil_no_uid ILIKE $${idx}
+      )
     )`);
   }
 
@@ -149,12 +168,19 @@ export const findOutEntries = async (options = {}) => {
   const rows = await dbQuery(
     `SELECT o.*,
             ${OUT_ITEM_DESCS_SQL} AS item_descs,
+            ${OUT_SCANNED_COIL_COUNT_SQL} AS coil_count,
+            ${OUT_SCANNED_HEAT_NOS_SQL} AS heat_nos,
+            ${OUT_SCANNED_MRN_REFS_SQL} AS mrn_refs,
             jc.macname,
+            vendor_mrn.acc_code AS acc_code,
+            vendor_mrn.acc_name AS acc_name,
             o.created_by AS created_by_name,
             o.approved_by AS approved_by_name,
             o.updated_by AS updated_by_name
      FROM ${TABLE} o
      ${OUT_ENTRY_JC_JOIN}
+     LEFT JOIN ${REJECTION} rej ON rej.qc_reject_uid = o.qc_reject_uid AND rej.is_deleted = false
+     LEFT JOIN ${MRN} vendor_mrn ON vendor_mrn.uid = NULLIF(TRIM(split_part(COALESCE(o.mrn_uids, rej.mrn_uids, ''), '|', 1)), '')
      ${where}
      ORDER BY o.out_uid DESC
      LIMIT $${i++} OFFSET $${i}`,
@@ -169,10 +195,17 @@ export const findOutEntry = async (out_uid) => {
   if (!Number.isFinite(id)) return null;
   const [row] = await dbQuery(
     `SELECT o.*, ${OUT_ITEM_DESCS_SQL} AS item_descs,
+            ${OUT_SCANNED_COIL_COUNT_SQL} AS coil_count,
+            ${OUT_SCANNED_HEAT_NOS_SQL} AS heat_nos,
+            ${OUT_SCANNED_MRN_REFS_SQL} AS mrn_refs,
             jc.macname,
+            vendor_mrn.acc_code AS acc_code,
+            vendor_mrn.acc_name AS acc_name,
             o.created_by AS created_by_name, o.approved_by AS approved_by_name, o.updated_by AS updated_by_name
      FROM ${TABLE} o
      ${OUT_ENTRY_JC_JOIN}
+     LEFT JOIN ${REJECTION} rej ON rej.qc_reject_uid = o.qc_reject_uid AND rej.is_deleted = false
+     LEFT JOIN ${MRN} vendor_mrn ON vendor_mrn.uid = NULLIF(TRIM(split_part(COALESCE(o.mrn_uids, rej.mrn_uids, ''), '|', 1)), '')
      WHERE o.out_uid = $1 AND o.is_deleted = false LIMIT 1`,
     [id]
   );
@@ -206,22 +239,22 @@ export const findStoreOutReasons = async ({ search } = {}) => {
 
 export const insertOutEntry = async (data) => {
   const {
-    entry_type, issue_uid, pjobcardno, qc_reject_uid, mrn_refs, mrn_uids, heat_nos, item_codes, item_descs, qtys, total_qty, coil_count,
+    entry_type, issue_uid, pjobcardno, qc_reject_uid, mrn_uids, item_codes, item_descs, total_qty,
     location_refs, reason, remarks, created_by, scan_complete,
   } = data;
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE}
-     (entry_type, issue_uid, pjobcardno, qc_reject_uid, mrn_refs, mrn_uids, heat_nos, item_codes, item_descs, qtys, total_qty, coil_count,
+     (entry_type, issue_uid, pjobcardno, qc_reject_uid, mrn_uids, item_codes, item_descs, total_qty,
       location_refs, reason, remarks, created_by, scan_complete)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      RETURNING *`,
     [
       entry_type ?? "store_out",
       issue_uid ?? null,
       pjobcardno ?? null,
       qc_reject_uid ?? null,
-      mrn_refs ?? null, mrn_uids ?? null, heat_nos ?? null, item_codes ?? null, item_descs ?? null, qtys ?? null,
-      total_qty ?? 0, coil_count ?? 0, location_refs ?? null, reason ?? null, remarks ?? null, created_by,
+      mrn_uids ?? null, item_codes ?? null, item_descs ?? null,
+      total_qty ?? 0, location_refs ?? null, reason ?? null, remarks ?? null, created_by,
       scan_complete === true,
     ]
   );
@@ -231,8 +264,7 @@ export const insertOutEntry = async (data) => {
 export const updateOutEntry = async (out_uid, fields = {}) => {
   const allowed = [
     "reason", "remarks", "approved", "approved_by", "approved_at", "updated_by", "updated_at",
-    "scan_complete", "mrn_refs", "mrn_uids", "heat_nos", "item_codes", "item_descs", "qtys", "total_qty",
-    "coil_count", "location_refs",
+    "scan_complete", "mrn_uids", "item_codes", "item_descs", "total_qty", "location_refs",
   ];
   const safe = {};
   for (const k of allowed) {
@@ -260,19 +292,47 @@ export const softDeleteOutEntry = async (out_uid, deleted_by) => {
   );
 };
 
-export const replaceOutEntryScannedCoils = async (out_uid, coil_no_uids = []) => {
+/** Refresh header total_qty from scanned_coil qty sum. */
+export const refreshOutEntryTotalQty = async (out_uid) => {
+  await dbQuery(
+    `UPDATE ${TABLE} o
+     SET total_qty = COALESCE((
+       SELECT SUM(COALESCE(s.qty, 0)) FROM ${SCANNED} s WHERE s.out_uid = o.out_uid
+     ), 0)
+     WHERE o.out_uid = $1 AND o.is_deleted = false`,
+    [Number(out_uid)]
+  );
+};
+
+/**
+ * Replace scanned coils for an out entry.
+ * coils = uid strings or `{ coil_no_uid, qty }`. Then refresh header total_qty.
+ */
+export const replaceOutEntryScannedCoils = async (out_uid, coils = []) => {
   const id = Number(out_uid);
-  const list = [...new Set((coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean))];
+  const list = [];
+  const seen = new Set();
+  for (const c of coils || []) {
+    if (c == null) continue;
+    const uid = String(typeof c === "object" ? c.coil_no_uid ?? "" : c).trim();
+    if (!uid) continue;
+    const key = uid.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const qty = typeof c === "object" && c.qty != null && c.qty !== "" ? Number(c.qty) : null;
+    list.push({ coil_no_uid: uid, qty: Number.isFinite(qty) ? qty : null });
+  }
+
   await dbQuery(`DELETE FROM ${SCANNED} WHERE out_uid = $1`, [id]);
-  if (!list.length) return [];
-  for (const uid of list) {
+  for (const row of list) {
     await dbQuery(
-      `INSERT INTO ${SCANNED} (out_uid, coil_no_uid) VALUES ($1, $2)
+      `INSERT INTO ${SCANNED} (out_uid, coil_no_uid, qty) VALUES ($1, $2, $3)
        ON CONFLICT DO NOTHING`,
-      [id, uid]
+      [id, row.coil_no_uid, row.qty]
     );
   }
-  return list;
+  await refreshOutEntryTotalQty(id);
+  return list.map((r) => r.coil_no_uid);
 };
 
 export const findOutEntryScannedCoilUids = async (out_uid) => {
@@ -286,18 +346,13 @@ export const findOutEntryScannedCoilUids = async (out_uid) => {
 export const findOutEntryScannedCoilsDetailed = async (out_uid) => {
   return dbQuery(
     `SELECT c.*,
-            m.mrn_no,
-            m.serial_no,
-            m.heat_no,
-            m.item_dcode,
-            m.item_code,
-            m.item_desc,
-            lm.location_no,
-            lm.rack_no,
-            lm.shelf_no AS row_no,
+            m.mrn_no, NULLIF((regexp_match(m.uid, '_([0-9]+)$'))[1], '')::integer AS serial_no, m.item_dcode, m.item_code, m.item_desc,
+            lm.location_no, lm.rack_no, lm.shelf_no AS row_no,
+            COALESCE(s.qty, c.qty) AS qty,
+            COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.coil_no), '')) AS heat_no,
             s.created_at AS scanned_at
      FROM ${SCANNED} s
-     JOIN ${COIL} c ON c.coil_no_uid = s.coil_no_uid AND c.is_deleted = false
+     JOIN ${COIL} c ON c.coil_no_uid = s.coil_no_uid
      LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
      LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
      WHERE s.out_uid = $1
@@ -324,7 +379,7 @@ export const findOutEntryLinkedCoils = async (out_uid) => {
     return dbQuery(
       `SELECT c.*,
               m.mrn_no,
-              m.serial_no,
+              NULLIF((regexp_match(m.uid, '_([0-9]+)$'))[1], '')::integer AS serial_no,
               m.heat_no,
               m.item_dcode,
               m.item_code,
@@ -335,7 +390,7 @@ export const findOutEntryLinkedCoils = async (out_uid) => {
        FROM ${COIL} c
        LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
        LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-       WHERE c.out_uid = $1 AND c.is_deleted = false
+       WHERE c.out_uid = $1
        ORDER BY c.coil_uid ASC`,
       [Number(out_uid)]
     );
@@ -389,28 +444,31 @@ function uniquePipeJoin(values = []) {
   )].join(" | ");
 }
 
+/** Fields to write on out_entry header from scanned coils. */
 export function buildOutEntryCoilSummary(coils = []) {
   const list = Array.isArray(coils) ? coils : [];
-  const mrnRefs = uniquePipeJoin(list.map((c) => c.mrn_no).filter((v) => v != null));
-  const mrnUids = uniquePipeJoin(list.map((c) => c.mrn_uid));
-  const heatNos = uniquePipeJoin(list.map((c) => c.heat_no));
-  const itemCodes = uniquePipeJoin(list.map((c) => c.item_code));
-  const itemDescs = uniquePipeJoin(list.map((c) => c.item_desc || c.rm_item_desc || c.itemdesc));
-  const locationRefs = uniquePipeJoin(
-    list.map((c) => c.location_no || (c.location_id != null ? String(c.location_id) : null))
-  );
-  const total_qty = list.reduce((s, c) => s + (Number(c.qty) || 0), 0);
-  const qtys = list.map((c) => c.qty ?? "").join(",");
   return {
-    mrn_refs: mrnRefs || null,
-    mrn_uids: mrnUids || null,
-    heat_nos: heatNos || null,
-    item_codes: itemCodes || null,
-    item_descs: itemDescs || null,
-    location_refs: locationRefs || null,
-    total_qty,
-    qtys,
+    mrn_uids: uniquePipeJoin(list.map((c) => c.mrn_uid)) || null,
+    item_codes: uniquePipeJoin(list.map((c) => c.item_code)) || null,
+    item_descs: uniquePipeJoin(list.map((c) => c.item_desc || c.rm_item_desc || c.itemdesc)) || null,
+    location_refs: uniquePipeJoin(list.map((c) => c.location_no || (c.location_id != null ? String(c.location_id) : null))) || null,
+    total_qty: list.reduce((s, c) => s + (Number(c.qty) || 0), 0),
+    // rejection / helpers only (not written to out_entry)
+    mrn_refs: uniquePipeJoin(list.map((c) => c.mrn_no).filter((v) => v != null)) || null,
+    heat_nos: uniquePipeJoin(list.map((c) => c.heat_no)) || null,
+    qtys: list.map((c) => c.qty ?? "").join(","),
     coil_count: list.length,
+  };
+}
+
+/** Only columns that belong on rmstore_out_entry. */
+export function outEntryHeaderFromSummary(summary = {}) {
+  return {
+    mrn_uids: summary.mrn_uids ?? null,
+    item_codes: summary.item_codes ?? null,
+    item_descs: summary.item_descs ?? null,
+    location_refs: summary.location_refs ?? null,
+    total_qty: summary.total_qty ?? 0,
   };
 }
 
@@ -421,7 +479,6 @@ export const findStoredMrnSummaries = async ({ search, page = 1, limit = 50 } = 
   const values = [];
   let i = 1;
   const conditions = [
-    "c.is_deleted = false",
     `COALESCE(c.status, 'active') = 'active'`,
     COIL_QC_PASSED_COND,
     `NULLIF(TRIM(c.mrn_uid::text), '') IS NOT NULL`,
@@ -497,7 +554,7 @@ export const findStoredMrnDetail = async (mrn_uid) => {
   const coils = await dbQuery(
     `SELECT c.*,
             m.mrn_no AS mrn_no,
-            m.serial_no AS serial_no,
+            NULLIF((regexp_match(m.uid, '_([0-9]+)$'))[1], '')::integer AS serial_no,
             m.heat_no AS heat_no,
             m.item_dcode AS item_dcode,
             m.item_code AS item_code,
@@ -512,8 +569,7 @@ export const findStoredMrnDetail = async (mrn_uid) => {
      LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
      ${COIL_QC_JOIN}
      LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-     WHERE c.is_deleted = false
-       AND COALESCE(c.status, 'active') = 'active'
+     WHERE COALESCE(c.status, 'active') = 'active'
        AND ${COIL_QC_PASSED_COND}
        AND c.mrn_uid = $1
      ORDER BY
@@ -627,9 +683,13 @@ export const findJobCardStoreOutPlan = async ({ issue_uid, pjobcardno, excludeOu
   );
   if (!jcMeta) return null;
 
-  // Reserved coil UIDs from IR (quota source)
+  // Reserved MRN quotas from IR (new JSON) or legacy coil UIDs → MRN.
   const reservedRows = await dbQuery(
-    `SELECT TRIM(c.coil->>'coil_no_uid') AS coil_no_uid
+    `SELECT
+       NULLIF(TRIM(c.coil->>'mrn_uid'), '') AS mrn_uid,
+       COALESCE((c.coil->>'coil_count')::int, 0) AS coil_count,
+       COALESCE((c.coil->>'qty')::float8, 0) AS qty,
+       NULLIF(TRIM(c.coil->>'coil_no_uid'), '') AS coil_no_uid
      FROM ${ISSUE_REQUEST} r
      INNER JOIN ${ISSUE_REQUEST_JC} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
      CROSS JOIN LATERAL jsonb_array_elements(
@@ -638,12 +698,68 @@ export const findJobCardStoreOutPlan = async ({ issue_uid, pjobcardno, excludeOu
      WHERE r.is_deleted = false
        AND r.approved = true
        AND r.issue_uid = $1
-       AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM($2))
-       AND TRIM(c.coil->>'coil_no_uid') <> ''`,
+       AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM($2))`,
     [issueId, jcNo]
   );
-  const reservedUids = (reservedRows || []).map((r) => String(r.coil_no_uid || "").trim()).filter(Boolean);
-  if (!reservedUids.length) {
+
+  const mrnQuotaMap = new Map(); // mrn_uid -> { count, qty, mrn_no }
+  const legacyUids = [];
+  for (const row of reservedRows || []) {
+    const uid = String(row.coil_no_uid || "").trim();
+    if (uid) {
+      legacyUids.push(uid);
+      continue;
+    }
+    const muid = String(row.mrn_uid || "").trim();
+    const count = Math.max(0, Math.floor(Number(row.coil_count) || 0));
+    if (!muid || count <= 0) continue;
+    if (!mrnQuotaMap.has(muid)) {
+      mrnQuotaMap.set(muid, { mrn_uid: muid, mrn_no: null, count: 0, qty: 0 });
+    }
+    const q = mrnQuotaMap.get(muid);
+    q.count += count;
+    q.qty += Number(row.qty) || 0;
+  }
+
+  if (legacyUids.length) {
+    const reservedCoilRows = await dbQuery(
+      `SELECT c.coil_no_uid, c.mrn_uid, m.mrn_no AS mrn_no, c.qty
+       FROM ${COIL} c
+       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       WHERE LOWER(TRIM(c.coil_no_uid)) = ANY($1::text[])`,
+      [legacyUids.map((u) => u.toLowerCase())]
+    );
+    for (const c of reservedCoilRows || []) {
+      const muid = String(c.mrn_uid || "").trim();
+      if (!muid) continue;
+      if (!mrnQuotaMap.has(muid)) {
+        mrnQuotaMap.set(muid, { mrn_uid: muid, mrn_no: c.mrn_no, count: 0, qty: 0 });
+      }
+      const q = mrnQuotaMap.get(muid);
+      q.count += 1;
+      q.qty += Number(c.qty) || 0;
+      if (c.mrn_no != null) q.mrn_no = c.mrn_no;
+    }
+  }
+
+  // Fill mrn_no for quota-only rows
+  const mrnUids = [...mrnQuotaMap.keys()];
+  if (mrnUids.length) {
+    const mrnRows = await dbQuery(
+      `SELECT uid AS mrn_uid, mrn_no FROM ${T.MRN} WHERE uid = ANY($1::text[])`,
+      [mrnUids]
+    );
+    for (const m of mrnRows || []) {
+      const q = mrnQuotaMap.get(String(m.mrn_uid || "").trim());
+      if (q && m.mrn_no != null) q.mrn_no = m.mrn_no;
+    }
+  }
+
+  const required_coil_count = [...mrnQuotaMap.values()].reduce((s, q) => s + (q.count || 0), 0);
+  const required_qty = [...mrnQuotaMap.values()].reduce((s, q) => s + (Number(q.qty) || 0), 0);
+  const reservedUids = legacyUids;
+
+  if (!required_coil_count) {
     return {
       issue_uid: jcMeta.issue_uid,
       pjobcardno: jcMeta.pjobcardno,
@@ -662,31 +778,6 @@ export const findJobCardStoreOutPlan = async ({ issue_uid, pjobcardno, excludeOu
       mrn_quotas: [],
     };
   }
-
-  // Resolve MRN quotas from reserved coils
-  const reservedCoilRows = await dbQuery(
-    `SELECT c.coil_no_uid, c.mrn_uid, m.mrn_no AS mrn_no, c.qty, m.item_code AS item_code, m.item_dcode AS item_dcode
-     FROM ${COIL} c
-     LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
-     WHERE c.is_deleted = false
-       AND LOWER(TRIM(c.coil_no_uid)) = ANY($1::text[])`,
-    [reservedUids.map((u) => u.toLowerCase())]
-  );
-  const mrnQuotaMap = new Map(); // mrn_uid -> { count, qty, mrn_no }
-  for (const c of reservedCoilRows || []) {
-    const muid = String(c.mrn_uid || "").trim();
-    if (!muid) continue;
-    if (!mrnQuotaMap.has(muid)) {
-      mrnQuotaMap.set(muid, { mrn_uid: muid, mrn_no: c.mrn_no, count: 0, qty: 0 });
-    }
-    const q = mrnQuotaMap.get(muid);
-    q.count += 1;
-    q.qty += Number(c.qty) || 0;
-    if (c.mrn_no != null) q.mrn_no = c.mrn_no;
-  }
-  const mrnUids = [...mrnQuotaMap.keys()];
-  const required_coil_count = reservedUids.length;
-  const required_qty = (reservedCoilRows || []).reduce((s, c) => s + (Number(c.qty) || 0), 0);
 
   if (!mrnUids.length) {
     return {
@@ -710,7 +801,6 @@ export const findJobCardStoreOutPlan = async ({ issue_uid, pjobcardno, excludeOu
 
   // Scan pool: any active coil on the reserved MRN UID(s). FIFO is by mrn_uid only.
   const expandValues = [mrnUids];
-  const mrnParam = "$1";
   let expandDraftExclude = "";
   let expandOutUidParam = "NULL::int";
   if (excludeOutUid != null && excludeOutUid !== "") {
@@ -730,7 +820,7 @@ export const findJobCardStoreOutPlan = async ({ issue_uid, pjobcardno, excludeOu
      )
      SELECT c.*,
             m.mrn_no AS mrn_no,
-            m.serial_no AS serial_no,
+            NULLIF((regexp_match(m.uid, '_([0-9]+)$'))[1], '')::integer AS serial_no,
             m.heat_no AS heat_no,
             m.item_dcode AS item_dcode,
             m.item_code AS item_code,
@@ -746,8 +836,7 @@ export const findJobCardStoreOutPlan = async ({ issue_uid, pjobcardno, excludeOu
      ${COIL_QC_JOIN}
      LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
      LEFT JOIN draft_blocked db ON db.coil_key = LOWER(TRIM(c.coil_no_uid))
-     WHERE c.is_deleted = false
-       AND c.mrn_uid = ANY(${mrnParam}::text[])
+     WHERE c.mrn_uid = ANY($1::text[])
        AND (
          (COALESCE(c.status, 'active') = 'active' AND c.out_uid IS NULL)
          OR (${expandOutUidParam} IS NOT NULL AND c.out_uid = ${expandOutUidParam})
@@ -762,7 +851,8 @@ export const findJobCardStoreOutPlan = async ({ issue_uid, pjobcardno, excludeOu
     expandValues
   );
 
-  const mrn_quotas = orderMrnQuotasFifo([...mrnQuotaMap.values()], reservedCoilRows || []);
+  const reservedCoilRowsForOrder = coils.slice(0, required_coil_count);
+  const mrn_quotas = orderMrnQuotasFifo([...mrnQuotaMap.values()], reservedCoilRowsForOrder);
   const fifoCoils = sortCoilsByFifoMrn(coils, mrn_quotas);
 
   const locMap = new Map();
@@ -796,6 +886,7 @@ export const findJobCardStoreOutPlan = async ({ issue_uid, pjobcardno, excludeOu
     rm_item_desc: jcMeta.rm_item_desc,
     issue_qty: jcMeta.issue_qty,
     mrn_uid: mrnUids.length === 1 ? mrnUids[0] : null,
+    mrn_uids: mrnUids.length ? mrnUids.join("|") : null,
     mrn_no:
       mrnUids.length === 1
         ? first.mrn_no || mrn_quotas[0]?.mrn_no || mrnUids[0]
@@ -804,7 +895,6 @@ export const findJobCardStoreOutPlan = async ({ issue_uid, pjobcardno, excludeOu
           : null,
     sticker_mode: "coil",
     heat_nos: heat_nos.join(", ") || null,
-    /** How many coils must be scanned (IR reserved count) */
     required_coil_count,
     required_qty,
     coil_count: required_coil_count,
@@ -844,21 +934,21 @@ export const isCoilPendingJobCardStoreOut = async (
       draftExclude = `AND o.out_uid <> $${i++}`;
     }
     const [row] = await dbQuery(
-      `WITH jc_coils AS (
-         SELECT TRIM(c.coil->>'coil_no_uid') AS coil_no_uid
+      `WITH reserved_mrns AS (
+         SELECT DISTINCT
+           COALESCE(
+             NULLIF(TRIM(c.coil->>'mrn_uid'), ''),
+             NULLIF(TRIM(coil.mrn_uid::text), '')
+           ) AS mrn_uid
          FROM ${ISSUE_REQUEST} r
          INNER JOIN ${ISSUE_REQUEST_JC} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
          CROSS JOIN LATERAL jsonb_array_elements(
            CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
          ) AS c(coil)
+         LEFT JOIN ${COIL} coil
+           ON NULLIF(TRIM(c.coil->>'coil_no_uid'), '') IS NOT NULL
+          AND LOWER(TRIM(coil.coil_no_uid)) = LOWER(TRIM(c.coil->>'coil_no_uid'))
          WHERE r.is_deleted = false AND r.approved = true
-       ),
-       available_coils AS (
-         SELECT LOWER(TRIM(c.coil_no_uid)) AS coil_key
-         FROM ${COIL} c
-         WHERE c.is_deleted = false
-           AND COALESCE(c.status, 'active') = 'active'
-           AND c.out_uid IS NULL
        ),
        draft_blocked AS (
          SELECT DISTINCT LOWER(TRIM(s.coil_no_uid)) AS coil_key
@@ -869,11 +959,12 @@ export const isCoilPendingJobCardStoreOut = async (
            ${draftExclude}
        )
        SELECT 1 AS ok
-       FROM jc_coils j
-       INNER JOIN available_coils s ON s.coil_key = LOWER(TRIM(j.coil_no_uid))
-       LEFT JOIN draft_blocked db ON db.coil_key = s.coil_key
-       WHERE LOWER(TRIM(j.coil_no_uid)) = $1
-         AND TRIM(j.coil_no_uid) <> ''
+       FROM ${COIL} c
+       INNER JOIN reserved_mrns rm ON rm.mrn_uid = c.mrn_uid
+       LEFT JOIN draft_blocked db ON db.coil_key = LOWER(TRIM(c.coil_no_uid))
+       WHERE LOWER(TRIM(c.coil_no_uid)) = $1
+         AND COALESCE(c.status, 'active') = 'active'
+         AND c.out_uid IS NULL
          AND db.coil_key IS NULL
        LIMIT 1`,
       values
@@ -945,8 +1036,12 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
       SELECT
         r.issue_uid,
         TRIM(jc.pjobcardno) AS pjobcardno,
-        LOWER(TRIM(c.coil->>'coil_no_uid')) AS coil_key,
-        TRIM(c.coil->>'coil_no_uid') AS coil_no_uid
+        NULLIF(TRIM(c.coil->>'mrn_uid'), '') AS mrn_uid,
+        COALESCE(
+          NULLIF((c.coil->>'coil_count')::int, 0),
+          CASE WHEN NULLIF(TRIM(c.coil->>'coil_no_uid'), '') IS NOT NULL THEN 1 ELSE 0 END
+        ) AS coil_count,
+        NULLIF(TRIM(c.coil->>'coil_no_uid'), '') AS coil_no_uid
       FROM ${ISSUE_REQUEST} r
       INNER JOIN ${ISSUE_REQUEST_JC} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
       CROSS JOIN LATERAL jsonb_array_elements(
@@ -954,7 +1049,10 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
       ) AS c(coil)
       WHERE r.is_deleted = false
         AND r.approved = true
-        AND TRIM(c.coil->>'coil_no_uid') <> ''
+        AND (
+          NULLIF(TRIM(c.coil->>'mrn_uid'), '') IS NOT NULL
+          OR NULLIF(TRIM(c.coil->>'coil_no_uid'), '') IS NOT NULL
+        )
     ),
     available_coils AS (
       SELECT
@@ -969,8 +1067,7 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
       ${COIL_QC_JOIN}
       LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-      WHERE c.is_deleted = false
-        AND COALESCE(c.status, 'active') = 'active'
+      WHERE COALESCE(c.status, 'active') = 'active'
         AND ${COIL_QC_PASSED_COND}
         AND c.out_uid IS NULL
     ),
@@ -985,7 +1082,20 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
       SELECT
         jc.issue_uid,
         TRIM(jc.pjobcardno) AS pjobcardno,
-        COUNT(*) FILTER (WHERE TRIM(c.coil->>'coil_no_uid') <> '')::int AS assigned_coil_count,
+        COALESCE((
+          SELECT SUM(
+            CASE
+              WHEN NULLIF(TRIM(e.elem->>'mrn_uid'), '') IS NOT NULL
+                   AND COALESCE((e.elem->>'coil_count')::int, 0) > 0
+                THEN (e.elem->>'coil_count')::int
+              WHEN NULLIF(TRIM(e.elem->>'coil_no_uid'), '') IS NOT NULL THEN 1
+              ELSE 0
+            END
+          )::int
+          FROM jsonb_array_elements(
+            CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
+          ) AS e(elem)
+        ), 0)::int AS assigned_coil_count,
         (
           SELECT COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int
           FROM ${TABLE} o
@@ -998,22 +1108,25 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
         ) AS out_coil_count
       FROM ${ISSUE_REQUEST} r
       INNER JOIN ${ISSUE_REQUEST_JC} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
-      CROSS JOIN LATERAL jsonb_array_elements(
-        CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
-      ) AS c(coil)
       WHERE r.is_deleted = false AND r.approved = true
-      GROUP BY jc.issue_uid, jc.pjobcardno
+      GROUP BY jc.issue_uid, jc.pjobcardno, jc.coils
     ),
     reserved_mrns AS (
       SELECT DISTINCT
         res.issue_uid,
         res.pjobcardno,
-        c.mrn_uid
+        COALESCE(
+          NULLIF(TRIM(res.mrn_uid), ''),
+          NULLIF(TRIM(c.mrn_uid::text), '')
+        ) AS mrn_uid
       FROM jc_reserved res
-      INNER JOIN ${COIL} c
-        ON LOWER(TRIM(c.coil_no_uid)) = res.coil_key
-       AND c.is_deleted = false
-      WHERE NULLIF(TRIM(c.mrn_uid::text), '') IS NOT NULL
+      LEFT JOIN ${COIL} c
+        ON res.coil_no_uid IS NOT NULL
+       AND LOWER(TRIM(c.coil_no_uid)) = LOWER(TRIM(res.coil_no_uid))
+      WHERE COALESCE(
+          NULLIF(TRIM(res.mrn_uid), ''),
+          NULLIF(TRIM(c.mrn_uid::text), '')
+        ) IS NOT NULL
     ),
     pool AS (
       SELECT
@@ -1122,12 +1235,16 @@ export const findPendingJobCardStoreOutDrafts = async (options = {}) => {
       COALESCE(o.pjobcardno,'') ILIKE $${idx} OR
       COALESCE(o.item_codes,'') ILIKE $${idx} OR
       COALESCE(o.item_descs,'') ILIKE $${idx} OR
-      COALESCE(o.mrn_refs,'') ILIKE $${idx} OR
+      COALESCE(o.mrn_uids,'') ILIKE $${idx} OR
       COALESCE(jc.item_code,'') ILIKE $${idx} OR
       COALESCE(jc.rm_item_code,'') ILIKE $${idx} OR
       COALESCE(jc.macname,'') ILIKE $${idx} OR
       o.out_uid::text ILIKE $${idx} OR
-      o.issue_uid::text ILIKE $${idx}
+      o.issue_uid::text ILIKE $${idx} OR
+      EXISTS (
+        SELECT 1 FROM ${SCANNED} s
+        WHERE s.out_uid = o.out_uid AND s.coil_no_uid ILIKE $${idx}
+      )
     )`);
   }
 
@@ -1155,12 +1272,12 @@ export const findPendingJobCardStoreOutDrafts = async (options = {}) => {
        o.scan_complete,
        o.approved,
        o.entry_type,
-       o.coil_count,
+       ${OUT_SCANNED_COIL_COUNT_SQL} AS coil_count,
        o.total_qty AS pending_qty,
-       o.coil_count AS pending_coil_count,
+       ${OUT_SCANNED_COIL_COUNT_SQL} AS pending_coil_count,
        o.item_codes AS rm_item_code,
        COALESCE(NULLIF(TRIM(o.item_descs), ''), jc.rm_item_desc) AS rm_item_desc,
-       o.mrn_refs AS mrn_nos,
+       ${OUT_SCANNED_MRN_REFS_SQL} AS mrn_nos,
        o.mrn_uids,
        o.created_at,
        o.created_at AS sort_at,
@@ -1250,21 +1367,28 @@ export const findPendingRejectionStoreOut = async (options = {}) => {
       COALESCE(r.reason,'') ILIKE $${idx} OR
       r.qc_reject_uid::text ILIKE $${idx} OR
       COALESCE(r.out_uid::text,'') ILIKE $${idx} OR
+      COALESCE(m.acc_name,'') ILIKE $${idx} OR
+      COALESCE(m.acc_code::text,'') ILIKE $${idx} OR
       EXISTS (
         SELECT 1 FROM ${COIL} c
-        WHERE c.is_deleted = false AND c.rm_uid = r.qc_reject_uid
+        WHERE c.rm_uid = r.qc_reject_uid
           AND COALESCE(c.coil_no_uid,'') ILIKE $${idx}
       )
     )`;
     virtualConditions.push(searchClause);
     draftConditions.push(`(
       o.out_uid::text ILIKE $${idx} OR
-      COALESCE(o.mrn_refs,'') ILIKE $${idx} OR
-      COALESCE(o.heat_nos,'') ILIKE $${idx} OR
+      COALESCE(o.mrn_uids,'') ILIKE $${idx} OR
       COALESCE(o.item_codes,'') ILIKE $${idx} OR
       COALESCE(o.item_descs,'') ILIKE $${idx} OR
       COALESCE(r.reason,'') ILIKE $${idx} OR
-      r.qc_reject_uid::text ILIKE $${idx}
+      r.qc_reject_uid::text ILIKE $${idx} OR
+      COALESCE(m.acc_name,'') ILIKE $${idx} OR
+      COALESCE(m.acc_code::text,'') ILIKE $${idx} OR
+      EXISTS (
+        SELECT 1 FROM ${SCANNED} s
+        WHERE s.out_uid = o.out_uid AND s.coil_no_uid ILIKE $${idx}
+      )
     )`);
   }
 
@@ -1295,6 +1419,9 @@ export const findPendingRejectionStoreOut = async (options = {}) => {
        'rm_rejection'::varchar AS entry_type,
        r.reason,
        r.ipr_uid,
+       m.acc_code AS acc_code,
+       m.acc_name AS acc_name,
+       m.acc_name AS vendor_acc_name,
        'rejection'::varchar AS pending_type,
        true AS is_virtual_pending,
        COALESCE(r.approved_at, r.created_at) AS sort_at
@@ -1313,11 +1440,11 @@ export const findPendingRejectionStoreOut = async (options = {}) => {
     `SELECT
        o.out_uid,
        o.qc_reject_uid,
-       o.mrn_refs AS mrn_no,
-       o.mrn_refs,
+       ${OUT_SCANNED_MRN_REFS_SQL} AS mrn_no,
+       ${OUT_SCANNED_MRN_REFS_SQL} AS mrn_refs,
        o.mrn_uids,
-       o.heat_nos AS heat_no,
-       o.heat_nos,
+       ${OUT_SCANNED_HEAT_NOS_SQL} AS heat_no,
+       ${OUT_SCANNED_HEAT_NOS_SQL} AS heat_nos,
        COALESCE(NULLIF(TRIM(o.item_codes), ''), NULLIF(TRIM(r.item_codes), ''), m.item_code) AS rm_item_code,
        COALESCE(NULLIF(TRIM(o.item_descs), ''), NULLIF(TRIM(r.item_descs), ''), m.item_desc) AS rm_item_desc,
        o.item_codes AS item_code,
@@ -1325,7 +1452,7 @@ export const findPendingRejectionStoreOut = async (options = {}) => {
        COALESCE(o.item_descs, r.item_descs) AS item_descs,
        o.total_qty AS qty,
        o.total_qty,
-       o.coil_count,
+       ${OUT_SCANNED_COIL_COUNT_SQL} AS coil_count,
        o.scan_complete,
        o.remarks,
        r.remarks AS rejection_remarks,
@@ -1333,6 +1460,9 @@ export const findPendingRejectionStoreOut = async (options = {}) => {
        o.entry_type,
        r.reason,
        r.ipr_uid,
+       m.acc_code AS acc_code,
+       m.acc_name AS acc_name,
+       m.acc_name AS vendor_acc_name,
        'rejection'::varchar AS pending_type,
        false AS is_virtual_pending,
        o.created_at AS sort_at

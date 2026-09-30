@@ -944,15 +944,11 @@ export const applyAuditComparisonAdjustment = async (
     if (missing.length) {
       const removeRes = await run(
         `UPDATE ${T.COIL_TABLE} c
-         SET location_id = NULL,
-             updated_by = $3,
-             updated_at = NOW()
+         SET location_id = NULL
          WHERE c.location_id = $1
            AND TRIM(UPPER(c.coil_no_uid::text)) = ANY($2::text[])
-           AND c.is_deleted = false
-           
          RETURNING c.coil_uid, c.coil_no_uid, c.qty, c.location_id, c.mrn_uid`,
-        [locId, missing.map((u) => normalizeCoilUid(u)), coilAuditBy]
+        [locId, missing.map((u) => normalizeCoilUid(u))]
       );
       const removed = client ? removeRes.rows : removeRes;
       if (removed?.length) {
@@ -979,14 +975,10 @@ export const applyAuditComparisonAdjustment = async (
       const extraUids = extra.map((u) => normalizeCoilUid(u));
       const extraRes = await run(
         `UPDATE ${T.COIL_TABLE} c
-         SET location_id = $1,
-             updated_by = $2,
-             updated_at = NOW()
-         WHERE TRIM(UPPER(c.coil_no_uid::text)) = ANY($3::text[])
-           AND c.is_deleted = false
-           
+         SET location_id = $1
+         WHERE TRIM(UPPER(c.coil_no_uid::text)) = ANY($2::text[])
          RETURNING c.coil_uid, c.coil_no_uid, c.qty, c.location_id, c.mrn_uid`,
-        [locId, coilAuditBy, extraUids]
+        [locId, extraUids]
       );
       const extraRows = client ? extraRes.rows : extraRes;
       if (extraRows?.length) {

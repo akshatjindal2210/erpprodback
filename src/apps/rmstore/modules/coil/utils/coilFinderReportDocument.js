@@ -330,6 +330,7 @@ function renderReportChrome({
           <div><span class="k">MRN UID</span> ${escapeHtml(mrn_uid)}</div>
           <div class="fn-meta-date"><span class="k">Date</span> ${escapeHtml(generatedAt)}</div>
         </div>
+        <div class="fn-meta-cust"><span class="k">Supplier</span> <span class="fn-cust-name">${escapeHtml(customer || "—")}</span></div>
       </div>`;
 }
 

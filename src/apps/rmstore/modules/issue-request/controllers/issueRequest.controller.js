@@ -204,13 +204,22 @@ function round(n) {
 }
 
 function normalizeIssueCoilsForCompare(coils = []) {
-  return [...coils]
-    .map((c) => ({
-      uid: String(c?.coil_no_uid || "").trim().toLowerCase(),
-      qty: round(c?.qty),
-    }))
-    .filter((c) => c.uid)
-    .sort((a, b) => a.uid.localeCompare(b.uid));
+  // Prefer MRN quotas; legacy UID rows count as 1 each per mrn.
+  const map = new Map();
+  for (const c of coils || []) {
+    const mrn = String(c?.mrn_uid || "").trim().toUpperCase();
+    const uid = String(c?.coil_no_uid || "").trim().toLowerCase();
+    const explicit = Number(c?.coil_count);
+    const add = Number.isFinite(explicit) && explicit > 0 ? Math.floor(explicit) : uid ? 1 : 0;
+    if (!mrn || add <= 0) continue;
+    const prev = map.get(mrn) || { mrn, count: 0, qty: 0 };
+    prev.count += add;
+    prev.qty = round(prev.qty + (Number(c?.qty) || 0));
+    map.set(mrn, prev);
+  }
+  return [...map.values()]
+    .map((r) => ({ mrn: r.mrn, count: r.count, qty: round(r.qty) }))
+    .sort((a, b) => a.mrn.localeCompare(b.mrn));
 }
 
 function normalizeIssueJobCardRowForCompare(jc) {
@@ -478,7 +487,6 @@ async function buildJobCardsPayload(rawCards, { excludeIssueUid = null, user = n
         coil_no_uid: c.coil_no_uid,
         qty: c.qty,
         mrn_uid: c.mrn_uid ?? null,
-        mrn_no: c.mrn_no ?? null,
       })),
     });
   }
@@ -823,7 +831,6 @@ export const createIssueRequest = async (req, res) => {
 
         const created = await insertIssueRequest(
           {
-            requested_qty: 0,
             coil_count: built.flatCoils.length,
             shift,
             remarks,
@@ -966,7 +973,6 @@ export const updateIssueRequestCtrl = async (req, res) => {
             coil_no_uid: c.coil_no_uid,
             qty: c.qty,
             mrn_uid: c.mrn_uid ?? null,
-            mrn_no: c.mrn_no ?? null,
           })),
         },
       ];

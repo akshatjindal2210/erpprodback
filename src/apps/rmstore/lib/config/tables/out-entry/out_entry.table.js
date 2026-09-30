@@ -1,6 +1,8 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
+import { dropColumnsIfExist } from "../../../../../../config/db/ensureDbColumns.js";
 
+/** Header-only. Coil qty → rmstore_out_entry_scanned_coil; heat/mrn via coil→MRN JOIN. */
 export async function createRmStoreOutEntryTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.OUT_ENTRY} (
@@ -9,14 +11,10 @@ export async function createRmStoreOutEntryTable() {
       issue_uid        INTEGER,
       pjobcardno       VARCHAR(80),
       qc_reject_uid    INTEGER,
-      mrn_refs         TEXT,
       mrn_uids         TEXT,
-      heat_nos         TEXT,
       item_codes       TEXT,
       item_descs       TEXT,
-      qtys             TEXT,
       total_qty        NUMERIC DEFAULT 0,
-      coil_count       INTEGER DEFAULT 0,
       location_refs    TEXT,
       reason           VARCHAR(200),
       remarks          TEXT,
@@ -42,4 +40,6 @@ export async function createRmStoreOutEntryTable() {
     CREATE INDEX IF NOT EXISTS rmstore_out_entry_issue_uid_idx
       ON ${T.OUT_ENTRY}(issue_uid) WHERE is_deleted = false AND issue_uid IS NOT NULL;
   `);
+
+  await dropColumnsIfExist(dbQuery, T.OUT_ENTRY, [ "mrn_refs", "heat_nos", "qtys", "coil_count" ]);
 }

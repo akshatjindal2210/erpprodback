@@ -1,8 +1,9 @@
-import { findQcRejections, findQcRejection, findIncompleteRejectionRegisters, insertQcRejection, updateQcRejection, softDeleteQcRejection, attachRejectionCoils, hasApprovedRejectionStoreOut, isMrnPortalRejectionRow, permanentlyRemoveUnusedMrnPortalRejection } from "../models/rmRejection.model.js";
+import { findQcRejections, findQcRejection, findIncompleteRejectionRegisters, insertQcRejection, updateQcRejection, softDeleteQcRejection, attachRejectionCoils, hasApprovedRejectionStoreOut, isMrnPortalRejectionRow, permanentlyRemoveUnusedMrnPortalRejection, primaryMrnUidFromRejection } from "../models/rmRejection.model.js";
 import { findInProcessRequest, findInProcessRejectionsPendingRejection, normalizeRequestType, IPR_DOWNSTREAM, IPR_REQUEST_TYPE } from "../../in-process-request/models/inProcessRequest.model.js";
 import { findCoilByUid, findCoilUidsByQcCheck, linkCoilsToRejectionRegister, revertCoilsFromRejectionRegister, findCoils, updateCoilsAfterQcReject } from "../../coil/models/coil.model.js";
 import { findQcCheck, findFailedQcChecksPendingRejection, reopenQcChecksForRejection, linkFailedQcChecksToRejection } from "../../qc-check/models/qcCheck.model.js";
 import { findOutEntry, findOutEntries, buildOutEntryCoilSummary } from "../../out-entry/models/outEntry.model.js";
+import { findMrnByUid } from "../../mrn/models/mrn.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
@@ -137,6 +138,175 @@ function filterPendingRowsByType(rows, pendingType) {
   });
 }
 
+function normMatchKey(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function firstItemCodeFromRow(row) {
+  const raw = row?.item_codes ?? row?.item_code ?? "";
+  return (
+    String(raw)
+      .split(/[,|]+/)
+      .map((s) => s.trim())
+      .find(Boolean) || null
+  );
+}
+
+/**
+ * invfnote uid: `{acc_code}-{item_dcode}-{packing}-{qty}` (e.g. 931-17834-41619-18000)
+ * Same join as Gate Entry / Forwarding Note.
+ */
+function invfnoteUidParts(rec = {}) {
+  const raw = String(rec?.uid ?? "").trim() || String(rec?.muid ?? "").trim();
+  const parts = raw.split("-").filter(Boolean);
+  return {
+    acc_code: parts[0] ? String(parts[0]).trim() : null,
+    item_dcode: parts[1] ? String(parts[1]).trim() : null,
+  };
+}
+
+function invfnoteSaleCat(rec = {}) {
+  return String(rec?.salecat ?? rec?.sale_cat ?? "").trim();
+}
+
+function invfnoteQty(rec = {}) {
+  const n = Number(rec?.itqty ?? rec?.ITQTY ?? rec?.qty);
+  return Number.isFinite(n) ? n : null;
+}
+
+function qtyEquals(a, b) {
+  const x = Number(a);
+  const y = Number(b);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+  return Math.abs(x - y) < 0.001;
+}
+
+/**
+ * Pending awaiting_bill — only invfnote salecat=2 + Green.
+ * Auto-match (no save): acc_code + item_code/itemdcode + qty (== itqty).
+ * muid = `{acc}-{itemdcode}-{packing}` (e.g. 2377-18996-0).
+ */
+async function enrichPendingMatchedInvfnoteBills(rows = []) {
+  const list = Array.isArray(rows) ? rows : [];
+  const needs = list.filter(
+    (r) =>
+      String(r?.pending_source || "").toLowerCase() === "awaiting_bill" &&
+      !String(r?.bill_no || "").trim()
+  );
+  if (!needs.length) return list;
+
+  let records = [];
+  try {
+    const invfnote = await fetchFromIMS("invfnote");
+    records = (Array.isArray(invfnote) ? invfnote : []).filter(
+      (rec) =>
+        invfnoteSaleCat(rec) === "2" &&
+        String(rec?.status ?? "").trim().toLowerCase() === "green"
+    );
+  } catch {
+    records = [];
+  }
+
+  const mrnUids = [
+    ...new Set(
+      needs
+        .filter((r) => !String(r?.vendor_acc_code ?? r?.acc_code ?? "").trim())
+        .map((r) => primaryMrnUidFromRejection(r))
+        .filter(Boolean)
+    ),
+  ];
+  const mrnByUid = new Map();
+  await Promise.all(
+    mrnUids.map(async (uid) => {
+      try {
+        const mrn = await findMrnByUid(uid);
+        if (mrn) mrnByUid.set(String(uid), mrn);
+      } catch {
+        /* skip */
+      }
+    })
+  );
+
+  const emptyMatch = {
+    matched_bill_no: null,
+    matched_bill_dt: null,
+    matched_bill_status: null,
+    matched_bill_acc_name: null,
+    matched_bill_acc_code: null,
+    matched_bill_item_code: null,
+    matched_bill_muid: null,
+    matched_bill_itqty: null,
+    bill_matched: false,
+  };
+
+  return list.map((row) => {
+    if (String(row?.pending_source || "").toLowerCase() !== "awaiting_bill") return row;
+    if (String(row?.bill_no || "").trim()) return row;
+
+    const mrnUid = primaryMrnUidFromRejection(row);
+    const mrn = (mrnUid && mrnByUid.get(String(mrnUid))) || null;
+
+    // Prefer SQL join fields (rejection → MRN create-time vendor/item); lookup only if join missed
+    const vendorAccCode = String(row?.vendor_acc_code ?? row?.acc_code ?? mrn?.acc_code ?? "").trim() || null;
+    const vendorAccNameRaw = String(row?.vendor_acc_name ?? row?.acc_name ?? mrn?.acc_name ?? "").trim() || null;
+    const itemDcode = String(row?.match_item_dcode ?? row?.item_dcode ?? mrn?.item_dcode ?? "").trim() || null;
+    const itemCodeRaw = String(row?.match_item_code ?? mrn?.item_code ?? "").trim() || firstItemCodeFromRow(row);
+    const itemCode = normMatchKey(itemCodeRaw);
+    const rejectQty = Number(row?.total_qty ?? row?.qty);
+
+    const base = {
+      ...row,
+      vendor_acc_code: vendorAccCode,
+      vendor_acc_name: vendorAccNameRaw,
+      match_item_code: itemCodeRaw || null,
+      match_item_dcode: itemDcode,
+      match_qty: Number.isFinite(rejectQty) ? rejectQty : null,
+      ...emptyMatch,
+    };
+
+    if (!records.length || !vendorAccCode || (!itemDcode && !itemCode)) return base;
+    if (!Number.isFinite(rejectQty)) return base;
+
+    for (const rec of records) {
+      const billNo = normalizeImsBillNo(rec);
+      if (!billNo) continue;
+
+      const uidParts = invfnoteUidParts(rec);
+      const billAccCode = String(rec?.acc_code ?? uidParts.acc_code ?? "").trim() || null;
+      const billItemDcode = String(rec?.itemdcode ?? rec?.item_dcode ?? uidParts.item_dcode ?? "").trim() || null;
+      const billItemCode = normMatchKey(rec?.item_code ?? rec?.itemcode);
+      const billQty = invfnoteQty(rec);
+
+      // acc_code + item (code or dcode) + qty
+      if (String(vendorAccCode) !== String(billAccCode)) continue;
+      const itemOk =
+        (itemDcode && billItemDcode && String(itemDcode) === String(billItemDcode)) ||
+        (itemCode && billItemCode && itemCode === billItemCode);
+      if (!itemOk) continue;
+      if (!qtyEquals(rejectQty, billQty)) continue;
+
+      const muid = String(rec?.muid ?? "").trim() || null;
+      return {
+        ...base,
+        matched_bill_no: billNo,
+        matched_bill_dt: normalizeImsBillDt(rec),
+        matched_bill_status: String(rec?.status ?? "").trim() || null,
+        matched_bill_acc_name: String(rec?.acc_name ?? "").trim() || null,
+        matched_bill_acc_code: billAccCode,
+        matched_bill_item_code: String(rec?.item_code ?? rec?.itemcode ?? "").trim() || null,
+        matched_bill_muid: muid,
+        matched_bill_itqty: billQty,
+        bill_matched: true,
+      };
+    }
+
+    return base;
+  });
+}
+
 async function loadPendingRejectionQueue({ search, pendingType, page = 1, limit = 5000 } = {}) {
   const type = normalizePendingTypeFilter(pendingType);
   const includeQc = type === "all" || type === "qc_check";
@@ -154,7 +324,7 @@ async function loadPendingRejectionQueue({ search, pendingType, page = 1, limit 
       ? findIncompleteRejectionRegisters({ search, page: 1, limit: 5000 })
       : Promise.resolve({ data: [] }),
   ]);
-  const merged = filterPendingRowsByType(
+  let merged = filterPendingRowsByType(
     [
       ...(registerResult.data || []),
       ...(iprResult.data || []),
@@ -166,6 +336,9 @@ async function loadPendingRejectionQueue({ search, pendingType, page = 1, limit 
     const tb = new Date(b.approved_at || b.inspected_at || b.created_at || 0).getTime();
     return tb - ta;
   });
+
+  merged = await enrichPendingMatchedInvfnoteBills(merged);
+
   const safePage = Math.max(1, Number(page) || 1);
   const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 100));
   const offset = (safePage - 1) * safeLimit;
@@ -888,8 +1061,8 @@ export const deleteQcRejection = async (req, res) => {
 
 /**
  * Save bill number(s) on an authorized QC rejection (same idea as IMS Forwarding Note).
- * Allowed after Store Out is authorized; may be updated any number of times.
- * body: { qc_reject_uid, bill_no } — bill_no null/"" clears.
+ * First attach: add permission. Update / clear after attach: super_admin only.
+ * body: { qc_reject_uid, bill_no, bill_dt? } — bill_no null/"" clears.
  */
 export const updateQcRejectionBill = async (req, res) => {
   try {
@@ -906,22 +1079,39 @@ export const updateQcRejectionBill = async (req, res) => {
       });
     }
 
-    const editBlocked = assertWithinEditDays(req, existing.created_at, "edit");
-    if (editBlocked) {
-      return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
-    }
+    const previous = existing.bill_no === null || existing.bill_no === undefined
+        ? null
+        : String(existing.bill_no).trim() || null;
+    const previousDt = existing.bill_dt ? String(existing.bill_dt) : null;
 
     const bill_no =
       req.body?.bill_no === null || req.body?.bill_no === undefined
         ? null
         : String(req.body.bill_no).trim() || null;
 
-    const previous =
-      existing.bill_no === null || existing.bill_no === undefined
+    const bill_dt =
+      req.body?.bill_dt === null || req.body?.bill_dt === undefined || req.body?.bill_dt === ""
         ? null
-        : String(existing.bill_no).trim() || null;
+        : String(req.body.bill_dt).trim() || null;
 
-    if (previous === bill_no) {
+    const isUpdate = Boolean(previous);
+    const isClear = previous && !bill_no;
+    const isSuperAdmin = String(req.user?.type || "").toLowerCase() === "super_admin" || String(req.user?.role || "").toLowerCase() === "super_admin";
+
+    // IMS style: once bill is attached, only super admin can change / clear it.
+    if ((isUpdate || isClear) && !isSuperAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: "Bill already attached. Only Super Admin can update or clear it.",
+      });
+    }
+
+    const editBlocked = assertWithinEditDays(req, existing.created_at, "edit");
+    if (editBlocked) {
+      return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
+    }
+
+    if (previous === bill_no && previousDt === bill_dt) {
       return res.json({
         success: true,
         data: existing,
@@ -932,6 +1122,7 @@ export const updateQcRejectionBill = async (req, res) => {
     const user = auditUserName(req);
     await updateQcRejection(id, {
       bill_no,
+      bill_dt,
       updated_by: user,
       updated_at: new Date(),
     });
@@ -939,14 +1130,16 @@ export const updateQcRejectionBill = async (req, res) => {
     const data = await findQcRejection(id);
     log(req, "update_bill", String(id), {
       qc_reject_uid: id,
-      old_values: { bill_no: previous },
-      new_values: { bill_no },
+      old_values: { bill_no: previous, bill_dt: previousDt },
+      new_values: { bill_no, bill_dt },
     }, data);
     return res.json({
       success: true,
       data,
       message: data?.bill_no
-        ? "Bill number(s) saved successfully."
+        ? isUpdate
+          ? "Bill number(s) updated successfully."
+          : "Bill number(s) saved successfully."
         : "Bill number cleared successfully.",
     });
   } catch (err) {
@@ -966,23 +1159,90 @@ function normalizeImsBillNo(record) {
   return String(raw ?? "").trim();
 }
 
-/** Live bill numbers from IMS invfnote — same source as IMS bill dropdowns. `billno` is not a dataset. */
+/** IMS billdt e.g. `24-09-2026 10:17` or ISO → `YYYY-MM-DD`. */
+function normalizeImsBillDt(record) {
+  const raw = record?.billdt ?? record?.bill_dt ?? record?.BillDt ?? null;
+  if (raw == null || raw === "") return null;
+  const s = String(raw).trim();
+  const dmy = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})/);
+  if (dmy) {
+    const dd = dmy[1].padStart(2, "0");
+    const mm = dmy[2].padStart(2, "0");
+    return `${dmy[3]}-${mm}-${dd}`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function invfnoteItemCode(rec = {}) {
+  return String(rec?.item_code ?? rec?.itemcode ?? "").trim() || null;
+}
+
+/** Live bills from IMS invfnote — only salecat=2. Optional filter: acc_code + item_code / item_dcode. */
 export const getQcRejectionBillNumbersViews = async (req, res) => {
   try {
     const search = String(req.body?.search ?? "").trim().toLowerCase();
     const page = Math.max(1, Number(req.body?.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.body?.limit) || 50));
+    const filterAcc = String(req.body?.acc_code ?? "").trim() || null;
+    const filterItemCode = normMatchKey(req.body?.item_code);
+    const filterItemDcode = String(req.body?.item_dcode ?? req.body?.itemdcode ?? "").trim() || null;
 
     const records = await fetchFromIMS("invfnote");
     const seen = new Set();
     const rows = [];
 
-    for (const rec of records) {
+    for (const rec of records || []) {
+      if (invfnoteSaleCat(rec) !== "2") continue;
+
+      const uidParts = invfnoteUidParts(rec);
+      const acc_code = String(rec?.acc_code ?? uidParts.acc_code ?? "").trim() || null;
+      const item_dcode = String(rec?.itemdcode ?? rec?.item_dcode ?? uidParts.item_dcode ?? "").trim() || null;
+      const item_code = invfnoteItemCode(rec);
+
+      if (filterAcc && String(filterAcc) !== String(acc_code)) continue;
+      if (filterItemDcode || filterItemCode) {
+        const dOk = filterItemDcode && item_dcode && String(filterItemDcode) === String(item_dcode);
+        const cOk = filterItemCode && item_code && filterItemCode === normMatchKey(item_code);
+        if (!dOk && !cOk) continue;
+      }
+
       const billNo = normalizeImsBillNo(rec);
       if (!billNo || seen.has(billNo)) continue;
       seen.add(billNo);
-      if (search && !billNo.toLowerCase().includes(search)) continue;
-      rows.push({ id: billNo, bill_no: billNo });
+      const bill_dt = normalizeImsBillDt(rec);
+      const acc_name = String(rec?.acc_name ?? "").trim() || null;
+      const status = String(rec?.status ?? "").trim() || null;
+      if (
+        search &&
+        ![billNo, acc_name, item_code, bill_dt, status, acc_code]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(search)
+      ) {
+        continue;
+      }
+      rows.push({
+        id: billNo,
+        bill_no: billNo,
+        billno: billNo,
+        bill_dt,
+        billdt: bill_dt,
+        acc_code,
+        acc_name,
+        item_code,
+        item_dcode,
+        itemdcode: item_dcode,
+        muid: String(rec?.muid ?? "").trim() || null,
+        item_desc: String(rec?.item_desc ?? rec?.itemdesc ?? "").trim() || null,
+        itqty: invfnoteQty(rec),
+        status,
+        is_green: String(status || "").toLowerCase() === "green",
+        salecat: "2",
+      });
     }
 
     rows.sort((a, b) =>
@@ -994,6 +1254,77 @@ export const getQcRejectionBillNumbersViews = async (req, res) => {
     const data = rows.slice(start, start + limit);
 
     return res.json({ success: true, data, total });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * Complete awaiting-bill rejection: bill_no + bill_dt (+ optional remarks).
+ * Bill date comes from selected invfnote bill. Moves Pending → Register.
+ * body: { qc_reject_uid, bill_no, bill_dt, remarks? }
+ */
+export const completeQcRejectionBill = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.qc_reject_uid ?? req.body?.id);
+    if (!id) return res.status(400).json({ success: false, message: "A valid QC rejection ID is required." });
+
+    const existing = await findQcRejection(id);
+    if (!existing) return res.status(404).json({ success: false, message: "QC rejection record not found." });
+    if (String(existing.bill_no || "").trim()) {
+      return res.status(400).json({ success: false, message: "This rejection is already complete." });
+    }
+
+    const storeOutApproved = await hasApprovedRejectionStoreOut(id);
+    if (!isMrnPortalRejectionRow(existing) && !storeOutApproved) {
+      return res.status(400).json({
+        success: false,
+        message: "Complete Store Out authorization before attaching the bill.",
+      });
+    }
+
+    const editBlocked = assertWithinEditDays(req, existing.created_at, "edit");
+    if (editBlocked) {
+      return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
+    }
+
+    const bill_no = String(req.body?.bill_no ?? "").trim();
+    if (!bill_no) {
+      return res.status(400).json({ success: false, message: "Bill number is required." });
+    }
+    const bill_dt = String(req.body?.bill_dt ?? "").trim();
+    if (!bill_dt) {
+      return res.status(400).json({ success: false, message: "Bill date is required." });
+    }
+
+    const remarks =
+      req.body?.remarks === undefined && req.body?.remark === undefined
+        ? undefined
+        : String(req.body?.remarks ?? req.body?.remark ?? "").trim() || null;
+
+    const user = auditUserName(req);
+    const fields = {
+      bill_no,
+      bill_dt,
+      updated_by: user,
+      updated_at: new Date(),
+    };
+    if (remarks !== undefined) fields.remarks = remarks;
+
+    await updateQcRejection(id, fields);
+
+    const data = await findQcRejection(id);
+    log(req, "complete_bill", String(id), {
+      qc_reject_uid: id,
+      bill_no: data?.bill_no,
+      bill_dt: data?.bill_dt,
+    }, data);
+
+    return res.json({
+      success: true,
+      data,
+      message: "Bill saved. Rejection moved to Register.",
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

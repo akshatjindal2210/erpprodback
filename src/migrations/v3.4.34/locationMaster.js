@@ -122,8 +122,7 @@ async function migrateFromLegacy(source) {
              UPPER(NULLIF(trim(${shelf}), ''))
        )
      )
-    WHERE c.is_deleted = false
-      AND c.location_id = l.location_id
+    WHERE c.location_id = l.location_id
       AND c.location_id IS DISTINCT FROM m.location_id
       AND (${del})
   `);

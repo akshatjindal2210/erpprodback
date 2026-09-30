@@ -93,7 +93,7 @@ async function saAddCoilsOutOfSync(adjustment = {}) {
   const spec = normalizeSaAddCoilSpec(adjustment);
   if (!spec.coilCount || !spec.coilQtys.length) return true;
   const coils = await findCoilsBySaId(adjId, "stock_in");
-  const active = (coils || []).filter((c) => !c?.is_deleted);
+  const active = (coils || []);
   if (active.length !== spec.coilCount) return true;
   const sorted = [...active].sort(
     (x, y) => (Number(x.coil_index) || 0) - (Number(y.coil_index) || 0)
@@ -323,7 +323,6 @@ export async function assertSaAddCoilsUnusedForEdit(adjustmentId) {
     );
   }
   const inUse = (coils || []).filter((c) => {
-    if (c?.is_deleted) return false;
     const status = String(c?.status || "active").toLowerCase();
     return status !== "active";
   });

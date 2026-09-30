@@ -47,7 +47,7 @@ function sumErpMrnCoilsQty(erpRow) {
 
 function erpLineReceiptCap(erpRow) {
   if (!erpRow) return 0;
-  const receipt = roundSaQty(erpRow?.it_recp_qty);
+  const receipt = roundSaQty(erpRow?.qty ?? erpRow?.it_recp_qty);
   const coilSum = sumErpMrnCoilsQty(erpRow);
   const parts = [receipt, coilSum].filter((n) => Number.isFinite(n) && n > 0);
   return parts.length ? Math.max(...parts) : 0;
@@ -89,7 +89,8 @@ export async function resolveMrnReceiptQtyForBudget(
 
   let localQty = 0;
   try {
-    localQty = roundSaQty((await findMrnByUid(uid))?.it_recp_qty);
+    const local = await findMrnByUid(uid);
+    localQty = roundSaQty(local?.qty ?? local?.it_recp_qty);
   } catch {
     /* optional */
   }

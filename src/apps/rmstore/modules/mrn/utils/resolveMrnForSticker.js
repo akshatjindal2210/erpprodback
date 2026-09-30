@@ -114,6 +114,7 @@ export async function resolveMrnForSticker(rawUid, { allowErp = false } = {}) {
         mrn: {
           ...erp,
           uid: mrn_uid,
+          sticker_status: "pending",
           sticker_generated: false,
         },
       };

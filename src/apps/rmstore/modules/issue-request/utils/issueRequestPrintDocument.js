@@ -79,6 +79,7 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
 
   let grandIssueQty = 0;
   let grandCoilQty = 0;
+  let grandReservedQty = 0;
   const rowChunks = [];
   let jcSr = 0;
 
@@ -105,8 +106,11 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
     const coilCount = coils.length;
     const coilQtySum = coils.reduce((s, c) => s + (Number(c?.qty) || 0), 0);
     const issueQty = Number(jc?.issue_qty) || 0;
-    const rowTotalQty = issueQty > 0 ? issueQty : coilQtySum;
+    const reservedQty = Number(jc?.reserved_issue_qty) > 0 ? Number(jc.reserved_issue_qty) : issueQty;
+    // Prefer sum of printed coil lines (store-out snapshot) so Total matches Coil Qty rows.
+    const rowTotalQty = coilQtySum > 0 ? coilQtySum : issueQty > 0 ? issueQty : 0;
     if (Number.isFinite(rowTotalQty)) grandIssueQty += rowTotalQty;
+    if (Number.isFinite(reservedQty)) grandReservedQty += reservedQty;
     jcSr += 1;
 
     const fgLine = escapeHtml(fgLineForJc(jc));
@@ -403,7 +407,7 @@ export function buildIssueRequestPrintDocument(data = {}, companyInfo = {}) {
           <table class="fn-foot" cellspacing="0">
             <tr>
               <td class="fn-fl" style="width:14%">Req. Qty</td>
-              <td class="fn-fv fn-fv-last" colspan="5"><span class="fn-under">${escapeHtml(fmtQty(data.requested_qty ?? grandIssueQty))}</span></td>
+              <td class="fn-fv fn-fv-last" colspan="5"><span class="fn-under">${escapeHtml(fmtQty(data.requested_qty ?? (grandReservedQty || grandIssueQty)))}</span></td>
             </tr>
             <tr>
               <td class="fn-fl">Approved By</td>

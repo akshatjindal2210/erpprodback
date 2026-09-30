@@ -1,4 +1,4 @@
-import { findOutEntries, findOutEntry, insertOutEntry, updateOutEntry, softDeleteOutEntry, replaceOutEntryScannedCoils, findOutEntryScannedCoilUids, findOutEntryScannedCoilsDetailed, findOutEntryLinkedCoils, findOpenOutDraftForCoil, clearOutEntryScannedCoils, buildOutEntryCoilSummary, findStoredMrnSummaries, findStoredMrnDetail, findPendingStoreOutByJobCard, findPendingJobCardStoreOutDrafts, findPendingRejectionStoreOut, findJobCardStoreOutPlan, isCoilPendingJobCardStoreOut, countActiveOutEntriesForIssue, findStoreOutReasons } from "../models/outEntry.model.js";
+import { findOutEntries, findOutEntry, insertOutEntry, updateOutEntry, softDeleteOutEntry, replaceOutEntryScannedCoils, findOutEntryScannedCoilUids, findOutEntryScannedCoilsDetailed, findOutEntryLinkedCoils, findOpenOutDraftForCoil, clearOutEntryScannedCoils, buildOutEntryCoilSummary, outEntryHeaderFromSummary, findStoredMrnSummaries, findStoredMrnDetail, findPendingStoreOutByJobCard, findPendingJobCardStoreOutDrafts, findPendingRejectionStoreOut, findJobCardStoreOutPlan, isCoilPendingJobCardStoreOut, countActiveOutEntriesForIssue, findStoreOutReasons } from "../models/outEntry.model.js";
 import { findCoilByUid, updateCoilsAfterStoreOut, updateCoilsAfterJobCardStoreOut, updateCoilsAfterRejectionStoreOut, clearCoilsForStoreOut, clearCoilsForRejectionStoreOut, findCoils } from "../../coil/models/coil.model.js";
 import { findIssueRequest, lockIssueRequestForStoreOut, unlockIssueRequestForStoreOut } from "../../issue-request/models/issueRequest.model.js";
 import { updateQcRejection, findQcRejection } from "../../rm-rejection/models/rmRejection.model.js";
@@ -472,8 +472,7 @@ export const lockIssueUidForOutEntry = async (req, res) => {
 export const getJobCardStoreOutPlan = async (req, res) => {
   try {
     const issue_uid = parsePositiveIntId(req.body?.issue_uid);
-    const pjobcardno =
-      req.body?.pjobcardno != null ? String(req.body.pjobcardno).trim() || null : null;
+    const pjobcardno = req.body?.pjobcardno != null ? String(req.body.pjobcardno).trim() || null : null;
     const excludeOutUid = parsePositiveIntId(req.body?.out_uid ?? req.body?.exclude_out_uid);
 
     if (!issue_uid || !pjobcardno) {
@@ -613,14 +612,14 @@ export const createOutEntry = async (req, res) => {
       ...(issue_uid != null ? { issue_uid } : {}),
       ...(pjobcardno ? { pjobcardno } : {}),
       ...(qcRejectUid != null ? { qc_reject_uid: qcRejectUid } : {}),
-      ...summary,
+      ...outEntryHeaderFromSummary(summary),
       reason,
       remarks,
       created_by: user,
       scan_complete,
     });
 
-    await replaceOutEntryScannedCoils(row.out_uid, uids);
+    await replaceOutEntryScannedCoils(row.out_uid, resolved);
 
     if (isJobCardOutEntry(savedEntryType) && issue_uid) {
       await lockIssueRequestForStoreOut({ issue_uid, userName: user });
@@ -880,14 +879,14 @@ export const updateOutEntryCtrl = async (req, res) => {
         coilsChanged || remarksChanged || reasonChanged || revertingAuthorizedEdit;
 
       if (coilsChanged) {
-        await replaceOutEntryScannedCoils(id, uids);
+        await replaceOutEntryScannedCoils(id, result.resolved);
       }
       if (coilBusinessChanges) {
         await updateOutEntry(
           id,
           withAuthorizedEditReset(
             {
-              ...(coilsChanged ? summary : {}),
+              ...(coilsChanged ? outEntryHeaderFromSummary(summary) : {}),
               remarks,
               scan_complete,
               updated_by: user,
@@ -926,14 +925,14 @@ export const updateOutEntryCtrl = async (req, res) => {
         coilsChanged || remarksChanged || reasonChanged || revertingAuthorizedEdit;
 
       if (coilsChanged) {
-        await replaceOutEntryScannedCoils(id, uids);
+        await replaceOutEntryScannedCoils(id, result.resolved);
       }
       if (coilBusinessChanges) {
         await updateOutEntry(
           id,
           withAuthorizedEditReset(
             {
-              ...(coilsChanged ? summary : {}),
+              ...(coilsChanged ? outEntryHeaderFromSummary(summary) : {}),
               remarks,
               scan_complete,
               updated_by: user,
@@ -952,14 +951,14 @@ export const updateOutEntryCtrl = async (req, res) => {
         coilsChanged || remarksChanged || reasonChanged || revertingAuthorizedEdit;
 
       if (coilsChanged) {
-        await replaceOutEntryScannedCoils(id, uids);
+        await replaceOutEntryScannedCoils(id, result.resolved);
       }
       if (coilBusinessChanges) {
         await updateOutEntry(
           id,
           withAuthorizedEditReset(
             {
-              ...(coilsChanged ? summary : {}),
+              ...(coilsChanged ? outEntryHeaderFromSummary(summary) : {}),
               ...(coilsChanged || reasonChanged ? { reason } : {}),
               remarks,
               scan_complete,

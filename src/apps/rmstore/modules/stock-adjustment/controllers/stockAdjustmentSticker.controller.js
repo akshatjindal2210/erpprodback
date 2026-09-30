@@ -39,7 +39,7 @@ function pickFirstNonEmpty(...values) {
 function enrichSaCoilSources(coil = {}, mrn = {}, adjustment = {}) {
   const adj = adjustment && typeof adjustment === "object" ? adjustment : {};
   const m = mrn && typeof mrn === "object" ? mrn : {};
-  const lotNo = pickFirstNonEmpty(adj.it_lot_no, adj.heat_no, coil.it_lot_no, m.it_lot_no, coil.heat_no, m.heat_no);
+  const lotNo = pickFirstNonEmpty(adj.it_lot_no, adj.heat_no, coil.it_lot_no, coil.coil_no, m.coil_no, m.it_lot_no, coil.heat_no, m.heat_no);
 
   return {
     coil: {

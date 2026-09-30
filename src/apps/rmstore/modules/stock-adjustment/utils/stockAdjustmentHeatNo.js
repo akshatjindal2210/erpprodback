@@ -10,9 +10,9 @@ export function resolveEffectiveHeatNo({ bodyHeatNo, coils = [], mrnRow = null }
   if (fromBody) return fromBody;
 
   for (const coil of coils) {
-    const h = normalizeHeatNo(coil?.heat_no) || normalizeHeatNo(coil?.it_lot_no);
+    const h = normalizeHeatNo(coil?.heat_no) || normalizeHeatNo(coil?.coil_no) || normalizeHeatNo(coil?.it_lot_no);
     if (h) return h;
   }
 
-  return normalizeHeatNo(mrnRow?.heat_no) || normalizeHeatNo(mrnRow?.it_lot_no) || null;
+  return (normalizeHeatNo(mrnRow?.heat_no) || normalizeHeatNo(mrnRow?.coil_no) || normalizeHeatNo(mrnRow?.it_lot_no) || null);
 }

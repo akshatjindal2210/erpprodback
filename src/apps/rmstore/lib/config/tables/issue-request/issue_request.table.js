@@ -1,5 +1,5 @@
 import dbQuery from "../../../../../../config/db/db.js";
-import { patchTableSchema, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
+import { patchTableSchema, patchCol, dropColumnsIfExist } from "../../../../../../config/db/ensureDbColumns.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
 /** Master header only — job cards + coils live in rmstore_issue_request_job_card (IMS FN style). */
@@ -9,7 +9,6 @@ export async function createRmStoreIssueRequestTable() {
       issue_uid             SERIAL PRIMARY KEY,
       shift                 VARCHAR(1) NOT NULL DEFAULT 'A',
       remarks               TEXT,
-      requested_qty         NUMERIC DEFAULT 0,
       coil_count            INTEGER DEFAULT 0,
       out_entry_locked      BOOLEAN DEFAULT false,
       out_entry_locked_by   TEXT,
@@ -39,4 +38,7 @@ export async function createRmStoreIssueRequestTable() {
       patchCol("out_entry_locked_at", "TIMESTAMP"),
     ],
   });
+
+  // Qty from job cards / store-out — not denorm on header
+  await dropColumnsIfExist(dbQuery, T.ISSUE_REQUEST, ["requested_qty"]);
 }

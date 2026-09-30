@@ -32,7 +32,7 @@ const OCCUPIED_CAPACITY_SQL = `(
     (
       SELECT COUNT(*)::int
       FROM rmstore_coil_table rc
-      WHERE rc.location_id = lm.location_id AND rc.is_deleted = false AND COALESCE(rc.status, 'active') IN ('active', 'rejected')
+      WHERE rc.location_id = lm.location_id AND COALESCE(rc.status, 'active') IN ('active', 'rejected')
     ),
     0
   )

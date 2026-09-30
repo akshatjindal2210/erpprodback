@@ -2,6 +2,16 @@ import { RMSTORE_TABLES as T } from "../../../../config/db/dbTables.js";
 
 const PRODUCTION_RETURN = "production_return";
 
+/** sticker_status values that count as generated (generate or approved). */
+export function mrnStickerGeneratedSql(mAlias = "m") {
+  return `LOWER(TRIM(COALESCE(${mAlias}.sticker_status, ''))) IN ('generate', 'approved')`;
+}
+
+/** sticker_status = approved. */
+export function mrnStickerApprovedSql(mAlias = "m") {
+  return `LOWER(TRIM(COALESCE(${mAlias}.sticker_status, ''))) = 'approved'`;
+}
+
 /** MRN Portal coils — excludes Stock Adjustment and Production Return balances. */
 export function portalMrnCoilBaseSql(cAlias = "c") {
   return `(
@@ -15,7 +25,7 @@ export function portalMrnCoilBaseSql(cAlias = "c") {
 export function mrnPortalGeneratedCoilSql(cAlias = "c", mAlias = "m") {
   return `(
     ${portalMrnCoilBaseSql(cAlias)}
-    AND ${mAlias}.sticker_generated = true
+    AND ${mrnStickerGeneratedSql(mAlias)}
   )`;
 }
 
@@ -23,8 +33,8 @@ export function mrnPortalGeneratedCoilSql(cAlias = "c", mAlias = "m") {
 export function mrnPortalStickerCoilSql(cAlias = "c", mAlias = "m") {
   return `(
     ${portalMrnCoilBaseSql(cAlias)}
-    AND ${mAlias}.sticker_generated = true
-    AND ${mAlias}.sticker_approved = true
+    AND ${mrnStickerGeneratedSql(mAlias)}
+    AND ${mrnStickerApprovedSql(mAlias)}
   )`;
 }
 
@@ -34,7 +44,7 @@ export function mrnPortalGeneratedCoilExistsSql(cAlias = "c") {
     SELECT 1
     FROM ${T.MRN} mx
     WHERE mx.uid = ${cAlias}.mrn_uid
-      AND mx.sticker_generated = true
+      AND ${mrnStickerGeneratedSql("mx")}
   )`;
 }
 
@@ -44,8 +54,8 @@ export function mrnPortalStickerCoilExistsSql(cAlias = "c") {
     SELECT 1
     FROM ${T.MRN} mx
     WHERE mx.uid = ${cAlias}.mrn_uid
-      AND mx.sticker_generated = true
-      AND mx.sticker_approved = true
+      AND ${mrnStickerGeneratedSql("mx")}
+      AND ${mrnStickerApprovedSql("mx")}
   )`;
 }
 

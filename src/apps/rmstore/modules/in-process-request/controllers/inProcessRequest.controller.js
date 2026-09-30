@@ -1,11 +1,11 @@
-import { findInProcessRequests, findInProcessRequest, findInProcessReasons, insertInProcessRequest, updateInProcessRequest, softDeleteInProcessRequest, findPendingAutoStoreInForConsume, findPendingStoreInForCoil, AUTO_STORE_IN_FROM_CONSUME_PREFIX, autoConsumeFromStoreInRemarks, parseConsumeIprUidFromAutoStoreInRemarks, normalizeCoils, normalizeProposedCoils, normalizeRequestType, resolveDownstream, resolveConsumeDownstream, hasReassignShopFloorBalance, IPR_REQUEST_TYPE, IPR_DOWNSTREAM } from "../models/inProcessRequest.model.js";
+import { findInProcessRequests, findInProcessRequest, findInProcessReasons, insertInProcessRequest, updateInProcessRequest, softDeleteInProcessRequest, findPendingAutoStoreInForConsume, findPendingStoreInForCoil, AUTO_STORE_IN_FROM_CONSUME_PREFIX, autoConsumeFromStoreInRemarks, parseConsumeIprUidFromAutoStoreInRemarks, normalizeCoils, normalizeProposedCoils, normalizeRequestType, normalizeType, typeToRequestType, resolveDownstream, resolveConsumeDownstream, hasReassignShopFloorBalance, resolveTypeFromLegacy, IPR_REQUEST_TYPE, IPR_DOWNSTREAM, IPR_TYPE } from "../models/inProcessRequest.model.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
 import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
-import { findCoils, findCoilByUid, revertCoilsConsumed, markCoilsInProcessRejectionPending, revertCoilsInProcessRejection, restoreCoilsToShopFloorOut, releaseCoilFromIprRejectionHoldForStoreIn, processStoreInReturnCoils, revertStoreInReturnCoils, processConsumeCoils } from "../../coil/models/coil.model.js";
+import { findCoils, findCoilByUid, revertCoilsConsumed, markCoilsInProcessRejectionPending, revertCoilsInProcessRejection, restoreCoilsToShopFloorOut, releaseCoilFromIprRejectionHoldForStoreIn, processStoreInReturnCoils, revertStoreInReturnCoils, processConsumeCoils, findLatestOutUidForCoil } from "../../coil/models/coil.model.js";
 import { findQcCheck, findQcCheckItems, findQcChecks } from "../../qc-check/models/qcCheck.model.js";
 import { formatExpected } from "../../../lib/utils/qc/evaluateSpec.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
@@ -89,77 +89,112 @@ const trimOrNull = (v) => {
   return s || null;
 };
 
-const intOrNull = (v) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-};
-
 /**
  * Normalize an incoming payload into writable columns.
  * `prev` is the existing row on edit/approve so untouched fields keep their value.
  */
 function buildRecordFields(body = {}, prev = null) {
-  const request_type = normalizeRequestType(
-    body.request_type !== undefined ? body.request_type : prev?.request_type
-  );
+  // Prefer canonical `type` when request_type is missing (legacy col may be dropped).
+  // Never let normalizeRequestType(undefined) silently become "rejection".
+  const canonicalHint = normalizeType(body.type) || normalizeType(prev?.type);
+  const rawRequestType =
+    body.request_type !== undefined && body.request_type !== null && String(body.request_type).trim() !== ""
+      ? body.request_type
+      : prev?.request_type !== undefined && prev?.request_type !== null && String(prev.request_type).trim() !== ""
+        ? prev.request_type
+        : null;
+  const request_type = rawRequestType
+    ? normalizeRequestType(rawRequestType)
+    : canonicalHint
+      ? typeToRequestType(canonicalHint)
+      : IPR_REQUEST_TYPE.REJECTION;
   const isStoreIn = request_type === IPR_REQUEST_TYPE.STORE_IN;
   const isConsume = request_type === IPR_REQUEST_TYPE.CONSUME;
-  const isTransfer = request_type === IPR_REQUEST_TYPE.TRANSFER;
-
   const coils = normalizeCoils(body.coils !== undefined ? body.coils : prev?.coils);
-  const previousInput =
+  const previous_coils = normalizeCoils(
     body.previous_coils !== undefined
       ? body.previous_coils
       : prev?.previous_coils?.length
         ? prev.previous_coils
-        : coils;
-  const previous_coils = normalizeCoils(previousInput);
-  const proposed_coils = isStoreIn
-    ? normalizeProposedCoils(
-        body.proposed_coils !== undefined
-          ? body.proposed_coils
+        : prev?.coils?.length
+          ? prev.coils
           : coils
-              .filter((c) => (Number(c.remaining_qty ?? c.qty) || 0) > 0)
-              .map((c, i) => ({
-                temp_id: `ret-${String(c.coil_no_uid || i).toLowerCase()}`,
-                coil_no_uid: c.coil_no_uid,
-                from_coil_uid: c.coil_no_uid,
-                qty: Number(c.remaining_qty ?? c.qty) || 0,
-                item_code: c.item_code,
-                item_desc: c.item_desc,
-                heat_no: c.heat_no,
-                mrn_uid: c.mrn_uid,
-                mrn_no: c.mrn_no,
-              }))
-      )
-    : [];
+  );
 
-  const first = coils[0] || previous_coils[0] || {};
+  let rejection_type = null;
+  if (!isStoreIn && !isConsume && request_type !== IPR_REQUEST_TYPE.TRANSFER) {
+    const incoming = body.rejection_type !== undefined ? body.rejection_type : prev?.rejection_type;
+    if (incoming === "lot" || canonicalHint === IPR_TYPE.LOT) rejection_type = "lot";
+    else rejection_type = "coil";
+  }
+
+  const type =
+    normalizeType(body.type) ||
+    normalizeType(prev?.type) ||
+    resolveTypeFromLegacy({ request_type, rejection_type, coils }) ||
+    canonicalHint ||
+    IPR_TYPE.COIL;
+
+  const reassignLine = coils.find((c) => c.reassign === true);
   const pick = (key, fallback = null) =>
     body[key] !== undefined ? body[key] : (prev?.[key] ?? fallback);
 
-  let rejection_type = null;
-  if (!isStoreIn && !isConsume && !isTransfer) {
-    const incoming = body.rejection_type !== undefined ? body.rejection_type : prev?.rejection_type;
-    rejection_type = incoming === "lot" ? "lot" : "coil";
+  // Target JC: explicit header first. Legacy rows stored target on reassign coil.pjobcardno.
+  let reassign_jc =
+    type === IPR_TYPE.REASSIGN
+      ? trimOrNull(pick("reassign_jc", null))
+      : null;
+
+  // Coil.pjobcardno must stay SOURCE (main). If FE still puts target on coil, restore source from previous_coils.
+  let coilsOut = coils;
+  if (type === IPR_TYPE.REASSIGN) {
+    const targetGuess =
+      reassign_jc ||
+      trimOrNull(reassignLine?.pjobcardno) ||
+      trimOrNull(prev?.reassign_jc);
+    reassign_jc = targetGuess;
+    const prevByUid = new Map(
+      previous_coils.map((p) => [String(p.coil_no_uid || "").trim().toLowerCase(), p])
+    );
+    coilsOut = coils.map((c) => {
+      if (c.reassign !== true) return c;
+      const key = String(c.coil_no_uid || "").trim().toLowerCase();
+      const prevLine = prevByUid.get(key);
+      const sourceJc = trimOrNull(prevLine?.pjobcardno);
+      const target = trimOrNull(targetGuess);
+      // Keep coil.pjobcardno as SOURCE; target lives on reassign_jc only.
+      if (!sourceJc || !target || sourceJc.toUpperCase() === target.toUpperCase()) return c;
+      return {
+        ...c,
+        pjobcardno: sourceJc,
+        macname: trimOrNull(prevLine?.macname) || c.macname || null,
+      };
+    });
   }
 
   return {
+    type,
+    reassign_jc: type === IPR_TYPE.REASSIGN ? reassign_jc : null,
     request_type,
     rejection_type,
     reason: trimOrNull(pick("reason")),
     remarks: trimOrNull(pick("remarks")),
-    lot_no: trimOrNull(pick("lot_no", first.mrn_no)),
-    mrn_uid: trimOrNull(pick("mrn_uid", first.mrn_uid)),
-    mrn_no: intOrNull(pick("mrn_no", first.mrn_no)),
-    heat_no: trimOrNull(pick("heat_no", first.heat_no)),
-    item_code: trimOrNull(pick("item_code", first.item_code)),
-    item_desc: trimOrNull(pick("item_desc", first.item_desc)),
-    seed_coil_uid: trimOrNull(pick("seed_coil_uid")),
-    coils,
+    mrn_uid: trimOrNull(pick("mrn_uid", coilsOut[0]?.mrn_uid || previous_coils[0]?.mrn_uid)),
+    coils: coilsOut,
     previous_coils,
-    proposed_coils,
-    scanned_coil_uids: coils.map((c) => c.coil_no_uid),
+    proposed_coils: isStoreIn
+      ? normalizeProposedCoils(
+          body.proposed_coils !== undefined
+            ? body.proposed_coils
+            : coils
+                .filter((c) => (Number(c.remaining_qty ?? c.qty) || 0) > 0)
+                .map((c) => ({
+                  coil_no_uid: c.coil_no_uid,
+                  from_coil_uid: c.coil_no_uid,
+                  qty: Number(c.remaining_qty ?? c.qty) || 0,
+                }))
+        )
+      : [],
     attachments: body.attachments !== undefined ? body.attachments : (prev?.attachments ?? []),
   };
 }
@@ -206,9 +241,6 @@ function validate(fields) {
         });
       }
     }
-  }
-  if (fields.request_type === IPR_REQUEST_TYPE.TRANSFER) {
-    // Placeholder for future transfer validation
   }
   if (fields.request_type === IPR_REQUEST_TYPE.REJECTION) {
     assertRejectionPhotos(fields);
@@ -259,8 +291,12 @@ async function assertConsumeReassignRules(fields, user) {
 
   for (const line of reassignLines) {
     const coilUid = String(line.coil_no_uid || "").trim();
-    const targetJc = String(line.pjobcardno || "").trim();
-    const targetMachine = String(line.macname || "").trim();
+    // Target JC lives on header `reassign_jc` (coil.pjobcardno is SOURCE / main).
+    const targetJc = String(fields.reassign_jc || line.reassign_target_pjobcardno || "").trim();
+    const jcMeta = jcByNo.get(toUpperTrim(targetJc));
+    const targetMachine = String(
+      line.reassign_target_macname || jcMeta?.macname || ""
+    ).trim();
     const targetWire = String(line.reassign_rm_item_code || line.item_code || "").trim();
 
     if (!targetJc || !targetMachine) {
@@ -442,6 +478,7 @@ const sameCoilSet = (a = [], b = []) => {
 };
 
 const IPR_BUSINESS_KEYS = [
+  "type", "reassign_jc", "stage",
   "request_type", "rejection_type", "reason", "remarks",
   "lot_no", "mrn_uid", "mrn_no", "heat_no", "item_code", "item_desc",
   "seed_coil_uid", "coils", "previous_coils", "proposed_coils",
@@ -503,6 +540,8 @@ function hasInProcessContentChanges(existing, fields) {
     return true;
   }
   if (String(fields.rejection_type || "") !== String(existing.rejection_type || "")) return true;
+  if (String(fields.type || "") !== String(existing.type || "")) return true;
+  if (String(fields.reassign_jc || "") !== String(existing.reassign_jc || "")) return true;
   if (!sameAttachments(existing.attachments, fields.attachments)) return true;
   return false;
 }
@@ -777,7 +816,7 @@ async function finalizeApprovedConsumeDownstream(iprUid, user, req) {
   const data = await findInProcessRequest(iprUid);
   if (!data) return null;
 
-  const downstream = resolveConsumeDownstream(data.coils);
+  const downstream = resolveConsumeDownstream(data.coils, data.type);
   if (data.downstream === downstream) return data;
 
   await updateInProcessRequest(iprUid, {
@@ -800,12 +839,40 @@ async function finalizeApprovedConsumeDownstream(iprUid, user, req) {
 /** Un-approving or deleting a consume request puts coils back out at the machine when they were issued. */
 async function releaseConsumedCoils(row, user, req) {
   await cancelLegacyAutoStoreInForConsume(row.ipr_uid, user);
-  const snapshot = row.previous_coils?.length ? row.previous_coils : row.coils;
-  const fromOut = (snapshot || []).some((c) => c.out_uid != null);
-  const hadReassign = normalizeCoils(row.coils).some((c) => c.reassign === true)
-    || normalizeCoils(snapshot).some((c) => c.reassign === true);
-  if (fromOut) {
-    const { restored } = await revertStoreInReturnCoils(row.ipr_uid, snapshot, user);
+  const snapshot = normalizeCoils(row.previous_coils?.length ? row.previous_coils : row.coils);
+  const hadReassign = normalizeCoils(row.coils).some((c) => c.reassign === true) || snapshot.some((c) => c.reassign === true);
+
+  // Slim JSON may omit out_uid; full consume also clears coil.out_uid — recover from live coil or Store Out scan history.
+  const enriched = [];
+  for (const line of snapshot) {
+    const coil = await findCoilByUid(line.coil_no_uid);
+    let outUid = line.out_uid != null ? Number(line.out_uid) : NaN;
+    if (!Number.isFinite(outUid) || outUid <= 0) {
+      outUid = coil?.out_uid != null ? Number(coil.out_uid) : NaN;
+    }
+    const hist = await findLatestOutUidForCoil(line.coil_no_uid);
+    if (!Number.isFinite(outUid) || outUid <= 0) {
+      if (hist?.out_uid != null) outUid = Number(hist.out_uid);
+    }
+    // Reassign undo → source JC from IPR line. Consume undo → original Store Out JC from history
+    // (never the displayed/reassign-target JC saved on the consume snapshot — that clears Machine).
+    const sourceJc = hadReassign
+      ? String(line.pjobcardno || hist?.pjobcardno || "").trim()
+      : String(hist?.pjobcardno || "").trim();
+    enriched.push({
+      ...line,
+      out_uid: Number.isFinite(outUid) && outUid > 0 ? outUid : null,
+      original_qty: Number(line.original_qty ?? line.qty) || Number(coil?.qty) || 0,
+      pjobcardno: sourceJc || null,
+    });
+  }
+
+  const canShopFloor = enriched.some((c) => c.out_uid != null);
+  if (canShopFloor) {
+    const { restored } = await revertStoreInReturnCoils(row.ipr_uid, enriched, user, {
+      // Repair/restore Store Out JC when we know the original (or reassign source).
+      restoreOutJobCard: enriched.some((c) => String(c.pjobcardno || "").trim()),
+    });
     if (!restored.length) return 0;
     logCoilTransactionSafe({
       transaction_type: hadReassign ? COIL_TX_TYPES.IPR_REASSIGN_REVERT : COIL_TX_TYPES.CONSUME_REVERT,
@@ -823,6 +890,7 @@ async function releaseConsumedCoils(row, user, req) {
     });
     return restored.length;
   }
+
   const restored = await revertCoilsConsumed(row.ipr_uid, user);
   if (!restored.length) return 0;
   logCoilTransactionSafe({
@@ -1225,8 +1293,10 @@ export const getInProcessRequests = async (req, res) => {
     const result = await findInProcessRequests({
       filters: sanitizeFilters(filters || {}, [
         "request_type",
+        "type",
         "approved",
         "downstream",
+        "stage",
         "from_date",
         "to_date",
       ]),
@@ -1235,7 +1305,7 @@ export const getInProcessRequests = async (req, res) => {
       limit,
       permission: req.permission,
     });
-    result.data = await enrichIprWithMachineLabels(result.data);
+    result.data = await enrichIprWithMachineLabels(result.data || []);
     return res.json({ success: true, ...result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -1330,7 +1400,7 @@ export const getPendingStoreInById = async (req, res) => {
         message: "Pending store-in request not found or not receivable.",
       });
     }
-    if (hasReassignShopFloorBalance(existing.coils)) {
+    if (hasReassignShopFloorBalance(existing.coils, existing.type)) {
       return res.status(400).json({
         success: false,
         message: "Reassign balance stays on shop floor — this request is not in the Unassigned receive queue.",
@@ -1400,7 +1470,7 @@ export const completeStoreInCtrl = async (req, res) => {
         message: "Only a request in the Store In Pending queue can be received.",
       });
     }
-    if (hasReassignShopFloorBalance(existing.coils)) {
+    if (hasReassignShopFloorBalance(existing.coils, existing.type)) {
       return res.status(400).json({
         success: false,
         message: "Reassign balance stays on shop floor — receive to Unassigned is not allowed for this request.",

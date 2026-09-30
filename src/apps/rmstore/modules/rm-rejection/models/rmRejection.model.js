@@ -19,7 +19,7 @@ export const mrnPortalRejectionPendingExcludeSql = (alias = "q") => `NOT (
   OR EXISTS (
     SELECT 1 FROM ${T.MRN} mp
     WHERE mp.sticker_reject_uid = ${alias}.qc_reject_uid
-      AND COALESCE(mp.sticker_rejected, false) = true
+      AND LOWER(TRIM(COALESCE(mp.sticker_status, ''))) = 'reject'
   )
 )`;
 
@@ -64,10 +64,13 @@ export async function attachRejectionCoils(rows = []) {
   const coilByReject = new Map();
   if (rejectIds.length) {
     const coilRows = await dbQuery(
-      `SELECT c.rm_uid, c.coil_no_uid, c.qty, c.mrn_uid, m.heat_no AS heat_no, m.item_code AS item_code, m.item_desc AS item_desc, c.ipr_uid, c.qc_uid
+      `SELECT c.rm_uid, c.coil_no_uid, c.qty, c.mrn_uid,
+              m.heat_no AS heat_no, m.item_code AS item_code, m.item_desc AS item_desc,
+              m.acc_code AS acc_code, m.acc_name AS acc_name,
+              c.ipr_uid, c.qc_uid
        FROM ${COIL_TABLE} c
        LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
-       WHERE c.is_deleted = false AND c.rm_uid = ANY($1::int[])
+       WHERE c.rm_uid = ANY($1::int[])
        ORDER BY c.coil_no_uid ASC`,
       [rejectIds]
     );
@@ -81,6 +84,8 @@ export async function attachRejectionCoils(rows = []) {
         heat_no: c.heat_no,
         item_code: c.item_code,
         item_desc: c.item_desc || null,
+        acc_code: c.acc_code ?? null,
+        acc_name: c.acc_name || null,
         ipr_uid: c.ipr_uid ?? null,
         qc_uid: c.qc_uid ?? null,
       });
@@ -92,7 +97,7 @@ export async function attachRejectionCoils(rows = []) {
     const scannedRows = await dbQuery(
       `SELECT s.out_uid, s.coil_no_uid, c.mrn_uid
        FROM ${SCANNED_COIL_TABLE} s
-       LEFT JOIN ${COIL_TABLE} c ON c.coil_no_uid = s.coil_no_uid AND c.is_deleted = false
+       LEFT JOIN ${COIL_TABLE} c ON c.coil_no_uid = s.coil_no_uid
        WHERE s.out_uid = ANY($1::int[])
        ORDER BY s.coil_no_uid ASC`,
       [outIds]
@@ -175,6 +180,11 @@ export const findQcRejections = async (options = {}) => {
   if (filters.register_complete === true || filters.register_complete === "true") {
     conditions.push(`COALESCE(TRIM(q.bill_no), '') <> ''`);
   }
+  // Incomplete (no bill) → Register "Incomplete" / "Awaiting Bill"; also still in Pending until bill attached.
+  if (filters.register_complete === false || filters.register_complete === "false") {
+    conditions.push(`COALESCE(TRIM(q.bill_no), '') = ''`);
+  }
+
   if (filters.approved !== undefined && filters.approved !== null && filters.approved !== "") {
     values.push(filters.approved === true || filters.approved === "true");
     conditions.push(`q.approved = $${i++}`);
@@ -198,7 +208,17 @@ export const findQcRejections = async (options = {}) => {
       COALESCE(q.item_codes,'') ILIKE $${idx} OR
       COALESCE(q.item_descs,'') ILIKE $${idx} OR
       COALESCE(q.reason,'') ILIKE $${idx} OR
-      COALESCE(q.remarks,'') ILIKE $${idx}
+      COALESCE(q.remarks,'') ILIKE $${idx} OR
+      COALESCE(q.bill_no,'') ILIKE $${idx} OR
+      EXISTS (
+        SELECT 1 FROM ${T.MRN} mx
+        WHERE mx.uid = NULLIF(TRIM(split_part(COALESCE(q.mrn_uids, ''), '|', 1)), '')
+          AND (
+            COALESCE(mx.acc_name,'') ILIKE $${idx} OR
+            COALESCE(mx.acc_code::text,'') ILIKE $${idx} OR
+            COALESCE(mx.item_code,'') ILIKE $${idx}
+          )
+      )
     )`);
   }
 
@@ -223,9 +243,15 @@ export const findQcRejections = async (options = {}) => {
                   (q.out_uid IS NOT NULL AND ox.out_uid = q.out_uid)
                   OR (ox.qc_reject_uid IS NOT NULL AND ox.qc_reject_uid = q.qc_reject_uid)
                 )
-            ) AS store_out_started
+            ) AS store_out_started,
+            m.acc_code AS vendor_acc_code,
+            m.acc_name AS vendor_acc_name,
+            m.acc_name AS acc_name,
+            m.item_dcode AS match_item_dcode,
+            m.item_code AS match_item_code
      FROM ${TABLE} q
      LEFT JOIN ${OUT_TABLE} o ON o.out_uid = q.out_uid AND o.is_deleted = false
+     LEFT JOIN ${T.MRN} m ON m.uid = NULLIF(TRIM(split_part(COALESCE(q.mrn_uids, ''), '|', 1)), '')
      ${where}
      ORDER BY q.qc_reject_uid DESC
      LIMIT $${i++} OFFSET $${i}`,
@@ -254,9 +280,15 @@ export const findQcRejection = async (qc_reject_uid) => {
                   (q.out_uid IS NOT NULL AND ox.out_uid = q.out_uid)
                   OR (ox.qc_reject_uid IS NOT NULL AND ox.qc_reject_uid = q.qc_reject_uid)
                 )
-            ) AS store_out_started
+            ) AS store_out_started,
+            m.acc_code AS vendor_acc_code,
+            m.acc_name AS vendor_acc_name,
+            m.acc_name AS acc_name,
+            m.item_dcode AS match_item_dcode,
+            m.item_code AS match_item_code
      FROM ${TABLE} q
      LEFT JOIN ${OUT_TABLE} o ON o.out_uid = q.out_uid AND o.is_deleted = false
+     LEFT JOIN ${T.MRN} m ON m.uid = NULLIF(TRIM(split_part(COALESCE(q.mrn_uids, ''), '|', 1)), '')
      WHERE q.qc_reject_uid = $1 AND q.is_deleted = false
      LIMIT 1`,
     [id]
@@ -284,7 +316,7 @@ export const insertQcRejection = async (data) => {
 };
 
 export const updateQcRejection = async (qc_reject_uid, fields = {}) => {
-  const allowed = ["remarks", "reason", "out_uid", "bill_no", "mrn_refs", "mrn_uids", "qtys", "total_qty", "coil_count", "item_codes", "item_descs", "heat_nos", "approved", "approved_by", "approved_at", "updated_by", "updated_at"];
+  const allowed = ["remarks", "reason", "out_uid", "bill_no", "bill_dt", "mrn_refs", "mrn_uids", "qtys", "total_qty", "coil_count", "item_codes", "item_descs", "heat_nos", "approved", "approved_by", "approved_at", "updated_by", "updated_at"];
   const safe = {};
   for (const k of allowed) {
     if (fields[k] !== undefined) safe[k] = fields[k];
@@ -372,10 +404,10 @@ export async function permanentlyRemoveUnusedMrnPortalRejection(rejection, { mrn
 
 /**
  * Incomplete rejection register rows (no bill_no yet) — feeds RM Rejection Pending queue.
- * MRN Portal rejections are excluded (register-only: attach bill on Register tab, no Store Out).
- * Stage: awaiting_store_out | awaiting_bill
+ * MRN Portal (no Store Out) → awaiting_bill. Others: awaiting_store_out | awaiting_bill.
  */
 function classifyIncompleteRejection(row) {
+  if (isMrnPortalRejectionRow(row)) return "awaiting_bill";
   const storeOutApproved =
     row.out_uid != null &&
     (row.store_out_approved === true || row.store_out_approved === "t");
@@ -422,6 +454,13 @@ function mapIncompleteRejectionRow(row) {
         : row.out_created_at || row.approved_at || row.created_at,
     created_at: row.created_at,
     created_by_name: row.created_by_name,
+    // MRN join — mal is vendor/item se aaya; BPS match isi pe
+    vendor_acc_code: row.vendor_acc_code != null ? String(row.vendor_acc_code).trim() || null : null,
+    vendor_acc_name: row.vendor_acc_name != null ? String(row.vendor_acc_name).trim() || null : null,
+    match_item_dcode: row.match_item_dcode != null ? String(row.match_item_dcode).trim() || null : null,
+    match_item_code: row.match_item_code != null ? String(row.match_item_code).trim() || null : null,
+    acc_code: row.vendor_acc_code != null ? String(row.vendor_acc_code).trim() || null : null,
+    item_dcode: row.match_item_dcode != null ? String(row.match_item_dcode).trim() || null : null,
   };
 }
 
@@ -432,7 +471,6 @@ export const findIncompleteRejectionRegisters = async (options = {}) => {
   const conditions = [
     "q.is_deleted = false",
     `COALESCE(TRIM(q.bill_no), '') = ''`,
-    mrnPortalRejectionPendingExcludeSql("q"),
   ];
 
   if (search) {
@@ -448,9 +486,12 @@ export const findIncompleteRejectionRegisters = async (options = {}) => {
       COALESCE(q.remarks,'') ILIKE $${idx} OR
       q.qc_reject_uid::text ILIKE $${idx} OR
       COALESCE(q.out_uid::text,'') ILIKE $${idx} OR
+      COALESCE(m.acc_name,'') ILIKE $${idx} OR
+      COALESCE(m.acc_code::text,'') ILIKE $${idx} OR
+      COALESCE(m.item_code,'') ILIKE $${idx} OR
       EXISTS (
         SELECT 1 FROM ${COIL_TABLE} c
-        WHERE c.is_deleted = false AND c.rm_uid = q.qc_reject_uid
+        WHERE c.rm_uid = q.qc_reject_uid
           AND COALESCE(c.coil_no_uid,'') ILIKE $${idx}
       ) OR
       EXISTS (
@@ -461,9 +502,11 @@ export const findIncompleteRejectionRegisters = async (options = {}) => {
   }
 
   const where = `WHERE ${conditions.join(" AND ")}`;
+  // Primary MRN UID on rejection → join local MRN (create-time vendor/item for BPS match)
   const fromClause = `
     FROM ${TABLE} q
-    LEFT JOIN ${OUT_TABLE} o ON o.out_uid = q.out_uid AND o.is_deleted = false`;
+    LEFT JOIN ${OUT_TABLE} o ON o.out_uid = q.out_uid AND o.is_deleted = false
+    LEFT JOIN ${T.MRN} m ON m.uid = NULLIF(TRIM(split_part(COALESCE(q.mrn_uids, ''), '|', 1)), '')`;
 
   const countRes = await dbQuery(`SELECT COUNT(*)::int AS count ${fromClause} ${where}`, values);
   const total = Number(countRes[0]?.count || 0);
@@ -478,7 +521,11 @@ export const findIncompleteRejectionRegisters = async (options = {}) => {
             ${rejectionStoreOutApprovedSql("q")} AS store_out_approved,
             o.scan_complete,
             o.created_at AS out_created_at,
-            o.approved_at AS store_out_approved_at
+            o.approved_at AS store_out_approved_at,
+            m.acc_code AS vendor_acc_code,
+            m.acc_name AS vendor_acc_name,
+            m.item_dcode AS match_item_dcode,
+            m.item_code AS match_item_code
      ${fromClause}
      ${where}
      ORDER BY COALESCE(o.approved_at, o.created_at, q.approved_at, q.created_at) DESC NULLS LAST,

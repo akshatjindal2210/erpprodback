@@ -1,7 +1,7 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { ISSUE_REQUEST_MACHINE_JOB_CARD_LOCK } from "../../../lib/config/app.config.js";
-import { findActiveJobCardsByIssueUid, jobCardRowToApi, softDeleteJobCardsByIssueUid } from "./issueRequestJobCard.model.js";
+import { findActiveJobCardsByIssueUid, jobCardRowToApi, softDeleteJobCardsByIssueUid, coilCountFromCoilsJson } from "./issueRequestJobCard.model.js";
 import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
 
 const TABLE = T.ISSUE_REQUEST;
@@ -10,40 +10,55 @@ const COIL = T.COIL_TABLE;
 const OUT_ENTRY = T.OUT_ENTRY;
 const OUT_SCANNED = T.OUT_ENTRY_SCANNED_COIL;
 
-/** Store-out qty from rmstore_out_entry.total_qty (fixed at approve), not live rmstore_coil_table.qty. */
-const JC_OUT_STATS_LATERAL = `
-    LEFT JOIN LATERAL (
-      SELECT
-        (
-          SELECT COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int
-          FROM ${OUT_ENTRY} o
-          INNER JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
-          WHERE o.is_deleted = false
-            AND COALESCE(o.approved, false) = true
-            AND o.issue_uid = jc.issue_uid
-            AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
-        ) AS out_coil_count,
-        COALESCE((
-          SELECT SUM(o.total_qty)::float8
-          FROM ${OUT_ENTRY} o
-          WHERE o.is_deleted = false
-            AND COALESCE(o.approved, false) = true
-            AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
-            AND o.issue_uid = jc.issue_uid
-            AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
-        ), 0)::float8 AS out_total_qty
-    ) jc_out ON true`;
+/** Match approved out-entry rows to a job-card line. */
+const JC_OUT_MATCH = `
+  o.is_deleted = false
+  AND o.approved = true
+  AND o.issue_uid = jc.issue_uid
+  AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
+`;
 
-const JC_ISSUE_QTY_DISPLAY_SQL = `CASE
-  WHEN COALESCE(jc_out.out_coil_count, 0) > 0 THEN jc_out.out_total_qty
-  ELSE jc.issue_qty
-END`;
+/** Per JC: scanned coil count + approved job_card total_qty. */
+const JC_OUT_STATS_LATERAL = `
+LEFT JOIN LATERAL (
+  SELECT
+    (
+      SELECT COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int
+      FROM ${OUT_ENTRY} o
+      JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
+      WHERE ${JC_OUT_MATCH}
+    ) AS out_coil_count,
+    COALESCE((
+      SELECT SUM(o.total_qty)::float8
+      FROM ${OUT_ENTRY} o
+      WHERE ${JC_OUT_MATCH}
+        AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
+    ), 0)::float8 AS out_total_qty
+) jc_out ON true`;
+
+/** After store-out: show out qty/count; else JC issue_qty / coils JSON length. */
+const JC_ISSUE_QTY_DISPLAY_SQL = `CASE WHEN COALESCE(jc_out.out_coil_count, 0) > 0 THEN jc_out.out_total_qty ELSE jc.issue_qty END`;
+/** Coil count from JC coils JSON — MRN quotas (`coil_count`) or legacy UID rows. */
+const JC_COIL_COUNT_SQL = `COALESCE((
+  SELECT SUM(
+    CASE
+      WHEN NULLIF(TRIM(e.elem->>'mrn_uid'), '') IS NOT NULL
+           AND COALESCE((e.elem->>'coil_count')::int, 0) > 0
+        THEN (e.elem->>'coil_count')::int
+      WHEN NULLIF(TRIM(e.elem->>'coil_no_uid'), '') IS NOT NULL THEN 1
+      ELSE 0
+    END
+  )::int
+  FROM jsonb_array_elements(
+    CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
+  ) AS e(elem)
+), 0)::int`;
+const JC_COIL_COUNT_DISPLAY_SQL = `CASE WHEN COALESCE(jc_out.out_coil_count, 0) > 0 THEN jc_out.out_coil_count ELSE ${JC_COIL_COUNT_SQL} END`;
 
 const MASTER_COLUMNS = `
   r.issue_uid,
   r.shift,
   r.remarks,
-  r.requested_qty,
   r.coil_count,
   r.out_entry_locked,
   r.out_entry_locked_by,
@@ -60,94 +75,58 @@ const MASTER_COLUMNS = `
   r.updated_at
 `;
 
-/** Aggregate job-card rows for master list / get-by-id (replaces legacy master JSONB). */
+/** Aggregate job-card rows for master list / get-by-id. */
 const JC_AGG_JOIN = `
-  LEFT JOIN LATERAL (
-    SELECT
-      COALESCE(jsonb_agg(
-        jsonb_build_object(
-          'pjobcardno', jc.pjobcardno,
-          'issue_qty', ${JC_ISSUE_QTY_DISPLAY_SQL},
-          'planqty', jc.planqty,
-          'macname', jc.macname,
-          'pldt', jc.pldt,
-          'item_code', jc.item_code,
-          'item_desc', jc.item_desc,
-          'rm_item_code', jc.rm_item_code,
-          'rm_item_desc', jc.rm_item_desc,
-          'part_weight', jc.part_weight,
-          'rm_weight', jc.rm_weight
-        ) ORDER BY jc.id
-      ), '[]'::jsonb) AS job_cards,
-      COALESCE(SUM((${JC_ISSUE_QTY_DISPLAY_SQL})), 0)::float8 AS job_cards_issue_qty_sum,
-      COALESCE(SUM(
-        CASE
-          WHEN COALESCE(jc_out.out_coil_count, 0) > 0 THEN jc_out.out_coil_count
-          ELSE jc.coil_count
-        END
-      ), 0)::int AS job_cards_coil_count_sum,
-      (array_agg(jc.item_code ORDER BY jc.id))[1] AS item_code,
-      (array_agg(jc.item_desc ORDER BY jc.id))[1] AS item_desc,
-      (array_agg(jc.rm_item_code ORDER BY jc.id))[1] AS rm_item_code,
-      (array_agg(jc.rm_item_desc ORDER BY jc.id))[1] AS rm_item_desc,
-      (array_agg(jc.production_id ORDER BY jc.id))[1] AS production_id,
-      (array_agg(jc.part_weight ORDER BY jc.id))[1] AS part_weight,
-      (array_agg(jc.rm_weight ORDER BY jc.id))[1] AS rm_weight
-    FROM ${JC_TABLE} jc
-    ${JC_OUT_STATS_LATERAL}
-    WHERE jc.issue_uid = r.issue_uid AND jc.is_deleted = false
-  ) jc_agg ON true
+LEFT JOIN LATERAL (
+  SELECT
+    COALESCE(jsonb_agg(
+      jsonb_build_object(
+        'pjobcardno', jc.pjobcardno,
+        'issue_qty', ${JC_ISSUE_QTY_DISPLAY_SQL},
+        'planqty', jc.planqty,
+        'macname', jc.macname,
+        'pldt', jc.pldt,
+        'item_code', jc.item_code,
+        'item_desc', jc.item_desc,
+        'rm_item_code', jc.rm_item_code,
+        'rm_item_desc', jc.rm_item_desc,
+        'part_weight', jc.part_weight,
+        'rm_weight', jc.rm_weight
+      ) ORDER BY jc.id
+    ), '[]'::jsonb) AS job_cards,
+    COALESCE(SUM((${JC_ISSUE_QTY_DISPLAY_SQL})), 0)::float8 AS job_cards_issue_qty_sum,
+    COALESCE(SUM((${JC_COIL_COUNT_DISPLAY_SQL})), 0)::int AS job_cards_coil_count_sum,
+    (array_agg(jc.item_code ORDER BY jc.id))[1] AS item_code,
+    (array_agg(jc.item_desc ORDER BY jc.id))[1] AS item_desc,
+    (array_agg(jc.rm_item_code ORDER BY jc.id))[1] AS rm_item_code,
+    (array_agg(jc.rm_item_desc ORDER BY jc.id))[1] AS rm_item_desc,
+    (array_agg(jc.part_weight ORDER BY jc.id))[1] AS part_weight,
+    (array_agg(jc.rm_weight ORDER BY jc.id))[1] AS rm_weight
+  FROM ${JC_TABLE} jc
+  ${JC_OUT_STATS_LATERAL}
+  WHERE jc.issue_uid = r.issue_uid AND jc.is_deleted = false
+) jc_agg ON true
 `;
 
+/** Master-level store-out completeness (issue-wide). */
 const MASTER_STORE_OUT_JOIN = `
-  LEFT JOIN LATERAL (
-    SELECT
-      COUNT(*) FILTER (WHERE TRIM(c.coil->>'coil_no_uid') <> '')::int AS assigned_coil_count,
-      (
-        SELECT COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int
-        FROM ${OUT_ENTRY} o
-        INNER JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid
-        WHERE o.is_deleted = false
-          AND o.approved = true
-          AND o.issue_uid = r.issue_uid
-      ) AS out_coil_count
-    FROM ${JC_TABLE} jc
-    CROSS JOIN LATERAL jsonb_array_elements(
-      CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
-    ) AS c(coil)
-    WHERE jc.issue_uid = r.issue_uid AND jc.is_deleted = false
-  ) st ON true
+LEFT JOIN LATERAL (
+  SELECT
+    COALESCE(SUM(${JC_COIL_COUNT_SQL}), 0)::int AS assigned_coil_count,
+    (
+      SELECT COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int
+      FROM ${OUT_ENTRY} o
+      JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
+      WHERE o.is_deleted = false
+        AND o.approved = true
+        AND o.issue_uid = r.issue_uid
+    ) AS out_coil_count
+  FROM ${JC_TABLE} jc
+  WHERE jc.issue_uid = r.issue_uid AND jc.is_deleted = false
+) st ON true
 `;
 
-const JC_STORE_OUT_JOIN = `
-  LEFT JOIN LATERAL (
-    SELECT
-      COUNT(*) FILTER (WHERE TRIM(c.coil->>'coil_no_uid') <> '')::int AS assigned_coil_count,
-      (
-        SELECT COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int
-        FROM ${OUT_ENTRY} o
-        INNER JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid
-        WHERE o.is_deleted = false
-          AND o.approved = true
-          AND o.issue_uid = jc.issue_uid
-          AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
-      ) AS out_coil_count,
-      (
-        SELECT COALESCE(SUM(o.total_qty), 0)::float8
-        FROM ${OUT_ENTRY} o
-        WHERE o.is_deleted = false
-          AND COALESCE(o.approved, false) = true
-          AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
-          AND o.issue_uid = jc.issue_uid
-          AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
-      ) AS out_qty
-    FROM jsonb_array_elements(
-      CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
-    ) AS c(coil)
-  ) jst ON true
-`;
-
-function applyIssueRequestListFilters(filters = {}, conditions, values, { iRef, statsAlias = "st" } = {}) {
+function applyIssueRequestListFilters(filters = {}, conditions, values, { iRef, statsAlias = "st", assignedSql = null } = {}) {
   let i = iRef.value;
 
   if (filters.approved !== undefined && filters.approved !== null && filters.approved !== "") {
@@ -166,14 +145,12 @@ function applyIssueRequestListFilters(filters = {}, conditions, values, { iRef, 
     const locked = filters.out_entry_locked === true || filters.out_entry_locked === "true";
     conditions.push(`COALESCE(r.out_entry_locked, false) = ${locked ? "true" : "false"}`);
   }
+  const assigned = assignedSql || `COALESCE(${statsAlias}.assigned_coil_count, 0)`;
+  const outCount = `COALESCE(${statsAlias}.out_coil_count, 0)`;
   if (filters.out_entry_complete === true || filters.out_entry_complete === "true") {
-    conditions.push(
-      `(COALESCE(${statsAlias}.assigned_coil_count, 0) > 0 AND COALESCE(${statsAlias}.out_coil_count, 0) >= COALESCE(${statsAlias}.assigned_coil_count, 0))`
-    );
+    conditions.push(`(${assigned} > 0 AND ${outCount} >= ${assigned})`);
   } else if (filters.out_entry_complete === false || filters.out_entry_complete === "false") {
-    conditions.push(
-      `NOT (COALESCE(${statsAlias}.assigned_coil_count, 0) > 0 AND COALESCE(${statsAlias}.out_coil_count, 0) >= COALESCE(${statsAlias}.assigned_coil_count, 0))`
-    );
+    conditions.push(`NOT (${assigned} > 0 AND ${outCount} >= ${assigned})`);
   }
 
   iRef.value = i;
@@ -200,7 +177,7 @@ function mapMasterRow(row) {
   return {
     ...row,
     job_cards: normalizeJsonArray(row.job_cards),
-    requested_qty: Number.isFinite(qtyDisplay) ? qtyDisplay : Number(row.requested_qty) || 0,
+    requested_qty: Number.isFinite(qtyDisplay) ? qtyDisplay : 0,
     coil_count: Number.isFinite(coilDisplay) ? coilDisplay : Number(row.coil_count) || 0,
   };
 }
@@ -262,7 +239,6 @@ export const findIssueRequests = async (options = {}) => {
             jc_agg.item_desc,
             jc_agg.rm_item_code,
             jc_agg.rm_item_desc,
-            jc_agg.production_id,
             jc_agg.part_weight,
             jc_agg.rm_weight,
             jc_agg.job_cards_issue_qty_sum,
@@ -298,7 +274,11 @@ export const findIssueRequestJobCardRows = async (options = {}) => {
     conditions.push(`r.created_at >= CURRENT_DATE - INTERVAL '${permission.can_view_days - 1} days'`);
   }
 
-  applyIssueRequestListFilters(filters, conditions, values, { iRef, statsAlias: "jst" });
+  applyIssueRequestListFilters(filters, conditions, values, {
+    iRef,
+    statsAlias: "jc_out",
+    assignedSql: JC_COIL_COUNT_SQL,
+  });
   let i = iRef.value;
 
   if (search) {
@@ -321,7 +301,7 @@ export const findIssueRequestJobCardRows = async (options = {}) => {
   const fromClause = `
      FROM ${TABLE} r
      INNER JOIN ${JC_TABLE} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
-     ${JC_STORE_OUT_JOIN}`;
+     ${JC_OUT_STATS_LATERAL}`;
 
   const countRes = await dbQuery(`SELECT COUNT(*) AS count ${fromClause} ${where}`, values);
   const total = Number(countRes[0]?.count || 0);
@@ -340,18 +320,11 @@ export const findIssueRequestJobCardRows = async (options = {}) => {
        jc.item_desc,
        jc.rm_item_code,
        jc.rm_item_desc,
-       jc.production_id,
        jc.planqty::float8 AS planqty,
-       CASE
-         WHEN COALESCE(jst.out_coil_count, 0) > 0 THEN jst.out_qty
-         ELSE jc.issue_qty
-       END::float8 AS issue_qty,
+       (${JC_ISSUE_QTY_DISPLAY_SQL})::float8 AS issue_qty,
        jc.part_weight::float8 AS part_weight,
        jc.rm_weight::float8 AS rm_weight,
-       CASE
-         WHEN COALESCE(jst.out_coil_count, 0) > 0 THEN jst.out_coil_count
-         ELSE jc.coil_count
-       END AS coil_count,
+       (${JC_COIL_COUNT_DISPLAY_SQL}) AS coil_count,
        r.shift,
        r.approved,
        r.remarks,
@@ -364,10 +337,10 @@ export const findIssueRequestJobCardRows = async (options = {}) => {
        r.updated_by AS updated_by_name,
        r.approved_by AS approved_by_name,
        r.out_entry_locked_by AS out_entry_locked_by_name,
-       COALESCE(jst.assigned_coil_count, 0)::int AS assigned_coil_count,
-       COALESCE(jst.out_coil_count, 0)::int AS store_out_coil_count,
-       (COALESCE(jst.assigned_coil_count, 0) > 0
-         AND COALESCE(jst.out_coil_count, 0) >= COALESCE(jst.assigned_coil_count, 0)) AS out_entry_complete
+       ${JC_COIL_COUNT_SQL} AS assigned_coil_count,
+       COALESCE(jc_out.out_coil_count, 0)::int AS store_out_coil_count,
+       (${JC_COIL_COUNT_SQL} > 0
+         AND COALESCE(jc_out.out_coil_count, 0) >= ${JC_COIL_COUNT_SQL}) AS out_entry_complete
      ${fromClause}
      ${where}
      ORDER BY r.issue_uid DESC, jc.pjobcardno ASC
@@ -391,7 +364,6 @@ export const findIssueRequest = async (issue_uid) => {
             jc_agg.item_desc,
             jc_agg.rm_item_code,
             jc_agg.rm_item_desc,
-            jc_agg.production_id,
             jc_agg.part_weight,
             jc_agg.rm_weight,
             jc_agg.job_cards_issue_qty_sum,
@@ -405,31 +377,166 @@ export const findIssueRequest = async (issue_uid) => {
   return mapMasterRow(row) ?? null;
 };
 
+/** Expand MRN-quota JSON (or legacy UID rows) to coil rows for API/edit UI. */
+async function expandJcCoilsForApi(rawCoils = [], { pjobcardno = null, issue_uid = null } = {}) {
+  const list = normalizeJsonArray(rawCoils);
+  const legacy = [];
+  const quotas = [];
+  for (const c of list) {
+    const uid = String(c?.coil_no_uid || "").trim();
+    if (uid) {
+      legacy.push({
+        coil_no_uid: uid,
+        qty: c?.qty ?? 0,
+        mrn_uid: c?.mrn_uid ?? null,
+        pjobcardno,
+        issue_uid,
+      });
+      continue;
+    }
+    const mrn_uid = String(c?.mrn_uid || "").trim();
+    const count = Math.max(0, Math.floor(Number(c?.coil_count) || 0));
+    if (mrn_uid && count > 0) quotas.push({ mrn_uid, coil_count: count, qty: Number(c?.qty) || 0 });
+  }
+  if (!quotas.length) return enrichCoilsFromMaster(legacy);
+
+  const mrnIds = [...new Set(quotas.map((q) => q.mrn_uid))];
+  const live = await dbQuery(
+    `SELECT c.coil_no_uid, c.mrn_uid, c.qty, c.location_id, c.created_at, c.coil_uid,
+            m.mrn_no, m.heat_no, m.item_code, m.acc_name
+     FROM ${COIL} c
+     LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+     WHERE COALESCE(c.status, 'active') = 'active'
+       AND c.mrn_uid = ANY($1::text[])
+     ORDER BY
+       CASE WHEN c.location_id IS NULL THEN 1 ELSE 0 END ASC,
+       c.created_at ASC NULLS LAST,
+       c.coil_uid ASC NULLS LAST,
+       c.coil_no_uid ASC`,
+    [mrnIds]
+  );
+  const byMrn = new Map();
+  for (const row of live || []) {
+    const m = String(row.mrn_uid || "").trim();
+    if (!byMrn.has(m)) byMrn.set(m, []);
+    byMrn.get(m).push(row);
+  }
+  const used = new Set(legacy.map((c) => String(c.coil_no_uid).toLowerCase()));
+  const expanded = [...legacy];
+  for (const q of quotas) {
+    let need = q.coil_count;
+    for (const row of byMrn.get(q.mrn_uid) || []) {
+      if (need <= 0) break;
+      const key = String(row.coil_no_uid || "").toLowerCase();
+      if (!key || used.has(key)) continue;
+      used.add(key);
+      expanded.push({
+        coil_no_uid: row.coil_no_uid,
+        qty: row.qty ?? 0,
+        mrn_uid: row.mrn_uid,
+        mrn_no: row.mrn_no,
+        heat_no: row.heat_no,
+        item_code: row.item_code,
+        acc_name: row.acc_name,
+        location_id: row.location_id,
+        created_at: row.created_at,
+        coil_uid: row.coil_uid,
+        pjobcardno,
+        issue_uid,
+      });
+      need -= 1;
+    }
+  }
+  return enrichCoilsFromMaster(expanded);
+}
+
 export const findIssueRequestCoils = async (issue_uid) => {
   const rows = await findActiveJobCardsByIssueUid(issue_uid);
   const id = Number(issue_uid);
-  const flat = [];
+  const outByJc = await findApprovedJobCardStoreOutCoilsByIssue(id);
+  const all = [];
   for (const jc of rows) {
-    for (const c of normalizeJsonArray(jc.coils)) {
-      const coil_no_uid = String(c?.coil_no_uid || "").trim();
-      if (!coil_no_uid) continue;
-      flat.push({
-        coil_no_uid,
-        qty: c?.qty ?? 0,
-        mrn_uid: c?.mrn_uid ?? null,
-        mrn_no: c?.mrn_no ?? null,
-        pjobcardno: jc.pjobcardno ?? c?.pjobcardno ?? null,
-        issue_uid: id,
-      });
+    const jcKey = String(jc.pjobcardno || "").trim().toUpperCase();
+    const outCoils = outByJc.get(jcKey);
+    if (outCoils?.length) {
+      all.push(...outCoils);
+      continue;
     }
+    const expanded = await expandJcCoilsForApi(jc.coils, {
+      pjobcardno: jc.pjobcardno ?? null,
+      issue_uid: id,
+    });
+    all.push(...expanded);
   }
-  return enrichCoilsFromMaster(flat);
+  return all;
 };
 
+/**
+ * After job-card store-out is approved, live coils are no longer `active`.
+ * Print / view must use the out-entry scanned snapshot (actual sent qty + MRN).
+ * @returns {Promise<Map<string, object[]>>} UPPER(pjobcardno) → coil rows
+ */
+export async function findApprovedJobCardStoreOutCoilsByIssue(issue_uid) {
+  const id = Number(issue_uid);
+  if (!Number.isFinite(id)) return new Map();
+
+  const rows = await dbQuery(
+    `SELECT
+       UPPER(TRIM(COALESCE(o.pjobcardno, ''))) AS jc_key,
+       TRIM(o.pjobcardno) AS pjobcardno,
+       TRIM(s.coil_no_uid) AS coil_no_uid,
+       COALESCE(s.qty, c.qty, 0)::float8 AS qty,
+       c.mrn_uid,
+       m.mrn_no,
+       m.heat_no,
+       m.item_code,
+       m.acc_name,
+       c.location_id,
+       c.created_at,
+       c.coil_uid
+     FROM ${OUT_ENTRY} o
+     JOIN ${OUT_SCANNED} s
+       ON s.out_uid = o.out_uid AND TRIM(COALESCE(s.coil_no_uid, '')) <> ''
+     LEFT JOIN ${COIL} c
+       ON c.coil_no_uid = s.coil_no_uid
+     LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+     WHERE o.is_deleted = false
+       AND o.approved = true
+       AND o.issue_uid = $1
+       AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
+     ORDER BY o.out_uid ASC, s.created_at ASC NULLS LAST, s.coil_no_uid ASC`,
+    [id]
+  );
+
+  const map = new Map();
+  for (const r of rows || []) {
+    const key = String(r.jc_key || "").trim();
+    if (!key) continue;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push({
+      coil_no_uid: r.coil_no_uid,
+      qty: r.qty ?? 0,
+      mrn_uid: r.mrn_uid ?? null,
+      mrn_no: r.mrn_no ?? null,
+      heat_no: r.heat_no ?? null,
+      item_code: r.item_code ?? null,
+      acc_name: r.acc_name ?? null,
+      location_id: r.location_id ?? null,
+      created_at: r.created_at ?? null,
+      coil_uid: r.coil_uid ?? null,
+      pjobcardno: r.pjobcardno ?? null,
+      issue_uid: id,
+    });
+  }
+  return map;
+}
+
 export const findIssueRequestJobCards = async (issue_uid) => {
-  const [header, rows] = await Promise.all([
-    findIssueRequest(issue_uid),
-    findActiveJobCardsByIssueUid(issue_uid),
+  const id = Number(issue_uid);
+  const [header, rows, outByJc] = await Promise.all([
+    findIssueRequest(id),
+    findActiveJobCardsByIssueUid(id),
+    findApprovedJobCardStoreOutCoilsByIssue(id),
   ]);
   const qtyByJc = new Map(
     (header?.job_cards || []).map((j) => [
@@ -437,27 +544,30 @@ export const findIssueRequestJobCards = async (issue_uid) => {
       Number(j?.issue_qty),
     ])
   );
-  const mapped = rows
-    .map((row) => {
-      const api = jobCardRowToApi(row);
-      if (!api) return null;
-      const q = qtyByJc.get(String(api.pjobcardno || "").trim().toUpperCase());
-      if (Number.isFinite(q)) api.issue_qty = q;
-      return api;
-    })
-    .filter(Boolean);
-  const allCoils = mapped.flatMap((jc) => jc.coils || []);
-  const enriched = await enrichCoilsFromMaster(allCoils);
-  const byUid = new Map(
-    enriched.map((c) => [String(c.coil_no_uid || "").toLowerCase(), c])
-  );
-  return mapped.map((jc) => ({
-    ...jc,
-    coils: (jc.coils || []).map((c) => {
-      const hit = byUid.get(String(c?.coil_no_uid || "").toLowerCase());
-      return hit || c;
-    }),
-  }));
+  const mapped = [];
+  for (const row of rows) {
+    const api = jobCardRowToApi(row);
+    if (!api) continue;
+    api.reserved_issue_qty = Number(row.issue_qty) || 0;
+    const jcKey = String(api.pjobcardno || "").trim().toUpperCase();
+    const q = qtyByJc.get(jcKey);
+    if (Number.isFinite(q)) api.issue_qty = q;
+    const outCoils = outByJc.get(jcKey);
+    if (outCoils?.length) {
+      api.coils = outCoils;
+      api.coil_count = outCoils.length;
+      api.store_out_complete = true;
+    } else {
+      api.coils = await expandJcCoilsForApi(row.coils, {
+        pjobcardno: api.pjobcardno,
+        issue_uid: id,
+      });
+      api.coil_count = api.coils.length || coilCountFromCoilsJson(row.coils);
+      api.store_out_complete = false;
+    }
+    mapped.push(api);
+  }
+  return mapped;
 };
 
 async function enrichCoilsFromMaster(coils = []) {
@@ -472,11 +582,11 @@ async function enrichCoilsFromMaster(coils = []) {
   if (!need.length) return list;
 
   const rows = await dbQuery(
-    `SELECT c.coil_no_uid, c.mrn_uid, m.mrn_no, m.heat_no, m.item_code, m.acc_name, c.location_id, c.created_at, c.coil_uid
+    `SELECT c.coil_no_uid, c.mrn_uid, m.mrn_no, m.heat_no, m.item_code, m.acc_name,
+            c.location_id, c.created_at, c.coil_uid
      FROM ${COIL} c
      LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
-     WHERE c.is_deleted = false
-       AND LOWER(TRIM(c.coil_no_uid)) = ANY($1::text[])`,
+     WHERE LOWER(TRIM(c.coil_no_uid)) = ANY($1::text[])`,
     [need]
   );
   const byUid = new Map(
@@ -487,16 +597,18 @@ async function enrichCoilsFromMaster(coils = []) {
     const full = byUid.get(String(c?.coil_no_uid || "").toLowerCase());
     if (!full) return c;
     return {
-      ...c,
+      coil_no_uid: c.coil_no_uid,
       qty: c.qty ?? 0,
-      mrn_uid: c.mrn_uid || full.mrn_uid || null,
-      mrn_no: c.mrn_no ?? full.mrn_no ?? null,
-      heat_no: c.heat_no || full.heat_no || null,
-      item_code: c.item_code || full.item_code || null,
-      acc_name: c.acc_name || full.acc_name || null,
-      location_id: c.location_id ?? full.location_id ?? null,
-      created_at: c.created_at || full.created_at || null,
-      coil_uid: c.coil_uid ?? full.coil_uid ?? null,
+      mrn_uid: full.mrn_uid ?? c.mrn_uid ?? null,
+      mrn_no: full.mrn_no ?? null,
+      heat_no: full.heat_no ?? null,
+      item_code: full.item_code ?? null,
+      acc_name: full.acc_name ?? null,
+      location_id: full.location_id ?? null,
+      created_at: full.created_at ?? null,
+      coil_uid: full.coil_uid ?? null,
+      ...(c.pjobcardno != null ? { pjobcardno: c.pjobcardno } : {}),
+      ...(c.issue_uid != null ? { issue_uid: c.issue_uid } : {}),
     };
   });
 }
@@ -525,43 +637,13 @@ export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid
 
   return dbQuery(
     `SELECT UPPER(TRIM(jc.pjobcardno)) AS pjobcardno,
-            COALESCE(SUM(
-              CASE
-                WHEN COALESCE(out_act.out_coil_count, 0) > 0 THEN out_act.out_total_qty
-                ELSE jc.issue_qty
-              END
-            ), 0)::float8 AS issued_qty,
-            COALESCE(SUM(
-              CASE
-                WHEN COALESCE(out_act.out_coil_count, 0) > 0 THEN out_act.out_total_qty
-                ELSE jc.issue_qty
-              END
-            ) FILTER (WHERE r.approved = true), 0)::float8 AS approved_qty,
+            COALESCE(SUM((${JC_ISSUE_QTY_DISPLAY_SQL})), 0)::float8 AS issued_qty,
+            COALESCE(SUM((${JC_ISSUE_QTY_DISPLAY_SQL})) FILTER (WHERE r.approved = true), 0)::float8 AS approved_qty,
             COUNT(*)::int AS request_count,
             MAX(r.issue_uid)::int AS last_issue_uid
      FROM ${TABLE} r
      INNER JOIN ${JC_TABLE} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
-     LEFT JOIN LATERAL (
-       SELECT
-         (
-           SELECT COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int
-           FROM ${OUT_ENTRY} o
-           INNER JOIN ${OUT_SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
-           WHERE o.is_deleted = false
-             AND COALESCE(o.approved, false) = true
-             AND o.issue_uid = jc.issue_uid
-             AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
-         ) AS out_coil_count,
-         COALESCE((
-           SELECT SUM(o.total_qty)::float8
-           FROM ${OUT_ENTRY} o
-           WHERE o.is_deleted = false
-             AND COALESCE(o.approved, false) = true
-             AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
-             AND o.issue_uid = jc.issue_uid
-             AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
-         ), 0)::float8 AS out_total_qty
-     ) out_act ON true
+     ${JC_OUT_STATS_LATERAL}
      WHERE r.is_deleted = false
        ${excludeClause}
        AND UPPER(TRIM(jc.pjobcardno)) = ANY($1::text[])
@@ -669,8 +751,7 @@ export const findMachineShopFloorJobCardConflicts = async (assignments = []) => 
        INNER JOIN req
          ON req.macname = UPPER(TRIM(jc.macname))
         AND req.pjobcardno <> UPPER(TRIM(jc.pjobcardno))
-       WHERE c.is_deleted = false
-         AND c.out_uid IS NOT NULL
+       WHERE c.out_uid IS NOT NULL
          AND LOWER(COALESCE(c.status, 'active')) = 'out'
          AND TRIM(COALESCE(jc.macname, '')) <> ''
          AND TRIM(COALESCE(jc.pjobcardno, '')) <> ''
@@ -712,8 +793,7 @@ export const findMachineShopFloorDifferentWireConflicts = async ({
       AND jc.is_deleted = false
       AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(COALESCE(o.pjobcardno, '')))
      LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
-     WHERE c.is_deleted = false
-       AND c.out_uid IS NOT NULL
+     WHERE c.out_uid IS NOT NULL
        AND LOWER(COALESCE(c.status, 'active')) = 'out'
        AND TRIM(COALESCE(jc.macname, '')) <> ''
        AND UPPER(TRIM(jc.macname)) = UPPER(TRIM($1))
@@ -758,9 +838,9 @@ function runSql(client, sql, params) {
 }
 
 /**
- * Coils reserved on issue requests (draft + approved).
- * Active from the moment IR is saved; released only after store-out authorize
- * (or when the IR is deleted). Edit excludes self via excludeIssueUid.
+ * Soft-reserved coil UIDs on open issue requests (no approved store-out for that JC).
+ * Legacy JSON: exact coil_no_uid.
+ * New JSON: MRN quotas → FIFO first N active coils on that MRN (capacity only; Store Out still any-in-MRN).
  */
 export const findReservedCoilsFromRequests = async ({
   excludeIssueUid = null,
@@ -774,19 +854,13 @@ export const findReservedCoilsFromRequests = async ({
     excludeClause = `AND r.issue_uid <> $1`;
   }
 
-  return runSql(
+  const jcRows = await runSql(
     client,
-    `SELECT LOWER(TRIM(c->>'coil_no_uid')) AS coil_no_uid,
-            r.issue_uid,
-            r.approved
+    `SELECT r.issue_uid, r.approved, jc.coils
      FROM ${TABLE} r
      INNER JOIN ${JC_TABLE} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
-     CROSS JOIN LATERAL jsonb_array_elements(
-       CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
-     ) AS c
      WHERE r.is_deleted = false
        ${excludeClause}
-       AND TRIM(c->>'coil_no_uid') <> ''
        AND NOT EXISTS (
          SELECT 1
          FROM ${OUT_ENTRY} o
@@ -797,19 +871,74 @@ export const findReservedCoilsFromRequests = async ({
        )`,
     values
   );
+
+  const reserved = [];
+  const quotas = [];
+  for (const row of jcRows || []) {
+    for (const c of normalizeJsonArray(row.coils)) {
+      const uid = String(c?.coil_no_uid || "").trim().toLowerCase();
+      if (uid) {
+        reserved.push({ coil_no_uid: uid, issue_uid: row.issue_uid, approved: row.approved });
+        continue;
+      }
+      const mrn_uid = String(c?.mrn_uid || "").trim();
+      const count = Math.max(0, Math.floor(Number(c?.coil_count) || 0));
+      if (mrn_uid && count > 0) {
+        quotas.push({
+          mrn_uid,
+          coil_count: count,
+          issue_uid: row.issue_uid,
+          approved: row.approved,
+        });
+      }
+    }
+  }
+  if (!quotas.length) return reserved;
+
+  const mrnIds = [...new Set(quotas.map((q) => q.mrn_uid))];
+  const live = await runSql(
+    client,
+    `SELECT LOWER(TRIM(c.coil_no_uid)) AS coil_no_uid, TRIM(c.mrn_uid) AS mrn_uid
+     FROM ${COIL} c
+     WHERE COALESCE(c.status, 'active') = 'active'
+       AND c.mrn_uid = ANY($1::text[])
+       AND TRIM(c.coil_no_uid) <> ''
+     ORDER BY
+       CASE WHEN c.location_id IS NULL THEN 1 ELSE 0 END ASC,
+       c.created_at ASC NULLS LAST,
+       c.coil_uid ASC NULLS LAST,
+       c.coil_no_uid ASC`,
+    [mrnIds]
+  );
+  const byMrn = new Map();
+  for (const row of live || []) {
+    if (!byMrn.has(row.mrn_uid)) byMrn.set(row.mrn_uid, []);
+    byMrn.get(row.mrn_uid).push(row.coil_no_uid);
+  }
+  const used = new Set(reserved.map((r) => r.coil_no_uid));
+  for (const q of quotas) {
+    let need = q.coil_count;
+    for (const uid of byMrn.get(q.mrn_uid) || []) {
+      if (need <= 0) break;
+      if (used.has(uid)) continue;
+      used.add(uid);
+      reserved.push({ coil_no_uid: uid, issue_uid: q.issue_uid, approved: q.approved });
+      need -= 1;
+    }
+  }
+  return reserved;
 };
 
 export const insertIssueRequest = async (data, { client = null } = {}) => {
   const rows = await runSql(
     client,
     `INSERT INTO ${TABLE}
-     (shift, remarks, requested_qty, coil_count, approved, approved_by, approved_at, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     (shift, remarks, coil_count, approved, approved_by, approved_at, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)
      RETURNING *`,
     [
       data.shift === "B" ? "B" : "A",
       data.remarks ?? null,
-      data.requested_qty ?? 0,
       data.coil_count ?? 0,
       data.approved === true,
       data.approved_by ?? null,
@@ -836,7 +965,7 @@ export const updateIssueRequest = async (issue_uid, fields = {}, { client = null
   }
 
   const allowed = [
-    "shift", "remarks", "requested_qty", "coil_count",
+    "shift", "remarks", "coil_count",
     "approved", "approved_by", "approved_at", "updated_by", "updated_at",
   ];
   const safe = {};

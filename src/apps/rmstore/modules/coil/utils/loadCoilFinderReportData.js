@@ -178,7 +178,7 @@ async function loadStickerDocs(coil) {
             label: "Test Certificate",
             sub: "From MRN entry",
             path: m.tc_file_path,
-            name: m.tc_file_name,
+            name: null,
             kind: "tc",
           })
         );
@@ -188,7 +188,7 @@ async function loadStickerDocs(coil) {
             label: "Raw Material Test Certificate",
             sub: "From MRN entry",
             path: m.rmtc_file_path,
-            name: m.rmtc_file_name,
+            name: null,
             kind: "rmtc",
           })
         );

@@ -242,8 +242,7 @@ export async function sumPendingAddQtyForMrn(mrn_uid, excludeAdjustmentId = null
        AND NOT EXISTS (
          SELECT 1
          FROM ${T.COIL_TABLE} c
-         WHERE c.is_deleted = false
-           AND c.sa_id = s.adjustment_id
+         WHERE c.sa_id = s.adjustment_id
            AND LOWER(COALESCE(c.sa_entry_type, 'stock_in')) = 'stock_in'
        )
        ${exclude}`,
@@ -264,8 +263,7 @@ export async function findPendingAddAdjustmentsWithoutCoils(limit = 100) {
        AND NOT EXISTS (
          SELECT 1
          FROM ${T.COIL_TABLE} c
-         WHERE c.is_deleted = false
-           AND c.sa_id = s.adjustment_id
+         WHERE c.sa_id = s.adjustment_id
            AND LOWER(COALESCE(c.sa_entry_type, 'stock_in')) = 'stock_in'
        )
      ORDER BY s.adjustment_id ASC

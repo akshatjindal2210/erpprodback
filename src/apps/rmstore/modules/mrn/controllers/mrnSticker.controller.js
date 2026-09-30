@@ -32,7 +32,7 @@ function mapBodyToMrn(body = {}) {
   return {
     uid: body.uid != null ? String(body.uid) : null,
     mrn_no: body.mrnno ?? body.mrn_no ?? null,
-    serial_no: body.itsrno ?? body.serial_no ?? null,
+    serial_no: body.itsrno ?? body.serial_no ?? null, // ERP only — not stored on rmstore_mrn
     mrn_dt: body.mrndt ?? body.mrn_dt ?? null,
     bill_no: body.billno ?? body.bill_no ?? null,
     bill_dt: body.billdt ?? body.bill_dt ?? null,
@@ -41,8 +41,10 @@ function mapBodyToMrn(body = {}) {
     item_dcode: body.itemdcode ?? body.item_dcode ?? null,
     item_code: body.itemcode ?? body.item_code ?? null,
     item_desc: body.itemdesc ?? body.item_desc ?? null,
-    it_recp_qty: body.itrecpqty ?? body.it_recp_qty ?? null,
-    it_lot_no: body.itLotNo ?? body.itlotno ?? body.it_lot_no ?? null,
+    qty: body.itrecpqty ?? body.it_recp_qty ?? body.qty ?? null,
+    it_recp_qty: body.itrecpqty ?? body.it_recp_qty ?? body.qty ?? null,
+    coil_no: body.itLotNo ?? body.itlotno ?? body.it_lot_no ?? body.coil_no ?? null,
+    it_lot_no: body.itLotNo ?? body.itlotno ?? body.it_lot_no ?? body.coil_no ?? null,
     it_unit: body.itunit ?? body.it_unit ?? null,
     fyid: body.fyid ?? null,
     internal_create_user: userc != null && String(userc).trim() !== "" ? String(userc).trim() : null,
@@ -134,19 +136,26 @@ export const getMrnDetail = async (req, res) => {
       success: true,
       data: {
         ...mrn,
-        itLotNo: mrn.it_lot_no ?? null,
+        qty: mrn.qty ?? mrn.it_recp_qty ?? null,
+        it_recp_qty: mrn.qty ?? mrn.it_recp_qty ?? null,
+        coil_no: mrn.coil_no ?? mrn.it_lot_no ?? null,
+        it_lot_no: mrn.coil_no ?? mrn.it_lot_no ?? null,
+        itLotNo: mrn.coil_no ?? mrn.it_lot_no ?? null,
         userc: mrn.internal_create_user ?? null,
         datec: mrn.internal_create_date ?? null,
         coils: coils.data || [],
+        sticker_status: mrn.sticker_status ?? null,
+        sticker_by: mrn.sticker_by ?? null,
+        sticker_at: mrn.sticker_at ?? null,
         sticker_generated: !!mrn.sticker_generated,
-        sticker_approved: mrn.sticker_approved === true || (mrn.sticker_generated && mrn.sticker_approved !== false),
+        sticker_approved: mrn.sticker_approved === true,
         sticker_approved_by: mrn.sticker_approved_by ?? null,
         sticker_approved_at: mrn.sticker_approved_at ?? null,
         sticker_rejected: mrn.sticker_rejected === true,
         status: mrn.sticker_rejected
           ? "reject"
           : !mrn.sticker_generated
-            ? "pending"
+            ? (parseDraftObj(mrn.sticker_draft) ? "draft" : "pending")
             : mrn.sticker_approved === false
               ? "generate"
               : "approved",
@@ -155,7 +164,6 @@ export const getMrnDetail = async (req, res) => {
         coil_count: (coils.data || []).length,
         qty_editable,
         qty_auto_calc,
-        // Master-level mode only. Legacy generated rows with null mode were coil-wise.
         sticker_mode: mrn?.sticker_mode || (mrn?.sticker_generated ? "coil" : sticker_mode),
       },
     });
@@ -199,7 +207,7 @@ export const generateMrnStickers = async (req, res) => {
       });
     }
 
-    const preBudget = await computeMrnQtyBudget(uid, { receiptQty: mrn.it_recp_qty });
+    const preBudget = await computeMrnQtyBudget(uid, { receiptQty: mrn.qty ?? mrn.it_recp_qty });
     if (preBudget.remaining_qty <= QTY_EPS) {
       return res.status(400).json({
         success: false,
@@ -231,7 +239,7 @@ export const generateMrnStickers = async (req, res) => {
       }
     }
 
-    const originalQty = Number(mrn.it_recp_qty);
+    const originalQty = Number(mrn.qty ?? mrn.it_recp_qty);
     const [qtyEditable, qtyAutoCalc, stickerMode] = await Promise.all([
       getMrnCoilQtyEditable(),
       getMrnCoilQtyAutoCalc(),
@@ -439,7 +447,7 @@ export const saveMrnStickerDraftCtrl = async (req, res) => {
     const total_qty =
       req.body?.total_qty != null && req.body.total_qty !== ""
         ? round3(Number(req.body.total_qty))
-        : round3(Number(mrn.it_recp_qty));
+        : round3(Number(mrn.qty ?? mrn.it_recp_qty));
 
     const draft = {
       heat_no: req.body?.heat_no != null ? String(req.body.heat_no).trim() : "",
@@ -473,8 +481,8 @@ export const saveMrnStickerDraftCtrl = async (req, res) => {
       total_qty: draft.total_qty,
       coil_qtys: draft.coil_qtys,
       remarks: draft.remarks || null,
-      tc_file_name: finalMrn?.tc_file_name ?? null,
-      rmtc_file_name: finalMrn?.rmtc_file_name ?? null,
+      tc_file_path: finalMrn?.tc_file_path ?? null,
+      rmtc_file_path: finalMrn?.rmtc_file_path ?? null,
       uploaded_tc: !!req.files?.tc?.[0],
       uploaded_rmtc: !!req.files?.rmtc?.[0],
       created_mrn_row: !!resolved.created,
@@ -486,12 +494,11 @@ export const saveMrnStickerDraftCtrl = async (req, res) => {
         uid,
         sticker_draft: draft,
         has_sticker_draft: true,
-        sticker_draft_at: finalMrn?.sticker_draft_at ?? saved?.sticker_draft_at ?? null,
-        sticker_draft_by: finalMrn?.sticker_draft_by ?? saved?.sticker_draft_by ?? null,
+        sticker_status: finalMrn?.sticker_status ?? saved?.sticker_status ?? "draft",
+        sticker_by: finalMrn?.sticker_by ?? saved?.sticker_by ?? null,
+        sticker_at: finalMrn?.sticker_at ?? saved?.sticker_at ?? null,
         tc_file_path: finalMrn?.tc_file_path ?? null,
-        tc_file_name: finalMrn?.tc_file_name ?? null,
         rmtc_file_path: finalMrn?.rmtc_file_path ?? null,
-        rmtc_file_name: finalMrn?.rmtc_file_name ?? null,
       },
       toast_type: "success",
       message: "Sticker draft saved successfully.",
@@ -547,11 +554,9 @@ async function mergeMrnDocUploads(req, uid, { requireBoth = false } = {}) {
   const docs = {};
   if (tcFile) {
     docs.tc_file_path = toRmPublicUploadPath(tcFile, "tc");
-    docs.tc_file_name = tcFile.originalname;
   }
   if (rmtcFile) {
     docs.rmtc_file_path = toRmPublicUploadPath(rmtcFile, "rmtc");
-    docs.rmtc_file_name = rmtcFile.originalname;
   }
 
   const updated = await updateMrnDocs(key, docs);
@@ -652,9 +657,12 @@ export const approveMrnStickers = async (req, res) => {
       success: true,
       data: {
         uid,
+        sticker_status: "approved",
         sticker_approved: true,
-        sticker_approved_by: approved.sticker_approved_by ?? user,
-        sticker_approved_at: approved.sticker_approved_at ?? null,
+        sticker_by: approved.sticker_by ?? user,
+        sticker_at: approved.sticker_at ?? null,
+        sticker_approved_by: approved.sticker_by ?? user,
+        sticker_approved_at: approved.sticker_at ?? null,
         status: "approved",
       },
       message: "Stickers approved successfully.",
@@ -705,7 +713,7 @@ export const rejectMrnPortal = async (req, res) => {
         ? round3(Number(req.body.total_qty))
         : draft?.total_qty != null && draft.total_qty !== ""
           ? round3(Number(draft.total_qty))
-          : round3(Number(mrn.it_recp_qty));
+          : round3(Number(mrn.qty ?? mrn.it_recp_qty));
 
     let coil_qtys = parseCoilQtys(req.body, coil_count);
     if (!coil_qtys && Array.isArray(draft?.coil_qtys) && draft.coil_qtys.length === coil_count) {
@@ -717,7 +725,7 @@ export const rejectMrnPortal = async (req, res) => {
 
     const totalQty = round3(coil_qtys.reduce((s, q) => s + Number(q), 0));
     const heat_no = String(
-      req.body?.heat_no ?? draft?.heat_no ?? mrn.heat_no ?? mrn.it_lot_no ?? ""
+      req.body?.heat_no ?? draft?.heat_no ?? mrn.heat_no ?? mrn.coil_no ?? mrn.it_lot_no ?? ""
     ).trim() || null;
 
     const user = auditUserName(req);
@@ -766,11 +774,14 @@ export const rejectMrnPortal = async (req, res) => {
       data: {
         uid,
         status: "reject",
+        sticker_status: "reject",
         qc_reject_uid: rejection.qc_reject_uid,
-        sticker_rejected_by: rejectedMrn?.sticker_rejected_by ?? user,
-        sticker_rejected_at: rejectedMrn?.sticker_rejected_at ?? rejectedAt,
+        sticker_by: rejectedMrn?.sticker_by ?? user,
+        sticker_at: rejectedMrn?.sticker_at ?? rejectedAt,
+        sticker_rejected_by: rejectedMrn?.sticker_by ?? user,
+        sticker_rejected_at: rejectedMrn?.sticker_at ?? rejectedAt,
       },
-      message: "MRN rejected and sent to RM Rejection register.",
+      message: "MRN rejected and queued in RM Rejection Pending (Awaiting Bill).",
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -899,15 +910,13 @@ export const uploadMrnDocs = async (req, res) => {
     const docs = {
       uid,
       tc_file_path: finalMrn.tc_file_path,
-      tc_file_name: finalMrn.tc_file_name,
       rmtc_file_path: finalMrn.rmtc_file_path,
-      rmtc_file_name: finalMrn.rmtc_file_name,
     };
 
     await log(req, "upload_docs", uid, {
       uid,
-      tc_file_name: docs.tc_file_name,
-      rmtc_file_name: docs.rmtc_file_name,
+      tc_file_path: docs.tc_file_path,
+      rmtc_file_path: docs.rmtc_file_path,
       uploaded_tc: !!req.files?.tc?.[0],
       uploaded_rmtc: !!req.files?.rmtc?.[0],
     }, docs);

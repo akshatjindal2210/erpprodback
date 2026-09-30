@@ -5,7 +5,6 @@ import { coilQcJoinForAlias } from "../../../../lib/utils/coilQcStatusSql.js";
 /** Physical in-store coils at this RM location (matches inventory report IN_STORE bucket). */
 const COIL_IN_STORE_WHERE = `
   c.location_id = $1
-  AND c.is_deleted = false
   AND LOWER(TRIM(COALESCE(c.status, 'active'))) NOT IN ('out', 'consumed')
   AND c.out_uid IS NULL
   AND LOWER(TRIM(COALESCE(c.status, 'active'))) <> 'consumed'
@@ -27,7 +26,7 @@ const SNAPSHOT_SQL = `
     m.item_desc,
     m.acc_code,
     NULLIF(TRIM(m.acc_name), '') AS acc_name,
-    COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.it_lot_no), '')) AS heat_no
+    COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.coil_no), '')) AS heat_no
   FROM ${T.COIL_TABLE} c
   LEFT JOIN ${T.MRN} m ON m.mrn_uid = c.mrn_uid AND m.is_deleted = false
   ${coilQcJoinForAlias("c", "q")}
@@ -51,14 +50,13 @@ const COIL_DETAIL_BY_UID_SQL = `
     m.item_desc,
     m.acc_code,
     NULLIF(TRIM(m.acc_name), '') AS acc_name,
-    COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.it_lot_no), '')) AS heat_no,
+    COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.coil_no), '')) AS heat_no,
     COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no
   FROM ${T.COIL_TABLE} c
   LEFT JOIN ${T.MRN} m ON m.mrn_uid = c.mrn_uid AND m.is_deleted = false
   LEFT JOIN ${IT.LOCATION_MASTER} lm ON c.location_id = lm.location_id
   ${coilQcJoinForAlias("c", "q")}
   WHERE TRIM(UPPER(c.coil_no_uid::text)) = ANY($1::text[])
-    AND c.is_deleted = false
   ORDER BY c.coil_no_uid
 `;
 

@@ -13,20 +13,15 @@ const TABLE = T.COIL_TABLE;
 
 /** Unassigned MRN stock — physical coil area (QC independent) + shared eligibility rules. */
 const PACKING_AREA_WHERE = (alias = "c") => [
-  `${alias}.is_deleted = false`,
   `${alias}.location_id IS NULL`,
   `(${coilAreaPhysicalStatusSql(alias)})`,
   `NULLIF(TRIM(${alias}.mrn_uid::text), '') IS NOT NULL`,
   coilAreaEligibleSql(alias),
 ];
 
-const COIL_LAST_BY_SQL = `CASE
-  WHEN c.updated_at IS NOT NULL AND (c.created_at IS NULL OR c.updated_at >= c.created_at)
-    THEN COALESCE(NULLIF(TRIM(c.updated_by), ''), c.created_by)
-  ELSE c.created_by
-END`;
+const COIL_LAST_BY_SQL = `c.created_by`;
 
-const COIL_LAST_AT_SQL = "COALESCE(c.updated_at, c.created_at)";
+const COIL_LAST_AT_SQL = "c.created_at";
 
 const SUMMARY_SORT = {
   mrn_uid: "mrn_uid",
@@ -92,7 +87,7 @@ export async function findPackingAreaByMrn(options = {}) {
        c.mrn_uid,
        ${sourceExpr}::varchar AS source,
        MAX(m.mrn_no) AS mrn_no,
-       MAX(m.serial_no) AS serial_no,
+       MAX(NULLIF((regexp_match(m.uid, '_([0-9]+)$'))[1], '')::integer) AS serial_no,
        string_agg(DISTINCT NULLIF(TRIM(m.heat_no), ''), ' | ') AS heat_nos,
        MAX(m.item_dcode) AS item_dcode,
        MAX(NULLIF(TRIM(m.item_code), '')) AS item_code,

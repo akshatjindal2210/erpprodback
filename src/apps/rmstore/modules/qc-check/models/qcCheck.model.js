@@ -25,7 +25,6 @@ const QC_QTY_AGG_JOIN = `LEFT JOIN LATERAL (
          SUM(COALESCE(c.qty, 0)) AS total_qty
        FROM ${T.COIL_TABLE} c
        WHERE c.qc_uid = q.qc_check_uid
-         AND c.is_deleted = false
      ) qc_agg ON true`;
 
 function qcSearchSql(idx) {
@@ -166,7 +165,6 @@ export const findQcChecks = async (options = {}) => {
         SELECT 1 FROM ${T.COIL_TABLE} c 
         WHERE c.qc_uid = q.qc_check_uid 
           AND c.coil_no_uid = $${i++}
-          AND c.is_deleted = false
       )
     )`);
   }
@@ -272,7 +270,6 @@ export const findPendingQcCheckByCoil = async (coil_no_uid) => {
          SUM(COALESCE(c2.qty, 0)) AS total_qty
        FROM ${T.COIL_TABLE} c2
        WHERE c2.qc_uid = q.qc_check_uid
-         AND c2.is_deleted = false
      ) qc_agg ON true
      WHERE c.coil_no_uid = $1
        AND q.is_deleted = false
@@ -303,7 +300,6 @@ export const findPendingQcCheckByCoil = async (coil_no_uid) => {
          SUM(COALESCE(c2.qty, 0)) AS total_qty
        FROM ${T.COIL_TABLE} c2
        WHERE c2.qc_uid = q.qc_check_uid
-         AND c2.is_deleted = false
      ) qc_agg ON true
      WHERE q.coil_no_uid = $1
        AND q.is_deleted = false
@@ -323,7 +319,6 @@ export const findPendingCoilsForQc = async (options = {}) => {
   const values = [];
   let i = 1;
   const conditions = [
-    "c.is_deleted = false",
     `COALESCE(c.status, 'active') = 'active'`,
     qcPendingMrnCoilSql("c", "m"),
     COIL_QC_NOT_FINAL_COND,
@@ -626,7 +621,6 @@ export const findLiveQcCheckByCoil = async (coil_no_uid) => {
          SUM(COALESCE(c2.qty, 0)) AS total_qty
        FROM ${T.COIL_TABLE} c2
        WHERE c2.qc_uid = q.qc_check_uid
-         AND c2.is_deleted = false
      ) qc_agg ON true
      WHERE c.coil_no_uid = $1 AND q.is_deleted = false
      ORDER BY q.qc_check_uid DESC
@@ -651,7 +645,6 @@ export const findLiveQcCheckByCoil = async (coil_no_uid) => {
          SUM(COALESCE(c2.qty, 0)) AS total_qty
        FROM ${T.COIL_TABLE} c2
        WHERE c2.qc_uid = q.qc_check_uid
-         AND c2.is_deleted = false
      ) qc_agg ON true
      WHERE q.coil_no_uid = $1 AND q.is_deleted = false
      ORDER BY q.qc_check_uid DESC
@@ -842,7 +835,6 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
     `NOT EXISTS (
        SELECT 1 FROM ${T.COIL_TABLE} c
        WHERE c.qc_uid = q.qc_check_uid
-         AND c.is_deleted = false
          AND (
            c.rm_uid IS NOT NULL
            OR c.out_uid IS NOT NULL
@@ -908,7 +900,6 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
          SUM(COALESCE(c.qty, 0)) AS total_qty
        FROM ${T.COIL_TABLE} c
        WHERE c.qc_uid = q.qc_check_uid
-         AND c.is_deleted = false
      ) qc_agg ON true
      ${where}
      ORDER BY q.qc_check_uid DESC

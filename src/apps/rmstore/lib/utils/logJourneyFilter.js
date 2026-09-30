@@ -44,7 +44,7 @@ journey_coils AS (
   SELECT c.coil_no_uid, TRIM(m.mrn_no::text) AS mrn_no
   FROM ${T.COIL_TABLE} c
   LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
-  WHERE COALESCE(c.is_deleted, false) = false
+  WHERE TRUE
     AND (
       c.coil_no_uid = $${exactIdx}
       OR c.coil_no_uid ILIKE $${prefixIdx}

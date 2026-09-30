@@ -14,7 +14,7 @@ const LOC = IT.LOCATION_MASTER;
 const TX = T.COIL_TRANSACTION;
 
 const REGISTER_COIL_SELECT = `
-  c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, m.heat_no,
+  c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, NULLIF((regexp_match(m.uid, '_([0-9]+)$'))[1], '')::integer AS serial_no, m.heat_no,
   m.item_dcode, m.item_code, m.item_desc, c.qty, c.location_id, c.in_uid,
   c.out_uid, c.status, ${COIL_QC_STATUS_EXPR} AS qc_check_status,
   lm.location_no, lm.rack_no, lm.shelf_no AS row_no
@@ -30,7 +30,7 @@ export async function findInwardRegisterCoils(in_uid) {
      LEFT JOIN ${MRN} m ON m.uid = c.mrn_uid
      ${COIL_QC_JOIN}
      LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-     WHERE c.in_uid = $1 AND c.is_deleted = false
+     WHERE c.in_uid = $1
      ORDER BY c.coil_uid ASC`,
     [id]
   );
@@ -143,10 +143,8 @@ export async function repairInwardRegisterLinks(in_uid) {
 
   const rows = await dbQuery(
     `UPDATE ${COIL}
-     SET in_uid = $1,
-         updated_at = NOW()
+     SET in_uid = $1
      WHERE coil_no_uid = ANY($2::text[])
-       AND is_deleted = false
        AND (in_uid IS NULL OR in_uid = $1)
      RETURNING coil_no_uid`,
     [id, uids]
@@ -182,11 +180,9 @@ export async function repairInwardRegisterLocations(in_uid) {
 
     const rows = await dbQuery(
       `UPDATE ${COIL}
-       SET location_id = $1,
-           updated_at = NOW()
+       SET location_id = $1
        WHERE in_uid = $2
          AND coil_no_uid = ANY($3::text[])
-         AND is_deleted = false
          AND location_id IS NULL
          AND COALESCE(status, 'active') = 'active'
        RETURNING coil_no_uid`,
@@ -254,7 +250,7 @@ export async function findInwardRegisterFallbackFromLog(in_uid) {
      LEFT JOIN ${MRN} m ON m.uid = c.mrn_uid
      ${COIL_QC_JOIN}
      LEFT JOIN ${LOC} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-     WHERE c.coil_no_uid = ANY($1::text[]) AND c.is_deleted = false
+     WHERE c.coil_no_uid = ANY($1::text[])
      ORDER BY c.coil_uid ASC`,
     [uids]
   );

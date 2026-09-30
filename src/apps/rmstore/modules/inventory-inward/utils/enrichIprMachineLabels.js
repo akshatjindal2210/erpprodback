@@ -38,8 +38,6 @@ function coilMeta(macMap, coilUid) {
   if (!coilUid) return null;
   const hit = macMap.get(String(coilUid).trim());
   if (!hit) return null;
-  // Backward-compatible: older callers stored a plain macname string.
-  if (typeof hit === "string") return { pjobcardno: null, macname: hit };
   return {
     pjobcardno: String(hit.pjobcardno || "").trim() || null,
     macname: String(hit.macname || "").trim() || null,
@@ -121,8 +119,26 @@ export async function enrichIprWithMachineLabels(rows = []) {
     if (existingMac) macs.add(existingMac);
     if (existingJc) jcs.add(existingJc);
 
-    const macname = existingMac || [...macs].join(" | ") || null;
-    const pjobcardno = existingJc || [...jcs].join(" | ") || null;
+    const targetKey = normalizeJcKey(row.reassign_jc);
+    const isReassign = String(row.type || "").toLowerCase() === "reassign" && !!targetKey;
+
+    // Reassign: Job Card column = SOURCE only (never the target reassign_jc).
+    let pjobcardno = existingJc || null;
+    let macname = existingMac || null;
+    if (isReassign) {
+      const candidates = [...jcs].filter((jc) => normalizeJcKey(jc) !== targetKey);
+      if (!pjobcardno || normalizeJcKey(pjobcardno) === targetKey) {
+        pjobcardno = candidates[0] || null;
+      }
+      // Don't invent source from live coil if it only resolves to target.
+      if (pjobcardno && normalizeJcKey(pjobcardno) === targetKey) pjobcardno = null;
+      if (!macname && pjobcardno) {
+        macname = jcMacMap.get(normalizeJcKey(pjobcardno)) || [...macs].find(Boolean) || null;
+      }
+    } else {
+      macname = existingMac || [...macs].join(" | ") || null;
+      pjobcardno = existingJc || [...jcs].join(" | ") || null;
+    }
 
     return { ...row, macname, pjobcardno, coils, previous_coils };
   });

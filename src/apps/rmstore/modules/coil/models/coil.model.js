@@ -13,7 +13,11 @@ import { isIssuedToShopFloor, isSaMinusWriteOff } from "../../../lib/utils/saMin
 const TABLE = T.COIL_TABLE;
 const OUT_ENTRY = T.OUT_ENTRY;
 const IPR_TABLE = T.IN_PROCESS_REQUEST;
-const COIL_HEAT_NO_SQL = `COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.it_lot_no), ''))`;
+const COIL_HEAT_NO_SQL = `COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.coil_no), ''))`;
+/** sticker_status + legacy boolean aliases for downstream JS (QC / issue eligibility). */
+const COIL_MRN_STICKER_SELECT = `m.sticker_status, (LOWER(TRIM(COALESCE(m.sticker_status, ''))) IN ('generate', 'approved')) AS sticker_generated, (LOWER(TRIM(COALESCE(m.sticker_status, ''))) = 'approved') AS sticker_approved`;
+const COIL_MRN_LOT_SELECT = `m.coil_no, m.coil_no AS it_lot_no`;
+const COIL_MRN_SERIAL_SQL = `NULLIF((regexp_match(m.uid, '_([0-9]+)$'))[1], '')::integer`;
 const COIL_QC_STATUS_SELECT = `${COIL_QC_STATUS_EXPR} AS qc_check_status`;
 const COIL_REJECTION_FIELDS = `${COIL_REJECTION_SELECT.replace(/\s+/g, " ").trim()}`;
 export const SA_ENTRY_TYPE = {
@@ -28,25 +32,152 @@ export function enrichCoilUidMeta(row) {
   return { ...row, coil_index: meta.index, total_coils: meta.total };
 }
 
-/** Job card column: single JC or reassign split (source qty → balance qty on target JC). */
+/**
+ * IPR coils JSON is slimmed on write (`slimCoilForStorage`): stores original_qty +
+ * remaining_qty on split, but NOT consumed_qty. Derive consumed the same way
+ * `normalizeCoils` does on read. When consumed is missing/0 but a split exists,
+ * always recompute from original − remaining.
+ */
+export function deriveIprLineQtys(line = {}) {
+  const n = (v) => {
+    if (v == null || v === "") return NaN;
+    const x = Number(v);
+    return Number.isFinite(x) ? x : NaN;
+  };
+  let original = n(line.original_qty);
+  if (!Number.isFinite(original)) original = n(line.qty);
+  if (!Number.isFinite(original)) original = 0;
+
+  let remaining = n(line.remaining_qty);
+  if (!Number.isFinite(remaining)) remaining = n(line.balance_qty);
+  if (!Number.isFinite(remaining)) remaining = n(line.qty);
+  if (!Number.isFinite(remaining)) remaining = original;
+
+  let consumed = n(line.consumed_qty);
+  if ((!Number.isFinite(consumed) || consumed <= 0) && original > remaining) {
+    consumed = original - remaining;
+  }
+  if (!Number.isFinite(consumed) || consumed < 0) consumed = 0;
+
+  return {
+    original_qty: original,
+    remaining_qty: remaining,
+    consumed_qty: consumed,
+  };
+}
+
+function parseReassignHistory(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function macnameFromAssignments(list) {
+  const macs = (list || []).map((a) => String(a?.macname || "").trim()).filter(Boolean);
+  const unique = [...new Map(macs.map((m) => [m.toUpperCase(), m])).values()];
+  return unique.length ? unique.join(", ") : null;
+}
+
+/** Normalize one history hop — always derive consumed from original/remaining when missing. */
+function normalizeReassignHop(hop = {}) {
+  const qtys = deriveIprLineQtys({
+    original_qty: hop.original_qty,
+    remaining_qty: hop.balance_qty ?? hop.remaining_qty,
+    qty: hop.qty,
+    consumed_qty: hop.consumed_qty,
+  });
+  return {
+    ipr_uid: hop.ipr_uid ?? null,
+    source_jc: String(hop.source_jc || "").trim() || null,
+    target_jc: String(hop.target_jc || "").trim() || null,
+    source_mac: String(hop.source_mac || "").trim() || null,
+    target_mac: String(hop.target_mac || "").trim() || null,
+    original_qty: qtys.original_qty,
+    consumed_qty: qtys.consumed_qty,
+    balance_qty: qtys.remaining_qty,
+  };
+}
+
+/** Job card column: full reassign chain as "JC (qty), JC (qty), …" + machines. */
 export function enrichCoilJobCardDisplay(row) {
   if (!row) return row;
   const base = enrichCoilUidMeta(row);
+
+  const history = parseReassignHistory(base.reassign_history)
+    .map(normalizeReassignHop)
+    .filter((h) => h.source_jc && h.target_jc);
+
+  if (history.length) {
+    const assignments = [];
+    for (const hop of history) {
+      if (hop.source_jc && hop.consumed_qty > 0) {
+        assignments.push({
+          pjobcardno: hop.source_jc,
+          macname: hop.source_mac || null,
+          qty: hop.consumed_qty,
+          kind: "consumed",
+        });
+      }
+    }
+    const last = history[history.length - 1];
+    const target = last.target_jc;
+    const balance = Number(last.balance_qty) || 0;
+    if (target && balance > 0) {
+      assignments.push({
+        pjobcardno: target,
+        macname: last.target_mac || null,
+        qty: balance,
+        kind: "balance",
+      });
+    }
+
+    const parts = assignments.map((a) => `${a.pjobcardno} (${a.qty})`);
+    return {
+      ...base,
+      reassign_ipr_uid: last.ipr_uid ?? base.reassign_ipr_uid,
+      reassign_source_pjobcardno: last.source_jc || null,
+      reassign_target_pjobcardno: target || null,
+      reassign_source_macname: last.source_mac || null,
+      reassign_target_macname: last.target_mac || null,
+      reassign_consumed_qty: last.consumed_qty || 0,
+      reassign_balance_qty: balance,
+      pjobcardno_label: parts.length ? parts.join(", ") : base.pjobcardno || null,
+      macname_label:
+        macnameFromAssignments(assignments) ||
+        last.target_mac ||
+        base.macname ||
+        null,
+      job_card_assignments: assignments.length ? assignments : null,
+      reassign: assignments.length > 1,
+    };
+  }
+
+  // Fallback: latest scalar pair only (legacy / single hop without history json).
   const source = String(base.reassign_source_pjobcardno || "").trim();
   const target = String(base.reassign_target_pjobcardno || base.pjobcardno || "").trim();
-  const consumed = Number(base.reassign_consumed_qty);
-  const balance = Number(base.reassign_balance_qty ?? base.qty);
+  const derived = deriveIprLineQtys({
+    original_qty: base.reassign_original_qty,
+    remaining_qty: base.reassign_balance_qty,
+    qty: base.qty,
+    consumed_qty: base.reassign_consumed_qty,
+  });
+  const consumed = derived.consumed_qty;
+  const balance =
+    base.reassign_balance_qty != null && base.reassign_balance_qty !== ""
+      ? Number(base.reassign_balance_qty)
+      : Number(base.qty);
   const hasSplit =
     source &&
     target &&
     source.toUpperCase() !== target.toUpperCase() &&
-    (consumed > 0 || balance > 0);
-
-  const macnameFromAssignments = (list) => {
-    const macs = (list || []).map((a) => String(a?.macname || "").trim()).filter(Boolean);
-    const unique = [...new Map(macs.map((m) => [m.toUpperCase(), m])).values()];
-    return unique.length ? unique.join(", ") : null;
-  };
+    (consumed > 0 || (Number.isFinite(balance) && balance > 0));
 
   if (!hasSplit) {
     return {
@@ -68,7 +199,7 @@ export function enrichCoilJobCardDisplay(row) {
       kind: "consumed",
     });
   }
-  if (balance > 0) {
+  if (Number.isFinite(balance) && balance > 0) {
     parts.push(`${target} (${balance})`);
     assignments.push({
       pjobcardno: target,
@@ -78,19 +209,150 @@ export function enrichCoilJobCardDisplay(row) {
     });
   }
 
-  const pjobcardno_label = parts.length > 1 ? parts.join(", ") : parts[0] || base.pjobcardno || null;
-
   return {
     ...base,
-    pjobcardno_label,
+    pjobcardno_label: parts.length > 1 ? parts.join(", ") : parts[0] || base.pjobcardno || null,
     macname_label:
       macnameFromAssignments(assignments) ||
       base.reassign_target_macname ||
       base.macname ||
       null,
-    job_card_assignments: assignments.length > 1 ? assignments : assignments.length ? assignments : null,
+    job_card_assignments: assignments.length ? assignments : null,
     reassign: assignments.length > 1,
   };
+}
+
+/**
+ * Batch-load approved reassign IPR hops for shop-floor coils.
+ * Prefer this over relying solely on SQL jsonb_agg — slim coils omit consumed_qty.
+ */
+export async function loadReassignHistoryByCoilUids(coilNoUids = []) {
+  const uids = [...new Set((coilNoUids || []).map((u) => String(u || "").trim()).filter(Boolean))];
+  const empty = new Map();
+  if (!uids.length) return empty;
+
+  const rows = await dbQuery(
+    `SELECT
+       ipr.ipr_uid,
+       NULLIF(TRIM(ipr.reassign_jc), '') AS reassign_jc,
+       ipr.coils,
+       COALESCE(ipr.approved_at, ipr.updated_at, ipr.created_at) AS sort_at
+     FROM ${IPR_TABLE} ipr
+     WHERE ipr.is_deleted = false
+       AND COALESCE(ipr.approved, false) = true
+       AND (
+         ipr.type = 'reassign'
+         OR NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+       )
+       AND EXISTS (
+         SELECT 1
+         FROM jsonb_array_elements(
+           CASE WHEN jsonb_typeof(ipr.coils) = 'array' THEN ipr.coils ELSE '[]'::jsonb END
+         ) AS line
+         WHERE LOWER(TRIM(line->>'coil_no_uid')) = ANY($1::text[])
+       )
+     ORDER BY COALESCE(ipr.approved_at, ipr.updated_at, ipr.created_at) ASC NULLS LAST, ipr.ipr_uid ASC`,
+    [uids.map((u) => u.toLowerCase())]
+  );
+
+  const uidSet = new Set(uids.map((u) => u.toLowerCase()));
+  const byCoil = new Map();
+  const jcNos = new Set();
+
+  for (const row of rows || []) {
+    const targetJc = String(row.reassign_jc || "").trim();
+    if (!targetJc) continue;
+    const coils = Array.isArray(row.coils)
+      ? row.coils
+      : typeof row.coils === "string"
+        ? (() => {
+            try {
+              const p = JSON.parse(row.coils);
+              return Array.isArray(p) ? p : [];
+            } catch {
+              return [];
+            }
+          })()
+        : [];
+
+    for (const line of coils) {
+      const coilUid = String(line?.coil_no_uid || "").trim();
+      if (!coilUid || !uidSet.has(coilUid.toLowerCase())) continue;
+      const sourceJc = String(line?.pjobcardno || "").trim();
+      if (!sourceJc) continue;
+      const qtys = deriveIprLineQtys(line);
+      const hop = {
+        ipr_uid: row.ipr_uid,
+        source_jc: sourceJc,
+        target_jc: targetJc,
+        source_mac: String(line?.macname || "").trim() || null,
+        target_mac: null,
+        original_qty: qtys.original_qty,
+        consumed_qty: qtys.consumed_qty,
+        balance_qty: qtys.remaining_qty,
+        sort_at: row.sort_at,
+      };
+      jcNos.add(sourceJc);
+      jcNos.add(targetJc);
+      const key = coilUid.toLowerCase();
+      if (!byCoil.has(key)) byCoil.set(key, []);
+      byCoil.get(key).push(hop);
+    }
+  }
+
+  const macMap = await findMacnamesForJobCards([...jcNos]);
+  const jcKey = (jc) => String(jc || "").replace(/^JC[\s\-]*/i, "").trim().toUpperCase();
+
+  for (const hops of byCoil.values()) {
+    for (const hop of hops) {
+      const srcMac = macMap.get(jcKey(hop.source_jc));
+      const tgtMac = macMap.get(jcKey(hop.target_jc));
+      if (srcMac) hop.source_mac = hop.source_mac || srcMac;
+      if (tgtMac) hop.target_mac = tgtMac;
+    }
+    hops.sort((a, b) => {
+      const ta = a.sort_at ? new Date(a.sort_at).getTime() : 0;
+      const tb = b.sort_at ? new Date(b.sort_at).getTime() : 0;
+      if (ta !== tb) return ta - tb;
+      return Number(a.ipr_uid || 0) - Number(b.ipr_uid || 0);
+    });
+  }
+
+  return byCoil;
+}
+
+/** Attach JS-built reassign_history then run display enrich (batch-safe). */
+export async function enrichCoilsWithReassignHistory(rows = []) {
+  const list = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  if (!list.length) return list;
+
+  const outUids = list
+    .filter((r) => String(r.status || "active").toLowerCase() === "out")
+    .map((r) => String(r.coil_no_uid || "").trim())
+    .filter(Boolean);
+
+  const historyByUid = outUids.length ? await loadReassignHistoryByCoilUids(outUids) : new Map();
+
+  return list.map((row) => {
+    const key = String(row.coil_no_uid || "").trim().toLowerCase();
+    const hops = historyByUid.get(key);
+    if (hops?.length) {
+      const last = hops[hops.length - 1];
+      return enrichCoilJobCardDisplay({
+        ...row,
+        reassign_history: hops,
+        reassign_ipr_uid: last.ipr_uid,
+        reassign_source_pjobcardno: last.source_jc,
+        reassign_target_pjobcardno: last.target_jc,
+        reassign_source_macname: last.source_mac,
+        reassign_target_macname: last.target_mac,
+        reassign_consumed_qty: last.consumed_qty,
+        reassign_balance_qty: last.balance_qty,
+        reassign_original_qty: last.original_qty,
+      });
+    }
+    return enrichCoilJobCardDisplay(row);
+  });
 }
 
 export function coilIndexFromUidSql(alias = "c") {
@@ -109,7 +371,7 @@ const COIL_QC_UID_SELECT = `COALESCE(c.qc_uid, q.qc_check_uid) AS qc_uid`;
 const COIL_SA_BILL_JOIN = `LEFT JOIN ${T.STOCK_ADJUSTMENT} sa_bill ON sa_bill.adjustment_id = c.sa_id AND sa_bill.is_deleted = false`;
 const COIL_BILL_NO_SQL = `COALESCE(NULLIF(TRIM(m.bill_no), ''), NULLIF(TRIM(sa_bill.bill_no), '')) AS bill_no`;
 const COIL_BILL_DT_SQL = `COALESCE(m.bill_dt, sa_bill.bill_dt) AS bill_dt`;
-const COIL_DETAIL_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, m.mrn_dt, m.sticker_generated, m.sticker_approved, ${COIL_BILL_NO_SQL}, ${COIL_BILL_DT_SQL}, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.it_unit, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, m.remarks, c.qty, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, jc.fg_item_code, jc.fg_item_desc, c.status, c.download_count, c.is_deleted, c.deleted_by, c.deleted_at, c.created_by, c.created_at, c.updated_by, c.updated_at`;
+const COIL_DETAIL_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, ${COIL_MRN_SERIAL_SQL} AS serial_no, m.mrn_dt, ${COIL_MRN_STICKER_SELECT}, ${COIL_BILL_NO_SQL}, ${COIL_BILL_DT_SQL}, ${COIL_HEAT_NO_SQL} AS heat_no, ${COIL_MRN_LOT_SELECT}, m.it_unit, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, m.remarks, c.qty, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, jc.fg_item_code, jc.fg_item_desc, c.status, c.download_count, c.created_by, c.created_at`;
 const COIL_MRN_JOIN = `LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid`;
 
 /**
@@ -169,7 +431,10 @@ LEFT JOIN LATERAL (
   ) jc_ir ON TRUE
   LEFT JOIN LATERAL (
     SELECT
-      NULLIF(TRIM(line->>'pjobcardno'), '') AS pjobcardno,
+      COALESCE(
+        NULLIF(TRIM(ipr.reassign_jc), ''),
+        NULLIF(TRIM(line->>'pjobcardno'), '')
+      ) AS pjobcardno,
       NULLIF(TRIM(line->>'macname'), '') AS macname
     FROM ${IPR_TABLE} ipr
     CROSS JOIN LATERAL jsonb_array_elements(
@@ -177,9 +442,12 @@ LEFT JOIN LATERAL (
     ) AS line
     WHERE LOWER(COALESCE(c.status, 'active')) = 'consumed'
       AND ipr.is_deleted = false
-      AND ipr.request_type = 'consume'
+      AND ipr.type IN ('consume', 'reassign')
       AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
-      AND NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
+      AND (
+        NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+        OR NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
+      )
       AND (c.ipr_uid IS NULL OR ipr.ipr_uid = c.ipr_uid)
     ORDER BY
       CASE WHEN c.ipr_uid IS NOT NULL AND ipr.ipr_uid = c.ipr_uid THEN 0 ELSE 1 END,
@@ -192,41 +460,181 @@ LEFT JOIN LATERAL (
      OR LOWER(COALESCE(c.status, 'active')) IN ('out', 'consumed')
 ) jc ON TRUE`;
 
-/** Latest approved reassign IPR line for a shop-floor coil (source JC + target JC + qty split). */
+/** All approved reassign hops for shop-floor coil (chain) + latest scalars for FG enrich. */
 const COIL_REASSIGN_JOIN = `
 LEFT JOIN LATERAL (
   SELECT
-    ipr.ipr_uid AS reassign_ipr_uid,
-    NULLIF(TRIM(line->>'pjobcardno'), '') AS reassign_target_pjobcardno,
-    NULLIF(TRIM(line->>'macname'), '') AS reassign_target_macname,
-    NULLIF(TRIM(prev.val->>'pjobcardno'), '') AS reassign_source_pjobcardno,
-    NULLIF(TRIM(prev.val->>'macname'), '') AS reassign_source_macname,
-    COALESCE(NULLIF(line->>'consumed_qty', '')::numeric, 0) AS reassign_consumed_qty,
-    COALESCE(
-      NULLIF(line->>'remaining_qty', '')::numeric,
-      NULLIF(line->>'qty', '')::numeric,
-      c.qty
-    ) AS reassign_balance_qty
-  FROM ${IPR_TABLE} ipr
-  CROSS JOIN LATERAL jsonb_array_elements(
-    CASE WHEN jsonb_typeof(ipr.coils) = 'array' THEN ipr.coils ELSE '[]'::jsonb END
-  ) AS line
+    latest.reassign_ipr_uid,
+    latest.reassign_target_pjobcardno,
+    latest.reassign_target_macname,
+    latest.reassign_source_pjobcardno,
+    latest.reassign_source_macname,
+    latest.reassign_consumed_qty,
+    latest.reassign_balance_qty,
+    latest.reassign_original_qty,
+    hist.reassign_history
+  FROM (
+    SELECT
+      COALESCE(
+        jsonb_agg(
+          jsonb_build_object(
+            'ipr_uid', hops.ipr_uid,
+            'source_jc', hops.source_jc,
+            'target_jc', hops.target_jc,
+            'source_mac', hops.source_mac,
+            'target_mac', hops.target_mac,
+            'original_qty', hops.original_qty,
+            'consumed_qty', hops.consumed_qty,
+            'balance_qty', hops.balance_qty
+          )
+          ORDER BY hops.sort_at ASC NULLS LAST, hops.ipr_uid ASC
+        ),
+        '[]'::jsonb
+      ) AS reassign_history
+    FROM (
+      SELECT
+        ipr.ipr_uid,
+        NULLIF(TRIM(line->>'pjobcardno'), '') AS source_jc,
+        NULLIF(TRIM(ipr.reassign_jc), '') AS target_jc,
+        NULLIF(TRIM(jc_src.macname), '') AS source_mac,
+        NULLIF(TRIM(jc_tgt.macname), '') AS target_mac,
+        /* slimCoilForStorage omits consumed_qty — derive original - remaining */
+        COALESCE(
+          NULLIF(line->>'original_qty', '')::numeric,
+          NULLIF(line->>'qty', '')::numeric,
+          0
+        ) AS original_qty,
+        COALESCE(
+          NULLIF(line->>'consumed_qty', '')::numeric,
+          GREATEST(
+            0,
+            COALESCE(NULLIF(line->>'original_qty', '')::numeric, NULLIF(line->>'qty', '')::numeric, 0)
+            - COALESCE(
+              NULLIF(line->>'remaining_qty', '')::numeric,
+              NULLIF(line->>'qty', '')::numeric,
+              COALESCE(NULLIF(line->>'original_qty', '')::numeric, 0)
+            )
+          )
+        ) AS consumed_qty,
+        COALESCE(
+          NULLIF(line->>'remaining_qty', '')::numeric,
+          NULLIF(line->>'qty', '')::numeric,
+          c.qty
+        ) AS balance_qty,
+        COALESCE(ipr.approved_at, ipr.updated_at, ipr.created_at) AS sort_at
+      FROM ${IPR_TABLE} ipr
+      CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(ipr.coils) = 'array' THEN ipr.coils ELSE '[]'::jsonb END
+      ) AS line
+      LEFT JOIN LATERAL (
+        SELECT jc.macname
+        FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
+        WHERE jc.is_deleted = false
+          AND NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
+          AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+            = UPPER(REGEXP_REPLACE(TRIM(line->>'pjobcardno'), '^JC[[:space:]\\-]*', '', 'i'))
+        ORDER BY jc.id DESC
+        LIMIT 1
+      ) jc_src ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT jc.macname
+        FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
+        WHERE jc.is_deleted = false
+          AND NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+          AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+            = UPPER(REGEXP_REPLACE(TRIM(ipr.reassign_jc), '^JC[[:space:]\\-]*', '', 'i'))
+        ORDER BY jc.id DESC
+        LIMIT 1
+      ) jc_tgt ON TRUE
+      WHERE ipr.is_deleted = false
+        AND (
+          ipr.type = 'reassign'
+          OR NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+        )
+        AND COALESCE(ipr.approved, false) = true
+        AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
+        AND LOWER(COALESCE(c.status, 'active')) = 'out'
+        AND NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
+        AND NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+    ) hops
+  ) hist
   LEFT JOIN LATERAL (
-    SELECT p AS val
-    FROM jsonb_array_elements(
-      CASE WHEN jsonb_typeof(ipr.previous_coils) = 'array' THEN ipr.previous_coils ELSE '[]'::jsonb END
-    ) AS p
-    WHERE LOWER(TRIM(p->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
-    LIMIT 1
-  ) prev ON TRUE
-  WHERE ipr.is_deleted = false
-    AND ipr.request_type = 'consume'
-    AND COALESCE(ipr.approved, false) = true
-    AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
-    AND COALESCE((line->>'reassign')::boolean, false) = true
-    AND LOWER(COALESCE(c.status, 'active')) = 'out'
-  ORDER BY ipr.approved_at DESC NULLS LAST, ipr.ipr_uid DESC
-  LIMIT 1
+    SELECT
+      hops.ipr_uid AS reassign_ipr_uid,
+      hops.target_jc AS reassign_target_pjobcardno,
+      hops.target_mac AS reassign_target_macname,
+      hops.source_jc AS reassign_source_pjobcardno,
+      hops.source_mac AS reassign_source_macname,
+      hops.consumed_qty AS reassign_consumed_qty,
+      hops.balance_qty AS reassign_balance_qty,
+      hops.original_qty AS reassign_original_qty
+    FROM (
+      SELECT
+        ipr.ipr_uid,
+        NULLIF(TRIM(line->>'pjobcardno'), '') AS source_jc,
+        NULLIF(TRIM(ipr.reassign_jc), '') AS target_jc,
+        NULLIF(TRIM(jc_src.macname), '') AS source_mac,
+        NULLIF(TRIM(jc_tgt.macname), '') AS target_mac,
+        COALESCE(
+          NULLIF(line->>'original_qty', '')::numeric,
+          NULLIF(line->>'qty', '')::numeric,
+          0
+        ) AS original_qty,
+        COALESCE(
+          NULLIF(line->>'consumed_qty', '')::numeric,
+          GREATEST(
+            0,
+            COALESCE(NULLIF(line->>'original_qty', '')::numeric, NULLIF(line->>'qty', '')::numeric, 0)
+            - COALESCE(
+              NULLIF(line->>'remaining_qty', '')::numeric,
+              NULLIF(line->>'qty', '')::numeric,
+              COALESCE(NULLIF(line->>'original_qty', '')::numeric, 0)
+            )
+          )
+        ) AS consumed_qty,
+        COALESCE(
+          NULLIF(line->>'remaining_qty', '')::numeric,
+          NULLIF(line->>'qty', '')::numeric,
+          c.qty
+        ) AS balance_qty
+      FROM ${IPR_TABLE} ipr
+      CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(ipr.coils) = 'array' THEN ipr.coils ELSE '[]'::jsonb END
+      ) AS line
+      LEFT JOIN LATERAL (
+        SELECT jc.macname
+        FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
+        WHERE jc.is_deleted = false
+          AND NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
+          AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+            = UPPER(REGEXP_REPLACE(TRIM(line->>'pjobcardno'), '^JC[[:space:]\\-]*', '', 'i'))
+        ORDER BY jc.id DESC
+        LIMIT 1
+      ) jc_src ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT jc.macname
+        FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
+        WHERE jc.is_deleted = false
+          AND NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+          AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+            = UPPER(REGEXP_REPLACE(TRIM(ipr.reassign_jc), '^JC[[:space:]\\-]*', '', 'i'))
+        ORDER BY jc.id DESC
+        LIMIT 1
+      ) jc_tgt ON TRUE
+      WHERE ipr.is_deleted = false
+        AND (
+          ipr.type = 'reassign'
+          OR NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+        )
+        AND COALESCE(ipr.approved, false) = true
+        AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
+        AND LOWER(COALESCE(c.status, 'active')) = 'out'
+        AND NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
+        AND NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+      ORDER BY COALESCE(ipr.approved_at, ipr.updated_at, ipr.created_at) DESC NULLS LAST, ipr.ipr_uid DESC
+      LIMIT 1
+    ) hops
+  ) latest ON TRUE
 ) ipr_r ON TRUE`;
 
 /** Shared SOURCE label for list/group queries (alias = coil table alias). */
@@ -245,20 +653,16 @@ export function portalMrnCoilSql(alias = "c") {
 }
 
 /** List columns only (no remarks/audit) — faster reads from coil_table. */
-const COIL_LAST_BY_SQL = `CASE
-  WHEN c.updated_at IS NOT NULL AND (c.created_at IS NULL OR c.updated_at >= c.created_at)
-    THEN COALESCE(NULLIF(TRIM(c.updated_by), ''), c.created_by)
-  ELSE c.created_by
-END`;
+const COIL_LAST_BY_SQL = `c.created_by`;
 
 /** sticker_* required — Issue Request / Store Out eligibility (`isCoilEligibleForIssueRequest`) reads these from list rows. */
-const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, m.serial_no, m.sticker_generated, m.sticker_approved, ${COIL_HEAT_NO_SQL} AS heat_no, m.it_lot_no, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, jc.fg_item_code, jc.fg_item_desc, jc.shop_floor_at, c.status, c.created_at, ${COIL_LAST_BY_SQL} AS last_by, COALESCE(c.updated_at, c.created_at) AS last_at, ${coilSourceSql("c")}::varchar AS source`;
+const COIL_LIST_SELECT = `c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, ${COIL_MRN_SERIAL_SQL} AS serial_no, ${COIL_MRN_STICKER_SELECT}, ${COIL_HEAT_NO_SQL} AS heat_no, ${COIL_MRN_LOT_SELECT}, m.item_dcode, m.item_code, m.item_desc, m.acc_code, m.acc_name, c.qty, ${COIL_INDEX_SELECT}, ${COIL_TOTAL_SELECT}, c.location_id, c.in_uid, ${COIL_REJECTION_FIELDS}, ${COIL_QC_UID_SELECT}, ${COIL_QC_STATUS_SELECT}, c.out_uid, c.sa_id, c.sa_entry_type, c.ipr_uid, jc.pjobcardno, jc.macname, jc.fg_item_code, jc.fg_item_desc, jc.shop_floor_at, c.status, c.created_at, ${COIL_LAST_BY_SQL} AS last_by, c.created_at AS last_at, ${coilSourceSql("c")}::varchar AS source`;
 
 export const findCoilUidsByQcCheck = async (qc_uid) => {
   const id = Number(qc_uid);
   if (!Number.isFinite(id)) return [];
   const rows = await dbQuery(
-    `SELECT coil_no_uid FROM ${TABLE} WHERE qc_uid = $1 AND is_deleted = false`,
+    `SELECT coil_no_uid FROM ${TABLE} WHERE qc_uid = $1`,
     [id]
   );
   return rows.map((r) => r.coil_no_uid);
@@ -281,7 +685,9 @@ async function fetchCoilsWithMrnDetails(coilNoUids = []) {
             ipr_r.reassign_source_pjobcardno,
             ipr_r.reassign_source_macname,
             ipr_r.reassign_consumed_qty,
-            ipr_r.reassign_balance_qty
+            ipr_r.reassign_balance_qty,
+            ipr_r.reassign_original_qty,
+            ipr_r.reassign_history
      FROM ${TABLE} c
      ${COIL_MRN_JOIN}
      ${COIL_SA_BILL_JOIN}
@@ -290,18 +696,17 @@ async function fetchCoilsWithMrnDetails(coilNoUids = []) {
      ${COIL_JOB_CARD_JOIN}
      ${COIL_REASSIGN_JOIN}
      WHERE c.coil_no_uid = ANY($1::text[])
-       AND c.is_deleted = false
      ORDER BY c.created_at ASC`,
     [uids]
   );
-  return (rows || []).map(enrichCoilJobCardDisplay);
+  return enrichCoilsWithReassignHistory(rows || []);
 }
 
 export const findCoils = async (options = {}) => {
   const { filters = {}, search, page = 1, limit = 100, sortBy = "coil_uid", order = "DESC", permission = {} } = options;
   const values = [];
   let i = 1;
-  const conditions = ["c.is_deleted = false"];
+  const conditions = ["TRUE"];
   const journeyMode = hasCoilJourneyFilter(filters);
   const operationalLookup =
     filters.coil_area === true ||
@@ -428,7 +833,7 @@ export const findCoils = async (options = {}) => {
     values.push(String(filters.heat_no).trim());
     const idx = i++;
     conditions.push(
-      `(UPPER(trim(m.heat_no)) = UPPER(trim($${idx})) OR UPPER(trim(m.it_lot_no)) = UPPER(trim($${idx})))`
+      `(UPPER(trim(m.heat_no)) = UPPER(trim($${idx})) OR UPPER(trim(m.coil_no)) = UPPER(trim($${idx})))`
     );
   }
   if (filters.in_uid != null && filters.in_uid !== "") {
@@ -518,6 +923,8 @@ export const findCoils = async (options = {}) => {
             ipr_r.reassign_source_macname,
             ipr_r.reassign_consumed_qty,
             ipr_r.reassign_balance_qty,
+            ipr_r.reassign_original_qty,
+            ipr_r.reassign_history,
             lm.location_no,
             lm.rack_no,
             lm.shelf_no AS row_no
@@ -535,7 +942,7 @@ export const findCoils = async (options = {}) => {
   );
 
   return {
-    data: (rows || []).map(enrichCoilJobCardDisplay),
+    data: await enrichCoilsWithReassignHistory(rows || []),
     total,
     page: safePage,
     limit: safeLimit,
@@ -544,18 +951,57 @@ export const findCoils = async (options = {}) => {
 };
 
 /**
- * Latest job card + machine per coil (shop floor / consumed join).
- * Map: coil_no_uid → { pjobcardno, macname } — used by IPR Register enrich (fill empty only).
+ * Job card + machine for coil UIDs — used by IPR Register enrich.
+ * Prefer live Store Out; else latest approved out that scanned this coil
+ * (covers stored/unassigned coils after balance receive where Coils-list join is gated off).
  */
 export async function findMacnamesForCoilUids(coilNoUids = []) {
   const uids = [...new Set((coilNoUids || []).map((u) => String(u || "").trim()).filter(Boolean))];
   if (!uids.length) return new Map();
   const rows = await dbQuery(
-    `SELECT c.coil_no_uid, jc.pjobcardno, jc.macname
+    `SELECT
+       c.coil_no_uid,
+       NULLIF(TRIM(o.pjobcardno), '') AS pjobcardno,
+       NULLIF(TRIM(jc_ir.macname), '') AS macname
      FROM ${TABLE} c
-     ${COIL_JOB_CARD_JOIN}
-     WHERE c.coil_no_uid = ANY($1::text[])
-       AND c.is_deleted = false`,
+     LEFT JOIN LATERAL (
+       SELECT o.out_uid, o.issue_uid, o.pjobcardno
+       FROM ${T.OUT_ENTRY} o
+       WHERE o.is_deleted = false
+         AND NULLIF(TRIM(o.pjobcardno), '') IS NOT NULL
+         AND (
+           (c.out_uid IS NOT NULL AND o.out_uid = c.out_uid)
+           OR (
+             COALESCE(o.approved, false) = true
+             AND EXISTS (
+               SELECT 1
+               FROM ${T.OUT_ENTRY_SCANNED_COIL} s
+               WHERE s.out_uid = o.out_uid
+                 AND LOWER(TRIM(s.coil_no_uid)) = LOWER(TRIM(c.coil_no_uid))
+             )
+           )
+         )
+       ORDER BY
+         CASE WHEN c.out_uid IS NOT NULL AND o.out_uid = c.out_uid THEN 0 ELSE 1 END,
+         COALESCE(o.approved_at, o.created_at) DESC NULLS LAST,
+         o.out_uid DESC
+       LIMIT 1
+     ) o ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT jc.macname
+       FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
+       WHERE o.out_uid IS NOT NULL
+         AND jc.is_deleted = false
+         AND NULLIF(TRIM(o.pjobcardno), '') IS NOT NULL
+         AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+           = UPPER(REGEXP_REPLACE(TRIM(o.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+       ORDER BY
+         CASE WHEN o.issue_uid IS NOT NULL AND jc.issue_uid = o.issue_uid THEN 0 ELSE 1 END,
+         CASE WHEN NULLIF(TRIM(jc.macname), '') IS NOT NULL THEN 0 ELSE 1 END,
+         jc.id DESC
+       LIMIT 1
+     ) jc_ir ON TRUE
+     WHERE c.coil_no_uid = ANY($1::text[])`,
     [uids]
   );
   const map = new Map();
@@ -610,6 +1056,8 @@ export const findCoilByUid = async (coil_no_uid) => {
             ipr_r.reassign_source_macname,
             ipr_r.reassign_consumed_qty,
             ipr_r.reassign_balance_qty,
+            ipr_r.reassign_original_qty,
+            ipr_r.reassign_history,
             lm.location_no,
             lm.rack_no,
             lm.shelf_no AS row_no
@@ -621,7 +1069,7 @@ export const findCoilByUid = async (coil_no_uid) => {
      ${COIL_JOB_CARD_JOIN}
      ${COIL_REASSIGN_JOIN}
      LEFT JOIN ${IT.LOCATION_MASTER} lm ON lm.location_id = c.location_id AND lm.is_deleted = false
-     WHERE ${sqlStickerUidEquals("c.coil_no_uid", "$1")} AND c.is_deleted = false
+     WHERE ${sqlStickerUidEquals("c.coil_no_uid", "$1")}
      ORDER BY
        CASE
          WHEN trim(c.coil_no_uid::text) = trim($1::text) THEN 0
@@ -632,7 +1080,9 @@ export const findCoilByUid = async (coil_no_uid) => {
      LIMIT 1`,
     [val]
   );
-  return row ? enrichCoilJobCardDisplay(row) : null;
+  if (!row) return null;
+  const [enriched] = await enrichCoilsWithReassignHistory([row]);
+  return enriched || null;
 };
 
 export const findCoilsByUids = async (uids = []) => {
@@ -643,7 +1093,7 @@ export const findCoilsByUids = async (uids = []) => {
     `SELECT c.coil_no_uid, c.coil_uid, m.mrn_no, c.qty, m.heat_no, m.item_code, c.status
      FROM ${TABLE} c
      ${COIL_MRN_JOIN}
-     WHERE c.is_deleted = false AND c.coil_no_uid IN (${placeholders})`,
+     WHERE c.coil_no_uid IN (${placeholders})`,
     list
   );
 };
@@ -653,7 +1103,7 @@ export const countCoilsForMrn = async (mrn_uid) => {
   if (!uid) return 0;
   const [row] = await dbQuery(
     `SELECT COUNT(*) AS count FROM ${TABLE}
-     WHERE mrn_uid = $1 AND is_deleted = false AND sa_id IS NULL`,
+     WHERE mrn_uid = $1 AND sa_id IS NULL`,
     [uid]
   );
   return Number(row?.count || 0);
@@ -672,15 +1122,13 @@ export const sumCoilQtyForMrn = async (mrn_uid) => {
        COALESCE((
          SELECT SUM(COALESCE(c.qty, 0))
          FROM ${TABLE} c
-         WHERE c.is_deleted = false
-           AND TRIM(c.mrn_uid) = $1
+         WHERE TRIM(c.mrn_uid) = $1
        ), 0)::float AS coil_qty,
        COALESCE((
          SELECT SUM(COALESCE((e->>'qty')::float, 0))
          FROM ${T.COIL_TRANSACTION} tx
          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tx.details->'coil_sticker_entries', '[]'::jsonb)) e
          INNER JOIN ${TABLE} c ON c.coil_no_uid = TRIM(e->>'coil_no_uid')
-           AND c.is_deleted = false
            AND TRIM(c.mrn_uid) = $1
          WHERE tx.transaction_type = $2
            AND COALESCE(tx.details->>'partial', '') IN ('true', '1')
@@ -698,8 +1146,7 @@ export const sumApprovedAddCoilQtyForAdjustment = async (adjustmentId) => {
   const [row] = await dbQuery(
     `SELECT COALESCE(SUM(COALESCE(qty, 0)), 0)::float AS total
      FROM ${TABLE}
-     WHERE is_deleted = false
-       AND sa_id = $1
+     WHERE sa_id = $1
        AND LOWER(COALESCE(sa_entry_type, 'stock_in')) = 'stock_in'`,
     [id]
   );
@@ -738,14 +1185,11 @@ export const updateCoilsAfterInward = async (in_uid, location_id, coil_no_uids =
   await dbQuery(
     `UPDATE ${TABLE}
      SET location_id = $1,
-         in_uid = $2,
-         updated_by = $3,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($4::text[])
-       AND is_deleted = false
+         in_uid = $2
+     WHERE coil_no_uid = ANY($3::text[])
        AND COALESCE(status, 'active') = 'active'
        AND out_uid IS NULL`,
-    [location_id, in_uid, userName ?? null, uids]
+    [location_id, in_uid, uids]
   );
 };
 
@@ -776,26 +1220,20 @@ export const syncInwardRegisterCoils = async (in_uid, locations = [], userName) 
       await client.query(
         `UPDATE ${TABLE}
          SET location_id = NULL,
-             in_uid = NULL,
-             updated_by = $2,
-             updated_at = NOW()
+             in_uid = NULL
          WHERE in_uid = $1
-           AND is_deleted = false
            AND COALESCE(status, 'active') = 'active'
-           AND NOT (coil_no_uid = ANY($3::text[]))`,
-        [id, userName ?? null, keepUids]
+           AND NOT (coil_no_uid = ANY($2::text[]))`,
+        [id, keepUids]
       );
     } else {
       await client.query(
         `UPDATE ${TABLE}
          SET location_id = NULL,
-             in_uid = NULL,
-             updated_by = $2,
-             updated_at = NOW()
+             in_uid = NULL
          WHERE in_uid = $1
-           AND is_deleted = false
            AND COALESCE(status, 'active') = 'active'`,
-        [id, userName ?? null]
+        [id]
       );
     }
 
@@ -807,31 +1245,25 @@ export const syncInwardRegisterCoils = async (in_uid, locations = [], userName) 
       await client.query(
         `UPDATE ${TABLE}
          SET location_id = $1,
-             in_uid = $2,
-             updated_by = $3,
-             updated_at = NOW()
-         WHERE coil_no_uid = ANY($4::text[])
-           AND is_deleted = false
+             in_uid = $2
+         WHERE coil_no_uid = ANY($3::text[])
            AND COALESCE(status, 'active') = 'active'
            AND out_uid IS NULL`,
-        [lid, id, userName ?? null, uids]
+        [lid, id, uids]
       );
     }
   });
 };
 
 /** Return coils to Coil Area when a Store-In is deleted. */
-export const clearCoilsForInward = async (in_uid, userName) => {
+export const clearCoilsForInward = async (in_uid, _userName) => {
   await dbQuery(
     `UPDATE ${TABLE}
      SET location_id = NULL,
-         in_uid = NULL,
-         updated_by = $2,
-         updated_at = NOW()
+         in_uid = NULL
      WHERE in_uid = $1
-       AND is_deleted = false
        AND COALESCE(status, 'active') = 'active'`,
-    [Number(in_uid), userName ?? null]
+    [Number(in_uid)]
   );
 };
 
@@ -848,12 +1280,9 @@ export const clearCoilQcLink = async (coil_no_uids = [], userName) => {
              AND LOWER(COALESCE(status, 'active')) = 'rejected'
            THEN 'active'
            ELSE status
-         END,
-         updated_by = $1,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($2::text[])
-       AND is_deleted = false`,
-    [userName ?? null, uids]
+         END
+     WHERE coil_no_uid = ANY($1::text[])`,
+    [uids]
   );
 };
 
@@ -871,11 +1300,8 @@ export const markCoilsQcFailPending = async (qc_uid, coil_no_uids = [], userName
          status = CASE
            WHEN location_id IS NOT NULL THEN 'rejected'
            ELSE 'active'
-         END,
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($3::text[])
-       AND is_deleted = false
+         END
+     WHERE coil_no_uid = ANY($2::text[])
        AND rm_uid IS NULL
        AND ipr_uid IS NULL
        AND (
@@ -883,7 +1309,7 @@ export const markCoilsQcFailPending = async (qc_uid, coil_no_uids = [], userName
          OR LOWER(COALESCE(status, 'active')) = 'rejected'
        )
      RETURNING coil_no_uid`,
-    [Number(qc_uid), userName ?? null, uids]
+    [Number(qc_uid), uids]
   );
   return fetchCoilsWithMrnDetails(rows?.map((row) => row.coil_no_uid) ?? []);
 };
@@ -899,13 +1325,10 @@ export const markCoilsQcPassed = async (qc_uid, coil_no_uids = [], userName) => 
     `UPDATE ${TABLE}
      SET qc_uid = $1,
          rm_uid = NULL,
-         status = 'active',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($3::text[])
-       AND is_deleted = false
+         status = 'active'
+     WHERE coil_no_uid = ANY($2::text[])
      RETURNING coil_no_uid`,
-    [Number(qc_uid), userName ?? null, uids]
+    [Number(qc_uid), uids]
   );
   return fetchCoilsWithMrnDetails(rows?.map((row) => row.coil_no_uid) ?? []);
 };
@@ -915,50 +1338,41 @@ export const linkCoilsToQcCheck = async (qc_uid, coil_no_uids = [], _qc_check_st
   if (!coil_no_uids.length) return;
   await dbQuery(
     `UPDATE ${TABLE}
-     SET qc_uid = $1,
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($3::text[])
-       AND is_deleted = false`,
-    [qc_uid, userName ?? null, coil_no_uids]
+     SET qc_uid = $1
+     WHERE coil_no_uid = ANY($2::text[])`,
+    [qc_uid, coil_no_uids]
   );
 };
 
 /** Restore coils held for an in-process rejection (not yet in qc_rejection register). */
-export const revertCoilsInProcessRejection = async (ipr_uid, userName) => {
+export const revertCoilsInProcessRejection = async (ipr_uid, _userName) => {
   const id = Number(ipr_uid);
   if (!Number.isFinite(id)) return [];
   const rows = await dbQuery(
     `UPDATE ${TABLE}
      SET ipr_uid = NULL,
-         status = 'active',
-         updated_by = $2,
-         updated_at = NOW()
+         status = 'active'
      WHERE ipr_uid = $1
-       AND is_deleted = false
        AND LOWER(COALESCE(status, 'active')) = 'rejected'
        AND rm_uid IS NULL
      RETURNING coil_no_uid`,
-    [id, userName ?? null]
+    [id]
   );
   return fetchCoilsWithMrnDetails(rows?.map((row) => row.coil_no_uid) ?? []);
 };
 
 /** After IPR rejection hold is released — restore shop-floor out when Store In is still pending. */
-export const restoreCoilsToShopFloorOut = async (coil_no_uids = [], userName) => {
+export const restoreCoilsToShopFloorOut = async (coil_no_uids = [], _userName) => {
   const uids = (coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean);
   if (!uids.length) return [];
   const rows = await dbQuery(
     `UPDATE ${TABLE}
      SET status = 'out',
-         ipr_uid = NULL,
-         updated_by = $2,
-         updated_at = NOW()
+         ipr_uid = NULL
      WHERE coil_no_uid = ANY($1::text[])
-       AND is_deleted = false
        AND LOWER(COALESCE(status, 'active')) IN ('active', 'rejected')
      RETURNING coil_no_uid`,
-    [uids, userName ?? null]
+    [uids]
   );
   return fetchCoilsWithMrnDetails(rows?.map((row) => row.coil_no_uid) ?? []);
 };
@@ -967,7 +1381,7 @@ export const restoreCoilsToShopFloorOut = async (coil_no_uids = [], userName) =>
  * Store In receive wins over an in-process rejection hold on the same coil —
  * release hold and restore shop-floor out so receive can proceed.
  */
-export const releaseCoilFromIprRejectionHoldForStoreIn = async (coil_no_uid, userName) => {
+export const releaseCoilFromIprRejectionHoldForStoreIn = async (coil_no_uid, _userName) => {
   const uid = String(coil_no_uid || "").trim();
   if (!uid) return null;
   const rows = await dbQuery(
@@ -976,15 +1390,12 @@ export const releaseCoilFromIprRejectionHoldForStoreIn = async (coil_no_uid, use
          location_id = NULL,
          in_uid = NULL,
          out_uid = NULL,
-         status = 'out',
-         updated_by = $2,
-         updated_at = NOW()
+         status = 'out'
      WHERE coil_no_uid = $1
-       AND is_deleted = false
        AND LOWER(COALESCE(status, 'active')) = 'rejected'
        AND rm_uid IS NULL
      RETURNING coil_no_uid, ipr_uid AS released_from_ipr_uid`,
-    [uid, userName ?? null]
+    [uid]
   );
   if (!rows?.[0]) return null;
   const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
@@ -1004,11 +1415,8 @@ export const markCoilsInProcessRejectionPending = async (ipr_uid, coil_no_uids =
          in_uid = NULL,
          out_uid = NULL,
          ipr_uid = $1,
-         status = 'rejected',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($3::text[])
-       AND is_deleted = false
+         status = 'rejected'
+     WHERE coil_no_uid = ANY($2::text[])
        AND rm_uid IS NULL
        AND (
          LOWER(COALESCE(status, 'active')) = 'active'
@@ -1022,7 +1430,7 @@ export const markCoilsInProcessRejectionPending = async (ipr_uid, coil_no_uids =
          )
        )
      RETURNING coil_no_uid`,
-    [Number(ipr_uid), userName ?? null, uids]
+    [Number(ipr_uid), uids]
   );
   return fetchCoilsWithMrnDetails(rows?.map((row) => row.coil_no_uid) ?? []);
 };
@@ -1039,19 +1447,16 @@ export const linkCoilsToRejectionRegister = async (
   const iprId = Number(fromIprUid);
   const hasIpr = Number.isFinite(iprId) && iprId > 0;
   const statusClause = hasIpr
-    ? `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND ipr_uid = $4 AND (rm_uid IS NULL OR rm_uid = $1)))`
+    ? `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND ipr_uid = $3 AND (rm_uid IS NULL OR rm_uid = $1)))`
     : `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND (rm_uid IS NULL OR rm_uid = $1) AND ipr_uid IS NULL))`;
-  const params = [Number(rm_uid), userName ?? null, uids];
+  const params = [Number(rm_uid), uids];
   if (hasIpr) params.push(iprId);
   await dbQuery(
     `UPDATE ${TABLE}
      SET rm_uid = $1,
          status = 'rejected',
-         out_uid = NULL,
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($3::text[])
-       AND is_deleted = false
+         out_uid = NULL
+     WHERE coil_no_uid = ANY($2::text[])
        AND ${statusClause}`,
     params
   );
@@ -1064,11 +1469,8 @@ export const updateCoilsAfterQcReject = async (rm_uid, coil_no_uids = [], userNa
     `UPDATE ${TABLE}
      SET rm_uid = $1,
          out_uid = NULL,
-         status = 'rejected',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($3::text[])
-       AND is_deleted = false
+         status = 'rejected'
+     WHERE coil_no_uid = ANY($2::text[])
        AND (
          COALESCE(status, 'active') = 'active'
          OR (
@@ -1077,34 +1479,30 @@ export const updateCoilsAfterQcReject = async (rm_uid, coil_no_uids = [], userNa
            AND ipr_uid IS NULL
          )
        )`,
-    [rm_uid, userName ?? null, coil_no_uids]
+    [rm_uid, coil_no_uids]
   );
 };
 
 /** Restore coils after RM Rejection register delete — back to QC fail / IPR pending hold. */
-export const revertCoilsFromRejectionRegister = async (rm_uid, userName) => {
+export const revertCoilsFromRejectionRegister = async (rm_uid, _userName) => {
   await dbQuery(
     `UPDATE ${TABLE}
      SET rm_uid = NULL,
-         status = 'rejected',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE rm_uid = $1 AND is_deleted = false`,
-    [Number(rm_uid), userName ?? null]
+         status = 'rejected'
+     WHERE rm_uid = $1`,
+    [Number(rm_uid)]
   );
 };
 
 /** Restore QC-rejected coils to Coil Area — clear QC link so they reappear as virtual pending. */
-export const clearCoilsForQcReject = async (rm_uid, userName) => {
+export const clearCoilsForQcReject = async (rm_uid, _userName) => {
   await dbQuery(
     `UPDATE ${TABLE}
      SET rm_uid = NULL,
          qc_uid = NULL,
-         status = 'active',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE rm_uid = $1 AND is_deleted = false AND status = 'rejected'`,
-    [Number(rm_uid), userName ?? null]
+         status = 'active'
+     WHERE rm_uid = $1 AND status = 'rejected'`,
+    [Number(rm_uid)]
   );
 };
 
@@ -1121,31 +1519,45 @@ export const markCoilsConsumed = async (ipr_uid, coil_no_uids = [], userName) =>
          in_uid = NULL,
          out_uid = NULL,
          ipr_uid = $1,
-         status = 'consumed',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($3::text[])
-       AND is_deleted = false
+         status = 'consumed'
+     WHERE coil_no_uid = ANY($2::text[])
        AND COALESCE(status, 'active') = 'out'
      RETURNING coil_no_uid, qty, mrn_uid`,
-    [Number(ipr_uid), userName ?? null, uids]
+    [Number(ipr_uid), uids]
   );
   return rows ?? [];
 };
 
+/** Latest approved Store Out that scanned this coil — used when IPR delete must restore shop floor. */
+export const findLatestOutUidForCoil = async (coil_no_uid) => {
+  const uid = String(coil_no_uid || "").trim();
+  if (!uid) return null;
+  const [row] = await dbQuery(
+    `SELECT o.out_uid, o.pjobcardno
+     FROM ${T.OUT_ENTRY_SCANNED_COIL} s
+     JOIN ${OUT_ENTRY} o ON o.out_uid = s.out_uid AND o.is_deleted = false
+     WHERE LOWER(TRIM(s.coil_no_uid)) = LOWER(TRIM($1))
+     ORDER BY
+       CASE WHEN COALESCE(o.approved, false) = true THEN 0 ELSE 1 END,
+       COALESCE(o.approved_at, o.created_at) DESC NULLS LAST,
+       o.out_uid DESC
+     LIMIT 1`,
+    [uid]
+  );
+  return row ?? null;
+};
+
 /** Undo a consume request — its coils return to the Coil Area as active. */
-export const revertCoilsConsumed = async (ipr_uid, userName) => {
+export const revertCoilsConsumed = async (ipr_uid, _userName) => {
   const id = Number(ipr_uid);
   if (!Number.isFinite(id)) return [];
   const rows = await dbQuery(
     `UPDATE ${TABLE}
      SET ipr_uid = NULL,
-         status = 'active',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE ipr_uid = $1 AND is_deleted = false AND status = 'consumed'
+         status = 'active'
+     WHERE ipr_uid = $1 AND status = 'consumed'
      RETURNING coil_no_uid`,
-    [id, userName ?? null]
+    [id]
   );
   return fetchCoilsWithMrnDetails(rows?.map((row) => row.coil_no_uid) ?? []);
 };
@@ -1199,14 +1611,11 @@ export const processConsumeCoils = async (ipr_uid, coilLines = [], userName) => 
              in_uid = NULL,
              out_uid = NULL,
              ipr_uid = $1,
-             status = 'consumed',
-             updated_by = $2,
-             updated_at = NOW()
-         WHERE coil_no_uid = $3
-           AND is_deleted = false
+             status = 'consumed'
+         WHERE coil_no_uid = $2
            AND status = 'out'
          RETURNING coil_no_uid`,
-        [Number(ipr_uid), userName ?? null, uid]
+        [Number(ipr_uid), uid]
       );
       if (rows?.[0]) {
         const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
@@ -1222,14 +1631,11 @@ export const processConsumeCoils = async (ipr_uid, coilLines = [], userName) => 
 
     const rows = await dbQuery(
       `UPDATE ${TABLE}
-       SET qty = $1,
-           updated_by = $2,
-           updated_at = NOW()
-       WHERE coil_no_uid = $3
-         AND is_deleted = false
+       SET qty = $1
+       WHERE coil_no_uid = $2
          AND status = 'out'
        RETURNING coil_no_uid`,
-      [balance, userName ?? null, uid]
+      [balance, uid]
     );
     if (rows?.[0]) {
       const isReassign = line.reassign === true;
@@ -1295,14 +1701,11 @@ export const processStoreInReturnCoils = async (ipr_uid, coilLines = [], userNam
              in_uid = NULL,
              out_uid = NULL,
              ipr_uid = $1,
-             status = 'consumed',
-             updated_by = $2,
-             updated_at = NOW()
-         WHERE coil_no_uid = $3
-           AND is_deleted = false
+             status = 'consumed'
+         WHERE coil_no_uid = $2
            AND status = 'out'
          RETURNING coil_no_uid`,
-        [Number(ipr_uid), userName ?? null, uid]
+        [Number(ipr_uid), uid]
       );
       if (rows?.[0]) {
         const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
@@ -1322,16 +1725,13 @@ export const processStoreInReturnCoils = async (ipr_uid, coilLines = [], userNam
            in_uid = NULL,
            out_uid = NULL,
            ipr_uid = NULL,
-           sa_entry_type = $4,
+           sa_entry_type = $3,
            status = 'active',
-           qty = $1,
-           updated_by = $2,
-           updated_at = NOW()
-       WHERE coil_no_uid = $3
-         AND is_deleted = false
+           qty = $1
+       WHERE coil_no_uid = $2
          AND status = 'out'
        RETURNING coil_no_uid`,
-      [remaining, userName ?? null, uid, SA_ENTRY_TYPE.PRODUCTION_RETURN]
+      [remaining, uid, SA_ENTRY_TYPE.PRODUCTION_RETURN]
     );
     if (rows?.[0]) {
       const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
@@ -1358,7 +1758,7 @@ export const processStoreInReturnCoils = async (ipr_uid, coilLines = [], userNam
 };
 
 /** Undo an approved store-in return — put coils back out at the machine. */
-export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], userName) => {
+export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], userName, { restoreOutJobCard = true } = {}) => {
   const id = Number(ipr_uid);
   if (!Number.isFinite(id)) return { restored: [] };
   const restored = [];
@@ -1379,13 +1779,11 @@ export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], user
         `UPDATE ${TABLE}
          SET ipr_uid = NULL,
              status = 'out',
-             out_uid = COALESCE($1, out_uid),
-             qty = $2,
-             updated_by = $3,
-             updated_at = NOW()
-         WHERE coil_no_uid = $4 AND is_deleted = false AND status = 'consumed'
+             out_uid = COALESCE($1::int, out_uid),
+             qty = $2
+         WHERE coil_no_uid = $3 AND status = 'consumed'
          RETURNING coil_no_uid`,
-        [outUid, original, userName ?? null, uid]
+        [outUid, original, uid]
       );
       if (rows?.[0]) {
         const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
@@ -1395,14 +1793,12 @@ export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], user
       const rows = await dbQuery(
         `UPDATE ${TABLE}
          SET status = 'out',
-             out_uid = COALESCE($1, out_uid),
+             out_uid = COALESCE($1::int, out_uid),
              qty = $2,
-             sa_entry_type = NULL,
-             updated_by = $3,
-             updated_at = NOW()
-         WHERE coil_no_uid = $4 AND is_deleted = false AND status = 'active'
+             sa_entry_type = NULL
+         WHERE coil_no_uid = $3 AND status = 'active'
          RETURNING coil_no_uid`,
-        [outUid, original, userName ?? null, uid]
+        [outUid, original, uid]
       );
       if (rows?.[0]) {
         const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
@@ -1412,12 +1808,10 @@ export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], user
       const rows = await dbQuery(
         `UPDATE ${TABLE}
          SET qty = $1,
-             out_uid = COALESCE($2, out_uid),
-             updated_by = $3,
-             updated_at = NOW()
-         WHERE coil_no_uid = $4 AND is_deleted = false AND status = 'out'
+             out_uid = COALESCE($2::int, out_uid)
+         WHERE coil_no_uid = $3 AND status = 'out'
          RETURNING coil_no_uid`,
-        [original, outUid, userName ?? null, uid]
+        [original, outUid, uid]
       );
       if (rows?.[0]) {
         const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
@@ -1425,16 +1819,14 @@ export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], user
       }
     }
 
-    // Reassign approve overwrites Store Out JC to target; undo must put source JC back
-    // so IR machine join works again (macname is not stored on out_entry).
+    // Only rewrite Store Out JC when caller asks (reassign undo / repair original JC).
+    // Plain consume undo must NOT stamp display/target JC onto out_entry — that clears machine.
     const restoreOutUid = outUid ?? (coil.out_uid != null ? Number(coil.out_uid) : null);
-    if (restoreOutUid && sourceJc) {
+    if (restoreOutJobCard && restoreOutUid && sourceJc) {
       await dbQuery(
         `UPDATE ${OUT_ENTRY}
-         SET pjobcardno = $1,
-             updated_at = NOW()
-         WHERE out_uid = $2
-           AND is_deleted = false`,
+         SET pjobcardno = $1
+         WHERE out_uid = $2`,
         [sourceJc, restoreOutUid]
       );
     }
@@ -1444,36 +1836,30 @@ export const revertStoreInReturnCoils = async (ipr_uid, previousCoils = [], user
 };
 
 /** Job Card Store Out — link coils (IMS-style: keep in_uid + location on register). */
-export const updateCoilsAfterJobCardStoreOut = async (out_uid, coil_no_uids = [], userName) => {
+export const updateCoilsAfterJobCardStoreOut = async (out_uid, coil_no_uids = [], _userName) => {
   if (!coil_no_uids.length) return;
   await dbQuery(
     `UPDATE ${TABLE}
      SET out_uid = $1,
-         status = 'out',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($3::text[])
-       AND is_deleted = false
+         status = 'out'
+     WHERE coil_no_uid = ANY($2::text[])
        AND COALESCE(status, 'active') = 'active'
        AND out_uid IS NULL`,
-    [out_uid, userName ?? null, coil_no_uids]
+    [out_uid, coil_no_uids]
   );
 };
 
 /** Store Out — link coils to out entry (IMS-style: keep in_uid + location for historical register). */
-export const updateCoilsAfterStoreOut = async (out_uid, coil_no_uids = [], userName) => {
+export const updateCoilsAfterStoreOut = async (out_uid, coil_no_uids = [], _userName) => {
   if (!coil_no_uids.length) return;
   await dbQuery(
     `UPDATE ${TABLE}
      SET out_uid = $1,
-         status = 'out',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($3::text[])
-       AND is_deleted = false
+         status = 'out'
+     WHERE coil_no_uid = ANY($2::text[])
        AND COALESCE(status, 'active') = 'active'
        AND out_uid IS NULL`,
-    [out_uid, userName ?? null, coil_no_uids]
+    [out_uid, coil_no_uids]
   );
 };
 
@@ -1481,13 +1867,14 @@ export const updateCoilsAfterStoreOut = async (out_uid, coil_no_uids = [], userN
  * RM Rejection Store Out — final returned step.
  * Keeps the coil linked to the rejection and removes it from the active shop-floor state.
  */
-export const updateCoilsAfterRejectionStoreOut = async (out_uid, rm_uid, coil_no_uids = [], userName, { fromIprUid = null } = {}) => {  if (!coil_no_uids.length) return;
+export const updateCoilsAfterRejectionStoreOut = async (out_uid, rm_uid, coil_no_uids = [], _userName, { fromIprUid = null } = {}) => {
+  if (!coil_no_uids.length) return;
   const iprId = Number(fromIprUid);
   const hasIpr = Number.isFinite(iprId) && iprId > 0;
   const statusClause = hasIpr
-    ? `(LOWER(COALESCE(status, 'active')) IN ('active', 'rejected', 'out', 'returned') AND ipr_uid = $5 AND (rm_uid IS NULL OR rm_uid = $2))`
+    ? `(LOWER(COALESCE(status, 'active')) IN ('active', 'rejected', 'out', 'returned') AND ipr_uid = $4 AND (rm_uid IS NULL OR rm_uid = $2))`
     : `(LOWER(COALESCE(status, 'active')) IN ('active', 'rejected', 'out', 'returned') AND (rm_uid IS NULL OR rm_uid = $2) AND ipr_uid IS NULL)`;
-  const params = [out_uid, rm_uid, userName ?? null, coil_no_uids];
+  const params = [out_uid, rm_uid, coil_no_uids];
   if (hasIpr) params.push(iprId);
   await dbQuery(
     `UPDATE ${TABLE}
@@ -1495,41 +1882,34 @@ export const updateCoilsAfterRejectionStoreOut = async (out_uid, rm_uid, coil_no
          in_uid = NULL,
          out_uid = $1,
          rm_uid = $2,
-         status = 'returned',
-         updated_by = $3,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($4::text[])
-       AND is_deleted = false
+         status = 'returned'
+     WHERE coil_no_uid = ANY($3::text[])
        AND ${statusClause}`,
     params
   );
 };
 
 /** Restore Store-Out coils to Coil Area. */
-export const clearCoilsForStoreOut = async (out_uid, userName) => {
+export const clearCoilsForStoreOut = async (out_uid, _userName) => {
   await dbQuery(
     `UPDATE ${TABLE}
      SET out_uid = NULL,
-         status = 'active',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE out_uid = $1 AND is_deleted = false AND status = 'out'`,
-    [Number(out_uid), userName ?? null]
+         status = 'active'
+     WHERE out_uid = $1 AND status = 'out'`,
+    [Number(out_uid)]
   );
 };
 
 /**
  * Undo RM Rejection Store Out — keep rejection link, restore coil as rejected.
  */
-export const clearCoilsForRejectionStoreOut = async (out_uid, userName) => {
+export const clearCoilsForRejectionStoreOut = async (out_uid, _userName) => {
   await dbQuery(
     `UPDATE ${TABLE}
      SET out_uid = NULL,
-         status = 'rejected',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE out_uid = $1 AND is_deleted = false AND LOWER(COALESCE(status, 'active')) IN ('returned', 'out')`,
-    [Number(out_uid), userName ?? null]
+         status = 'rejected'
+     WHERE out_uid = $1 AND LOWER(COALESCE(status, 'active')) IN ('returned', 'out')`,
+    [Number(out_uid)]
   );
 };
 
@@ -1538,9 +1918,8 @@ export const incrementCoilDownloadCount = async (coil_no_uids = []) => {
   if (!uids.length) return;
   await dbQuery(
     `UPDATE ${TABLE}
-     SET download_count = COALESCE(download_count, 0) + 1,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($1::text[]) AND is_deleted = false`,
+     SET download_count = COALESCE(download_count, 0) + 1
+     WHERE coil_no_uid = ANY($1::text[])`,
     [uids]
   );
 };
@@ -1552,27 +1931,13 @@ export const countStoreInCoilsForMrn = async (mrn_uid) => {
   const [row] = await dbQuery(
     `SELECT COUNT(*)::int AS cnt
      FROM ${TABLE}
-     WHERE mrn_uid = $1 AND is_deleted = false AND location_id IS NOT NULL AND sa_id IS NULL`,
+     WHERE mrn_uid = $1 AND location_id IS NOT NULL AND sa_id IS NULL`,
     [uid]
   );
   return Number(row?.cnt || 0);
 };
 
-/** Soft-delete MRN Portal coil stickers for an MRN (Cancel stickers). SA coils are kept. */
-export const softDeleteCoilsByMrn = async (mrn_uid, deleted_by = null) => {
-  const uid = String(mrn_uid || "").trim();
-  if (!uid) return 0;
-  const rows = await dbQuery(
-    `UPDATE ${TABLE}
-     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_by = $2, updated_at = NOW()
-     WHERE mrn_uid = $1 AND is_deleted = false AND sa_id IS NULL
-     RETURNING coil_uid`,
-    [uid, deleted_by]
-  );
-  return Array.isArray(rows) ? rows.length : 0;
-};
-
-/** Permanently remove MRN Portal coils (incl. prior soft-deleted) so UIDs can be regenerated. */
+/** Permanently remove MRN Portal coils so UIDs can be regenerated. SA coils are kept. */
 export const hardDeleteCoilsByMrn = async (mrn_uid) => {
   const uid = String(mrn_uid || "").trim();
   if (!uid) return 0;
@@ -1584,6 +1949,9 @@ export const hardDeleteCoilsByMrn = async (mrn_uid) => {
   );
   return Array.isArray(rows) ? rows.length : 0;
 };
+
+/** Same as hardDeleteCoilsByMrn (name kept for callers). */
+export const softDeleteCoilsByMrn = async (mrn_uid, _deleted_by = null) => hardDeleteCoilsByMrn(mrn_uid);
 
 /** Any coil rows still linked to this MRN (portal or Stock Adjustment). */
 export const countCoilsByMrnUid = async (mrn_uid) => {
@@ -1607,16 +1975,15 @@ export const countSaCoilsByMrnUid = async (mrn_uid) => {
   return Number(row?.cnt || 0);
 };
 
-/** Soft-delete specific coils by coil_no_uid (partial generate rollback). */
-export const softDeleteCoilsByCoilNoUids = async (coil_no_uids = [], deleted_by = null) => {
+/** Hard-delete coils by coil_no_uid. */
+export const softDeleteCoilsByCoilNoUids = async (coil_no_uids = [], _deleted_by = null) => {
   const uids = (coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean);
   if (!uids.length) return 0;
   const rows = await dbQuery(
-    `UPDATE ${TABLE}
-     SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_by = $2, updated_at = NOW()
-     WHERE coil_no_uid = ANY($1::text[]) AND is_deleted = false
+    `DELETE FROM ${TABLE}
+     WHERE coil_no_uid = ANY($1::text[])
      RETURNING coil_uid`,
-    [uids, deleted_by]
+    [uids]
   );
   return Array.isArray(rows) ? rows.length : 0;
 };
@@ -1717,56 +2084,47 @@ export const insertStockAdjustmentAddCoils = async ({
   return fetchCoilsWithMrnDetails(uids);
 };
 
-/** Soft-delete coils created by an Add adjustment. */
-export const softDeleteStockAdjustmentAddCoils = async (adjustmentId, userName) => {
+/** Hard-delete coils created by an Add adjustment. */
+export const softDeleteStockAdjustmentAddCoils = async (adjustmentId, _userName) => {
   const adjId = Number(adjustmentId);
   if (!Number.isFinite(adjId) || adjId <= 0) return 0;
   const rows = await dbQuery(
-    `UPDATE ${TABLE}
-     SET is_deleted = true,
-         deleted_by = $2,
-         deleted_at = NOW(),
-         updated_by = $2,
-         updated_at = NOW()
+    `DELETE FROM ${TABLE}
      WHERE sa_id = $1
-       AND is_deleted = false
        AND COALESCE(sa_entry_type, 'stock_in') = 'stock_in'
      RETURNING coil_uid`,
-    [adjId, userName ?? null]
+    [adjId]
   );
   return Array.isArray(rows) ? rows.length : 0;
 };
 
 /** Mark active coils as SA minus (consumed write-off — not shop floor). Keeps location for revert. */
-export const markCoilsStockAdjustmentOut = async (adjustmentId, coil_no_uids = [], userName) => {
+export const markCoilsStockAdjustmentOut = async (adjustmentId, coil_no_uids = [], _userName) => {
   const uids = [...new Set((coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean))];
   if (!uids.length) return [];
   return dbQuery(
     `UPDATE ${TABLE}
      SET status = 'consumed',
          sa_id = $1,
-         sa_entry_type = 'stock_out',
-         updated_by = $2,
-         updated_at = NOW()
-     WHERE coil_no_uid = ANY($3::text[])
-       AND is_deleted = false
+         sa_entry_type = 'stock_out'
+     WHERE coil_no_uid = ANY($2::text[])
        AND out_uid IS NULL
        AND (
          LOWER(COALESCE(status, 'active')) = 'active'
          OR (sa_entry_type = 'stock_out' AND sa_id = $1)
        )
      RETURNING *`,
-    [Number(adjustmentId), userName ?? null, uids]
+    [Number(adjustmentId), uids]
   );
 };
 
 /** Undo SA minus — restore coils to active. */
-export const clearStockAdjustmentMinusMarks = async (adjustmentId, coil_no_uids = [], userName) => {
+export const clearStockAdjustmentMinusMarks = async (adjustmentId, coil_no_uids = [], _userName) => {
   const adjId = Number(adjustmentId);
   const uids = [...new Set((coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean))];
-  const conditions = ["is_deleted = false", "sa_entry_type = 'stock_out'"];
-  const values = [userName ?? null];
-  let i = 2;
+  const conditions = ["sa_entry_type = 'stock_out'"];
+  const values = [];
+  let i = 1;
 
   if (Number.isFinite(adjId) && adjId > 0) {
     values.push(adjId);
@@ -1783,9 +2141,7 @@ export const clearStockAdjustmentMinusMarks = async (adjustmentId, coil_no_uids 
     `UPDATE ${TABLE}
      SET status = 'active',
          sa_id = NULL,
-         sa_entry_type = NULL,
-         updated_by = $1,
-         updated_at = NOW()
+         sa_entry_type = NULL
      WHERE ${conditions.join(" AND ")}
      RETURNING *`,
     values
@@ -1796,7 +2152,7 @@ export const findCoilsBySaId = async (adjustmentId, sa_entry_type = null) => {
   const adjId = Number(adjustmentId);
   if (!Number.isFinite(adjId) || adjId <= 0) return [];
   const values = [adjId];
-  let sql = `SELECT * FROM ${TABLE} WHERE sa_id = $1 AND is_deleted = false`;
+  let sql = `SELECT * FROM ${TABLE} WHERE sa_id = $1`;
   if (sa_entry_type === "stock_in") {
     sql += ` AND (sa_entry_type = 'stock_in' OR sa_entry_type IS NULL)`;
   } else if (sa_entry_type) {

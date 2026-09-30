@@ -18,7 +18,6 @@ async function loadRmLocationsByIds(locationIds) {
       SELECT COUNT(*)::int
       FROM ${COIL} rc
       WHERE rc.location_id = lm.location_id
-        AND rc.is_deleted = false
         AND COALESCE(rc.status, 'active') IN ('active', 'rejected')
     ),
     0
@@ -50,8 +49,7 @@ async function loadCoilsByUid(coilUids) {
   const rows = await dbQuery(
     `SELECT coil_no_uid, location_id
      FROM ${COIL}
-     WHERE is_deleted = false
-       AND coil_no_uid::text = ANY($1::text[])`,
+     WHERE coil_no_uid::text = ANY($1::text[])`,
     [uids]
   );
 

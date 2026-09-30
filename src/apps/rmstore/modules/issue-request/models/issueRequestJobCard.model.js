@@ -17,6 +17,47 @@ function normalizeJsonArray(raw) {
   return [];
 }
 
+/** Total coils from MRN-quota JSON (or legacy per-coil rows). */
+export function coilCountFromCoilsJson(raw) {
+  let n = 0;
+  for (const c of normalizeJsonArray(raw)) {
+    const cnt = Number(c?.coil_count);
+    if (Number.isFinite(cnt) && cnt > 0 && String(c?.mrn_uid || "").trim()) {
+      n += Math.floor(cnt);
+      continue;
+    }
+    if (String(c?.coil_no_uid || "").trim()) n += 1;
+  }
+  return n;
+}
+
+/**
+ * Persist shape: MRN quotas only — no specific coil_no_uid.
+ * Accepts FE coil picks `{coil_no_uid, qty, mrn_uid}` OR quotas `{mrn_uid, coil_count, qty}`.
+ */
+export function aggregateToMrnQuotas(raw) {
+  const map = new Map();
+  for (const c of normalizeJsonArray(raw)) {
+    const mrn_uid = String(c?.mrn_uid || "").trim();
+    if (!mrn_uid) continue;
+    const qty = Number(c?.qty);
+    const safeQty = Number.isFinite(qty) ? qty : 0;
+    const explicitCount = Number(c?.coil_count);
+    const addCount =
+      Number.isFinite(explicitCount) && explicitCount > 0
+        ? Math.floor(explicitCount)
+        : String(c?.coil_no_uid || "").trim()
+          ? 1
+          : 0;
+    if (addCount <= 0 && safeQty <= 0) continue;
+    const prev = map.get(mrn_uid) || { mrn_uid, coil_count: 0, qty: 0 };
+    prev.coil_count += addCount > 0 ? addCount : 0;
+    prev.qty += safeQty;
+    map.set(mrn_uid, prev);
+  }
+  return [...map.values()].filter((q) => q.coil_count > 0);
+}
+
 /** API shape (matches legacy job_cards JSONB). */
 export function jobCardRowToApi(row) {
   if (!row) return null;
@@ -32,31 +73,18 @@ export function jobCardRowToApi(row) {
     rm_item_dcode: row.rm_item_dcode ?? null,
     rm_item_code: row.rm_item_code ?? null,
     rm_item_desc: row.rm_item_desc ?? null,
-    production_id: row.production_id ?? null,
     planqty: row.planqty ?? 0,
     issue_qty: row.issue_qty ?? 0,
     part_weight: row.part_weight ?? 0,
     rm_weight: row.rm_weight ?? 0,
+    coil_count: coilCountFromCoilsJson(coils),
     coils,
   };
 }
 
+/** DB write: only `{ mrn_uid, coil_count, qty }`. */
 function normalizeCoilPayload(raw) {
-  return normalizeJsonArray(raw)
-    .map((c) => {
-      const coil_no_uid = String(c?.coil_no_uid || "").trim();
-      if (!coil_no_uid) return null;
-      const qty = Number(c?.qty);
-      const mrn_uid = c?.mrn_uid != null && String(c.mrn_uid).trim() !== "" ? String(c.mrn_uid).trim() : null;
-      const mrn_no = c?.mrn_no != null && String(c.mrn_no).trim() !== "" ? c.mrn_no : null;
-      return {
-        coil_no_uid,
-        qty: Number.isFinite(qty) ? qty : 0,
-        ...(mrn_uid ? { mrn_uid } : {}),
-        ...(mrn_no != null ? { mrn_no } : {}),
-      };
-    })
-    .filter(Boolean);
+  return aggregateToMrnQuotas(raw);
 }
 
 function jobCardPayloadToRow(issue_uid, raw, userName) {
@@ -72,12 +100,10 @@ function jobCardPayloadToRow(issue_uid, raw, userName) {
     rm_item_dcode: raw?.rm_item_dcode ?? null,
     rm_item_code: raw?.rm_item_code ?? null,
     rm_item_desc: raw?.rm_item_desc ?? null,
-    production_id: raw?.production_id ?? null,
     planqty: Number(raw?.planqty ?? raw?.plan_qty ?? 0) || 0,
     issue_qty: Number(raw?.issue_qty ?? 0) || 0,
     part_weight: Number(raw?.part_weight ?? 0) || 0,
     rm_weight: Number(raw?.rm_weight ?? 0) || 0,
-    coil_count: coils.length,
     coils: JSON.stringify(coils),
     created_by: userName ?? null,
   };
@@ -125,9 +151,9 @@ export const insertIssueRequestJobCard = async (data, { client = null } = {}) =>
   const rows = await run(
     `INSERT INTO ${TABLE}
      (issue_uid, pjobcardno, pldt, macname, item_dcode, item_code, item_desc,
-      rm_item_dcode, rm_item_code, rm_item_desc, production_id,
-      planqty, issue_qty, part_weight, rm_weight, coil_count, coils, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18)
+      rm_item_dcode, rm_item_code, rm_item_desc,
+      planqty, issue_qty, part_weight, rm_weight, coils, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16)
      RETURNING *`,
     [
       data.issue_uid,
@@ -140,12 +166,10 @@ export const insertIssueRequestJobCard = async (data, { client = null } = {}) =>
       data.rm_item_dcode,
       data.rm_item_code,
       data.rm_item_desc,
-      data.production_id,
       data.planqty,
       data.issue_qty,
       data.part_weight,
       data.rm_weight,
-      data.coil_count,
       data.coils,
       data.created_by,
     ]
