@@ -7,6 +7,7 @@ import User from "../../identity/users/models/user.model.js";
 import { toUserId } from "../../lib/utils/realtime/socket.js";
 import { formatPushTitle, resolvePushAppBrand } from "../../../../config/push/pushAppBrand.js";
 import { INBOX_DELIVERY_RECIPIENT_LABEL } from "../../lib/config/notifications/inboxConfig.js";
+import Inbox from "../inbox/inbox.model.js";
 
 const PUSH_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days — delivers when device comes online
 const PUSH_SEND_TIMEOUT_MS = 8000; // fail fast so one hung endpoint cannot delay other devices
@@ -86,6 +87,16 @@ async function sendToRow(row, notification = {}, meta = {}) {
   const title = formatPushTitle(app_type, rawTitle);
   const body = notification.body || "";
 
+  const uid = row.user_id ?? meta.user_id ?? null;
+  let unread_count;
+  if (uid) {
+    try {
+      unread_count = await Inbox.countUnread(uid, {});
+    } catch {
+      unread_count = undefined;
+    }
+  }
+
   const payload = JSON.stringify({
     title,
     body: body || title,
@@ -96,12 +107,14 @@ async function sendToRow(row, notification = {}, meta = {}) {
     silent: false,
     vibrate: notification.vibrate || [200, 100, 200],
     url,
+    unread_count,
     data: {
       url,
       inbox_id: inbox_id != null ? String(inbox_id) : "",
       tracking_id,
       app_type,
       app_label: brand.label,
+      unread_count,
       api_base: String(config.web_push?.api_base_url || config.web_push?.delivery_api_bases?.[0] || "").replace(/\/$/, ""),
       delivery_api_bases: config.web_push?.delivery_api_bases ?? [],
       company_backend_url: String(config.web_push?.company_backend_url || "").replace(/\/$/, ""),

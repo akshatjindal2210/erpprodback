@@ -394,7 +394,7 @@ export const deleteShortage = async (req, res) => {
 /* ─────────────────  Internal helpers (packing sticker override)  ───────────────── */
 
 /** Insert helper used by packing deviation flow — no activity log, auto-approved. */
-export async function createShortageRecordInternal(record, req) {
+export async function createShortageRecordInternal(record, req, options = {}) {
   try {
     const parsed = parseCreatePayload(record);
     if (!parsed.ok) {
@@ -403,6 +403,9 @@ export async function createShortageRecordInternal(record, req) {
 
     const data = { ...parsed.data, created_by: auditUserName(req) };
     const prepared = await applyShortageApproval(data, { mode: "create", req, existing: null, autoApprove: true });
+    if (options.approvedBy != null) {
+      prepared.approved_by = String(options.approvedBy);
+    }
 
     const row = await insertShortage(prepared);
     const [enriched] = await enrichShortageRows([row]);
@@ -852,6 +855,12 @@ export const createPackingDeviation = async (req, res) => {
   }
 };
 
+/** Safe qty/number for auto-deviation remark lines (null/NaN → "—"). */
+function remarkNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? String(n) : "—";
+}
+
 /** New Sticker Auto Deviation: check = FG + current − schedule_bal; if check ≤ item Max → create excess. */
 export const autoPackingDeviation = async (req, res) => {
   try {
@@ -881,16 +890,43 @@ export const autoPackingDeviation = async (req, res) => {
       return res.json({ success: true, data: { created: false, skipped_auto: true, auto_check_qty: check, ...before } });
     }
 
+    const itemcode = String(b.item_code ?? b.itemcode ?? itemdcode).trim() || String(itemdcode);
+    const pct = Number(before.shortage_qty_percentage);
+    const used = remarkNum(before.month_used_qty);
+    const cur = remarkNum(before.requested_qty);
+    const projected = remarkNum(before.projected_total);
+    const base = remarkNum(before.base_qty);
+    const tol = remarkNum(before.tolerance_qty);
+    const allowed = remarkNum(before.allowed_limit);
+    const fg = remarkNum(before.fg_stock_qty);
+    const schBal = remarkNum(before.schedule_balance_qty);
+    const pctLabel = Number.isFinite(pct) ? `${pct}%` : "—";
+    const maxLabel = max > 0 ? String(max) : "off";
+    // Same calc vars as above — simple labels only.
+    const remarks = [
+      `Auto deviation — packing #${doc_no || "—"}`,
+      `Auto deviation qty: ${excess}`,
+      `Month used: ${used}`,
+      `Current packing: ${cur}`,
+      `Total projected (month used + current): ${projected}`,
+      `Base (shortage): ${base}`,
+      `Tolerance (${pctLabel}): ${tol}`,
+      `Allowed (base + tolerance): ${allowed}`,
+      `Stock check: FG ${fg} + current ${cur} − schedule bal ${schBal} = ${remarkNum(check)}`,
+      `Item max: ${maxLabel}`,
+    ].join("\n");
+
     const outcome = await createShortageRecordInternal(
       {
         itemdcode,
-        itemcode: String(b.item_code ?? b.itemcode ?? itemdcode).trim() || String(itemdcode),
+        itemcode,
         type: "Deviation",
         qty: excess,
         month: normalizeShortageMonth(b.doc_dt ?? b.month, null),
-        remarks: `Auto deviation — packing #${doc_no || "—"}`,
+        remarks,
       },
-      req
+      req,
+      { approvedBy: "System" }
     );
     if (!outcome.success) {
       return res.status(400).json({ success: false, message: outcome.message || "Auto deviation failed.", data: before });
