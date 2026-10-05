@@ -25,21 +25,32 @@ export const getErpStockComparisonReport = async (req, res) => {
   }
 };
 
-/** Push one mismatch packing to IMS stockadjust, then the report is refreshed. */
+function parseStockAdjustBody(body) {
+  const docno = Number(body?.docno);
+  const docdt = String(body?.docdt ?? "").trim().slice(0, 10);
+  const qty = Number(body?.qty);
+  const fyid = Number(body?.fyid);
+  if (!Number.isFinite(docno) || docno <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(docdt) || !Number.isFinite(qty) || qty === 0) {
+    return { error: "Packing no, date, and a non-zero qty are required." };
+  }
+  if (!Number.isFinite(fyid) || fyid <= 0) {
+    return { error: "fyid is required." };
+  }
+  return { docno, docdt, qty, fyid };
+}
+
+/** Push one mismatch packing to IMS stockadjust (type: 1 + fyid). */
 export const adjustErpStockMismatch = async (req, res) => {
   try {
     const type = String(req.user?.type || "").toLowerCase().trim();
     if (type !== "super_admin" && type !== "super admin") {
       return res.status(403).json({ success: false, message: "You do not have permission to adjust stock." });
     }
-    const docno = Number(req.body?.docno);
-    const docdt = String(req.body?.docdt ?? "").trim().slice(0, 10);
-    const qty = Number(req.body?.qty);
-    if (!Number.isFinite(docno) || docno <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(docdt) || !Number.isFinite(qty) || qty === 0) {
-      return res.status(400).json({ success: false, message: "Packing no, date, and a non-zero qty are required." });
+    const parsed = parseStockAdjustBody(req.body);
+    if (parsed.error) {
+      return res.status(400).json({ success: false, message: parsed.error });
     }
-
-    const json = await fetchImsDataRaw("stockadjust", { docno, docdt, qty });
+    const json = await fetchImsDataRaw("stockadjust", { ...parsed, type: 1 });
     if (!json?.success) {
       return res.status(502).json({ success: false, message: json?.message || "Stock adjust failed." });
     }
@@ -53,21 +64,19 @@ export const adjustErpStockMismatch = async (req, res) => {
   }
 };
 
-/** Same as Adjust, plus type: 2 on stockadjust. */
+/** Same as Adjust, with type: 2 + fyid on stockadjust. */
 export const adjustErpStockMismatch2 = async (req, res) => {
   try {
     const type = String(req.user?.type || "").toLowerCase().trim();
     if (type !== "super_admin" && type !== "super admin") {
       return res.status(403).json({ success: false, message: "You do not have permission to adjust stock." });
     }
-    const docno = Number(req.body?.docno);
-    const docdt = String(req.body?.docdt ?? "").trim().slice(0, 10);
-    const qty = Number(req.body?.qty);
-    if (!Number.isFinite(docno) || docno <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(docdt) || !Number.isFinite(qty) || qty === 0) {
-      return res.status(400).json({ success: false, message: "Packing no, date, and a non-zero qty are required." });
+    const parsed = parseStockAdjustBody(req.body);
+    if (parsed.error) {
+      return res.status(400).json({ success: false, message: parsed.error });
     }
 
-    const json = await fetchImsDataRaw("stockadjust", { docno, docdt, qty, type: 2 });
+    const json = await fetchImsDataRaw("stockadjust", { ...parsed, type: 2 });
     if (!json?.success) {
       return res.status(502).json({ success: false, message: json?.message || "Stock adjust failed." });
     }

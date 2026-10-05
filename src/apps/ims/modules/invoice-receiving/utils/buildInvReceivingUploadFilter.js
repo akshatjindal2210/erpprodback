@@ -140,18 +140,19 @@ export function parseReceiverefnoFromIms(raw) {
  * Build local gate payload for invoice receiving save (no ERP / invreceiving).
  */
 export function buildGateReceivingPayload(req, opts = {}) {
-  const { file_paths = [], approved = false, remarks = "", touchUpload = true } = opts;
+  const { file_paths = [], approved = false, remarks = "", touchUpload = true, previousMeta = null } = opts;
+  const prev = previousMeta && typeof previousMeta === "object" && !Array.isArray(previousMeta) ? previousMeta : null;
   const paths = (Array.isArray(file_paths) ? file_paths : []).map((p) => String(p).trim()).filter((p) => !isErpNullString(p));
 
   const user = auditUserName(req) || "system";
   const now = formatIstDateTime(new Date());
   const wantApproved = !!approved;
 
-  const uploaded_by = touchUpload ? user : String(req.body?.uploaded_by ?? "").trim() || user;
+  const uploaded_by = touchUpload ? user : String(req.body?.uploaded_by ?? prev?.uploaded_by ?? "").trim() || user;
   const uploaded_at = touchUpload
     ? now
     : (() => {
-        const raw = req.body?.uploaded_at;
+        const raw = req.body?.uploaded_at ?? prev?.uploaded_at;
         if (raw == null || String(raw).trim() === "") return now;
         return formatIstDateTime(raw);
       })();

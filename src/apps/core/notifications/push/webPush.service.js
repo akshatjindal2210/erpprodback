@@ -89,11 +89,14 @@ async function sendToRow(row, notification = {}, meta = {}) {
 
   const uid = row.user_id ?? meta.user_id ?? null;
   let unread_count;
+  let unread_count_all;
   if (uid) {
     try {
-      unread_count = await Inbox.countUnread(uid, {});
+      unread_count = await Inbox.countUnread(uid, { app_type });
+      unread_count_all = await Inbox.countUnread(uid, {});
     } catch {
       unread_count = undefined;
+      unread_count_all = undefined;
     }
   }
 
@@ -108,6 +111,7 @@ async function sendToRow(row, notification = {}, meta = {}) {
     vibrate: notification.vibrate || [200, 100, 200],
     url,
     unread_count,
+    unread_count_all,
     data: {
       url,
       inbox_id: inbox_id != null ? String(inbox_id) : "",
@@ -115,6 +119,7 @@ async function sendToRow(row, notification = {}, meta = {}) {
       app_type,
       app_label: brand.label,
       unread_count,
+      unread_count_all,
       api_base: String(config.web_push?.api_base_url || config.web_push?.delivery_api_bases?.[0] || "").replace(/\/$/, ""),
       delivery_api_bases: config.web_push?.delivery_api_bases ?? [],
       company_backend_url: String(config.web_push?.company_backend_url || "").replace(/\/$/, ""),

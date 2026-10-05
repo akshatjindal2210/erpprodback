@@ -16,9 +16,9 @@ import { isCoilEligibleForIprRejection, iprRejectionIneligibleMessage } from "..
 import { isIssuedToShopFloor, isSaMinusWriteOff } from "../../../lib/utils/saMinusInventory.js";
 import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 import { enrichIprWithMachineLabels } from "../../inventory-inward/utils/enrichIprMachineLabels.js";
-import { filterPrdRunJcBySearch, loadMappedPrdRunJc, slicePage, toPrdRunJcPickerRow } from "../../production/utils/erpItems.js";
-import { findApprovedFgItemsForRmWire, findProductions } from "../../production/models/productionMaster.model.js";
-import { normalizeRmItems } from "../../production/utils/productionRmHelpers.js";
+import { filterPrdRunJcBySearch, loadMappedItems, loadMappedPrdRunJc, slicePage, toPrdRunJcPickerRow } from "../../production/utils/erpItems.js";
+import { findApprovedFgItemsForRmWire, findApprovedProductionRowsLite, findProductions } from "../../production/models/productionMaster.model.js";
+import { enrichProductionRow, normalizeRmItems } from "../../production/utils/productionRmHelpers.js";
 
 const MODULE = "rm_in_process_request";
 const log = createRmstoreActivityLogger(MODULE);
@@ -1938,10 +1938,76 @@ function prodKeyForJcRow(row) {
   return null;
 }
 
+function addFgKeysToSet(set, row) {
+  const itemdcode = Number(row?.itemdcode ?? row?.item_dcode);
+  const itemCode = String(row?.item_code || "").trim().toUpperCase();
+  if (Number.isFinite(itemdcode) && itemdcode > 0) set.add(`d:${itemdcode}`);
+  if (itemCode) set.add(`c:${itemCode}`);
+}
+
+function jcRowMatchesAllowedFg(allowedFgKeys, jcRow) {
+  const itemdcode = Number(jcRow?.itemdcode ?? jcRow?.item_dcode);
+  const itemCode = String(jcRow?.item_code || "").trim().toUpperCase();
+  if (Number.isFinite(itemdcode) && itemdcode > 0 && allowedFgKeys.has(`d:${itemdcode}`)) return true;
+  if (itemCode && allowedFgKeys.has(`c:${itemCode}`)) return true;
+  return false;
+}
+
+function indexProductionByFgKey(map, rawRow) {
+  const p = enrichProductionRow(rawRow);
+  const itemdcode = Number(p?.item_dcode);
+  const itemCode = String(p?.item_code || "").trim().toUpperCase();
+  if (Number.isFinite(itemdcode) && itemdcode > 0) map.set(`d:${itemdcode}`, p);
+  if (itemCode) map.set(`c:${itemCode}`, p);
+}
+
+function resolveProductionForJc(prodByFgKey, jcRow) {
+  if (!jcRow) return null;
+  const primaryKey = prodKeyForJcRow(jcRow);
+  if (primaryKey && prodByFgKey.has(primaryKey)) return prodByFgKey.get(primaryKey);
+  const itemdcode = Number(jcRow?.itemdcode ?? jcRow?.item_dcode);
+  const itemCode = String(jcRow?.item_code || "").trim().toUpperCase();
+  if (itemCode && prodByFgKey.has(`c:${itemCode}`)) return prodByFgKey.get(`c:${itemCode}`);
+  if (Number.isFinite(itemdcode) && itemdcode > 0 && prodByFgKey.has(`d:${itemdcode}`)) {
+    return prodByFgKey.get(`d:${itemdcode}`);
+  }
+  return null;
+}
+
+function sameApprovedFgProduction(prodA, prodB) {
+  if (!prodA || !prodB) return false;
+  const dA = Number(prodA.item_dcode);
+  const dB = Number(prodB.item_dcode);
+  const cA = String(prodA.item_code || "").trim().toUpperCase();
+  const cB = String(prodB.item_code || "").trim().toUpperCase();
+  if (Number.isFinite(dA) && dA > 0 && Number.isFinite(dB) && dB > 0 && dA === dB) return true;
+  if (cA && cB && cA === cB) return true;
+  return prodA === prodB;
+}
+
+/** 1-based index of this RM wire in FG production rm_items (array order). */
+function rmWireSequenceInProduction(prodRow, rmCodeUpper, dcodeToCode, rmDcode = null) {
+  if (!prodRow || (!rmCodeUpper && rmDcode == null)) return null;
+  const rmDcodeNum = rmDcode != null && rmDcode !== "" ? Number(rmDcode) : NaN;
+  const items = normalizeRmItems(prodRow);
+  for (let i = 0; i < items.length; i++) {
+    const dc = Number(items[i]?.rm_item_dcode);
+    if (Number.isFinite(rmDcodeNum) && rmDcodeNum > 0 && Number.isFinite(dc) && dc === rmDcodeNum) {
+      return i + 1;
+    }
+    let code = String(items[i]?.rm_item_code || "").trim().toUpperCase();
+    if (!code && Number.isFinite(dc) && dc > 0) code = dcodeToCode.get(dc) || "";
+    if (rmCodeUpper && code && code === rmCodeUpper) return i + 1;
+  }
+  return null;
+}
+
 /** Reassign job card picker — one request (no per-FG production-mapping loop on client). */
 export const getReassignJobCards = async (req, res) => {
   try {
     const rm_item_code = String(req.body?.rm_item_code || "").trim();
+    const rm_item_dcodeRaw = req.body?.rm_item_dcode;
+    const rm_item_dcode = rm_item_dcodeRaw != null && rm_item_dcodeRaw !== "" ? Number(rm_item_dcodeRaw) : null;
     const source_pjobcardno = String(req.body?.source_pjobcardno || "").trim();
     const exclude_pjobcardno = String(req.body?.exclude_pjobcardno || source_pjobcardno || "").trim();
     const search = sanitizeSearch(req.body?.search);
@@ -1954,20 +2020,37 @@ export const getReassignJobCards = async (req, res) => {
       return res.json({ success: true, data: [], total: 0, page, limit });
     }
 
-    const fgItems = await findApprovedFgItemsForRmWire({ item_code: rm_item_code });
-    const allowedFgKeys = new Set(fgItems.map((fg) => prodKeyForJcRow({ itemdcode: fg.item_dcode, item_code: fg.item_code })).filter(Boolean));
+    const fgItems = await findApprovedFgItemsForRmWire({
+      item_code: rm_item_code,
+      item_dcode: Number.isFinite(rm_item_dcode) && rm_item_dcode > 0 ? rm_item_dcode : undefined,
+    });
+    const allowedFgKeys = new Set();
+    for (const fg of fgItems) addFgKeysToSet(allowedFgKeys, { itemdcode: fg.item_dcode, item_code: fg.item_code });
 
-    const allJcs = await loadMappedPrdRunJc();
-    let sourceProdKey = null;
-    if (source_pjobcardno) {
-      const src = allJcs.find((j) => toUpperTrim(j.pjobcardno) === toUpperTrim(source_pjobcardno));
-      sourceProdKey = prodKeyForJcRow(src);
-    }
+    const rmCodeUpper = rm_item_code.toUpperCase();
+    const [prodRows, rmMaster, allJcs] = await Promise.all([
+      findApprovedProductionRowsLite(),
+      loadMappedItems("item", { type: "rm" }),
+      loadMappedPrdRunJc(),
+    ]);
+    const dcodeToCode = new Map(
+      (rmMaster || [])
+        .map((r) => [Number(r.itemdcode ?? r.item_dcode), String(r.item_code || "").trim().toUpperCase()])
+        .filter(([d, c]) => Number.isFinite(d) && d > 0 && c)
+    );
+    const prodByFgKey = new Map();
+    for (const p of prodRows || []) indexProductionByFgKey(prodByFgKey, p);
+    const sourceJc = source_pjobcardno
+      ? allJcs.find((j) => toUpperTrim(j.pjobcardno) === toUpperTrim(source_pjobcardno))
+      : null;
+    const sourceProd = sourceJc ? resolveProductionForJc(prodByFgKey, sourceJc) : null;
 
     let rows = allJcs.filter((j) => {
-      const key = prodKeyForJcRow(j);
-      if (!key || !allowedFgKeys.has(key)) return false;
-      if (primaryOnly && sourceProdKey && key !== sourceProdKey) return false;
+      if (!jcRowMatchesAllowedFg(allowedFgKeys, j)) return false;
+      if (primaryOnly && sourceProd) {
+        const jcProd = resolveProductionForJc(prodByFgKey, j);
+        if (!sameApprovedFgProduction(sourceProd, jcProd)) return false;
+      }
       if (exclude_pjobcardno && toUpperTrim(j.pjobcardno) === toUpperTrim(exclude_pjobcardno)) {
         return false;
       }
@@ -1978,12 +2061,21 @@ export const getReassignJobCards = async (req, res) => {
     rows = rows
       .map((j) => {
         const picked = toPrdRunJcPickerRow(j);
+        const prodRow = resolveProductionForJc(prodByFgKey, j);
+        const seq = rmWireSequenceInProduction(
+          prodRow,
+          rmCodeUpper,
+          dcodeToCode,
+          Number.isFinite(rm_item_dcode) && rm_item_dcode > 0 ? rm_item_dcode : null
+        );
+        const is_primary = seq === 1 ? 1 : 0;
         return {
           ...picked,
-          _isPrimaryProd: Boolean(sourceProdKey && prodKeyForJcRow(j) === sourceProdKey),
+          is_primary,
+          _isPrimaryProd: is_primary === 1,
         };
       })
-      .sort((a, b) => (b._isPrimaryProd ? 1 : 0) - (a._isPrimaryProd ? 1 : 0));
+      .sort((a, b) => (b.is_primary || 0) - (a.is_primary || 0));
 
     const paged = slicePage(rows, page, limit);
     return res.json({ success: true, ...paged, page, limit });

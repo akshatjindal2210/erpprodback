@@ -9,7 +9,8 @@ import { columnExists, dropColumnsIfExist, patchCol, patchTableSchema } from "..
  * stage = workflow (was downstream)
  * reassign_jc = target job card when type=reassign
  *
- * Boot: ensure cols → light type recovery (always) → optional heavy legacy → drop legacy.
+ * Boot: ensure cols + indexes → drop legacy columns (idempotent).
+ * Type/backfill helpers below are kept for reference; calls are commented out after migration.
  * RUN_IPR_BACKFILL = true only for one-time live migration if legacy cols still exist.
  */
 
@@ -300,9 +301,10 @@ export async function createRmStoreInProcessRequestTable() {
     ],
   });
 
-  await recoverIprTypeLight();
-  await backfillReassignJcLight();
-  await backfillIprLegacyHeavy();
+  // Boot backfill disabled — re-enable only for one-time migration (see in-process-request.md).
+  // await recoverIprTypeLight();
+  // await backfillReassignJcLight();
+  // await backfillIprLegacyHeavy();
 
   await dropColumnsIfExist(dbQuery, T.IN_PROCESS_REQUEST, LEGACY_DROP_COLS);
 }

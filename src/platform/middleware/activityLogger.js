@@ -27,6 +27,8 @@ const HRMS_MODULES = {
   attendance: "hrms_attendance",
   "attendance-log": "hrms_attendance_log",
   "gate-pass": "hrms_gate_pass",
+  leave: "hrms_leave",
+  loan: "hrms_loan",
 };
 
 function resolveMiddlewareModule(originalUrl, appType) {

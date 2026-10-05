@@ -1,4 +1,5 @@
 export const HRMS_ATTENDANCE_TZ = "Asia/Kolkata";
+export const NIGHT_SHIFT_END = "08:00";
 
 /** Quoted DB/API field names — `in` / `out` are reserved in SQL. */
 export const ATT_COL_IN = '"in"';

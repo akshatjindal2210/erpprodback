@@ -861,7 +861,19 @@ function remarkNum(v) {
   return Number.isFinite(n) ? String(n) : "—";
 }
 
-/** New Sticker Auto Deviation: check = FG + current − schedule_bal; if check ≤ item Max → create excess. */
+/**
+ * New Sticker Auto Deviation.
+ *
+ * Qty formula (from evaluateMonthlyPackingLimit):
+ *   allowed  = shortage + floor(shortage × tolerance%)
+ *   projected = month used + current packing
+ *   excess   = ceil(max(0, projected − allowed))
+ *
+ * Auto gate formula:
+ *   check = FG + current packing − schedule balance
+ *   Auto create when: excess ≥ 1 AND Max > 0 AND check ≤ Max
+ *   else skip (manual Create Deviation)
+ */
 export const autoPackingDeviation = async (req, res) => {
   try {
     const b = req.body || {};
@@ -883,37 +895,33 @@ export const autoPackingDeviation = async (req, res) => {
     const before = await evaluateMonthlyPackingLimit(args);
     if (before.ok) return res.json({ success: true, data: { created: false, ...before } });
 
+    // check = FG + current packing − schedule balance
     const check = (Number(before.fg_stock_qty) || 0) + (Number(before.requested_qty) || 0) - (Number(before.schedule_balance_qty) || 0);
     const max = Number(before.item_max_qty) || 0;
+    // excess = ceil(projected − allowed)
     const excess = Math.ceil(Number(before.excess_qty) || 0);
-    if (excess < 1 || (max > 0 && check > max)) {
+    // Skip Auto unless: excess ≥ 1 AND Max > 0 AND check ≤ Max
+    if (excess < 1 || max <= 0 || check > max) {
       return res.json({ success: true, data: { created: false, skipped_auto: true, auto_check_qty: check, ...before } });
     }
 
     const itemcode = String(b.item_code ?? b.itemcode ?? itemdcode).trim() || String(itemdcode);
-    const pct = Number(before.shortage_qty_percentage);
-    const used = remarkNum(before.month_used_qty);
     const cur = remarkNum(before.requested_qty);
-    const projected = remarkNum(before.projected_total);
-    const base = remarkNum(before.base_qty);
-    const tol = remarkNum(before.tolerance_qty);
     const allowed = remarkNum(before.allowed_limit);
     const fg = remarkNum(before.fg_stock_qty);
+    const shortage = remarkNum(before.base_qty);
     const schBal = remarkNum(before.schedule_balance_qty);
-    const pctLabel = Number.isFinite(pct) ? `${pct}%` : "—";
-    const maxLabel = max > 0 ? String(max) : "off";
-    // Same calc vars as above — simple labels only.
+    // Same formulas as above — numbers for user to recalculate.
     const remarks = [
       `Auto deviation — packing #${doc_no || "—"}`,
-      `Auto deviation qty: ${excess}`,
-      `Month used: ${used}`,
-      `Current packing: ${cur}`,
-      `Total projected (month used + current): ${projected}`,
-      `Base (shortage): ${base}`,
-      `Tolerance (${pctLabel}): ${tol}`,
-      `Allowed (base + tolerance): ${allowed}`,
-      `Stock check: FG ${fg} + current ${cur} − schedule bal ${schBal} = ${remarkNum(check)}`,
-      `Item max: ${maxLabel}`,
+      `Reason: packing ${cur} over allowed ${allowed}`,
+      `Auto qty: +${excess}`,
+      `FG: ${fg}`,
+      `Shortage: ${shortage}`,
+      `Schedule bal: ${schBal}`,
+      `Max: ${max}`,
+      `Qty formula: (month used + packing) − allowed → +${excess}`,
+      `Gate formula: FG + packing − schedule bal = ${fg} + ${cur} − ${schBal} = ${remarkNum(check)} (must be ≤ max ${max})`,
     ].join("\n");
 
     const outcome = await createShortageRecordInternal(

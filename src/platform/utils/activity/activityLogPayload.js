@@ -69,6 +69,8 @@ const ENTITY_LABELS = {
   hrms_attendance_log: "attendance log",
   hrms_employee: "employee",
   hrms_gate_pass: "gate pass",
+  hrms_leave: "leave",
+  hrms_loan: "loan",
   rm_mrn_portal: "MRN",
   rm_inventory_inwards: "store in",
   rm_qc_check: "QC check",

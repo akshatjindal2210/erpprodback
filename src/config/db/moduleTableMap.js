@@ -66,6 +66,8 @@ export const OTHER_TABLE_TO_MODULE = {
   hrms_attendance: "hrms_attendance",
   hrms_attendance_log: "hrms_attendance_log",
   hrms_gate_pass: "hrms_gate_pass",
+  hrms_leave: "hrms_leave",
+  hrms_loan: "hrms_loan",
 };
 
 /** Used by dashboard SQL helpers and notifications: physical table to module name. */
@@ -123,6 +125,8 @@ export const MODULE_PRIMARY_TABLE = {
   hrms_attendance: "hrms_attendance",
   hrms_attendance_log: "hrms_attendance_log",
   hrms_gate_pass: "hrms_gate_pass",
+  hrms_leave: "hrms_leave",
+  hrms_loan: "hrms_loan",
 };
 
 const ALL_TABLES = new Set([

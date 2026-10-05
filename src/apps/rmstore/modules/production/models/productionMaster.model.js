@@ -197,3 +197,10 @@ export async function findApprovedFgItemsForRmWire({ item_code, item_dcode } = {
     item_code: r.item_code ? String(r.item_code).trim() : "",
   }));
 }
+
+/** Approved FG mappings — RM list order = wire sequence (1 = primary). */
+export async function findApprovedProductionRowsLite() {
+  return dbQuery(
+    `SELECT item_dcode, item_code, rm_items FROM ${TBL} WHERE is_deleted = false AND approved = true`
+  );
+}

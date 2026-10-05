@@ -1,7 +1,9 @@
 import { fetchImsDataRaw } from "../../../lib/services/ims.service.js";
 import { toImsIrPublicUploadPath } from "../../../lib/middleware/upload.js";
-import { clearGateInvoiceReceiving, findMatchedOutGateRows, findUnmatchedOutGateRows, saveGateInvoiceReceiving } from "../../gate-entry/models/gateEntry.model.js";
+import { clearGateInvoiceReceiving, findGateByBillNo, findMatchedOutGateRows, findUnmatchedOutGateRows, saveGateInvoiceReceiving } from "../../gate-entry/models/gateEntry.model.js";
 import { formatIstDateTime, GATE_PENDING_MIN_BILL_DT, resolveGateImsBilldtFilter } from "../../gate-entry/utils/imsBillDateFilter.js";
+import { applyTimestamp, UPLOAD_TIMESTAMP_TYPES } from "../../../../rmstore/lib/utils/applyUploadTimestamp.js";
+import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { buildGateReceivingPayload, isErpNullString, parseExistingPathsFromBody, parseReceivingMeta } from "../utils/buildInvReceivingUploadFilter.js";
 
 const MODULE = "invoice_receiving";
@@ -137,12 +139,24 @@ export async function updateInvoiceReceiving(req, res) {
 
     const wantApproved = parseTruthyFlag(req.body?.approved);
     const touchUpload = newPaths.length > 0 || mode === "add";
+    const existingGate = await findGateByBillNo(prnbillno);
+    const previousMeta = parseReceivingMeta(existingGate?.receiving_meta);
     const payload = buildGateReceivingPayload(req, {
       file_paths,
       approved: wantApproved,
       remarks: req.body?.remarks,
       touchUpload,
+      previousMeta,
     });
+
+    if (touchUpload && uploaded.length > 0) {
+      const meta = parseReceivingMeta(payload.receiving_meta);
+      const uploader = String(meta?.uploaded_by || auditUserName(req) || "").trim();
+      const stampedAt = new Date();
+      for (const file of uploaded) {
+        await applyTimestamp(file, UPLOAD_TIMESTAMP_TYPES.IMAGE, uploader, stampedAt);
+      }
+    }
 
     const gate = await saveGateInvoiceReceiving(prnbillno, {
       receiving_file: payload.receiving_file,

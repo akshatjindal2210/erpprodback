@@ -327,7 +327,10 @@ export async function enrichCoilsWithReassignHistory(rows = []) {
   if (!list.length) return list;
 
   const outUids = list
-    .filter((r) => String(r.status || "active").toLowerCase() === "out")
+    .filter((r) => {
+      const st = String(r.status || "active").toLowerCase();
+      return st === "out" || st === "consumed";
+    })
     .map((r) => String(r.coil_no_uid || "").trim())
     .filter(Boolean);
 
@@ -553,7 +556,7 @@ LEFT JOIN LATERAL (
         )
         AND COALESCE(ipr.approved, false) = true
         AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
-        AND LOWER(COALESCE(c.status, 'active')) = 'out'
+        AND LOWER(COALESCE(c.status, 'active')) IN ('out', 'consumed')
         AND NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
         AND NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
     ) hops
@@ -628,7 +631,7 @@ LEFT JOIN LATERAL (
         )
         AND COALESCE(ipr.approved, false) = true
         AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
-        AND LOWER(COALESCE(c.status, 'active')) = 'out'
+        AND LOWER(COALESCE(c.status, 'active')) IN ('out', 'consumed')
         AND NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
         AND NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
       ORDER BY COALESCE(ipr.approved_at, ipr.updated_at, ipr.created_at) DESC NULLS LAST, ipr.ipr_uid DESC

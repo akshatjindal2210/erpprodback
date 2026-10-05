@@ -6,7 +6,7 @@ import { formatHrmsDate, formatHrmsDateTime, formatHrmsTime } from "../../../lib
 import { fetchEmpMaster } from "../../../lib/erpApi.js";
 import { applyApprovalUpdateFields, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { logHrmsActivity } from "../../../lib/utils/activity/logHrmsActivity.js";
-import { istTs, LOG_DATE_SQL, LOG_VALID_PUNCH_SQL, normalizeShift, shiftDisplay, countPunches, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate, parseEmpDcode } from "../../../lib/attendanceCommon.js";
+import { istTs, LOG_DATE_SQL, LOG_VALID_PUNCH_SQL, normalizeShift, shiftDisplay, countPunches, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate, parseEmpDcode, NIGHT_SHIFT_END } from "../../../lib/attendanceCommon.js";
 
 const ENTITY = "hrms_attendance";
 const ATT = T.ATTENDANCE;
@@ -83,19 +83,19 @@ const LOG_DAILY_PUNCH_SQL = `
     SELECT employee_code, MIN(event_timestamp) AS first_out
     FROM ${T.ATTENDANCE_LOG}
     WHERE ${LOG_VALID_PUNCH_SQL}
-      AND ${LOG_DATE_SQL} = ($1::date + INTERVAL '1 day')::date
-      AND (event_timestamp AT TIME ZONE 'Asia/Kolkata')::time <= TIME '08:30:00'
+      AND ${LOG_DATE_SQL} = ($1::date + 1)
+      AND (event_timestamp AT TIME ZONE 'Asia/Kolkata')::time < TIME '${NIGHT_SHIFT_END}'
     GROUP BY employee_code
   )
   SELECT
     d.employee_code,
-    MAX(d.name) FILTER (WHERE d.name IS NOT NULL AND TRIM(d.name) <> '') AS name,
+    MAX(d.name) FILTER (WHERE NULLIF(TRIM(d.name), '') IS NOT NULL) AS name,
     ${istTs("MIN(d.event_timestamp)")} AS "in",
     ${istTs("CASE WHEN COUNT(*) > 1 THEN MAX(d.event_timestamp) ELSE n.first_out END")} AS "out",
     (COUNT(*) + CASE WHEN COUNT(*) = 1 AND n.first_out IS NOT NULL THEN 1 ELSE 0 END)::int AS punch_count,
     CASE WHEN COUNT(*) = 1 AND n.first_out IS NOT NULL THEN 'B' ELSE 'A' END AS shift
   FROM day_logs d
-  LEFT JOIN next_day_first n ON n.employee_code = d.employee_code
+  LEFT JOIN next_day_first n USING (employee_code)
   GROUP BY d.employee_code, n.first_out
 `;
 
@@ -147,6 +147,8 @@ function attachEmp(row, byDcode) {
     ...row,
     emp_dcode: parseEmpDcode(row.emp_dcode),
     emp_code: emp?.emp_code ?? row.emp_code ?? "",
+    default_in: row.default_in || toHHmm24(emp?.emp_intime) || toHHmm24(emp?.emp_intime_display) || null,
+    default_out: row.default_out || toHHmm24(emp?.emp_outtime) || toHHmm24(emp?.emp_outtime_display) || null,
   };
 }
 
@@ -197,7 +199,7 @@ function isDateTimeAllowedForAttendanceDate(attendanceDate, inTime, outTime) {
   if (!date) return false;
   const start = Date.parse(`${date}T00:00:00+05:30`);
   const dayEnd = Date.parse(`${date}T23:59:59+05:30`);
-  const nextDayCutoff = Date.parse(`${addOneDayYmd(date)}T08:30:00+05:30`);
+  const nextDayCutoff = Date.parse(`${addOneDayYmd(date)}T${NIGHT_SHIFT_END}:00+05:30`);
 
   const inMs = inTime ? Date.parse(inTime) : NaN;
   const outMs = outTime ? Date.parse(outTime) : NaN;

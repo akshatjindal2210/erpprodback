@@ -350,6 +350,11 @@ export async function evaluateMonthlyPackingLimit({itemdcode, item_code = null, 
   const dispatchQty = schedulePair?.dispatchQty ?? 0;
   const scheduleBalanceQty = schedulePair?.balanceQty ?? 0;
 
+  // Packing limit formula:
+  //   allowed  = shortage + floor(shortage × tolerance%)
+  //   projected = month used + current packing
+  //   excess   = max(0, projected − allowed)
+  //   ok       = projected ≤ allowed
   const baseQty = shortage.total;
   const toleranceQty = Math.floor(baseQty * (pct / 100));
   const allowedLimit = baseQty + toleranceQty;

@@ -33,12 +33,13 @@ function buildStampLabel(uploadedByName, date = new Date()) {
   return name ? `${name} · ${ts}` : ts;
 }
 
-export async function applyTimestamp(file, type = UPLOAD_TIMESTAMP_TYPES.IMAGE, uploadedByName = "") {
+export async function applyTimestamp(file, type = UPLOAD_TIMESTAMP_TYPES.IMAGE, uploadedByName = "", stampedAt = null) {
   if (!file?.path || !fs.existsSync(file.path)) return file;
   if (type !== UPLOAD_TIMESTAMP_TYPES.IMAGE) return file;
   if (!isImageUpload(file)) return file;
 
-  const label = buildStampLabel(uploadedByName);
+  const at = stampedAt instanceof Date && !Number.isNaN(stampedAt.getTime()) ? stampedAt : new Date();
+  const label = buildStampLabel(uploadedByName, at);
   const img = await loadImage(file.path);
   const canvas = createCanvas(img.width, img.height);
   const ctx = canvas.getContext("2d");
