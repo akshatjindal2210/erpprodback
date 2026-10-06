@@ -1,7 +1,8 @@
 /**
  * ═══════════════════════════════════════════════════════════
  *  HRMS ATTENDANCE — ALL FORMULAS (change HERE only)
- *  UI mirror: frontend/.../attendanceUtils.js → rowTotals()
+ *  List / View / Approve / Save / Add live: computeAttendanceDerived()
+ *  Frontend only displays those numbers (POST /attendance/calc while typing)
  * ═══════════════════════════════════════════════════════════
  *
  * CUTOFFS (IST)
@@ -24,24 +25,58 @@
  *   total_minutes  = In → Out
  *   lunch          = true if total ≥ 240 (−30 when true)
  *   worked_minutes = total − lunch
+ *   default        = default_in → default_out (FD); HD = half of that + 30 lunch
+ *   normal         = min(worked, default − lunch)
  *
  * OT (ot_minutes)
- *   Full (FD) = (Out − default_out) − buffer
- *               (early Out → negative; buffer only on positive OT)
- *   Half (HD) = excess over Normal half-day only (no buffer)
+ *   extra after default_out (late)
+ *     > buffer  → OT = full extra, Adjust = 0
+ *     1..buffer → OT = 0, Adjust = those leftover minutes (e.g. 25 min extra, no OT)
+ *     ≤ 0       → OT = 0, Adjust = 0
+ *   Half (HD) = excess over Normal only (no buffer, Adjust = 0)
  *   + OT → OT Approval pending (ot_approved: 0 pending | 1 approved | 2 rejected)
- *   − OT → System auto-approve
  *   After approve/reject → only super_admin may change decision
  *
  * DEFAULTS (TIMESTAMPTZ)
  *   default_in / default_out from emp master times + attendance_date
  *   Night Out date = next day when Out time < In time
  *
+ * ── EXAMPLE (FD, buffer 30) ──
+ *
+ *   A) Default 08:30–18:30 = 600 min.  In 08:36  Out 18:31
+ *      Total   = 18:31 − 08:36           = 595 min  (9 hr 55 min)
+ *      Lunch   = 595 ≥ 240               =  30 min
+ *      Worked  = 595 − 30                = 565 min  (9 hr 25 min)
+ *      Normal  = min(565, 600 − 30)      = 565 min
+ *      Late    = 18:31 − 18:30           =   1 min
+ *      OT      = 1 ≤ 30                  =   0 min
+ *      Adjust  =                         =   1 min
+ *
+ *   B) Default 09:00–18:30 = 570 min.  In 08:37  Out 18:57
+ *      Total   = 18:57 − 08:37           = 620 min  (10 hr 20 min)
+ *      Lunch   =  30 min
+ *      Worked  = 590 min
+ *      Normal  = min(590, 570 − 30)      = 540 min  (9 hr 0 min)
+ *      Late    = 18:57 − 18:30           =  27 min
+ *      OT      = 27 ≤ 30                 =   0 min   (not 27 − 30 = −3)
+ *      Adjust  =                         =  27 min  (extra, no OT)
+ *
+ *   C) Same default as B.  Out 19:01
+ *      Late    =  31 min  > 30
+ *      OT      =  31 min  (full extra, not 31 − 30 = 1)
+ *      Adjust  =   0 min
+ *
+ *   D) HD, default 600, worked 400
+ *      Expected = (600 − 30) / 2 + 30    = 315 min
+ *      Normal   = 315 − 30               = 285 min
+ *      OT       = max(0, 400 − 285)      = 115 min  (no buffer)
+ *
  * KEY FUNCTIONS
  *   buildLogDailyPunchSql      punch → In / Out / Shift
  *   applyNightDefaultOut       missing/late night Out → 08:00
  *   buildDefaultInOutTimestamps
- *   computeAttendanceDerived   total + lunch + worked + OT + approve state
+ *   computeAttendanceDerived   total + lunch + worked + default + normal + OT
+ *   computeOtMinutes           OT only (buffer / half-day)
  *   buildAttendanceParams      pack for DB save
  * ═══════════════════════════════════════════════════════════
  */
@@ -142,7 +177,8 @@ export function normalizeDayType(value) {
 }
 
 export function dayTypeDisplay(value) {
-  return DAY_TYPE_MASTER[normalizeDayType(value)]?.name || normalizeDayType(value);
+  // return DAY_TYPE_MASTER[normalizeDayType(value)]?.name || normalizeDayType(value); // comment as it is show table current so comment this line
+  return normalizeDayType(value);
 }
 
 export function dayTypeValue(value) {
@@ -322,11 +358,17 @@ export function defaultOutDateTime(row) {
     || buildDefaultInOutTimestamps(row?.attendance_date, row?.shift, row?.default_in, row?.default_out).default_out;
 }
 
-function defaultSpanMinutes(row) {
+export function defaultSpanMinutes(row) {
   const a = asIstTimestamp(row?.default_in)
     || buildDefaultInOutTimestamps(row?.attendance_date, row?.shift, row?.default_in, row?.default_out).default_in;
   const b = defaultOutDateTime(row);
   return a && b ? minutesBetweenTs(a, b) : null;
+}
+
+function expectedDayMinutes(fullDefaultMins, isHalf) {
+  if (fullDefaultMins == null) return null;
+  if (!isHalf) return fullDefaultMins;
+  return Math.max(0, fullDefaultMins - LUNCH_MINUTES) / 2 + LUNCH_MINUTES;
 }
 
 export function computeTotalMinutes(row = {}) {
@@ -347,10 +389,30 @@ export function computeWorkedMinutes(row = {}) {
   return Math.max(0, total - (computeLunch(total) ? LUNCH_MINUTES : 0));
 }
 
-/** OT: Full = after default Out − buffer; Half = excess over Normal */
-export function computeOtMinutes(row = {}, overtimeBufferMinutes = 0) {
+function lateOutDeltaMinutes(row = {}) {
+  const outRaw = rowOutTime(row);
+  const defaultOutDt = defaultOutDateTime(row);
+  if (!outRaw || !defaultOutDt) return null;
+  let outDt = String(outRaw).trim();
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(outDt)) {
+    const date = ymd(row.attendance_date);
+    const hm = hhmm(outDt);
+    if (!date || !hm) return null;
+    outDt = `${date}T${hm}:00+05:30`;
+  } else if (!/[zZ]$|[+\-]\d{2}:\d{2}$/.test(outDt)) {
+    outDt = /\d{2}:\d{2}:\d{2}/.test(outDt) ? `${outDt}+05:30` : `${outDt}:00+05:30`;
+  }
+  return minutesBetweenTs(defaultOutDt, outDt);
+}
+
+function otBufferMinutes(overtimeBufferMinutes) {
   const buf = Number(overtimeBufferMinutes);
-  const buffer = Number.isFinite(buf) && buf > 0 ? buf : 0;
+  return Number.isFinite(buf) && buf > 0 ? buf : 0;
+}
+
+/** OT: Full = extra after default Out only if over buffer (then all extra mins); else 0. Half = excess over Normal */
+export function computeOtMinutes(row = {}, overtimeBufferMinutes = 0) {
+  const buffer = otBufferMinutes(overtimeBufferMinutes);
 
   if (normalizeDayType(row.day_type) === "HD") {
     const punch = computeTotalMinutes(row);
@@ -366,21 +428,20 @@ export function computeOtMinutes(row = {}, overtimeBufferMinutes = 0) {
     }
   }
 
-  const outRaw = rowOutTime(row);
-  const defaultOutDt = defaultOutDateTime(row);
-  if (!outRaw || !defaultOutDt) return null;
-  let outDt = String(outRaw).trim();
-  if (!/^\d{4}-\d{2}-\d{2}T/.test(outDt)) {
-    const date = ymd(row.attendance_date);
-    const hm = hhmm(outDt);
-    if (!date || !hm) return null;
-    outDt = `${date}T${hm}:00+05:30`;
-  } else if (!/[zZ]$|[+\-]\d{2}:\d{2}$/.test(outDt)) {
-    outDt = /\d{2}:\d{2}:\d{2}/.test(outDt) ? `${outDt}+05:30` : `${outDt}:00+05:30`;
-  }
-  const delta = minutesBetweenTs(defaultOutDt, outDt);
+  const delta = lateOutDeltaMinutes(row);
   if (delta == null) return null;
-  return delta > 0 ? delta - buffer : delta;
+  if (delta > buffer) return Math.round(delta);
+  return 0;
+}
+
+/** Extra after default Out that did not become OT (within buffer). Drawer only. */
+export function computeAdjustMinutes(row = {}, overtimeBufferMinutes = 0) {
+  if (normalizeDayType(row.day_type) === "HD") return 0;
+  const buffer = otBufferMinutes(overtimeBufferMinutes);
+  const delta = lateOutDeltaMinutes(row);
+  if (delta == null) return null;
+  if (delta > 0 && delta <= buffer) return Math.round(delta);
+  return 0;
 }
 
 /** + OT pending; − OT System auto */
@@ -397,7 +458,7 @@ export function resolveOtApprovalState(otMinutes) {
   return { ot_approved: 0, ot_approved_by: null, ot_approved_at: null, ot_remarks: null };
 }
 
-/** Save: defaults + total + lunch + worked + OT */
+/** Save + list/view numbers. See file-top EXAMPLE A–D. */
 export function computeAttendanceDerived(row = {}, overtimeBufferMinutes = 0) {
   const shift = normalizeShift(row.shift) || "A";
   const dayType = normalizeDayType(row.day_type);
@@ -414,13 +475,27 @@ export function computeAttendanceDerived(row = {}, overtimeBufferMinutes = 0) {
   };
   const total_minutes = computeTotalMinutes(withDefaults);
   const lunch = computeLunch(total_minutes);
+  const lunch_minutes = total_minutes == null ? null : lunch ? LUNCH_MINUTES : 0;
+  const worked_minutes = total_minutes == null ? null : Math.max(0, total_minutes - (lunch ? LUNCH_MINUTES : 0));
   const ot_minutes = computeOtMinutes(withDefaults, overtimeBufferMinutes);
+  const adjust_minutes = computeAdjustMinutes(withDefaults, overtimeBufferMinutes);
+  const isHalf = dayType === "HD";
+  const default_minutes = defaultSpanMinutes(withDefaults);
+  const expected = expectedDayMinutes(default_minutes, isHalf);
+  const lunchInExpected = isHalf ? LUNCH_MINUTES : lunch_minutes ?? 0;
+  const normalCap = expected == null ? null : Math.max(0, expected - lunchInExpected);
+  const normal_minutes = worked_minutes == null || normalCap == null ? null : Math.min(worked_minutes, normalCap);
   return {
     ...withDefaults,
     total_minutes,
     lunch,
-    worked_minutes: total_minutes == null ? null : Math.max(0, total_minutes - (lunch ? LUNCH_MINUTES : 0)),
-    ot_minutes,
+    lunch_minutes,
+    worked_minutes,
+    default_minutes: expected,
+    full_default_minutes: default_minutes,
+    normal_minutes,
+    ot_minutes: ot_minutes == null ? null : Math.max(0, Math.round(Number(ot_minutes))),
+    adjust_minutes: adjust_minutes == null ? 0 : Math.max(0, Math.round(Number(adjust_minutes))),
     ...resolveOtApprovalState(ot_minutes),
   };
 }

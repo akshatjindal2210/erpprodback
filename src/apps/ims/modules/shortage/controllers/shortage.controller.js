@@ -871,8 +871,7 @@ function remarkNum(v) {
  *
  * Auto gate formula:
  *   check = FG + current packing − schedule balance
- *   Auto create when: excess ≥ 1 AND Max > 0 AND check ≤ Max
- *   else skip (manual Create Deviation)
+ *   Auto when excess ≥ 1 AND (item Max not set OR check ≤ Max)
  */
 export const autoPackingDeviation = async (req, res) => {
   try {
@@ -898,11 +897,15 @@ export const autoPackingDeviation = async (req, res) => {
     // check = FG + current packing − schedule balance
     const check = (Number(before.fg_stock_qty) || 0) + (Number(before.requested_qty) || 0) - (Number(before.schedule_balance_qty) || 0);
     const max = Number(before.item_max_qty) || 0;
-    // excess = ceil(projected − allowed)
     const excess = Math.ceil(Number(before.excess_qty) || 0);
-    // Skip Auto unless: excess ≥ 1 AND Max > 0 AND check ≤ Max
-    if (excess < 1 || max <= 0 || check > max) {
+
+    if (excess < 1) {
       return res.json({ success: true, data: { created: false, skipped_auto: true, auto_check_qty: check, ...before } });
+    }
+    if (max > 0) {
+      if (check > max) {
+        return res.json({ success: true, data: { created: false, skipped_auto: true, auto_check_qty: check, ...before } });
+      }
     }
 
     const itemcode = String(b.item_code ?? b.itemcode ?? itemdcode).trim() || String(itemdcode);

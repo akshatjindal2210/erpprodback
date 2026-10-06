@@ -1003,9 +1003,9 @@ export const getQcHoldTransactionLog = async (req, res) => {
       return res.json({ success: true, data });
     }
 
+    // Date range applies to each transaction row's action time (submit/approve/create/delete),
+    // not hold header created_at — see buildQcHoldTransactionLog inRange(created_at).
     const holdsRaw = await findQcHoldMaterialsForTxLog({
-      from_date: fromDate || null,
-      to_date: toDate || null,
       search: search || null,
       limit: 5000,
     });

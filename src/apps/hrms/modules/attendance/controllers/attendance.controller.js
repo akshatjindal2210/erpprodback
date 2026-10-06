@@ -6,7 +6,7 @@ import { formatHrmsDate, formatHrmsDateTime, formatHrmsTime } from "../../../lib
 import { fetchEmpMaster } from "../../../lib/erpApi.js";
 import { applyApprovalUpdateFields, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { logHrmsActivity } from "../../../lib/utils/activity/logHrmsActivity.js";
-import { istTs, normalizeShift, shiftDisplay, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, normalizeDayType, dayTypeDisplay, dayTypeValue, computeOtMinutes, computeTotalMinutes, computeWorkedMinutes, computeLunch, computeAttendanceDerived, buildLogDailyPunchSql, applyNightDefaultOut, buildDefaultInOutTimestamps, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate, parseEmpDcode, NIGHT_SHIFT_END, addDaysYmd, normalizeOtApprovedFlag, otDecisionLabel } from "../../../lib/attendanceCommon.js";
+import { istTs, normalizeShift, shiftDisplay, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, normalizeDayType, dayTypeDisplay, dayTypeValue, computeAttendanceDerived, buildLogDailyPunchSql, applyNightDefaultOut, buildDefaultInOutTimestamps, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate, parseEmpDcode, NIGHT_SHIFT_END, addDaysYmd, normalizeOtApprovedFlag, otDecisionLabel } from "../../../lib/attendanceCommon.js";
 
 const ENTITY = "hrms_attendance";
 const ATT = T.ATTENDANCE;
@@ -168,43 +168,29 @@ function formatRow(row, byDcode, overtimeBufferMinutes) {
   const approval = String(merged.approval_status ?? "").trim();
   const inTs = rowInTime(merged);
   const outTs = rowOutTime(merged);
-  const dayType = normalizeDayType(merged.day_type);
-  const dayValue = merged.day_value != null && Number.isFinite(Number(merged.day_value))
-    ? Number(merged.day_value)
-    : dayTypeValue(dayType);
-  const otMinutes = merged.ot_minutes != null && Number.isFinite(Number(merged.ot_minutes))
-    ? Math.round(Number(merged.ot_minutes))
-    : computeOtMinutes(merged, overtimeBufferMinutes);
+  const derived = computeAttendanceDerived({ ...merged, in: inTs, out: outTs }, overtimeBufferMinutes);
   const otApproved = normalizeOtApprovedFlag(merged.ot_approved);
-  const totalMinutes =
-    merged.total_minutes != null && Number.isFinite(Number(merged.total_minutes))
-      ? Math.round(Number(merged.total_minutes))
-      : computeTotalMinutes({ ...merged, in: inTs, out: outTs });
-  const lunch =
-    merged.lunch === true || merged.lunch === 1 || merged.lunch === "1" || merged.lunch === "t"
-      ? true
-      : merged.lunch === false || merged.lunch === 0 || merged.lunch === "0" || merged.lunch === "f"
-        ? false
-        : computeLunch(totalMinutes);
-  const workedMinutes =
-    merged.worked_minutes != null && Number.isFinite(Number(merged.worked_minutes))
-      ? Math.round(Number(merged.worked_minutes))
-      : computeWorkedMinutes({ ...merged, in: inTs, out: outTs });
+  const otMinutes = derived.ot_minutes;
   return {
     ...merged,
     in: inTs,
     out: outTs,
-    day_type: dayType,
-    day_type_display: dayTypeDisplay(dayType),
-    day_value: dayValue,
-    default_in: merged.default_in || null,
-    default_out: merged.default_out || null,
-    default_in_display: formatHrmsDateTime(merged.default_in),
-    default_out_display: formatHrmsDateTime(merged.default_out),
-    total_minutes: totalMinutes,
-    lunch,
-    lunch_display: totalMinutes == null ? "—" : lunch ? "Yes" : "No",
-    worked_minutes: workedMinutes,
+    day_type: derived.day_type,
+    day_type_display: dayTypeDisplay(derived.day_type),
+    day_value: derived.day_value,
+    default_in: derived.default_in || null,
+    default_out: derived.default_out || null,
+    default_in_display: formatHrmsDateTime(derived.default_in),
+    default_out_display: formatHrmsDateTime(derived.default_out),
+    default_minutes: derived.default_minutes,
+    full_default_minutes: derived.full_default_minutes,
+    normal_minutes: derived.normal_minutes,
+    lunch_minutes: derived.lunch_minutes,
+    adjust_minutes: derived.adjust_minutes,
+    total_minutes: derived.total_minutes,
+    lunch: derived.lunch,
+    lunch_display: derived.total_minutes == null ? "—" : derived.lunch ? "Yes" : "No",
+    worked_minutes: derived.worked_minutes,
     ot_minutes: otMinutes,
     ot_approved: otApproved,
     ot_status_display: otMinutes == null || otMinutes === 0 ? "—" : otDecisionLabel(otApproved),
@@ -501,6 +487,51 @@ export async function previewAttendance(req, res) {
     return res.json({ success: true, date, data, total: data.length, overtime_buffer_minutes });
   } catch (err) {
     console.error("[HRMS] previewAttendance:", err);
+    return res.status(500).json({ success: false, message: err.message || "Server error." });
+  }
+}
+
+function hoursFieldsFromDerived(derived, overtimeBufferMinutes) {
+  return {
+    total_minutes: derived.total_minutes,
+    lunch: derived.lunch,
+    lunch_minutes: derived.lunch_minutes,
+    worked_minutes: derived.worked_minutes,
+    default_minutes: derived.default_minutes,
+    full_default_minutes: derived.full_default_minutes,
+    normal_minutes: derived.normal_minutes,
+    ot_minutes: derived.ot_minutes,
+    adjust_minutes: derived.adjust_minutes,
+    overtime_buffer_minutes: overtimeBufferMinutes,
+  };
+}
+
+/** Live hours while Add/Edit typing — same formulas as save/list. */
+export async function calcAttendance(req, res) {
+  try {
+    const overtime_buffer_minutes = await getHrmsOvertimeBufferMinutes();
+    const rawList = Array.isArray(req.body?.rows) ? req.body.rows : [req.body || {}];
+    const data = rawList.map((raw) => {
+      const date = ymd(raw.attendance_date ?? raw.date);
+      const times = parseAttendanceInOut(raw, {}, date);
+      const derived = computeAttendanceDerived(
+        {
+          attendance_date: date,
+          in: times.in,
+          out: times.out,
+          shift: raw.shift,
+          day_type: raw.day_type,
+          default_in: raw.default_in,
+          default_out: raw.default_out,
+        },
+        overtime_buffer_minutes
+      );
+      return hoursFieldsFromDerived(derived, overtime_buffer_minutes);
+    });
+    const one = !Array.isArray(req.body?.rows);
+    return res.json({ success: true, overtime_buffer_minutes, data: one ? data[0] : data });
+  } catch (err) {
+    console.error("[HRMS] calcAttendance:", err);
     return res.status(500).json({ success: false, message: err.message || "Server error." });
   }
 }
