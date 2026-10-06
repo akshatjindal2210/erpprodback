@@ -12,11 +12,12 @@
 
 export async function columnExists(query, tableName, columnName) {
   if (!tableName || !columnName) return false;
+  const stem = tableNameStem(tableName);
   const rows = await query(
     `SELECT 1 FROM information_schema.columns
      WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
      LIMIT 1`,
-    [tableName, columnName]
+    [stem, columnName]
   );
   return Array.isArray(rows) && rows.length > 0;
 }

@@ -92,10 +92,12 @@ const TASK_MODULE_ROUTES = {
 const HRMS_MODULE_ROUTES = {
   hrms_attendance: `${HRMS}/attendance`,
   hrms_attendance_log: `${HRMS}/attendance-log`,
+  hrms_ot_approval: `${HRMS}/ot-approval`,
   hrms_employee: `${HRMS}/employees`,
   hrms_gate_pass: `${HRMS}/gate-pass`,
   hrms_leave: `${HRMS}/leave`,
   hrms_loan: `${HRMS}/loan`,
+  hrms_deduction: `${HRMS}/loan-deduction`,
   hrms_activity_logs: `${HRMS}/logs`,
 };
 

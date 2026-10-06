@@ -3,6 +3,7 @@ import { createAttendanceTable } from "../tables/attendance/attendance.table.js"
 import { createGatePassTable } from "../tables/gate-pass/gate_pass.table.js";
 import { createLeaveTable } from "../tables/leave/leave.table.js";
 import { createLoanTable } from "../tables/loan/loan.table.js";
+import { createDeductionTable } from "../tables/deduction/deduction.table.js";
 
 export async function initHrmsDB() {
   await createAttendanceLogTable();
@@ -10,4 +11,5 @@ export async function initHrmsDB() {
   await createGatePassTable();
   await createLeaveTable();
   await createLoanTable();
+  await createDeductionTable();
 }

@@ -9,7 +9,8 @@ import { buildGateReceivingPayload, isErpNullString, parseExistingPathsFromBody,
 const MODULE = "invoice_receiving";
 const MODE_PERM = { add: "can_add", edit: "can_edit", approve: "can_authorize" };
 
-const DATE_KEYS = ["billdt", "uploaded_at", "approved_at"];
+/** Only bill_dt — uploaded_at / approved_at are already IST `DD-MM-YYYY HH:mm` in meta; re-formatting breaks dates. */
+const DATE_KEYS = ["billdt"];
 
 /** Map gate row → Invoice Receiving list/drawer shape (no ERP). */
 function mapGateToIrRow(gate, accName = null) {

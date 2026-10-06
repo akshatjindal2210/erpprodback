@@ -64,10 +64,12 @@ export const OTHER_TABLE_TO_MODULE = {
   mst_designations: "designations",
   mst_attributes: "attributes",
   hrms_attendance: "hrms_attendance",
+  hrms_ot_approval: "hrms_attendance",
   hrms_attendance_log: "hrms_attendance_log",
   hrms_gate_pass: "hrms_gate_pass",
   hrms_leave: "hrms_leave",
   hrms_loan: "hrms_loan",
+  hrms_deduction: "hrms_deduction",
 };
 
 /** Used by dashboard SQL helpers and notifications: physical table to module name. */
@@ -123,10 +125,12 @@ export const MODULE_PRIMARY_TABLE = {
   designations: "mst_designations",
   attributes: "mst_attributes",
   hrms_attendance: "hrms_attendance",
+  hrms_ot_approval: "hrms_attendance",
   hrms_attendance_log: "hrms_attendance_log",
   hrms_gate_pass: "hrms_gate_pass",
   hrms_leave: "hrms_leave",
   hrms_loan: "hrms_loan",
+  hrms_deduction: "hrms_deduction",
 };
 
 const ALL_TABLES = new Set([

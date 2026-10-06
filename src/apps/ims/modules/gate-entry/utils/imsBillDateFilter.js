@@ -192,17 +192,47 @@ export const GATE_PENDING_MIN_BILL_DT = new Date(2026, 8, 1); // 1 Sep 2026
 export const INVOICE_RECEVING_GATE_PENDING_MIN_BILL_DT = new Date(2026, 8, 21); // 1 Sep 2026 
 // export const GATE_PENDING_MIN_BILL_DT = new Date(2026, 8, 20); // 26 Aug 2026
 
-/** Postgres: `ims_gate_entry.bill_dt` (TEXT) → date; NULL when unparseable. */
-export const GATE_BILL_DT_DATE_SQL = `
+/**
+ * Postgres: display / IMS datetime TEXT → date (date portion only).
+ * Supports ISO `YYYY-MM-DD…`, `DD-MM-YYYY` (+ optional time), `DD/MM/YYYY` (+ optional time).
+ * @param {string} textExpr SQL expression yielding the raw timestamp text
+ */
+export function buildImsDisplayTextToDateSql(textExpr) {
+  const t = `TRIM(COALESCE(${textExpr}, ''))`;
+  const dmy = `(regexp_match(${t}, '^(\\d{1,2})-(\\d{1,2})-(\\d{4})'))`;
+  const dmySlash = `(regexp_match(${t}, '^(\\d{1,2})/(\\d{1,2})/(\\d{4})'))`;
+  return `
   COALESCE(
-    NULLIF(substring(TRIM(bill_dt) from '^(\d{4}-\d{2}-\d{2})'), '')::date,
+    NULLIF(substring(${t} from '^(\\d{4}-\\d{2}-\\d{2})'), '')::date,
     CASE
-      WHEN TRIM(COALESCE(bill_dt, '')) ~ '^\\d{1,2}-\\d{2}-\\d{4}'
-      THEN to_date(substring(TRIM(bill_dt) from 1 for 10), 'DD-MM-YYYY')
+      WHEN ${dmy} IS NOT NULL
+      THEN make_date((${dmy})[3]::int, (${dmy})[2]::int, (${dmy})[1]::int)
+      ELSE NULL
+    END,
+    CASE
+      WHEN ${dmySlash} IS NOT NULL
+      THEN make_date((${dmySlash})[3]::int, (${dmySlash})[2]::int, (${dmySlash})[1]::int)
       ELSE NULL
     END
   )
+  `;
+}
+
+/** Postgres: `ims_gate_entry.bill_dt` (TEXT) → date; NULL when unparseable. */
+export const GATE_BILL_DT_DATE_SQL = buildImsDisplayTextToDateSql("bill_dt");
+
+/**
+ * Raw `uploaded_at` from IR `receiving_meta` JSON (TEXT column).
+ * Regex extract only — never casts meta to jsonb (corrupt meta must not fail the list query).
+ */
+export const IR_RECEIVING_META_UPLOADED_AT_RAW_SQL = `
+  NULLIF(TRIM((regexp_match(COALESCE(receiving_meta, ''), '"uploaded_at"\\s*:\\s*"([^"]*)"', 'i'))[1]), '')
 `;
+
+/** Postgres: IR registration date = `receiving_meta.uploaded_at` → date (IST display or ISO). */
+export const IR_RECEIVING_UPLOADED_AT_DATE_SQL = buildImsDisplayTextToDateSql(
+  IR_RECEIVING_META_UPLOADED_AT_RAW_SQL
+);
 
 /** IR / Gate pending — same cutoff as Gate Entry pending (operator-controlled constant above). */
 export function gateRowMeetsPendingMinBillDt(row) {

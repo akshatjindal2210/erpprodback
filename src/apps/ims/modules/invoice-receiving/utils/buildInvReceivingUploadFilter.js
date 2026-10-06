@@ -1,6 +1,15 @@
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { formatIstDateTime } from "../../gate-entry/utils/imsBillDateFilter.js";
 
+/** Already-saved `DD-MM-YYYY HH:mm` must not pass through `new Date()` (US parse). */
+function coerceIstDisplayDateTime(raw) {
+  if (raw == null || String(raw).trim() === "") return formatIstDateTime(new Date());
+  const s = String(raw).trim();
+  if (/^\d{2}-\d{2}-\d{4}(\s+\d{1,2}:\d{2})?$/.test(s)) return s;
+  const out = formatIstDateTime(raw);
+  return out ?? s;
+}
+
 /** Invoice receiving upload folder (change here only if path changes). */
 export const IR_RECEIVING_UPLOAD_PREFIX = "uploads/ims/invoice-receiving/";
 
@@ -154,7 +163,7 @@ export function buildGateReceivingPayload(req, opts = {}) {
     : (() => {
         const raw = req.body?.uploaded_at ?? prev?.uploaded_at;
         if (raw == null || String(raw).trim() === "") return now;
-        return formatIstDateTime(raw);
+        return coerceIstDisplayDateTime(raw);
       })();
 
   const receiving_meta = {

@@ -122,7 +122,7 @@ export const DB_TABLES = {
   ],
 
   /** HRMS application tables. */
-  hrms: ["hrms_attendance_log", "hrms_attendance", "hrms_gate_pass", "hrms_leave", "hrms_loan"],
+  hrms: ["hrms_attendance_log", "hrms_attendance", "hrms_gate_pass", "hrms_leave", "hrms_loan", "hrms_deduction"],
 
   purchase: [],
   production: [],

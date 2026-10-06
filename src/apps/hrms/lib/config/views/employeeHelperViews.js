@@ -8,10 +8,12 @@ function fieldsForEmployees(mod, act) {
   if (mod == null || act == null) return null;
 
   if (mod === "hrms_attendance" && (act === VIEW || isForm(act))) return true;
+  if (mod === "hrms_ot_approval" && (act === VIEW || act === "authorize")) return true;
   if (mod === "hrms_attendance_log" && act === VIEW) return true;
   if (mod === "hrms_gate_pass" && (act === VIEW || isForm(act))) return true;
   if (mod === "hrms_leave" && (act === VIEW || isForm(act))) return true;
   if (mod === "hrms_loan" && (act === VIEW || isForm(act))) return true;
+  if (mod === "hrms_deduction" && (act === VIEW || isForm(act))) return true;
 
   return null;
 }

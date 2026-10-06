@@ -10,6 +10,12 @@ export const HRMS_OVERTIME_BUFFER = Object.freeze({
   DEFAULT: 30,
 });
 
+/** Loan / advance amount bounds (rupees). Confirm MAX with product owner. */
+export const HRMS_LOAN_AMOUNT = Object.freeze({
+  MIN: 1,
+  MAX: 10000000,
+});
+
 export const HRMS_APP_CONFIG_KEYS = Object.freeze({
   OVERTIME_BUFFER_MINUTES: "hrms_overtime_buffer_minutes",
 });

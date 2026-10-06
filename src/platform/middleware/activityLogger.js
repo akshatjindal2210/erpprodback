@@ -26,6 +26,7 @@ const HRMS_MODULES = {
   employees: "hrms_employee",
   attendance: "hrms_attendance",
   "attendance-log": "hrms_attendance_log",
+  "ot-approval": "hrms_ot_approval",
   "gate-pass": "hrms_gate_pass",
   leave: "hrms_leave",
   loan: "hrms_loan",

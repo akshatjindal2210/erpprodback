@@ -4,7 +4,7 @@
  */
 import dbQuery from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
-import { formatIstDateYmd, GATE_BILL_DT_DATE_SQL, GATE_PENDING_MIN_BILL_DT, gateRowMeetsPendingMinBillDt } from "../utils/imsBillDateFilter.js";
+import { formatIstDateYmd, GATE_BILL_DT_DATE_SQL, GATE_PENDING_MIN_BILL_DT, gateRowMeetsPendingMinBillDt, IR_RECEIVING_UPLOADED_AT_DATE_SQL } from "../utils/imsBillDateFilter.js";
 
 export async function findSavedGateBillSet() {
   const rows = await dbQuery(`SELECT LOWER(TRIM(bill_no)) AS bill_key FROM ${T.GATE_ENTRY} WHERE is_deleted = false AND NULLIF(TRIM(bill_no), '') IS NOT NULL`);
@@ -172,7 +172,8 @@ export async function findUnmatchedOutGateRows() {
 
 /**
  * Gate Out rows with invoice receiving saved (IR Register).
- * Date filter = Gate bill_dt (same business date as Gate Entry / legacy ERP register).
+ * Register date range = receiving_meta.uploaded_at (registration / upload date).
+ * Pending merge min cutoff still uses bill_dt.
  */
 export async function findMatchedOutGateRows({ from_date, to_date, apply_pending_min_bill_dt = false } = {}) {
   const values = [];
@@ -184,24 +185,25 @@ export async function findMatchedOutGateRows({ from_date, to_date, apply_pending
     "NULLIF(TRIM(COALESCE(receiving_file, '')), '') IS NOT NULL",
   ];
 
-  const dateExpr = GATE_BILL_DT_DATE_SQL;
+  const billDtExpr = GATE_BILL_DT_DATE_SQL;
+  const registeredAtExpr = IR_RECEIVING_UPLOADED_AT_DATE_SQL;
 
   if (apply_pending_min_bill_dt) {
     values.push(formatIstDateYmd(GATE_PENDING_MIN_BILL_DT));
-    conditions.push(`${dateExpr} >= $${i++}::date`);
+    conditions.push(`${billDtExpr} >= $${i++}::date`);
   }
 
   if (from_date || to_date) {
-    conditions.push(`${dateExpr} IS NOT NULL`);
+    conditions.push(`${registeredAtExpr} IS NOT NULL`);
   }
 
   if (from_date) {
     values.push(String(from_date).slice(0, 10));
-    conditions.push(`${dateExpr} >= $${i++}::date`);
+    conditions.push(`${registeredAtExpr} >= $${i++}::date`);
   }
   if (to_date) {
     values.push(String(to_date).slice(0, 10));
-    conditions.push(`${dateExpr} <= $${i++}::date`);
+    conditions.push(`${registeredAtExpr} <= $${i++}::date`);
   }
 
   const rows = await dbQuery(

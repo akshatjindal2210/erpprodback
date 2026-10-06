@@ -7,13 +7,15 @@ export function maxPassDateYmdIst() {
   return addDaysYmd(istNowDate(), PASS_DATE_MAX_FUTURE_DAYS);
 }
 
-export function validatePassDateYmd(passDate) {
+export function validatePassDateYmd(passDate, opts = {}) {
   const d = ymd(passDate);
   if (!d) return { ok: false, message: "Pass date is required." };
   const today = istNowDate();
-  if (d < today) return { ok: false, message: "Pass date cannot be before today." };
+  const existing = ymd(opts.existingPassDate);
+  const unchangedPast = Boolean(existing) && d === existing && d < today;
+  if (d < today && !unchangedPast) return { ok: false, message: "Pass date cannot be before today." };
   const max = maxPassDateYmdIst();
-  if (d > max) {
+  if (d > max && !unchangedPast) {
     return {
       ok: false,
       message: PASS_DATE_MAX_FUTURE_DAYS ? `Pass date cannot be after ${max}.` : "Only today is allowed.",
@@ -33,8 +35,8 @@ function ymdFromTimestamp(ts) {
 }
 
 /** Same-day out/in, or overnight → in on pass date + 1 day only. */
-export function resolveGatePassOutIn(passDate, outRaw, inRaw) {
-  const dateCheck = validatePassDateYmd(passDate);
+export function resolveGatePassOutIn(passDate, outRaw, inRaw, opts = {}) {
+  const dateCheck = validatePassDateYmd(passDate, opts);
   if (!dateCheck.ok) return dateCheck;
   const date = dateCheck.passDate;
 
