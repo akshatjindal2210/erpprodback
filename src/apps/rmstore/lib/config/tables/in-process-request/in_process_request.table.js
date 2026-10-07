@@ -7,7 +7,7 @@ import { columnExists, dropColumnsIfExist, patchCol, patchTableSchema } from "..
  *
  * type = consume|return|reassign|reject_coil|reject_lot
  * stage = workflow (was downstream)
- * reassign_jc = target job card when type=reassign
+ * reassign_jc = JSONB target snapshot when type=reassign
  *
  * Boot: ensure cols + indexes → drop legacy columns (idempotent).
  * Type/backfill helpers below are kept for reference; calls are commented out after migration.
@@ -36,7 +36,6 @@ async function recoverIprTypeLight() {
   const hasType = await columnExists(dbQuery, T.IN_PROCESS_REQUEST, "type");
   if (!hasType) return;
 
-  // 0) Rename legacy rejection types → reject_coil / reject_lot
   await dbQuery(`
     UPDATE ${T.IN_PROCESS_REQUEST}
     SET type = 'reject_coil'
@@ -48,12 +47,11 @@ async function recoverIprTypeLight() {
     WHERE type = 'lot'
   `);
 
-  // 1) Reassign header/flag always wins over consume/reject.
   await dbQuery(`
     UPDATE ${T.IN_PROCESS_REQUEST} r
     SET type = 'reassign'
     WHERE (
-      NULLIF(TRIM(r.reassign_jc), '') IS NOT NULL
+      NULLIF(TRIM(COALESCE(r.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
       OR EXISTS (
         SELECT 1
         FROM jsonb_array_elements(
@@ -65,9 +63,6 @@ async function recoverIprTypeLight() {
     AND COALESCE(NULLIF(TRIM(r.type), ''), '') IS DISTINCT FROM 'reassign'
   `);
 
-  // 2) Fill empty / wrong reject_coil types from stage.
-  // Update Coil Status leftover ("Return" card) stays type=consume (reason = status update)
-  // so approve/consume workflow keeps working; FE badge maps it to Return.
   await dbQuery(`
     UPDATE ${T.IN_PROCESS_REQUEST} r
     SET type = CASE
@@ -117,6 +112,31 @@ async function recoverIprTypeLight() {
  */
 async function backfillReassignJcLight() {
   return;
+}
+
+/** One-time: VARCHAR reassign_jc → JSONB (existing JC number → { pjobcardno }). */
+async function convertReassignJcToJsonb() {
+  const table = T.IN_PROCESS_REQUEST;
+  if (!(await columnExists(dbQuery, table, "reassign_jc"))) return;
+
+  const [col] = await dbQuery(
+    `SELECT data_type FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'rmstore_in_process_request' AND column_name = 'reassign_jc'
+     LIMIT 1`
+  );
+  const dt = String(col?.data_type || "").toLowerCase();
+  if (dt !== "character varying" && dt !== "text") return;
+
+  await dbQuery(`
+    ALTER TABLE ${table}
+    ALTER COLUMN reassign_jc TYPE jsonb USING (
+      CASE
+        WHEN NULLIF(TRIM(reassign_jc::text), '') IS NOT NULL
+        THEN jsonb_build_object('pjobcardno', TRIM(reassign_jc::text))
+        ELSE NULL
+      END
+    )
+  `);
 }
 
 /** Heavy one-time migration — only when RUN_IPR_BACKFILL and legacy cols exist. */
@@ -267,7 +287,7 @@ export async function createRmStoreInProcessRequestTable() {
       reason            TEXT,
       remarks           TEXT,
       mrn_uid           VARCHAR(100),
-      reassign_jc       VARCHAR(100),
+      reassign_jc       JSONB,
       coils             JSONB NOT NULL DEFAULT '[]'::jsonb,
       attachments       JSONB DEFAULT '[]'::jsonb,
       stage             VARCHAR(30),
@@ -290,7 +310,7 @@ export async function createRmStoreInProcessRequestTable() {
   await patchTableSchema(dbQuery, T.IN_PROCESS_REQUEST, {
     columns: [
       patchCol("type", "VARCHAR(20)"),
-      patchCol("reassign_jc", "VARCHAR(100)"),
+      patchCol("reassign_jc", "JSONB"),
       patchCol("stage", "VARCHAR(30)"),
     ],
     indexes: [
@@ -300,6 +320,8 @@ export async function createRmStoreInProcessRequestTable() {
          ON ${T.IN_PROCESS_REQUEST}(stage) WHERE is_deleted = false AND approved = true`,
     ],
   });
+
+  await convertReassignJcToJsonb();
 
   // Boot backfill disabled — re-enable only for one-time migration (see in-process-request.md).
   // await recoverIprTypeLight();

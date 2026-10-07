@@ -1,11 +1,38 @@
-import { findInProcessRequests, findInProcessRequest, findInProcessReasons, insertInProcessRequest, updateInProcessRequest, softDeleteInProcessRequest, findPendingAutoStoreInForConsume, findPendingStoreInForCoil, AUTO_STORE_IN_FROM_CONSUME_PREFIX, autoConsumeFromStoreInRemarks, parseConsumeIprUidFromAutoStoreInRemarks, normalizeCoils, normalizeProposedCoils, normalizeRequestType, normalizeType, typeToRequestType, resolveDownstream, resolveConsumeDownstream, hasReassignShopFloorBalance, resolveTypeFromLegacy, IPR_REQUEST_TYPE, IPR_DOWNSTREAM, IPR_TYPE } from "../models/inProcessRequest.model.js";
+import {
+  findInProcessRequests,
+  findInProcessRequest,
+  findInProcessReasons,
+  insertInProcessRequest,
+  updateInProcessRequest,
+  softDeleteInProcessRequest,
+  findPendingAutoStoreInForConsume,
+  findPendingStoreInForCoil,
+  AUTO_STORE_IN_FROM_CONSUME_PREFIX,
+  autoConsumeFromStoreInRemarks,
+  parseConsumeIprUidFromAutoStoreInRemarks,
+  normalizeCoils,
+  normalizeProposedCoils,
+  normalizeRequestType,
+  normalizeType,
+  typeToRequestType,
+  resolveDownstream,
+  resolveConsumeDownstream,
+  hasReassignShopFloorBalance,
+  resolveTypeFromLegacy,
+  parseReassignJc,
+  reassignJcNo,
+  resolveReassignJcForWrite,
+  IPR_REQUEST_TYPE,
+  IPR_DOWNSTREAM,
+  IPR_TYPE,
+} from "../models/inProcessRequest.model.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
 import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
-import { findCoils, findCoilByUid, revertCoilsConsumed, markCoilsInProcessRejectionPending, revertCoilsInProcessRejection, restoreCoilsToShopFloorOut, releaseCoilFromIprRejectionHoldForStoreIn, processStoreInReturnCoils, revertStoreInReturnCoils, processConsumeCoils, findLatestOutUidForCoil } from "../../coil/models/coil.model.js";
+import { findCoils, findCoilByUid, revertCoilsConsumed, markCoilsInProcessRejectionPending, revertCoilsInProcessRejection, restoreCoilsToShopFloorOut, releaseCoilFromIprRejectionHoldForStoreIn, processStoreInReturnCoils, revertStoreInReturnCoils, processConsumeCoils, findLatestOutUidForCoil, enrichPendingShopFloorDisplay, slimPendingShopFloorRow } from "../../coil/models/coil.model.js";
 import { findQcCheck, findQcCheckItems, findQcChecks } from "../../qc-check/models/qcCheck.model.js";
 import { formatExpected } from "../../../lib/utils/qc/evaluateSpec.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
@@ -139,20 +166,20 @@ function buildRecordFields(body = {}, prev = null) {
   const pick = (key, fallback = null) =>
     body[key] !== undefined ? body[key] : (prev?.[key] ?? fallback);
 
-  // Target JC: explicit header first. Legacy rows stored target on reassign coil.pjobcardno.
-  let reassign_jc =
-    type === IPR_TYPE.REASSIGN
-      ? trimOrNull(pick("reassign_jc", null))
-      : null;
+  let reassign_jc = type === IPR_TYPE.REASSIGN ? parseReassignJc(pick("reassign_jc", null)) : null;
 
   // Coil.pjobcardno must stay SOURCE (main). If FE still puts target on coil, restore source from previous_coils.
   let coilsOut = coils;
   if (type === IPR_TYPE.REASSIGN) {
     const targetGuess =
-      reassign_jc ||
+      reassignJcNo(reassign_jc) ||
       trimOrNull(reassignLine?.pjobcardno) ||
-      trimOrNull(prev?.reassign_jc);
-    reassign_jc = targetGuess;
+      reassignJcNo(prev?.reassign_jc);
+    if (targetGuess && !reassignJcNo(reassign_jc)) {
+      reassign_jc = parseReassignJc(targetGuess);
+    } else if (targetGuess && reassign_jc) {
+      reassign_jc = { ...reassign_jc, pjobcardno: reassign_jc.pjobcardno || targetGuess };
+    }
     const prevByUid = new Map(
       previous_coils.map((p) => [String(p.coil_no_uid || "").trim().toLowerCase(), p])
     );
@@ -292,7 +319,7 @@ async function assertConsumeReassignRules(fields, user) {
   for (const line of reassignLines) {
     const coilUid = String(line.coil_no_uid || "").trim();
     // Target JC lives on header `reassign_jc` (coil.pjobcardno is SOURCE / main).
-    const targetJc = String(fields.reassign_jc || line.reassign_target_pjobcardno || "").trim();
+    const targetJc = String(reassignJcNo(fields.reassign_jc) || line.reassign_target_pjobcardno || "").trim();
     const jcMeta = jcByNo.get(toUpperTrim(targetJc));
     const targetMachine = String(
       line.reassign_target_macname || jcMeta?.macname || ""
@@ -541,7 +568,12 @@ function hasInProcessContentChanges(existing, fields) {
   }
   if (String(fields.rejection_type || "") !== String(existing.rejection_type || "")) return true;
   if (String(fields.type || "") !== String(existing.type || "")) return true;
-  if (String(fields.reassign_jc || "") !== String(existing.reassign_jc || "")) return true;
+  if (
+    JSON.stringify(parseReassignJc(fields.reassign_jc)) !==
+    JSON.stringify(parseReassignJc(existing.reassign_jc))
+  ) {
+    return true;
+  }
   if (!sameAttachments(existing.attachments, fields.attachments)) return true;
   return false;
 }
@@ -1290,6 +1322,7 @@ export const getInProcessRequests = async (req, res) => {
       sortBy: "ipr_uid",
       order: "DESC",
     });
+    const listSurface = String(req.body?.list_surface || filters?.list_surface || "").trim().toLowerCase() || null;
     const result = await findInProcessRequests({
       filters: sanitizeFilters(filters || {}, [
         "request_type",
@@ -1303,6 +1336,7 @@ export const getInProcessRequests = async (req, res) => {
       search: sanitizeSearch(search),
       page,
       limit,
+      listSurface,
       permission: req.permission,
     });
     result.data = await enrichIprWithMachineLabels(result.data || []);
@@ -1446,7 +1480,9 @@ export const getPendingShopFloor = async (req, res) => {
       order: "ASC",
       permission: req.permission,
     });
-    return res.json({ success: true, ...result });
+    const enriched = await enrichPendingShopFloorDisplay(result.data || []);
+    const data = enriched.map(slimPendingShopFloorRow);
+    return res.json({ success: true, ...result, data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -1588,6 +1624,12 @@ export const createInProcessRequest = async (req, res) => {
 
     let incomingApproved = normalizeApprovedInput(req.body?.approved);
     const record = { ...fields, created_by: user, downstream: IPR_DOWNSTREAM.NONE };
+    record.reassign_jc = await resolveReassignJcForWrite({
+      type: fields.type,
+      reassign_jc: fields.reassign_jc,
+      coils: fields.coils,
+      previous_coils: fields.previous_coils,
+    });
     const isConsume = fields.request_type === IPR_REQUEST_TYPE.CONSUME;
     const isRejection = fields.request_type === IPR_REQUEST_TYPE.REJECTION;
     const isStoreIn = fields.request_type === IPR_REQUEST_TYPE.STORE_IN;
@@ -1743,6 +1785,14 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     const incomingApproved = normalizeApprovedInput(req.body?.approved);
     const contentChanged = hasInProcessContentChanges(existing, fields);
     const updateFields = contentChanged ? pickIprBusinessFields(fields) : {};
+    if (contentChanged || normalizeType(fields.type) === IPR_TYPE.REASSIGN) {
+      updateFields.reassign_jc = await resolveReassignJcForWrite({
+        type: fields.type,
+        reassign_jc: fields.reassign_jc,
+        coils: fields.coils,
+        previous_coils: fields.previous_coils ?? existing.previous_coils ?? existing.coils,
+      });
+    }
     const approvalOnly = !contentChanged && incomingApproved === true;
 
     if (incomingApproved === undefined && !contentChanged) {
@@ -2040,17 +2090,9 @@ export const getReassignJobCards = async (req, res) => {
     );
     const prodByFgKey = new Map();
     for (const p of prodRows || []) indexProductionByFgKey(prodByFgKey, p);
-    const sourceJc = source_pjobcardno
-      ? allJcs.find((j) => toUpperTrim(j.pjobcardno) === toUpperTrim(source_pjobcardno))
-      : null;
-    const sourceProd = sourceJc ? resolveProductionForJc(prodByFgKey, sourceJc) : null;
 
     let rows = allJcs.filter((j) => {
-      if (!jcRowMatchesAllowedFg(allowedFgKeys, j)) return false;
-      if (primaryOnly && sourceProd) {
-        const jcProd = resolveProductionForJc(prodByFgKey, j);
-        if (!sameApprovedFgProduction(sourceProd, jcProd)) return false;
-      }
+      if (allowedFgKeys.size && !jcRowMatchesAllowedFg(allowedFgKeys, j)) return false;
       if (exclude_pjobcardno && toUpperTrim(j.pjobcardno) === toUpperTrim(exclude_pjobcardno)) {
         return false;
       }
@@ -2073,7 +2115,12 @@ export const getReassignJobCards = async (req, res) => {
           ...picked,
           is_primary,
           _isPrimaryProd: is_primary === 1,
+          _rm_wire_seq: seq,
         };
+      })
+      .filter((r) => {
+        if (!primaryOnly) return true;
+        return r.is_primary === 1 && r._rm_wire_seq != null;
       })
       .sort((a, b) => (b.is_primary || 0) - (a.is_primary || 0));
 

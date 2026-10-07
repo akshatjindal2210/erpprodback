@@ -1,6 +1,8 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
+import { findIssueRequestRegisterMetaByCoilUids, findIssueRequestRegisterMetaByPjobcardnos } from "../../issue-request/models/issueRequestJobCard.model.js";
+import { findProductionJcMetaByPjobcardnos, mergePendingJcDisplayMeta, productionJcMetaKey } from "../../production/utils/erpItems.js";
 
 const TABLE = T.IN_PROCESS_REQUEST;
 const REJECTION_TABLE = T.REJECTION;
@@ -164,7 +166,7 @@ function inferTypeFromStageAndCoils(row = {}) {
 
 export function resolveCanonicalType(row = {}) {
   // Reassign wins even when type was incorrectly saved as consume.
-  if (str(row.reassign_jc) || normalizeCoils(row.coils).some((c) => c.reassign === true)) {
+  if (reassignJcNo(row.reassign_jc) || normalizeCoils(row.coils).some((c) => c.reassign === true)) {
     return IPR_TYPE.REASSIGN;
   }
   return (
@@ -334,6 +336,107 @@ export function slimCoilsForStorage(coils) {
   return jsonArray(coils).map(slimCoilForStorage).filter(Boolean);
 }
 
+/** Target JC snapshot on reassign save (picker / prdrunjc). */
+export function slimReassignTargetForStorage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const itemdcodeRaw = raw.itemdcode ?? raw.item_dcode;
+  const itemdcode =
+    itemdcodeRaw != null && itemdcodeRaw !== "" && Number.isFinite(Number(itemdcodeRaw))
+      ? Number(itemdcodeRaw)
+      : null;
+  const out = {
+    pjobcardno: str(raw.pjobcardno),
+    macname: str(raw.macname),
+    item_code: str(raw.item_code),
+    itemdcode,
+    item_desc: str(raw.item_desc || raw.itemdesc),
+    source_pjobcardno: str(raw.source_pjobcardno),
+    source_macname: str(raw.source_macname),
+  };
+  if (!out.pjobcardno && !out.item_code) return null;
+  return out;
+}
+
+export function parseReassignTarget(raw) {
+  if (!raw) return null;
+  let obj = raw;
+  if (typeof raw === "string") {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  return slimReassignTargetForStorage(obj);
+}
+
+/** Reassign target — DB column `reassign_jc` (JSONB). */
+export function parseReassignJc(raw) {
+  if (raw != null && typeof raw === "object" && !Array.isArray(raw)) {
+    return slimReassignTargetForStorage(raw);
+  }
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (!t) return null;
+    if (t.startsWith("{")) return parseReassignTarget(t);
+    return slimReassignTargetForStorage({ pjobcardno: t });
+  }
+  return null;
+}
+
+export function reassignJcNo(raw) {
+  return str(parseReassignJc(raw)?.pjobcardno);
+}
+
+/** Build target JC JSON on create/update when FE omitted FG/mac fields. */
+export async function resolveReassignJcForWrite({ type, reassign_jc, coils, previous_coils }) {
+  if (normalizeType(type) !== IPR_TYPE.REASSIGN) return null;
+  const fromFe = parseReassignJc(reassign_jc);
+  if (fromFe?.pjobcardno && (fromFe.item_code || fromFe.macname)) return fromFe;
+
+  const lines = normalizeCoils(coils);
+  const prev = normalizeCoils(previous_coils);
+  const reassignLine = lines.find((c) => c.reassign === true) || lines[0];
+  const prevLine = prev.find((p) => String(p.coil_no_uid) === String(reassignLine?.coil_no_uid)) || prev[0];
+
+  const jc = reassignJcNo(reassign_jc);
+  if (!jc) return null;
+  const prod = await findProductionJcMetaByPjobcardnos([jc]);
+  const hit = prod.get(productionJcMetaKey(jc));
+
+  return slimReassignTargetForStorage({
+    ...(fromFe || {}),
+    pjobcardno: jc,
+    macname: fromFe?.macname || hit?.macname,
+    item_code: fromFe?.item_code || hit?.fg_item_code,
+    itemdcode: fromFe?.itemdcode ?? hit?.itemdcode,
+    item_desc: fromFe?.item_desc || hit?.fg_item_desc,
+    source_pjobcardno: str(fromFe?.source_pjobcardno || reassignLine?.pjobcardno || prevLine?.pjobcardno),
+    source_macname: str(fromFe?.source_macname || reassignLine?.macname || prevLine?.macname),
+  });
+}
+
+function applyRegisterReassignRow(summarized, row) {
+  if (summarized?.type !== IPR_TYPE.REASSIGN) return summarized;
+  const tgt = parseReassignJc(row?.reassign_jc);
+  if (!tgt) return summarized;
+
+  const srcJc = tgt.source_pjobcardno || summarized.pjobcardno;
+  const srcMac = tgt.source_macname || summarized.macname;
+  return {
+    ...summarized,
+    reassign_jc: tgt,
+    ...(srcJc ? { pjobcardno: srcJc } : {}),
+    ...(srcMac ? { macname: srcMac } : {}),
+    ...(tgt.item_code || tgt.item_desc
+      ? {
+          fg_item_code: tgt.item_code ?? summarized.fg_item_code,
+          fg_item_desc: tgt.item_desc ?? summarized.fg_item_desc,
+        }
+      : {}),
+  };
+}
+
 /** @deprecated proposed_coils column dropped — kept for FE payload fold-in only. */
 export function slimProposedCoilsForStorage(coils) {
   return jsonArray(coils)
@@ -477,6 +580,77 @@ async function enrichCoilsArrays(coils, proposed) {
   return { coils: coilsOut, proposed_coils: proposedOut };
 }
 
+const jcMetaKey = (jc) => String(jc || "").replace(/^JC[\s\-]*/i, "").trim().toUpperCase();
+
+/** FG job card — reassign balance → target JC; else source / store-out JC. */
+function iprFgJobCard(row, lines = [], reassignTargetByUid = null) {
+  const coilLines = Array.isArray(lines) ? lines : [];
+  const first = coilLines[0] || {};
+  const type = resolveCanonicalType(row);
+  const reassignNo = reassignJcNo(row.reassign_jc);
+  const fromCoil = str(first.pjobcardno);
+  const sourceJc =
+    fromCoil && !(reassignNo && fromCoil.toUpperCase() === reassignNo.toUpperCase()) ? fromCoil : null;
+  const useTargetFg =
+    type === IPR_TYPE.REASSIGN ||
+    hasReassignShopFloorBalance(coilLines, type) ||
+    coilLines.some((c) => c.reassign === true);
+  if (useTargetFg) {
+    const uidKey = String(first.coil_no_uid || "").trim().toLowerCase();
+    const target =
+      reassignNo ||
+      str(first.reassign_target_pjobcardno) ||
+      (uidKey && reassignTargetByUid?.get(uidKey)) ||
+      null;
+    if (target) return target;
+  }
+  return sourceJc || fromCoil || null;
+}
+
+function mergeCoilLineJobCard(line, jcByUid) {
+  if (!line?.coil_no_uid) return line;
+  const hit = jcByUid?.get(String(line.coil_no_uid).trim().toLowerCase());
+  if (!hit) return line;
+  return {
+    ...line,
+    pjobcardno: str(line.pjobcardno) || hit.pjobcardno || null,
+    macname: str(line.macname) || hit.macname || null,
+  };
+}
+
+function reassignTargetByCoilUid(historyByUid) {
+  const map = new Map();
+  for (const [uid, hops] of historyByUid?.entries() || []) {
+    const last = hops?.[hops.length - 1];
+    const target = str(last?.target_jc);
+    if (target) map.set(uid, target);
+  }
+  return map;
+}
+
+/** Register list — JC, machine, FG, RM from Store Out Issue Request for the coil. */
+function resolveIprRegisterFromIssue(lines, coilIssueByUid) {
+  const first = lines[0] || {};
+  const uidKey = String(first.coil_no_uid || "").trim().toLowerCase();
+  const issue = uidKey ? coilIssueByUid?.get(uidKey) : null;
+  if (!issue) return null;
+  const reassignWire = str(first.reassign_rm_item_code);
+  const out = {
+    pjobcardno: str(issue.pjobcardno),
+    macname: str(issue.macname),
+    fg_item_code: issue.fg_item_code ?? null,
+    fg_item_desc: issue.fg_item_desc ?? null,
+  };
+  if (reassignWire) {
+    out.item_code = reassignWire;
+    out.item_desc = str(first.item_desc) || issue.rm_item_desc || null;
+  } else if (issue.rm_item_code) {
+    out.item_code = issue.rm_item_code;
+    out.item_desc = issue.rm_item_desc ?? null;
+  }
+  return out;
+}
+
 function slimCoilLineForApi(c, { detail = false } = {}) {
   if (!c?.coil_no_uid) return null;
   if (!detail) return { coil_no_uid: String(c.coil_no_uid) };
@@ -517,7 +691,7 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
   const isReturn = type === IPR_TYPE.RETURN;
   const isConsume = type === IPR_TYPE.CONSUME || type === IPR_TYPE.REASSIGN;
   const isReject = isIprRejectionType(type);
-  const reassign_jc = str(row.reassign_jc);
+  const reassignJcObj = parseReassignJc(row.reassign_jc);
   const isList = mode === "list";
 
   let lines = normalizeCoils(coils ?? row.coils);
@@ -540,9 +714,10 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
           ? "Reassign"
           : "Balance";
 
+  const reassignNo = reassignJcNo(reassignJcObj);
   const fromCoil = str(first.pjobcardno) || str(first.source_pjobcardno);
   const sourceJc =
-    fromCoil && !(reassign_jc && fromCoil.toUpperCase() === reassign_jc.toUpperCase())
+    fromCoil && !(reassignNo && fromCoil.toUpperCase() === reassignNo.toUpperCase())
       ? fromCoil
       : null;
   const sourceMac = str(first.macname) || str(first.source_macname) || null;
@@ -561,7 +736,7 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
   const base = {
     ipr_uid: row.ipr_uid,
     type,
-    reassign_jc,
+    reassign_jc: reassignJcObj,
     reason: row.reason ?? null,
     remarks: row.remarks ?? null,
     mrn_uid: row.mrn_uid ?? null,
@@ -594,6 +769,8 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
     lot_label: type === IPR_TYPE.LOT ? str(row.mrn_uid) : null,
     pjobcardno: sourceJc,
     macname: sourceMac,
+    fg_item_code: null,
+    fg_item_desc: null,
     coil_label:
       lines.length === 1 ? first.coil_no_uid : lines.length > 1 ? `${lines.length} coils` : null,
   };
@@ -643,6 +820,7 @@ export const findInProcessRequests = async (options = {}) => {
     limit = 100,
     includeAutoStoreInFromConsume = false,
     pendingStoreInQueue = false,
+    listSurface = null,
     permission = {},
   } = options;
   const values = [];
@@ -680,7 +858,7 @@ export const findInProcessRequests = async (options = {}) => {
       );
     } else if (t === IPR_TYPE.REASSIGN) {
       conditions.push(
-        `(r.type = '${IPR_TYPE.REASSIGN}' OR NULLIF(TRIM(r.reassign_jc), '') IS NOT NULL)`
+        `(r.type = '${IPR_TYPE.REASSIGN}' OR NULLIF(TRIM(COALESCE(r.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL)`
       );
     } else {
       values.push(t);
@@ -711,7 +889,9 @@ export const findInProcessRequests = async (options = {}) => {
       COALESCE(r.reason,'') ILIKE $${idx} OR
       COALESCE(r.remarks,'') ILIKE $${idx} OR
       COALESCE(r.mrn_uid,'') ILIKE $${idx} OR
-      COALESCE(r.reassign_jc,'') ILIKE $${idx} OR
+      COALESCE(r.reassign_jc->>'pjobcardno','') ILIKE $${idx} OR
+      COALESCE(r.reassign_jc->>'item_code','') ILIKE $${idx} OR
+      COALESCE(r.reassign_jc::text,'') ILIKE $${idx} OR
       COALESCE(r.type,'') ILIKE $${idx} OR
       COALESCE(r.stage,'') ILIKE $${idx} OR
       COALESCE(r.created_by,'') ILIKE $${idx} OR
@@ -746,14 +926,142 @@ export const findInProcessRequests = async (options = {}) => {
     }
   }
   const meta = await loadCoilMetaByUids(allUids);
-  // pendingStoreInQueue needs working coil qtys for Store In list cards — use detail.
   const mode = pendingStoreInQueue ? "detail" : "list";
-  const data = pageRows.map((r) => {
-    const lines = normalizeCoils(r.coils).map((c) =>
-      enrichCoilLine(c, meta.get(String(c.coil_no_uid).toLowerCase()))
-    );
-    return summarizeRow(r, { coils: lines, mode });
+  const isRegisterList = mode === "list";
+  /** Pending tab queue — list rows only; skip Register FG/RM batch enrich. */
+  const applyRegisterEnrich = isRegisterList && listSurface !== "pending";
+
+  let irByCoil = new Map();
+  if (applyRegisterEnrich && allUids.length) {
+    irByCoil = await findIssueRequestRegisterMetaByCoilUids(allUids);
+  }
+
+  const enrichedRows = pageRows.map((r) => {
+    const lines = normalizeCoils(r.coils).map((c) => {
+      const key = String(c.coil_no_uid).toLowerCase();
+      const mrnMeta = meta.get(key);
+      return enrichCoilLine(c, mrnMeta);
+    });
+    return { row: r, lines, mrnMeta: meta.get(String(lines[0]?.coil_no_uid || "").toLowerCase()) };
   });
+
+  const data = enrichedRows.map(({ row, lines }) => {
+    const summarized = summarizeRow(row, { coils: lines, mode });
+    if (!applyRegisterEnrich) return summarized;
+
+    let merged = applyRegisterReassignRow(summarized, row);
+    const fromIssue = resolveIprRegisterFromIssue(lines, irByCoil);
+    if (fromIssue) {
+      merged = {
+        ...merged,
+        ...(merged.type !== IPR_TYPE.REASSIGN && fromIssue.pjobcardno ? { pjobcardno: fromIssue.pjobcardno } : {}),
+        ...(merged.type !== IPR_TYPE.REASSIGN && fromIssue.macname ? { macname: fromIssue.macname } : {}),
+        ...(fromIssue.fg_item_code || fromIssue.fg_item_desc
+          ? {
+              fg_item_code: merged.fg_item_code ?? fromIssue.fg_item_code ?? null,
+              fg_item_desc: merged.fg_item_desc ?? fromIssue.fg_item_desc ?? null,
+            }
+          : {}),
+        ...(fromIssue.item_code
+          ? {
+              item_code: fromIssue.item_code,
+              item_desc: fromIssue.item_desc ?? merged.item_desc,
+            }
+          : {}),
+      };
+    }
+    return merged;
+  });
+
+  if (applyRegisterEnrich && data.length) {
+    const prodJcs = [
+      ...new Set(
+        data
+          .filter(
+            (r) =>
+              r.type === IPR_TYPE.REASSIGN &&
+              reassignJcNo(r.reassign_jc) &&
+              !(r.fg_item_code || parseReassignJc(r.reassign_jc)?.item_code)
+          )
+          .map((r) => reassignJcNo(r.reassign_jc))
+          .filter(Boolean)
+      ),
+    ];
+    if (prodJcs.length) {
+      const prodByJc = await findProductionJcMetaByPjobcardnos(prodJcs);
+      for (let i = 0; i < data.length; i += 1) {
+        const row = data[i];
+        if (row.type !== IPR_TYPE.REASSIGN) continue;
+        const jc = reassignJcNo(row.reassign_jc);
+        if (!jc) continue;
+        const hit = prodByJc.get(productionJcMetaKey(jc));
+        if (!hit?.fg_item_code && !hit?.fg_item_desc) continue;
+        const tgt = parseReassignJc(row.reassign_jc) || slimReassignTargetForStorage({ pjobcardno: jc });
+        data[i] = {
+          ...row,
+          fg_item_code: row.fg_item_code || hit.fg_item_code,
+          fg_item_desc: row.fg_item_desc || hit.fg_item_desc,
+          reassign_jc: {
+            ...tgt,
+            pjobcardno: tgt?.pjobcardno || jc,
+            item_code: tgt?.item_code || hit.fg_item_code,
+            item_desc: tgt?.item_desc || hit.fg_item_desc,
+            macname: tgt?.macname || hit.macname,
+            itemdcode: tgt?.itemdcode ?? hit.itemdcode,
+          },
+        };
+      }
+    }
+  }
+
+  /** Pending tab — FG + RM from Issue Request for the job card shown on the row. */
+  if (listSurface === "pending" && data.length) {
+    const pendingDisplayJc = (row) => {
+      if (row?.type === IPR_TYPE.REASSIGN && reassignJcNo(row.reassign_jc)) {
+        return reassignJcNo(row.reassign_jc);
+      }
+      return str(row.pjobcardno);
+    };
+    const jcs = [...new Set(data.map(pendingDisplayJc).filter(Boolean))];
+    if (jcs.length) {
+      const [irPending, prodPending] = await Promise.all([
+        findIssueRequestRegisterMetaByPjobcardnos(jcs),
+        findProductionJcMetaByPjobcardnos(jcs),
+      ]);
+      data = data.map((row) => {
+        const jc = pendingDisplayJc(row);
+        if (!jc) return row;
+        const key = productionJcMetaKey(jc);
+        const hit = mergePendingJcDisplayMeta(prodPending.get(key), irPending.get(key));
+        if (
+          !hit.macname &&
+          !hit.fg_item_code &&
+          !hit.fg_item_desc &&
+          !hit.rm_item_code
+        ) {
+          return row;
+        }
+        return {
+          ...row,
+          pjobcardno: jc,
+          ...(hit.macname ? { macname: hit.macname } : {}),
+          ...(hit.fg_item_code || hit.fg_item_desc
+            ? {
+                fg_item_code: hit.fg_item_code ?? row.fg_item_code ?? null,
+                fg_item_desc: hit.fg_item_desc ?? row.fg_item_desc ?? null,
+              }
+            : {}),
+          ...(hit.rm_item_code
+            ? {
+                item_code: hit.rm_item_code,
+                item_desc: hit.rm_item_desc ?? row.item_desc ?? null,
+              }
+            : {}),
+        };
+      });
+    }
+  }
+
   return {
     data,
     total,
@@ -812,7 +1120,7 @@ const WRITABLE = [
   "approved", "approved_by", "approved_at",
   "created_by", "updated_by", "updated_at",
 ];
-const JSON_COLS = new Set(["coils", "attachments"]);
+const JSON_COLS = new Set(["coils", "attachments", "reassign_jc"]);
 const STRIP_LEGACY_WRITE = [
   "request_type", "rejection_type", "lot_no", "mrn_no", "heat_no",
   "item_code", "item_desc", "seed_coil_uid", "scanned_coil_uids", "downstream",
@@ -835,9 +1143,11 @@ function prepareWritablePayload(data = {}) {
   if (type) out.type = type;
 
   if (out.type === IPR_TYPE.REASSIGN) {
-    // reassign_jc = target only (from header). coil.pjobcardno is SOURCE — do not copy it here.
-    if (out.reassign_jc === undefined || out.reassign_jc === null || out.reassign_jc === "") {
-      out.reassign_jc = str(out.reassign_jc) || null;
+    if (out.reassign_jc !== undefined) {
+      out.reassign_jc =
+        out.reassign_jc === null || out.reassign_jc === ""
+          ? null
+          : parseReassignJc(out.reassign_jc) || null;
     }
   } else if (out.type && out.reassign_jc === undefined) {
     out.reassign_jc = null;
@@ -876,7 +1186,13 @@ export const insertInProcessRequest = async (data = {}) => {
     if (prepared[key] === undefined) continue;
     cols.push(key);
     placeholders.push(JSON_COLS.has(key) ? `$${i++}::jsonb` : `$${i++}`);
-    values.push(JSON_COLS.has(key) ? JSON.stringify(prepared[key] || []) : prepared[key]);
+    values.push(
+      JSON_COLS.has(key)
+        ? prepared[key] == null
+          ? null
+          : JSON.stringify(prepared[key])
+        : prepared[key]
+    );
   }
 
   const [row] = await dbQuery(
@@ -939,7 +1255,8 @@ export const findInProcessRejectionsPendingRejection = async (options = {}) => {
       COALESCE(r.reason,'') ILIKE $${idx} OR
       COALESCE(r.remarks,'') ILIKE $${idx} OR
       COALESCE(r.mrn_uid,'') ILIKE $${idx} OR
-      COALESCE(r.reassign_jc,'') ILIKE $${idx} OR
+      COALESCE(r.reassign_jc->>'pjobcardno','') ILIKE $${idx} OR
+      COALESCE(r.reassign_jc::text,'') ILIKE $${idx} OR
       COALESCE(r.coils::text,'') ILIKE $${idx} OR
       r.ipr_uid::text ILIKE $${idx}
     )`);

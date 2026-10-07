@@ -3,6 +3,24 @@ import { withTransaction } from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 
 const TABLE = T.ISSUE_REQUEST_JOB_CARD;
+const IR_TABLE = T.ISSUE_REQUEST;
+const COIL_TABLE = T.COIL_TABLE;
+const OUT_ENTRY = T.OUT_ENTRY;
+const OUT_SCANNED = T.OUT_ENTRY_SCANNED_COIL;
+
+const jcMetaKey = (jc) => String(jc || "").replace(/^JC[\s\-]*/i, "").trim().toUpperCase();
+
+function registerMetaRow(r) {
+  if (!r) return null;
+  return {
+    pjobcardno: r.pjobcardno ? String(r.pjobcardno).trim() : null,
+    macname: r.macname ? String(r.macname).trim() : null,
+    fg_item_code: r.fg_item_code ? String(r.fg_item_code).trim() : null,
+    fg_item_desc: r.fg_item_desc ? String(r.fg_item_desc).trim() : null,
+    rm_item_code: r.rm_item_code ? String(r.rm_item_code).trim() : null,
+    rm_item_desc: r.rm_item_desc ? String(r.rm_item_desc).trim() : null,
+  };
+}
 
 function normalizeJsonArray(raw) {
   if (Array.isArray(raw)) return raw;
@@ -198,6 +216,99 @@ export async function replaceIssueRequestJobCards(
 
   if (client) return work(client);
   return withTransaction(work);
+}
+
+/** Issue Request Register — FG + RM per job card (latest approved IR). */
+export async function findIssueRequestRegisterMetaByPjobcardnos(pjobcardnos = []) {
+  const raw = [...new Set((pjobcardnos || []).map((j) => String(j || "").trim()).filter(Boolean))];
+  const keys = raw.map(jcMetaKey).filter(Boolean);
+  if (!keys.length) return new Map();
+
+  const rows = await dbQuery(
+    `SELECT DISTINCT ON (UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i')))
+       UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i')) AS jc_key,
+       jc.pjobcardno,
+       jc.macname,
+       jc.item_code AS fg_item_code,
+       jc.item_desc AS fg_item_desc,
+       jc.rm_item_code,
+       jc.rm_item_desc
+     FROM ${IR_TABLE} r
+     INNER JOIN ${TABLE} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
+     WHERE r.is_deleted = false
+       AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i')) = ANY($1::text[])
+     ORDER BY
+       UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i')),
+       COALESCE(r.approved, false) DESC,
+       r.issue_uid DESC,
+       jc.id DESC`,
+    [keys]
+  );
+
+  const map = new Map();
+  for (const r of rows || []) {
+    const key = String(r.jc_key || "").trim().toUpperCase();
+    if (!key || map.has(key)) continue;
+    map.set(key, registerMetaRow(r));
+  }
+  return map;
+}
+
+/** Store Out issue line — same FG/RM as that Issue Request Register row. */
+export async function findIssueRequestRegisterMetaByCoilUids(coilNoUids = []) {
+  const uids = [...new Set((coilNoUids || []).map((u) => String(u || "").trim()).filter(Boolean))];
+  if (!uids.length) return new Map();
+
+  const rows = await dbQuery(
+    `SELECT
+       c.coil_no_uid,
+       jc.pjobcardno,
+       jc.macname,
+       jc.item_code AS fg_item_code,
+       jc.item_desc AS fg_item_desc,
+       jc.rm_item_code,
+       jc.rm_item_desc
+     FROM ${COIL_TABLE} c
+     LEFT JOIN LATERAL (
+       SELECT o.out_uid, o.issue_uid, o.pjobcardno
+       FROM ${OUT_ENTRY} o
+       WHERE o.is_deleted = false
+         AND NULLIF(TRIM(o.pjobcardno), '') IS NOT NULL
+         AND (
+           (c.out_uid IS NOT NULL AND o.out_uid = c.out_uid)
+           OR (
+             COALESCE(o.approved, false) = true
+             AND EXISTS (
+               SELECT 1 FROM ${OUT_SCANNED} s
+               WHERE s.out_uid = o.out_uid
+                 AND LOWER(TRIM(s.coil_no_uid)) = LOWER(TRIM(c.coil_no_uid))
+             )
+           )
+         )
+       ORDER BY
+         CASE WHEN c.out_uid IS NOT NULL AND o.out_uid = c.out_uid THEN 0 ELSE 1 END,
+         COALESCE(o.approved_at, o.created_at) DESC NULLS LAST,
+         o.out_uid DESC
+       LIMIT 1
+     ) o ON TRUE
+     INNER JOIN ${TABLE} jc
+       ON jc.is_deleted = false
+       AND o.issue_uid IS NOT NULL
+       AND jc.issue_uid = o.issue_uid
+       AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+         = UPPER(REGEXP_REPLACE(TRIM(o.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+     INNER JOIN ${IR_TABLE} r ON r.issue_uid = jc.issue_uid AND r.is_deleted = false
+     WHERE c.coil_no_uid = ANY($1::text[])`,
+    [uids]
+  );
+
+  const map = new Map();
+  for (const r of rows || []) {
+    const key = String(r.coil_no_uid || "").trim().toLowerCase();
+    if (!key) continue;
+    map.set(key, registerMetaRow(r));
+  }
+  return map;
 }
 
 /** FG product on a job card (latest row if duplicate pjobcardno). */

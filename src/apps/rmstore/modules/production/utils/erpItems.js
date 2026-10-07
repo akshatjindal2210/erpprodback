@@ -110,6 +110,48 @@ export function filterPrdRunJcBySearch(rows, search) {
   );
 }
 
+export function productionJcMetaKey(jc) {
+  return String(jc || "")
+    .replace(/^JC[\s\-]*/i, "")
+    .trim()
+    .toUpperCase();
+}
+
+/** Running job card master (prdrunjc) — FG + machine; JC may not exist on Issue Request yet. */
+export async function findProductionJcMetaByPjobcardnos(pjobcardnos = []) {
+  const keys = new Set((pjobcardnos || []).map(productionJcMetaKey).filter(Boolean));
+  if (!keys.size) return new Map();
+
+  const rows = await loadMappedPrdRunJc();
+  const map = new Map();
+  for (const r of rows) {
+    const key = productionJcMetaKey(r.pjobcardno);
+    if (!key || !keys.has(key) || map.has(key)) continue;
+    map.set(key, {
+      pjobcardno: r.pjobcardno,
+      macname: r.macname ? String(r.macname).trim() : null,
+      fg_item_code: r.item_code ? String(r.item_code).trim() : null,
+      fg_item_desc: r.itemdesc ? String(r.itemdesc).trim() : null,
+      itemdcode: r.itemdcode ?? null,
+    });
+  }
+  return map;
+}
+
+/** Pending display — production master wins for FG/mac; IR adds RM when issued. */
+export function mergePendingJcDisplayMeta(prodHit, irHit) {
+  const prod = prodHit || {};
+  const ir = irHit || {};
+  return {
+    pjobcardno: prod.pjobcardno || ir.pjobcardno || null,
+    macname: prod.macname || ir.macname || null,
+    fg_item_code: prod.fg_item_code || ir.fg_item_code || null,
+    fg_item_desc: prod.fg_item_desc ?? ir.fg_item_desc ?? null,
+    rm_item_code: ir.rm_item_code || null,
+    rm_item_desc: ir.rm_item_desc ?? null,
+  };
+}
+
 export function slicePage(rows, page = 1, limit = 1000) {
   const safePage = Math.max(1, Number(page) || 1);
   const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 1000));

@@ -1,5 +1,6 @@
 import { findJobCardFgByPjobcardno } from "../../issue-request/models/issueRequestJobCard.model.js";
 import { isIssuedToShopFloor } from "../../../lib/utils/saMinusInventory.js";
+import { findProductionJcMetaByPjobcardnos, productionJcMetaKey } from "../../production/utils/erpItems.js";
 
 function coilWireUnit(row) {
   const u = String(row?.it_unit || "kg").trim();
@@ -45,6 +46,59 @@ function summaryFromSplits(splits) {
   };
 }
 
+function jobCardAssignments(row) {
+  return (Array.isArray(row?.job_card_assignments) ? row.job_card_assignments : []).filter((a) =>
+    String(a?.pjobcardno || "").trim()
+  );
+}
+
+function fgFromProdMeta(prodMap, jc) {
+  const hit = prodMap.get(productionJcMetaKey(jc));
+  if (!hit?.fg_item_code) return null;
+  return { fg_item_code: hit.fg_item_code, fg_item_desc: hit.fg_item_desc ?? null };
+}
+
+/** Full reassign chain — one FG split per job_card_assignments hop (Coil Finder History). */
+async function fgWireSplitsFromJobCardAssignments(row) {
+  const assignments = jobCardAssignments(row);
+  if (!assignments.length) return null;
+
+  const multiHop = assignments.length > 1 || row.reassign === true;
+  const status = String(row?.status || "active").toLowerCase();
+  if (!multiHop && status !== "consumed") return null;
+
+  const unit = coilWireUnit(row);
+  const jcs = [...new Set(assignments.map((a) => String(a.pjobcardno).trim()).filter(Boolean))];
+  const prodMap = jcs.length ? await findProductionJcMetaByPjobcardnos(jcs) : new Map();
+
+  const fgCache = new Map();
+  const resolveFg = async (jc) => {
+    const key = productionJcMetaKey(jc);
+    if (fgCache.has(key)) return fgCache.get(key);
+    let fg = fgFromProdMeta(prodMap, jc);
+    if (!fg?.fg_item_code) fg = await findJobCardFgByPjobcardno(jc);
+    fgCache.set(key, fg || null);
+    return fg;
+  };
+
+  const splits = [];
+  for (const a of assignments) {
+    const jc = String(a.pjobcardno).trim();
+    const fg = await resolveFg(jc);
+    const part = buildSplit({
+      fg,
+      qty: a.qty,
+      unit,
+      pjobcardno: jc,
+      kind: a.kind || "on_job",
+    });
+    if (part) splits.push(part);
+  }
+
+  if (!splits.length) return null;
+  return summaryFromSplits(splits);
+}
+
 /** Reassign: FG + wire qty cut on source JC and balance on target JC. */
 async function reassignFgWireSplits(row) {
   const unit = coilWireUnit(row);
@@ -70,8 +124,9 @@ async function reassignFgWireSplits(row) {
     if (part) splits.push(part);
   }
   if (balance > 0) {
+    const fgBalance = sourceFg?.fg_item_code ? sourceFg : targetFg;
     const part = buildSplit({
-      fg: targetFg,
+      fg: fgBalance,
       qty: balance,
       unit,
       pjobcardno: target,
@@ -103,6 +158,10 @@ function shopFloorFgWireSplit(row) {
 /** Coil Finder FG header: wire cut / balance qty per FG (reassign + normal shop floor). */
 export async function enrichCoilFgForReassign(row) {
   if (!row) return {};
+
+  const fromChain = await fgWireSplitsFromJobCardAssignments(row);
+  if (fromChain?.fg_wire_splits?.length) return fromChain;
+
   if (row.reassign) return reassignFgWireSplits(row);
   if (isIssuedToShopFloor(row)) return shopFloorFgWireSplit(row);
   return {};

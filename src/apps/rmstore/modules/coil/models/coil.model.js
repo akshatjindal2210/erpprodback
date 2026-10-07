@@ -9,6 +9,8 @@ import { coilAreaEligibleSql, coilAreaPhysicalStatusSql, portalMrnCoilBaseSql } 
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { roundCoilQty } from "../../../lib/utils/coilQtySplit.js";
 import { isIssuedToShopFloor, isSaMinusWriteOff } from "../../../lib/utils/saMinusInventory.js";
+import { findIssueRequestRegisterMetaByCoilUids, findIssueRequestRegisterMetaByPjobcardnos } from "../../issue-request/models/issueRequestJobCard.model.js";
+import { findProductionJcMetaByPjobcardnos, mergePendingJcDisplayMeta, productionJcMetaKey } from "../../production/utils/erpItems.js";
 
 const TABLE = T.COIL_TABLE;
 const OUT_ENTRY = T.OUT_ENTRY;
@@ -85,6 +87,15 @@ function macnameFromAssignments(list) {
   return unique.length ? unique.join(", ") : null;
 }
 
+/** After consume on target JC, live coil qty is the shop-floor balance (reassign JSON is a snapshot). */
+function liveShopFloorBalanceQty(row, hopBalanceQty) {
+  const hop = Number(hopBalanceQty) || 0;
+  const status = String(row?.status || "active").toLowerCase();
+  const live = Number(row?.qty) || 0;
+  if (status === "out" && live > 0) return live;
+  return hop;
+}
+
 /** Normalize one history hop — always derive consumed from original/remaining when missing. */
 function normalizeReassignHop(hop = {}) {
   const qtys = deriveIprLineQtys({
@@ -128,7 +139,19 @@ export function enrichCoilJobCardDisplay(row) {
     }
     const last = history[history.length - 1];
     const target = last.target_jc;
-    const balance = Number(last.balance_qty) || 0;
+    const balance = liveShopFloorBalanceQty(base, last.balance_qty);
+    const firstHop = history[0];
+    if (firstHop?.source_jc && target && firstHop.source_jc.toUpperCase() !== target.toUpperCase() && balance > 0) {
+      const hasSource = assignments.some((a) => a.kind === "consumed" && a.pjobcardno === firstHop.source_jc);
+      if (!hasSource) {
+        assignments.unshift({
+          pjobcardno: firstHop.source_jc,
+          macname: firstHop.source_mac || null,
+          qty: 0,
+          kind: "consumed",
+        });
+      }
+    }
     if (target && balance > 0) {
       assignments.push({
         pjobcardno: target,
@@ -138,7 +161,10 @@ export function enrichCoilJobCardDisplay(row) {
       });
     }
 
-    const parts = assignments.map((a) => `${a.pjobcardno} (${a.qty})`);
+    const parts = assignments.map((a) => {
+      const q = Number(a.qty) || 0;
+      return q > 0 ? `${a.pjobcardno} (${q})` : String(a.pjobcardno || "");
+    }).filter(Boolean);
     return {
       ...base,
       reassign_ipr_uid: last.ipr_uid ?? base.reassign_ipr_uid,
@@ -169,10 +195,12 @@ export function enrichCoilJobCardDisplay(row) {
     consumed_qty: base.reassign_consumed_qty,
   });
   const consumed = derived.consumed_qty;
-  const balance =
+  const balance = liveShopFloorBalanceQty(
+    base,
     base.reassign_balance_qty != null && base.reassign_balance_qty !== ""
       ? Number(base.reassign_balance_qty)
-      : Number(base.qty);
+      : Number(base.qty)
+  );
   const hasSplit =
     source &&
     target &&
@@ -234,7 +262,7 @@ export async function loadReassignHistoryByCoilUids(coilNoUids = []) {
   const rows = await dbQuery(
     `SELECT
        ipr.ipr_uid,
-       NULLIF(TRIM(ipr.reassign_jc), '') AS reassign_jc,
+       NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') AS reassign_jc,
        ipr.coils,
        COALESCE(ipr.approved_at, ipr.updated_at, ipr.created_at) AS sort_at
      FROM ${IPR_TABLE} ipr
@@ -242,7 +270,7 @@ export async function loadReassignHistoryByCoilUids(coilNoUids = []) {
        AND COALESCE(ipr.approved, false) = true
        AND (
          ipr.type = 'reassign'
-         OR NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+         OR NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
        )
        AND EXISTS (
          SELECT 1
@@ -260,7 +288,11 @@ export async function loadReassignHistoryByCoilUids(coilNoUids = []) {
   const jcNos = new Set();
 
   for (const row of rows || []) {
-    const targetJc = String(row.reassign_jc || "").trim();
+    const targetJc = String(
+      (row.reassign_jc && typeof row.reassign_jc === "object"
+        ? row.reassign_jc.pjobcardno
+        : row.reassign_jc) || ""
+    ).trim();
     if (!targetJc) continue;
     const coils = Array.isArray(row.coils)
       ? row.coils
@@ -316,6 +348,12 @@ export async function loadReassignHistoryByCoilUids(coilNoUids = []) {
       if (ta !== tb) return ta - tb;
       return Number(a.ipr_uid || 0) - Number(b.ipr_uid || 0);
     });
+    for (let i = 1; i < hops.length; i++) {
+      const prevTarget = String(hops[i - 1].target_jc || "").trim();
+      if (!prevTarget) continue;
+      hops[i].source_jc = prevTarget;
+      hops[i].source_mac = hops[i].source_mac || hops[i - 1].target_mac || null;
+    }
   }
 
   return byCoil;
@@ -355,6 +393,130 @@ export async function enrichCoilsWithReassignHistory(rows = []) {
       });
     }
     return enrichCoilJobCardDisplay(row);
+  });
+}
+
+/** True when shop-floor row is reassign balance (source JC consumed + target JC balance). */
+export function coilPendingReassignRef(row) {
+  const assignments = Array.isArray(row?.job_card_assignments) ? row.job_card_assignments : [];
+  if (!assignments.length) return false;
+  const balance = assignments.find((a) => a?.kind === "balance");
+  const consumed = assignments.find((a) => a?.kind === "consumed");
+  if (balance && consumed) {
+    const jcKey = (jc) => String(jc || "").replace(/^JC[\s\-]*/i, "").trim().toUpperCase();
+    const b = jcKey(balance.pjobcardno);
+    const c = jcKey(consumed.pjobcardno);
+    return Boolean(b && c && b !== c);
+  }
+  return assignments.length > 1 && Boolean(balance);
+}
+
+/** IPR Pending tab — minimal fields only (full coil row stays in Coils module). */
+export function slimPendingShopFloorRow(row) {
+  if (!row) return row;
+  let assignments = row.job_card_assignments;
+  if (Array.isArray(assignments) && assignments.length) {
+    assignments = assignments.map(({ pjobcardno, macname, qty, kind }) => ({
+      pjobcardno: pjobcardno ?? null,
+      macname: macname ?? null,
+      qty: qty ?? null,
+      kind: kind ?? null,
+    }));
+  }
+  return {
+    coil_uid: row.coil_uid ?? null,
+    coil_no_uid: row.coil_no_uid ?? null,
+    mrn_uid: row.mrn_uid ?? null,
+    mrn_no: row.mrn_no ?? null,
+    item_code: row.item_code ?? null,
+    item_desc: row.item_desc ?? null,
+    qty: row.qty ?? null,
+    heat_no: row.heat_no ?? null,
+    out_uid: row.out_uid ?? null,
+    shop_floor_at: row.shop_floor_at ?? null,
+    status: row.status ?? null,
+    location_id: row.location_id ?? null,
+    fg_item_code: row.fg_item_code ?? null,
+    fg_item_desc: row.fg_item_desc ?? null,
+    pending_rm_item_code: row.pending_rm_item_code ?? null,
+    pending_rm_item_desc: row.pending_rm_item_desc ?? null,
+    pending_jc_macname: row.pending_jc_macname ?? null,
+    pjobcardno: row.pjobcardno ?? null,
+    macname: row.macname ?? null,
+    reassign_target_pjobcardno: row.reassign_target_pjobcardno ?? null,
+    reassign_target_macname: row.reassign_target_macname ?? null,
+    job_card_assignments: assignments?.length ? assignments : null,
+    pending_reassign_ref: coilPendingReassignRef(row),
+  };
+}
+
+/** IPR Pending shop floor — FG/RM from Issue Request for the JC shown (target after reassign). */
+export async function enrichPendingShopFloorDisplay(rows = []) {
+  const list = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  if (!list.length) return list;
+
+  const jcKey = (jc) => String(jc || "").replace(/^JC[\s\-]*/i, "").trim().toUpperCase();
+  const uids = list.map((r) => String(r.coil_no_uid || "").trim()).filter(Boolean);
+  const sourceIr = uids.length ? await findIssueRequestRegisterMetaByCoilUids(uids) : new Map();
+  const historyByUid = uids.length ? await loadReassignHistoryByCoilUids(uids) : new Map();
+
+  const pendingJcs = new Set();
+  for (const row of list) {
+    const key = String(row.coil_no_uid || "").trim().toLowerCase();
+    const issue = sourceIr.get(key);
+    const hops = historyByUid.get(key);
+    const last = hops?.[hops.length - 1];
+    const assignments = Array.isArray(row.job_card_assignments) ? row.job_card_assignments : [];
+    const balance = assignments.find((a) => a?.kind === "balance");
+    const tgt = String(balance?.pjobcardno || last?.target_jc || row.reassign_target_pjobcardno || "").trim();
+    const display = tgt || String(issue?.pjobcardno || row.pjobcardno || "").trim();
+    if (display) pendingJcs.add(display);
+  }
+  const jcList = [...pendingJcs];
+  const [irByJc, prodByJc] = await Promise.all([
+    jcList.length ? findIssueRequestRegisterMetaByPjobcardnos(jcList) : new Map(),
+    jcList.length ? findProductionJcMetaByPjobcardnos(jcList) : new Map(),
+  ]);
+
+  return list.map((row) => {
+    const key = String(row.coil_no_uid || "").trim().toLowerCase();
+    const issue = sourceIr.get(key);
+    const hops = historyByUid.get(key);
+    const last = hops?.length ? hops[hops.length - 1] : null;
+    const assignments = Array.isArray(row.job_card_assignments) ? row.job_card_assignments : [];
+    const balance = assignments.find((a) => a?.kind === "balance");
+    const targetJc = String(balance?.pjobcardno || last?.target_jc || row.reassign_target_pjobcardno || "").trim();
+    const displayJc = targetJc || String(issue?.pjobcardno || row.pjobcardno || "").trim();
+    const dKey = displayJc ? productionJcMetaKey(displayJc) : "";
+    const irJcMeta = dKey ? irByJc.get(dKey) : null;
+    const prodMeta = dKey ? prodByJc.get(dKey) : null;
+    const baseMeta = displayJc && jcKey(displayJc) === jcKey(issue?.pjobcardno) ? issue : null;
+    const irForMerge = targetJc ? irJcMeta : irJcMeta || baseMeta || issue;
+    /** FG/mac from prdrunjc master; RM from IR when that JC was issued. */
+    const meta = mergePendingJcDisplayMeta(prodMeta, irForMerge);
+
+    const enriched = {
+      ...row,
+      fg_item_code: meta?.fg_item_code || row.fg_item_code || null,
+      fg_item_desc: meta?.fg_item_desc ?? row.fg_item_desc ?? null,
+      ...(meta?.rm_item_code
+        ? { pending_rm_item_code: meta.rm_item_code, pending_rm_item_desc: meta.rm_item_desc ?? null }
+        : {}),
+      ...(meta?.macname && displayJc ? { pending_jc_macname: meta.macname } : {}),
+      ...(last?.target_jc || targetJc
+        ? {
+            reassign_target_pjobcardno: targetJc || last?.target_jc,
+            reassign_target_macname:
+              meta?.macname ||
+              balance?.macname ||
+              last?.target_mac ||
+              row.reassign_target_macname ||
+              null,
+          }
+        : {}),
+    };
+    enriched.pending_reassign_ref = coilPendingReassignRef(enriched);
+    return enriched;
   });
 }
 
@@ -435,7 +597,7 @@ LEFT JOIN LATERAL (
   LEFT JOIN LATERAL (
     SELECT
       COALESCE(
-        NULLIF(TRIM(ipr.reassign_jc), ''),
+        NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), ''),
         NULLIF(TRIM(line->>'pjobcardno'), '')
       ) AS pjobcardno,
       NULLIF(TRIM(line->>'macname'), '') AS macname
@@ -448,7 +610,7 @@ LEFT JOIN LATERAL (
       AND ipr.type IN ('consume', 'reassign')
       AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
       AND (
-        NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+        NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
         OR NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
       )
       AND (c.ipr_uid IS NULL OR ipr.ipr_uid = c.ipr_uid)
@@ -498,7 +660,7 @@ LEFT JOIN LATERAL (
       SELECT
         ipr.ipr_uid,
         NULLIF(TRIM(line->>'pjobcardno'), '') AS source_jc,
-        NULLIF(TRIM(ipr.reassign_jc), '') AS target_jc,
+        NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') AS target_jc,
         NULLIF(TRIM(jc_src.macname), '') AS source_mac,
         NULLIF(TRIM(jc_tgt.macname), '') AS target_mac,
         /* slimCoilForStorage omits consumed_qty — derive original - remaining */
@@ -543,22 +705,22 @@ LEFT JOIN LATERAL (
         SELECT jc.macname
         FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
         WHERE jc.is_deleted = false
-          AND NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+          AND NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
           AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
-            = UPPER(REGEXP_REPLACE(TRIM(ipr.reassign_jc), '^JC[[:space:]\\-]*', '', 'i'))
+            = UPPER(REGEXP_REPLACE(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '^JC[[:space:]\\-]*', '', 'i'))
         ORDER BY jc.id DESC
         LIMIT 1
       ) jc_tgt ON TRUE
       WHERE ipr.is_deleted = false
         AND (
           ipr.type = 'reassign'
-          OR NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+          OR NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
         )
         AND COALESCE(ipr.approved, false) = true
         AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
         AND LOWER(COALESCE(c.status, 'active')) IN ('out', 'consumed')
         AND NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
-        AND NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+        AND NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
     ) hops
   ) hist
   LEFT JOIN LATERAL (
@@ -575,7 +737,7 @@ LEFT JOIN LATERAL (
       SELECT
         ipr.ipr_uid,
         NULLIF(TRIM(line->>'pjobcardno'), '') AS source_jc,
-        NULLIF(TRIM(ipr.reassign_jc), '') AS target_jc,
+        NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') AS target_jc,
         NULLIF(TRIM(jc_src.macname), '') AS source_mac,
         NULLIF(TRIM(jc_tgt.macname), '') AS target_mac,
         COALESCE(
@@ -618,22 +780,22 @@ LEFT JOIN LATERAL (
         SELECT jc.macname
         FROM ${T.ISSUE_REQUEST_JOB_CARD} jc
         WHERE jc.is_deleted = false
-          AND NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+          AND NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
           AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
-            = UPPER(REGEXP_REPLACE(TRIM(ipr.reassign_jc), '^JC[[:space:]\\-]*', '', 'i'))
+            = UPPER(REGEXP_REPLACE(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '^JC[[:space:]\\-]*', '', 'i'))
         ORDER BY jc.id DESC
         LIMIT 1
       ) jc_tgt ON TRUE
       WHERE ipr.is_deleted = false
         AND (
           ipr.type = 'reassign'
-          OR NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+          OR NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
         )
         AND COALESCE(ipr.approved, false) = true
         AND LOWER(TRIM(line->>'coil_no_uid')) = LOWER(TRIM(c.coil_no_uid))
         AND LOWER(COALESCE(c.status, 'active')) IN ('out', 'consumed')
         AND NULLIF(TRIM(line->>'pjobcardno'), '') IS NOT NULL
-        AND NULLIF(TRIM(ipr.reassign_jc), '') IS NOT NULL
+        AND NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
       ORDER BY COALESCE(ipr.approved_at, ipr.updated_at, ipr.created_at) DESC NULLS LAST, ipr.ipr_uid DESC
       LIMIT 1
     ) hops

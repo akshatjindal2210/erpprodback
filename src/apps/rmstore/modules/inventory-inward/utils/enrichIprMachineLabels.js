@@ -119,7 +119,11 @@ export async function enrichIprWithMachineLabels(rows = []) {
     if (existingMac) macs.add(existingMac);
     if (existingJc) jcs.add(existingJc);
 
-    const targetKey = normalizeJcKey(row.reassign_jc);
+    const targetKey = normalizeJcKey(
+      row.reassign_jc && typeof row.reassign_jc === "object"
+        ? row.reassign_jc.pjobcardno
+        : row.reassign_jc
+    );
     const isReassign = String(row.type || "").toLowerCase() === "reassign" && !!targetKey;
 
     // Reassign: Job Card column = SOURCE only (never the target reassign_jc).
