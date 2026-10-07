@@ -250,6 +250,37 @@ export function enrichCoilJobCardDisplay(row) {
   };
 }
 
+/** One machine = one JC lock — use reassign balance target, not store-out source. */
+export function resolveEffectiveShopFloorLockAssignment(row, reassignHops = null) {
+  if (!row) {
+    return { pjobcardno: "", macname: "", wires: null };
+  }
+  const hops =
+    reassignHops != null
+      ? reassignHops
+      : parseReassignHistory(row.reassign_history);
+  const enriched = enrichCoilJobCardDisplay({ ...row, reassign_history: hops });
+  const balance = (enriched.job_card_assignments || []).find((a) => a.kind === "balance");
+  const wires = row.wires ?? row.rm_item_code ?? null;
+  if (balance?.pjobcardno) {
+    const balJc = String(balance.pjobcardno).trim();
+    const storeJc = String(row.pjobcardno || "").trim();
+    const jcKey = (jc) => String(jc || "").replace(/^JC[\s\-]*/i, "").trim().toUpperCase();
+    const reassignedAway = storeJc && jcKey(balJc) !== jcKey(storeJc);
+    const macFromBalance = String(balance.macname || enriched.reassign_target_macname || "").trim();
+    return {
+      pjobcardno: balJc,
+      macname: macFromBalance || (reassignedAway ? "" : String(row.macname || "").trim()),
+      wires,
+    };
+  }
+  return {
+    pjobcardno: String(row.pjobcardno || "").trim(),
+    macname: String(row.macname || "").trim(),
+    wires,
+  };
+}
+
 /**
  * Batch-load approved reassign IPR hops for shop-floor coils.
  * Prefer this over relying solely on SQL jsonb_agg — slim coils omit consumed_qty.
@@ -262,7 +293,7 @@ export async function loadReassignHistoryByCoilUids(coilNoUids = []) {
   const rows = await dbQuery(
     `SELECT
        ipr.ipr_uid,
-       NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') AS reassign_jc,
+       ipr.reassign_jc AS reassign_jc_json,
        ipr.coils,
        COALESCE(ipr.approved_at, ipr.updated_at, ipr.created_at) AS sort_at
      FROM ${IPR_TABLE} ipr
@@ -288,11 +319,16 @@ export async function loadReassignHistoryByCoilUids(coilNoUids = []) {
   const jcNos = new Set();
 
   for (const row of rows || []) {
+    const reassignJc = row.reassign_jc_json;
     const targetJc = String(
-      (row.reassign_jc && typeof row.reassign_jc === "object"
-        ? row.reassign_jc.pjobcardno
-        : row.reassign_jc) || ""
+      (reassignJc && typeof reassignJc === "object" && !Array.isArray(reassignJc)
+        ? reassignJc.pjobcardno
+        : reassignJc) || ""
     ).trim();
+    const iprTargetMac =
+      reassignJc && typeof reassignJc === "object" && !Array.isArray(reassignJc)
+        ? String(reassignJc.macname || "").trim() || null
+        : null;
     if (!targetJc) continue;
     const coils = Array.isArray(row.coils)
       ? row.coils
@@ -318,7 +354,7 @@ export async function loadReassignHistoryByCoilUids(coilNoUids = []) {
         source_jc: sourceJc,
         target_jc: targetJc,
         source_mac: String(line?.macname || "").trim() || null,
-        target_mac: null,
+        target_mac: iprTargetMac,
         original_qty: qtys.original_qty,
         consumed_qty: qtys.consumed_qty,
         balance_qty: qtys.remaining_qty,
@@ -332,15 +368,24 @@ export async function loadReassignHistoryByCoilUids(coilNoUids = []) {
     }
   }
 
-  const macMap = await findMacnamesForJobCards([...jcNos]);
+  const jcList = [...jcNos];
+  const [macMap, prodMap] = await Promise.all([
+    findMacnamesForJobCards(jcList),
+    findProductionJcMetaByPjobcardnos(jcList),
+  ]);
   const jcKey = (jc) => String(jc || "").replace(/^JC[\s\-]*/i, "").trim().toUpperCase();
 
   for (const hops of byCoil.values()) {
     for (const hop of hops) {
       const srcMac = macMap.get(jcKey(hop.source_jc));
-      const tgtMac = macMap.get(jcKey(hop.target_jc));
+      const tgtKey = productionJcMetaKey(hop.target_jc);
+      const tgtMac =
+        macMap.get(jcKey(hop.target_jc)) ||
+        prodMap.get(tgtKey)?.macname ||
+        hop.target_mac ||
+        null;
       if (srcMac) hop.source_mac = hop.source_mac || srcMac;
-      if (tgtMac) hop.target_mac = tgtMac;
+      if (tgtMac) hop.target_mac = String(tgtMac).trim();
     }
     hops.sort((a, b) => {
       const ta = a.sort_at ? new Date(a.sort_at).getTime() : 0;

@@ -1,6 +1,8 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { ISSUE_REQUEST_MACHINE_JOB_CARD_LOCK } from "../../../lib/config/app.config.js";
+import { loadReassignHistoryByCoilUids, resolveEffectiveShopFloorLockAssignment } from "../../coil/models/coil.model.js";
+import { findProductionJcMetaByPjobcardnos, productionJcMetaKey } from "../../production/utils/erpItems.js";
 import { findActiveJobCardsByIssueUid, jobCardRowToApi, softDeleteJobCardsByIssueUid, coilCountFromCoilsJson } from "./issueRequestJobCard.model.js";
 import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
 
@@ -9,6 +11,151 @@ const JC_TABLE = T.ISSUE_REQUEST_JOB_CARD;
 const COIL = T.COIL_TABLE;
 const OUT_ENTRY = T.OUT_ENTRY;
 const OUT_SCANNED = T.OUT_ENTRY_SCANNED_COIL;
+const IPR_TABLE = T.IN_PROCESS_REQUEST;
+
+function normalizeMachineKey(macname) {
+  return String(macname ?? "").trim().toUpperCase();
+}
+
+function normalizeJobCardKey(pjobcardno) {
+  return String(pjobcardno ?? "")
+    .replace(/^JC[\s\-]*/i, "")
+    .trim()
+    .toUpperCase();
+}
+
+const SHOP_FLOOR_OUT_COIL_JC_JOIN = `
+  INNER JOIN ${OUT_ENTRY} o ON o.out_uid = c.out_uid AND o.is_deleted = false
+  INNER JOIN ${JC_TABLE} jc
+    ON jc.issue_uid = o.issue_uid
+   AND jc.is_deleted = false
+   AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(COALESCE(o.pjobcardno, '')))`;
+
+/** Candidate shop-floor coils for machine lock (store-out + reassign-target machines). */
+async function fetchShopFloorCoilLockRows(macnames = []) {
+  const macs = [...new Set((macnames || []).map(normalizeMachineKey).filter(Boolean))];
+  if (!macs.length) return [];
+
+  const byStoreOut = await dbQuery(
+    `SELECT
+       LOWER(TRIM(c.coil_no_uid)) AS coil_no_uid,
+       c.qty,
+       c.status,
+       UPPER(TRIM(jc.macname)) AS macname,
+       TRIM(jc.pjobcardno) AS pjobcardno,
+       NULLIF(TRIM(COALESCE(m.item_code, jc.rm_item_code, '')), '') AS wires
+     FROM ${COIL} c
+     ${SHOP_FLOOR_OUT_COIL_JC_JOIN}
+     LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+     WHERE c.out_uid IS NOT NULL
+       AND LOWER(COALESCE(c.status, 'active')) = 'out'
+       AND TRIM(COALESCE(jc.macname, '')) <> ''
+       AND UPPER(TRIM(jc.macname)) = ANY($1::text[])`,
+    [macs]
+  );
+
+  const reassignUidRows = await dbQuery(
+    `SELECT DISTINCT LOWER(TRIM(line->>'coil_no_uid')) AS coil_no_uid
+     FROM ${IPR_TABLE} ipr
+     INNER JOIN ${JC_TABLE} jc
+       ON jc.is_deleted = false
+      AND NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
+      AND UPPER(REGEXP_REPLACE(TRIM(jc.pjobcardno), '^JC[[:space:]\\-]*', '', 'i'))
+        = UPPER(REGEXP_REPLACE(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '^JC[[:space:]\\-]*', '', 'i'))
+     CROSS JOIN LATERAL jsonb_array_elements(
+       CASE WHEN jsonb_typeof(ipr.coils) = 'array' THEN ipr.coils ELSE '[]'::jsonb END
+     ) AS line
+     WHERE ipr.is_deleted = false
+       AND COALESCE(ipr.approved, false) = true
+       AND (
+         ipr.type = 'reassign'
+         OR NULLIF(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '') IS NOT NULL
+       )
+       AND UPPER(TRIM(jc.macname)) = ANY($1::text[])
+       AND NULLIF(TRIM(line->>'coil_no_uid'), '') IS NOT NULL`,
+    [macs]
+  );
+
+  const seen = new Set((byStoreOut || []).map((r) => r.coil_no_uid));
+  const extraUids = (reassignUidRows || [])
+    .map((r) => r.coil_no_uid)
+    .filter((uid) => uid && !seen.has(uid));
+
+  let byReassignTarget = [];
+  if (extraUids.length) {
+    byReassignTarget = await dbQuery(
+      `SELECT
+         LOWER(TRIM(c.coil_no_uid)) AS coil_no_uid,
+         c.qty,
+         c.status,
+         UPPER(TRIM(jc.macname)) AS macname,
+         TRIM(jc.pjobcardno) AS pjobcardno,
+         NULLIF(TRIM(COALESCE(m.item_code, jc.rm_item_code, '')), '') AS wires
+       FROM ${COIL} c
+       ${SHOP_FLOOR_OUT_COIL_JC_JOIN}
+       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
+       WHERE c.out_uid IS NOT NULL
+         AND LOWER(COALESCE(c.status, 'active')) = 'out'
+         AND LOWER(TRIM(c.coil_no_uid)) = ANY($1::text[])`,
+      [extraUids]
+    );
+  }
+
+  return [...(byStoreOut || []), ...(byReassignTarget || [])];
+}
+
+async function fillEffectiveMacFromProduction(eff) {
+  if (normalizeMachineKey(eff.macname) || !eff.pjobcardno) return eff;
+  const prod = await findProductionJcMetaByPjobcardnos([eff.pjobcardno]);
+  const mac = prod.get(productionJcMetaKey(eff.pjobcardno))?.macname;
+  if (!mac) return eff;
+  return { ...eff, macname: String(mac).trim() };
+}
+
+async function aggregateShopFloorJobCardConflicts(assignments, coilRows, historyByUid) {
+  const pairs = [
+    ...new Map(
+      (assignments || [])
+        .map((a) => ({
+          macname: normalizeMachineKey(a?.macname),
+          pjobcardno: String(a?.pjobcardno ?? "").trim(),
+        }))
+        .filter((p) => p.macname && p.pjobcardno)
+        .map((p) => [`${p.macname}::${normalizeJobCardKey(p.pjobcardno)}`, p])
+    ).values(),
+  ];
+  if (!pairs.length) return [];
+
+  const hits = new Map();
+
+  for (const row of coilRows || []) {
+    const uid = String(row.coil_no_uid || "").trim().toLowerCase();
+    const hops = historyByUid.get(uid) || [];
+    let eff = resolveEffectiveShopFloorLockAssignment(row, hops);
+    eff = await fillEffectiveMacFromProduction(eff);
+    const effMac = normalizeMachineKey(eff.macname);
+    const effJcKey = normalizeJobCardKey(eff.pjobcardno);
+    if (!effMac || !effJcKey) continue;
+
+    for (const pair of pairs) {
+      if (effMac !== pair.macname) continue;
+      if (effJcKey === normalizeJobCardKey(pair.pjobcardno)) continue;
+
+      const key = `${effMac}::${effJcKey}`;
+      const cur = hits.get(key) || {
+        macname: effMac,
+        pjobcardno: eff.pjobcardno,
+        coil_count: 0,
+        wires: eff.wires || null,
+      };
+      cur.coil_count += 1;
+      if (eff.wires) cur.wires = eff.wires;
+      hits.set(key, cur);
+    }
+  }
+
+  return [...hits.values()].sort((a, b) => b.coil_count - a.coil_count);
+}
 
 /** Match approved out-entry rows to a job-card line. */
 const JC_OUT_MATCH = `
@@ -718,50 +865,21 @@ export const findMachineShopFloorJobCardConflicts = async (assignments = []) => 
     ...new Map(
       (assignments || [])
         .map((a) => ({
-          macname: String(a?.macname ?? "").trim().toUpperCase(),
-          pjobcardno: String(a?.pjobcardno ?? "").trim().toUpperCase(),
+          macname: normalizeMachineKey(a?.macname),
+          pjobcardno: String(a?.pjobcardno ?? "").trim(),
         }))
         .filter((p) => p.macname && p.pjobcardno)
-        .map((p) => [`${p.macname}::${p.pjobcardno}`, p])
+        .map((p) => [`${p.macname}::${normalizeJobCardKey(p.pjobcardno)}`, p])
     ).values(),
   ];
   if (!pairs.length) return [];
 
-  const macnames = pairs.map((p) => p.macname);
-  const pjobcards = pairs.map((p) => p.pjobcardno);
+  const macnames = [...new Set(pairs.map((p) => p.macname))];
+  const coilRows = await fetchShopFloorCoilLockRows(macnames);
+  if (!coilRows.length) return [];
 
-  return dbQuery(
-    `WITH req AS (
-       SELECT * FROM UNNEST($1::text[], $2::text[]) AS t(macname, pjobcardno)
-     ),
-     blocked AS (
-       SELECT
-         UPPER(TRIM(jc.macname)) AS macname,
-         TRIM(jc.pjobcardno) AS pjobcardno,
-         COUNT(*)::int AS coil_count,
-         MAX(NULLIF(TRIM(jc.rm_item_code), '')) AS wires
-       FROM ${COIL} c
-       INNER JOIN ${OUT_ENTRY} o
-         ON o.out_uid = c.out_uid
-        AND o.is_deleted = false
-       INNER JOIN ${JC_TABLE} jc
-         ON jc.issue_uid = o.issue_uid
-        AND jc.is_deleted = false
-        AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(COALESCE(o.pjobcardno, '')))
-       INNER JOIN req
-         ON req.macname = UPPER(TRIM(jc.macname))
-        AND req.pjobcardno <> UPPER(TRIM(jc.pjobcardno))
-       WHERE c.out_uid IS NOT NULL
-         AND LOWER(COALESCE(c.status, 'active')) = 'out'
-         AND TRIM(COALESCE(jc.macname, '')) <> ''
-         AND TRIM(COALESCE(jc.pjobcardno, '')) <> ''
-         AND UPPER(TRIM(jc.macname)) = ANY($1::text[])
-       GROUP BY UPPER(TRIM(jc.macname)), TRIM(jc.pjobcardno)
-     )
-     SELECT * FROM blocked
-     ORDER BY coil_count DESC`,
-    [macnames, pjobcards]
-  );
+  const historyByUid = await loadReassignHistoryByCoilUids(coilRows.map((r) => r.coil_no_uid));
+  return await aggregateShopFloorJobCardConflicts(pairs, coilRows, historyByUid);
 };
 
 /** Shop floor coils (status out): block reassign when another wire is running on the same machine. */
@@ -777,33 +895,41 @@ export const findMachineShopFloorDifferentWireConflicts = async ({
   if (!mac || !wire) return [];
 
   const excludeUid = String(excludeCoilUid ?? "").trim().toLowerCase();
+  const macKey = normalizeMachineKey(mac);
 
-  return dbQuery(
-    `SELECT
-       UPPER(TRIM(jc.macname)) AS macname,
-       TRIM(jc.pjobcardno) AS pjobcardno,
-       COUNT(*)::int AS coil_count,
-       MAX(NULLIF(TRIM(COALESCE(m.item_code, jc.rm_item_code, '')), '')) AS wires
-     FROM ${COIL} c
-     INNER JOIN ${OUT_ENTRY} o
-       ON o.out_uid = c.out_uid
-      AND o.is_deleted = false
-     INNER JOIN ${JC_TABLE} jc
-       ON jc.issue_uid = o.issue_uid
-      AND jc.is_deleted = false
-      AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(COALESCE(o.pjobcardno, '')))
-     LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
-     WHERE c.out_uid IS NOT NULL
-       AND LOWER(COALESCE(c.status, 'active')) = 'out'
-       AND TRIM(COALESCE(jc.macname, '')) <> ''
-       AND UPPER(TRIM(jc.macname)) = UPPER(TRIM($1))
-       AND UPPER(TRIM(COALESCE(m.item_code, jc.rm_item_code, ''))) <> $2
-       AND ($3 = '' OR LOWER(TRIM(c.coil_no_uid)) <> $3)
-     GROUP BY UPPER(TRIM(jc.macname)), TRIM(jc.pjobcardno)
-     ORDER BY coil_count DESC
-     LIMIT 5`,
-    [mac, wire, excludeUid]
-  );
+  const coilRows = await fetchShopFloorCoilLockRows([macKey]);
+  if (!coilRows.length) return [];
+
+  const historyByUid = await loadReassignHistoryByCoilUids(coilRows.map((r) => r.coil_no_uid));
+  const hits = new Map();
+
+  for (const row of coilRows) {
+    const uid = String(row.coil_no_uid || "").trim().toLowerCase();
+    if (excludeUid && uid === excludeUid) continue;
+
+    const hops = historyByUid.get(uid) || [];
+    let eff = resolveEffectiveShopFloorLockAssignment(row, hops);
+    eff = await fillEffectiveMacFromProduction(eff);
+    if (normalizeMachineKey(eff.macname) !== macKey) continue;
+
+    const rowWire = String(eff.wires || row.wires || "")
+      .trim()
+      .toUpperCase();
+    if (!rowWire || rowWire === wire) continue;
+
+    const jcKey = normalizeJobCardKey(eff.pjobcardno);
+    const key = `${macKey}::${jcKey}`;
+    const cur = hits.get(key) || {
+      macname: macKey,
+      pjobcardno: eff.pjobcardno,
+      coil_count: 0,
+      wires: rowWire,
+    };
+    cur.coil_count += 1;
+    hits.set(key, cur);
+  }
+
+  return [...hits.values()].sort((a, b) => b.coil_count - a.coil_count).slice(0, 5);
 };
 
 export function shopFloorJobCardConflictMessage(hit) {
