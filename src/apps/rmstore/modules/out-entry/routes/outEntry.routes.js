@@ -15,7 +15,7 @@ router.post("/lock-issue-uid", authenticate, accessControl(MODULE, ["add", "edit
 router.post("/get", authenticate, accessControl(MODULE, "view"), getOutEntryById);
 router.post("/reasons", authenticate, accessControl(MODULE, "view"), getStoreOutReasons);
 router.post("/create", authenticate, accessControl(MODULE, "add"), createOutEntry);
-router.post("/update", authenticate, accessControl(MODULE, ["edit", "authorize"]), updateOutEntryCtrl);
+router.post("/update", authenticate, accessControl(MODULE, ["add", "edit", "authorize"]), updateOutEntryCtrl);
 router.post("/approve", authenticate, accessControl(MODULE, "authorize"), updateOutEntryCtrl);
 router.post("/delete", authenticate, accessControl(MODULE, "delete"), deleteOutEntry);
 
