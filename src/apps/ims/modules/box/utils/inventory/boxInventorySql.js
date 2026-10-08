@@ -12,7 +12,7 @@ export function sqlBoxOutUidEmpty(alias = "b") {
   return `${alias}.out_uid IS NULL`;
 }
 
-/** Packing category is tray (dailyprod or category master). Sticker type is always box. */
+/** Packing category is tray / OEM Tray (dailyprod or category master). Sticker type is always box. */
 export function sqlPackingIsTray(packingExpr) {
   return `EXISTS (
     SELECT 1
@@ -20,8 +20,8 @@ export function sqlPackingIsTray(packingExpr) {
     LEFT JOIN ims_category c ON c.id = dp.category_id
     WHERE TRIM(dp.doc_no::text) = TRIM(${packingExpr}::text)
       AND (
-        LOWER(TRIM(COALESCE(dp.category_name, ''))) = 'tray'
-        OR LOWER(TRIM(COALESCE(c.name, ''))) = 'tray'
+        LOWER(TRIM(COALESCE(dp.category_name, ''))) IN ('tray', 'oem tray')
+        OR LOWER(TRIM(COALESCE(c.name, ''))) IN ('tray', 'oem tray')
       )
       AND dp.doc_dt >= DATE '${MANAGE_TRAY_ENFORCE_FROM}'
   )`;

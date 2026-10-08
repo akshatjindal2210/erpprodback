@@ -16,6 +16,7 @@ import { effectiveBoxCustomerAcc, isBoxCustomerOverridden } from "../utils/overr
 import { resolvePackingStickerMetaForPrint } from "../utils/stickers/stickerPrintMeta.js";
 import { invalidateDailyProdGeneratedCache } from "../../../lib/utils/packing-entry/index.js";
 import { buildDailyProdStickerFields, stickerFetchRowFromDailyProd } from "../../../lib/utils/packing-entry/stickers/stickerGenerateSnapshot.js";
+import dbQuery from "../../../../../config/db/db.js";
 
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { logOverrideCustomerBatch } from "../utils/transactions/logBoxTransaction.js";
@@ -962,6 +963,23 @@ export const stickerFetchBox = async (req, res) => {
 
       if (imsLive?.itemdcode != null && String(imsLive.itemdcode).trim() !== "") {
         rows = await getStickerHistoryFromLiveRow(imsLive, category_id);
+      }
+    }
+
+    // OEM Tray + no tray std → OEM qty (category stays OEM Tray).
+    if (category_id && (!rows?.length || !rows.some((r) => Number(r.standard_qty_per_box) > 0))) {
+      const [trayCat] = await dbQuery(`SELECT id FROM ims_category WHERE is_deleted = false AND LOWER(TRIM(name)) = 'oem tray' AND id::text = $1 LIMIT 1`, [String(category_id)]);
+      if (trayCat) {
+        const [oemCat] = await dbQuery(`SELECT id FROM ims_category WHERE is_deleted = false AND LOWER(TRIM(name)) = 'oem' LIMIT 1`);
+        if (oemCat?.id) {
+          let fb = await getStickerHistory(doc_no, oemCat.id);
+          if ((!fb?.length || !fb.some((r) => Number(r.standard_qty_per_box) > 0)) && liveFromBody) {
+            fb = await getStickerHistoryFromLiveRow(liveFromBody, oemCat.id);
+          }
+          if (fb?.length) {
+            rows = fb.map((r) => ({ ...r, type: trayCat.id, ims_category: "OEM Tray" }));
+          }
+        }
       }
     }
 

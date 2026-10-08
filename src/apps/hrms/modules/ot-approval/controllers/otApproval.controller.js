@@ -63,7 +63,7 @@ export async function listOtApproval(req, res) {
     const filterDcode = parseEmpDcode(filters?.emp_dcode);
     const status = String(filters?.ot_status || "").toLowerCase();
 
-    // Always honor filters when sent (FE "server" mode). FE "quick" mode omits them.
+    // Date / emp / status only when sent. Default FE sends pending so empty dates stay light.
     const where = [`COALESCE(ot_minutes, 0) <> 0`];
     const params = [];
     if (fromDate) {
@@ -82,13 +82,21 @@ export async function listOtApproval(req, res) {
     else if (status === "rejected") where.push(`COALESCE(ot_approved, 0) = 2`);
     else if (status === "pending") where.push(`COALESCE(ot_minutes, 0) > 0 AND COALESCE(ot_approved, 0) = 0`);
 
+    const whereSql = where.join(" AND ");
+    const countRows = await dbQuery(`SELECT COUNT(*)::int AS n FROM ${ATT} WHERE ${whereSql}`, params);
+    const total = Number(countRows?.[0]?.n) || 0;
+    const lim = Math.min(Math.max(Number(limit) || 100, 1), 1000);
+    const off = Math.max(Number(offset) || 0, 0);
     const rows = await dbQuery(
-      `SELECT ${COLS} FROM ${ATT} WHERE ${where.join(" AND ")} ORDER BY name ASC, emp_dcode ASC, attendance_date DESC`,
-      params
+      `SELECT ${COLS} FROM ${ATT}
+       WHERE ${whereSql}
+       ORDER BY name ASC, emp_dcode ASC, attendance_date DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, lim, off]
     );
     const byDcode = await empMap();
     const data = rows.map((r) => formatRow(r, byDcode));
-    return res.json({ success: true, data: data.slice(offset, offset + limit), total: data.length, page, limit });
+    return res.json({ success: true, data, total, page, limit: lim });
   } catch (err) {
     console.error("[HRMS] listOtApproval:", err);
     return res.status(500).json({ success: false, message: err.message || "Server error." });

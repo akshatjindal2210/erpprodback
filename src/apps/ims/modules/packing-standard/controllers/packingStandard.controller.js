@@ -7,6 +7,7 @@ import { resolveViewsFields } from "../../../lib/config/views/helperViews.js";
 import { applyApprovalWorkflow, normalizeApprovedInput, auditUserName, applyApprovalUpdateFields, prepareUpdateByRules } from "../../../../core/lib/utils/auth/approval.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
+import dbQuery from "../../../../../config/db/db.js";
 
 const CFG = getCrudModuleConfig("packing_standard");
 
@@ -287,7 +288,21 @@ export const getPackingStandardsViews = async (req, res) => {
       limit: 5000,
       fields: fields || ["standard_id", "item_dcode", "qty", "unit", "type", "sticker_type"]
     });
-    const enrichedRows = await enrichPackingRows(result.data || []);
+    let enrichedRows = await enrichPackingRows(result.data || []);
+    // Packing entry: OEM std for an item → also show OEM Tray (same row) if tray std missing.
+    if (String(permission_module || "") === "packing_entry" && enrichedRows.length) {
+      const cats = await dbQuery(`SELECT id, name FROM ims_category WHERE is_deleted = false AND LOWER(TRIM(name)) IN ('oem', 'oem tray')`);
+      const oem = (cats || []).find((c) => String(c.name).trim().toLowerCase() === "oem");
+      const tray = (cats || []).find((c) => String(c.name).trim().toLowerCase() === "oem tray");
+      if (oem && tray) {
+        const trayItems = new Set(enrichedRows.filter((r) => Number(r.type) === Number(tray.id)).map((r) => String(r.item_dcode)));
+        for (const r of [...enrichedRows]) {
+          if (Number(r.type) !== Number(oem.id)) continue;
+          if (trayItems.has(String(r.item_dcode))) continue;
+          enrichedRows.push({ ...r, type: tray.id, category_name: "OEM Tray" });
+        }
+      }
+    }
     res.json({ success: true, data: enrichedRows });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

@@ -336,7 +336,7 @@ export function slimCoilsForStorage(coils) {
   return jsonArray(coils).map(slimCoilForStorage).filter(Boolean);
 }
 
-/** Target JC snapshot on reassign save (picker / prdrunjc). */
+/** Target JC snapshot on reassign save — only macname, item_code, itemdcode, pjobcardno. */
 export function slimReassignTargetForStorage(raw) {
   if (!raw || typeof raw !== "object") return null;
   const itemdcodeRaw = raw.itemdcode ?? raw.item_dcode;
@@ -349,9 +349,6 @@ export function slimReassignTargetForStorage(raw) {
     macname: str(raw.macname),
     item_code: str(raw.item_code),
     itemdcode,
-    item_desc: str(raw.item_desc || raw.itemdesc),
-    source_pjobcardno: str(raw.source_pjobcardno),
-    source_macname: str(raw.source_macname),
   };
   if (!out.pjobcardno && !out.item_code) return null;
   return out;
@@ -389,15 +386,10 @@ export function reassignJcNo(raw) {
 }
 
 /** Build target JC JSON on create/update when FE omitted FG/mac fields. */
-export async function resolveReassignJcForWrite({ type, reassign_jc, coils, previous_coils }) {
+export async function resolveReassignJcForWrite({ type, reassign_jc }) {
   if (normalizeType(type) !== IPR_TYPE.REASSIGN) return null;
   const fromFe = parseReassignJc(reassign_jc);
   if (fromFe?.pjobcardno && (fromFe.item_code || fromFe.macname)) return fromFe;
-
-  const lines = normalizeCoils(coils);
-  const prev = normalizeCoils(previous_coils);
-  const reassignLine = lines.find((c) => c.reassign === true) || lines[0];
-  const prevLine = prev.find((p) => String(p.coil_no_uid) === String(reassignLine?.coil_no_uid)) || prev[0];
 
   const jc = reassignJcNo(reassign_jc);
   if (!jc) return null;
@@ -410,9 +402,6 @@ export async function resolveReassignJcForWrite({ type, reassign_jc, coils, prev
     macname: fromFe?.macname || hit?.macname,
     item_code: fromFe?.item_code || hit?.fg_item_code,
     itemdcode: fromFe?.itemdcode ?? hit?.itemdcode,
-    item_desc: fromFe?.item_desc || hit?.fg_item_desc,
-    source_pjobcardno: str(fromFe?.source_pjobcardno || reassignLine?.pjobcardno || prevLine?.pjobcardno),
-    source_macname: str(fromFe?.source_macname || reassignLine?.macname || prevLine?.macname),
   });
 }
 
@@ -421,17 +410,12 @@ function applyRegisterReassignRow(summarized, row) {
   const tgt = parseReassignJc(row?.reassign_jc);
   if (!tgt) return summarized;
 
-  const srcJc = tgt.source_pjobcardno || summarized.pjobcardno;
-  const srcMac = tgt.source_macname || summarized.macname;
   return {
     ...summarized,
     reassign_jc: tgt,
-    ...(srcJc ? { pjobcardno: srcJc } : {}),
-    ...(srcMac ? { macname: srcMac } : {}),
-    ...(tgt.item_code || tgt.item_desc
+    ...(tgt.item_code
       ? {
           fg_item_code: tgt.item_code ?? summarized.fg_item_code,
-          fg_item_desc: tgt.item_desc ?? summarized.fg_item_desc,
         }
       : {}),
   };
@@ -1001,14 +985,13 @@ export const findInProcessRequests = async (options = {}) => {
           ...row,
           fg_item_code: row.fg_item_code || hit.fg_item_code,
           fg_item_desc: row.fg_item_desc || hit.fg_item_desc,
-          reassign_jc: {
-            ...tgt,
+          reassign_jc: slimReassignTargetForStorage({
+            ...(tgt || {}),
             pjobcardno: tgt?.pjobcardno || jc,
             item_code: tgt?.item_code || hit.fg_item_code,
-            item_desc: tgt?.item_desc || hit.fg_item_desc,
             macname: tgt?.macname || hit.macname,
             itemdcode: tgt?.itemdcode ?? hit.itemdcode,
-          },
+          }),
         };
       }
     }

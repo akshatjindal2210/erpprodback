@@ -13,10 +13,8 @@ const TRAY_ENFORCE_BY_PACKING_DATE = `EXISTS (
   WHERE ${sqlDailyprodDocNoMatch("dpd.doc_no", "b.packing_number")}
     AND dpd.doc_dt >= DATE '${MANAGE_TRAY_ENFORCE_FROM}'
 )`;
-const IS_TRAY = `(
-  (LOWER(TRIM(COALESCE(dp.category_name, ''))) = 'tray' OR LOWER(TRIM(COALESCE(c.name, ''))) = 'tray')
-  AND dp.doc_dt >= DATE '${MANAGE_TRAY_ENFORCE_FROM}'
-)`;
+const CAT_IS_TRAY = (expr) => `LOWER(TRIM(COALESCE(${expr}, ''))) IN ('tray', 'oem tray')`;
+const IS_TRAY = `((${CAT_IS_TRAY("dp.category_name")} OR ${CAT_IS_TRAY("c.name")}) AND dp.doc_dt >= DATE '${MANAGE_TRAY_ENFORCE_FROM}')`;
 const TRAY_JOINS = `LEFT JOIN ${T.CATEGORY} c ON c.id = dp.category_id`;
 const DP_JOIN = sqlDailyprodDocNoMatch("dp.doc_no", "ba.packing_number");
 const BATCH_JOIN = `LEFT JOIN ${T.TRAY_BATCH} tb ON tb.batch_id = t.batch_id`;
@@ -88,14 +86,14 @@ function packingListSql({ onlyInHand = false, extraWhere = "", includeTotal = fa
         tl.updated_by AS linked_by,
         (${IN_HAND}) AS in_hand,
         (b.location_id IS NOT NULL OR b.out_uid IS NOT NULL) AS used,
-        (LOWER(TRIM(COALESCE(box_cat.name, ''))) = 'tray' AND ${TRAY_ENFORCE_BY_PACKING_DATE}) AS box_is_tray
+        (${CAT_IS_TRAY("box_cat.name")} AND ${TRAY_ENFORCE_BY_PACKING_DATE}) AS box_is_tray
       FROM ${T.BOX_TABLE} b
       LEFT JOIN ${T.CATEGORY} box_cat ON box_cat.id = b.category_id
       LEFT JOIN ${T.TRAY_MASTER} tl ON tl.box_uid = b.box_uid
       WHERE b.is_deleted = false
         AND NULLIF(${PN("b")}, '') IS NOT NULL
         AND (
-          (LOWER(TRIM(COALESCE(box_cat.name, ''))) = 'tray' AND ${TRAY_ENFORCE_BY_PACKING_DATE})
+          (${CAT_IS_TRAY("box_cat.name")} AND ${TRAY_ENFORCE_BY_PACKING_DATE})
           OR EXISTS (
             SELECT 1 FROM tray_packings tp
             WHERE tp.packing_number = ${PN("b")}

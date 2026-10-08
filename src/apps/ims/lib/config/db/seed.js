@@ -7,6 +7,8 @@ import { HRMS_APP_CONFIG_SEEDS } from "../../../../hrms/lib/config/app.config.js
 const CATEGORIES = [
   { name: "OEM" },
   { name: "Market" },
+  { name: "Tray" },
+  { name: "OEM Tray" },
 ];
 
 const STICKER_TYPES = [
