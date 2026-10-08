@@ -1,4 +1,4 @@
-import { MANAGE_TRAY_ENFORCE_FROM } from "../../../../lib/config/manageTray.config.js";
+import { MANAGE_TRAY_ENFORCE_FROM, sqlManageTrayCategoryInList } from "../../../../lib/config/manageTray.config.js";
 
 /**
  * SQL fragments for box inventory — mirrors backend/src/utils/box/boxInventory.js
@@ -12,16 +12,17 @@ export function sqlBoxOutUidEmpty(alias = "b") {
   return `${alias}.out_uid IS NULL`;
 }
 
-/** Packing category is tray / OEM Tray (dailyprod or category master). Sticker type is always box. */
+/** Manage Tray categories from config (current: OEM Tray only; add "tray" later). */
 export function sqlPackingIsTray(packingExpr) {
+  const cats = sqlManageTrayCategoryInList();
   return `EXISTS (
     SELECT 1
     FROM ims_dailyprod dp
     LEFT JOIN ims_category c ON c.id = dp.category_id
     WHERE TRIM(dp.doc_no::text) = TRIM(${packingExpr}::text)
       AND (
-        LOWER(TRIM(COALESCE(dp.category_name, ''))) IN ('tray', 'oem tray')
-        OR LOWER(TRIM(COALESCE(c.name, ''))) IN ('tray', 'oem tray')
+        LOWER(TRIM(COALESCE(dp.category_name, ''))) IN (${cats})
+        OR LOWER(TRIM(COALESCE(c.name, ''))) IN (${cats})
       )
       AND dp.doc_dt >= DATE '${MANAGE_TRAY_ENFORCE_FROM}'
   )`;

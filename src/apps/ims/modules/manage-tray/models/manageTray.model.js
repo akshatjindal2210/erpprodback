@@ -2,7 +2,7 @@ import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { sqlDailyprodDocNoMatch } from "../../box/utils/inventory/boxInventorySql.js";
 import { TRAY_OCC_JOIN, TRAY_POOL_EXPR } from "../../tray/lib/trayOccupancySql.js";
-import { MANAGE_TRAY_ENFORCE_FROM } from "../../../lib/config/manageTray.config.js";
+import { MANAGE_TRAY_ENFORCE_FROM, sqlManageTrayCategoryInList } from "../../../lib/config/manageTray.config.js";
 
 const IN_HAND = `b.out_uid IS NULL AND (b.sa_entry_type IS DISTINCT FROM 'stock_out') AND b.qc_hold_id IS NULL`;
 const PN = (alias) => `TRIM(${alias ? `${alias}.` : ""}packing_number::text)`;
@@ -13,7 +13,7 @@ const TRAY_ENFORCE_BY_PACKING_DATE = `EXISTS (
   WHERE ${sqlDailyprodDocNoMatch("dpd.doc_no", "b.packing_number")}
     AND dpd.doc_dt >= DATE '${MANAGE_TRAY_ENFORCE_FROM}'
 )`;
-const CAT_IS_TRAY = (expr) => `LOWER(TRIM(COALESCE(${expr}, ''))) IN ('tray', 'oem tray')`;
+const CAT_IS_TRAY = (expr) => `LOWER(TRIM(COALESCE(${expr}, ''))) IN (${sqlManageTrayCategoryInList()})`;
 const IS_TRAY = `((${CAT_IS_TRAY("dp.category_name")} OR ${CAT_IS_TRAY("c.name")}) AND dp.doc_dt >= DATE '${MANAGE_TRAY_ENFORCE_FROM}')`;
 const TRAY_JOINS = `LEFT JOIN ${T.CATEGORY} c ON c.id = dp.category_id`;
 const DP_JOIN = sqlDailyprodDocNoMatch("dp.doc_no", "ba.packing_number");
