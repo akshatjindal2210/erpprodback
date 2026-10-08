@@ -6,6 +6,7 @@ export const APP_GATES = {
   hrms: "app_hrms",
   purchase: "app_purchase",
   production: "app_production",
+  engineering: "app_engineering",
 };
 
 export const APP_META = {
@@ -16,9 +17,10 @@ export const APP_META = {
   hrms: { label: "HRMS", permissions: true },
   purchase: { label: "Purchase", permissions: true },
   production: { label: "Production", permissions: true },
+  engineering: { label: "Engineering", permissions: true },
 };
 
-export const PORTAL_APP_KEYS = ["core", "ims", "rmstore", "task", "hrms", "purchase", "production"];
+export const PORTAL_APP_KEYS = ["core", "ims", "rmstore", "task", "hrms", "purchase", "production", "engineering"];
 
 export const SETTINGS_MODULES = ["users", "modules", "training_videos", "departments", "designations"];
 
@@ -106,6 +108,10 @@ export const MODULES = {
     { name: "production_shortage", label: "Shortage" },
     { name: "production_activity_logs", label: "Activity Logs" },
   ],
+  engineering: [
+    { name: "eng_process_master", label: "Process Master" },
+    { name: "eng_machine_master", label: "Machine Master" },
+  ],
 };
 
 export const SEED_MODULES = [
@@ -179,4 +185,6 @@ export const SEED_MODULES = [
   { name: "production_shortage",          label: "Shortage",                        sort_order: 55,       app_type: "production" },
   { name: "purchase_activity_logs",       label: "Activity Logs",                   sort_order: 56,       app_type: "purchase" },
   { name: "production_activity_logs",     label: "Activity Logs",                   sort_order: 57,       app_type: "production" },
+  { name: "eng_process_master",           label: "Process Master",                  sort_order: 58,       app_type: "engineering" },
+  { name: "eng_machine_master",           label: "Machine Master",                  sort_order: 59,       app_type: "engineering" },
 ];

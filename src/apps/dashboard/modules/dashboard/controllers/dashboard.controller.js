@@ -14,7 +14,7 @@ import { clearImsMetaForResponse } from "../../../../ims/lib/utils/erp-api/looku
 import { findUsers } from "../../../../core/identity/users/models/user.model.js";
 import { TABLE_MODULE_OVERRIDES } from "../../../../../config/db/moduleTableMap.js";
 
-const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings", "rmstore", "hrms", "purchase", "production"]);
+const ALLOWED_APP_KEYS = new Set(["home", "ims", "task", "settings", "rmstore", "hrms", "purchase", "production", "engineering"]);
 const ALLOWED_DB_SOURCES = new Set(["ims_postgresql", "erp_mssql", "hrms_mssql", "hybrid", "url_json"]);
 const ALLOWED_AUDIENCE_SCOPES = new Set(["global", "users"]);
 const APP_TABLE_PREFIX = {
@@ -26,6 +26,7 @@ const APP_TABLE_PREFIX = {
   hrms: ["hrms_"],
   purchase: ["purchase_"],
   production: ["production_"],
+  engineering: [],
 };
 
 function extractReferencedTables(rawSql = "") {

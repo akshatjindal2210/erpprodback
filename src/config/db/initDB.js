@@ -7,6 +7,7 @@ import { initRmStoreDB } from "../../apps/rmstore/lib/config/db/initDB.js";
 import { initHrmsDB } from "../../apps/hrms/lib/config/db/initDB.js";
 import { initPurchaseDB } from "../../apps/purchase/lib/config/db/initDB.js";
 import { initProductionDB } from "../../apps/production/lib/config/db/initDB.js";
+import { initEngineeringDB } from "../../apps/engineering/lib/config/db/initDB.js";
 import { runVersionMigrations } from "../../migrations/index.js";
 import { runStartupBackfills, backfillShortageGrpname } from "../../backfills/index.js";
 import { syncSerialSequences } from "./syncSequences.js";
@@ -25,6 +26,7 @@ export const initDB = async () => {
     await initHrmsDB();
     await initPurchaseDB();
     await initProductionDB();
+    await initEngineeringDB();
     await initDashboardDB();
 
     // One-shot migrations.

@@ -18,6 +18,7 @@ import rmstoreRoutes from "./apps/rmstore/routes/index.js";
 import hrmsRoutes from "./apps/hrms/routes/index.js";
 import purchaseRoutes from "./apps/purchase/routes/index.js";
 import productionRoutes from "./apps/production/routes/index.js";
+import engineeringRoutes from "./apps/engineering/routes/index.js";
 
 const app = express();
 
@@ -61,6 +62,7 @@ app.use("/api/rmstore", activityLogger("rmstore"), rmstoreRoutes);
 app.use("/api/hrms", activityLogger("hrms"), hrmsRoutes);
 app.use("/api/purchase", activityLogger("purchase"), purchaseRoutes);
 app.use("/api/production", activityLogger("production"), productionRoutes);
+app.use("/api/engineering", activityLogger("engineering"), engineeringRoutes);
 app.use("/api", activityLogger("ims"), imsRoutes);
 
 app.use((req, res) => {

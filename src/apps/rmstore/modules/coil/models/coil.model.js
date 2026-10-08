@@ -5,7 +5,7 @@ import { formatCoilNoUid, formatStockAdjustmentCoilUid, sqlStickerUidEquals } fr
 import { parseCoilNoUidMeta, resolveSerialNoForUid } from "../../../lib/coilUidHelpers.js";
 import { COIL_QC_JOIN, COIL_QC_PASSED_COND, COIL_QC_STATUS_EXPR } from "../../../lib/utils/coilQcStatusSql.js";
 import { COIL_REJECTION_JOIN, COIL_REJECTION_SELECT } from "../../../lib/utils/coilRejectionSql.js";
-import { coilAreaEligibleSql, coilAreaPhysicalStatusSql, portalMrnCoilBaseSql } from "../../../lib/utils/mrnPortalCoilSql.js";
+import { coilAreaEligibleSql, coilAreaPhysicalStatusSql, iprRejectedCoilSql, portalMrnCoilBaseSql } from "../../../lib/utils/mrnPortalCoilSql.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { roundCoilQty } from "../../../lib/utils/coilQtySplit.js";
 import { isIssuedToShopFloor, isSaMinusWriteOff } from "../../../lib/utils/saMinusInventory.js";
@@ -475,6 +475,8 @@ export function slimPendingShopFloorRow(row) {
     mrn_no: row.mrn_no ?? null,
     item_code: row.item_code ?? null,
     item_desc: row.item_desc ?? null,
+    acc_code: row.acc_code ?? null,
+    acc_name: row.acc_name ?? null,
     qty: row.qty ?? null,
     heat_no: row.heat_no ?? null,
     out_uid: row.out_uid ?? null,
@@ -850,6 +852,7 @@ LEFT JOIN LATERAL (
 /** Shared SOURCE label for list/group queries (alias = coil table alias). */
 export function coilSourceSql(alias = "c") {
   return `CASE
+    WHEN ${iprRejectedCoilSql(alias)} THEN 'IPR REJECTION'
     WHEN ${alias}.sa_id IS NOT NULL THEN 'STOCK ADJUSTMENT'
     WHEN LOWER(COALESCE(${alias}.sa_entry_type, '')) = '${SA_ENTRY_TYPE.PRODUCTION_RETURN}' THEN 'PRODUCTION RETURN'
     WHEN NULLIF(TRIM(${alias}.mrn_uid::text), '') IS NOT NULL THEN 'MRN PORTAL'
@@ -1025,7 +1028,9 @@ export const findCoils = async (options = {}) => {
   }
   if (filters.source != null && String(filters.source).trim() !== "") {
     const src = String(filters.source).trim().toUpperCase();
-    if (src === "PRODUCTION RETURN") {
+    if (src === "IPR REJECTION") {
+      conditions.push(iprRejectedCoilSql("c"));
+    } else if (src === "PRODUCTION RETURN") {
       conditions.push(
         `LOWER(COALESCE(c.sa_entry_type, '')) = '${SA_ENTRY_TYPE.PRODUCTION_RETURN}'`
       );
@@ -1037,6 +1042,9 @@ export const findCoils = async (options = {}) => {
         `LOWER(COALESCE(c.sa_entry_type, '')) <> '${SA_ENTRY_TYPE.PRODUCTION_RETURN}'`
       );
       conditions.push(`NULLIF(TRIM(c.mrn_uid::text), '') IS NOT NULL`);
+    }
+    if (src !== "IPR REJECTION" && (filters.coil_area === true || filters.coil_area === "true")) {
+      conditions.push(`NOT ${iprRejectedCoilSql("c")}`);
     }
   }
   if (filters.heat_no != null && String(filters.heat_no).trim() !== "") {
@@ -1383,6 +1391,8 @@ export const insertBulkCoils = async (rows = []) => {
   return created;
 };
 
+const INWARD_STATUS_SQL = `(COALESCE(status, 'active') = 'active' OR (LOWER(status) = 'rejected' AND ipr_uid IS NOT NULL))`;
+
 export const updateCoilsAfterInward = async (in_uid, location_id, coil_no_uids = [], userName) => {
   const uids = (coil_no_uids || [])
     .map((u) => {
@@ -1397,7 +1407,7 @@ export const updateCoilsAfterInward = async (in_uid, location_id, coil_no_uids =
      SET location_id = $1,
          in_uid = $2
      WHERE coil_no_uid = ANY($3::text[])
-       AND COALESCE(status, 'active') = 'active'
+       AND ${INWARD_STATUS_SQL}
        AND out_uid IS NULL`,
     [location_id, in_uid, uids]
   );
@@ -1432,7 +1442,7 @@ export const syncInwardRegisterCoils = async (in_uid, locations = [], userName) 
          SET location_id = NULL,
              in_uid = NULL
          WHERE in_uid = $1
-           AND COALESCE(status, 'active') = 'active'
+           AND ${INWARD_STATUS_SQL}
            AND NOT (coil_no_uid = ANY($2::text[]))`,
         [id, keepUids]
       );
@@ -1442,7 +1452,7 @@ export const syncInwardRegisterCoils = async (in_uid, locations = [], userName) 
          SET location_id = NULL,
              in_uid = NULL
          WHERE in_uid = $1
-           AND COALESCE(status, 'active') = 'active'`,
+           AND ${INWARD_STATUS_SQL}`,
         [id]
       );
     }
@@ -1457,7 +1467,7 @@ export const syncInwardRegisterCoils = async (in_uid, locations = [], userName) 
          SET location_id = $1,
              in_uid = $2
          WHERE coil_no_uid = ANY($3::text[])
-           AND COALESCE(status, 'active') = 'active'
+           AND ${INWARD_STATUS_SQL}
            AND out_uid IS NULL`,
         [lid, id, uids]
       );
@@ -1472,7 +1482,7 @@ export const clearCoilsForInward = async (in_uid, _userName) => {
      SET location_id = NULL,
          in_uid = NULL
      WHERE in_uid = $1
-       AND COALESCE(status, 'active') = 'active'`,
+       AND ${INWARD_STATUS_SQL}`,
     [Number(in_uid)]
   );
 };

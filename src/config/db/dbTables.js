@@ -9,6 +9,7 @@
  *   hrms_*    — HRMS app tables only
  *   purchase_* — Purchase app tables only
  *   production_* — Production app tables only
+ *   eng_*       — Engineering app tables only
  *
  * Imports:
  *   Core / settings  → MST_TABLES
@@ -26,6 +27,7 @@ export const TABLE_PREFIX = {
   hrms: "hrms_",
   purchase: "purchase_",
   production: "production_",
+  engineering: "eng_",
 };
 
 export const DB_TABLES = {
@@ -126,6 +128,12 @@ export const DB_TABLES = {
 
   purchase: [],
   production: [],
+
+  /** Engineering application tables. */
+  engineering: [
+    "eng_process_master",
+    "eng_machine_master",
+  ],
 };
 
 /** Map table stem to full name, e.g. USERS → "mst_users". */
@@ -146,5 +154,6 @@ export const RMSTORE_TABLES = toKeyMap(DB_TABLES.rmstore, TABLE_PREFIX.rmstore);
 export const HRMS_TABLES = toKeyMap(DB_TABLES.hrms, TABLE_PREFIX.hrms);
 export const PURCHASE_TABLES = toKeyMap(DB_TABLES.purchase, TABLE_PREFIX.purchase);
 export const PRODUCTION_TABLES = toKeyMap(DB_TABLES.production, TABLE_PREFIX.production);
+export const ENGINEERING_TABLES = toKeyMap(DB_TABLES.engineering, TABLE_PREFIX.engineering);
 
 export default DB_TABLES;

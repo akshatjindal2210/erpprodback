@@ -484,6 +484,8 @@ export function normalizeCoils(coils) {
         is_seed_scan: Boolean(c.is_seed_scan),
         store_in_qty: c.store_in_qty != null ? num(c.store_in_qty) : null,
         balance_in_store_in: c.balance_in_store_in === true,
+        acc_code: str(c.acc_code),
+        acc_name: str(c.acc_name),
       };
     });
 }
@@ -519,7 +521,9 @@ async function loadCoilMetaByUids(uids = []) {
        m.mrn_no,
        m.heat_no,
        m.item_code,
-       m.item_desc
+       m.item_desc,
+       m.acc_code,
+       m.acc_name
      FROM ${COIL_TABLE} c
      LEFT JOIN ${MRN_TABLE} m ON m.uid = c.mrn_uid
      WHERE c.coil_no_uid IN (${placeholders})`,
@@ -545,6 +549,8 @@ function enrichCoilLine(line, meta) {
     location_id: line.location_id ?? meta.location_id ?? null,
     out_uid: line.out_uid ?? meta.out_uid ?? null,
     status: line.status || str(meta.status),
+    acc_code: line.acc_code ?? str(meta.acc_code),
+    acc_name: line.acc_name || str(meta.acc_name),
   };
 }
 
@@ -753,6 +759,9 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
     lot_label: type === IPR_TYPE.LOT ? str(row.mrn_uid) : null,
     pjobcardno: sourceJc,
     macname: sourceMac,
+    source_out_uid: first.out_uid ?? null,
+    acc_code: first.acc_code ?? null,
+    acc_name: first.acc_name || null,
     fg_item_code: null,
     fg_item_desc: null,
     coil_label:
@@ -929,7 +938,7 @@ export const findInProcessRequests = async (options = {}) => {
     return { row: r, lines, mrnMeta: meta.get(String(lines[0]?.coil_no_uid || "").toLowerCase()) };
   });
 
-  const data = enrichedRows.map(({ row, lines }) => {
+  let data = enrichedRows.map(({ row, lines }) => {
     const summarized = summarizeRow(row, { coils: lines, mode });
     if (!applyRegisterEnrich) return summarized;
 
@@ -1054,6 +1063,28 @@ export const findInProcessRequests = async (options = {}) => {
   };
 };
 
+/**
+ * Rejection hold clears coil.out_uid — fill shop-floor source (JC / machine / FG)
+ * from the Issue Request store-out history when the IPR coil JSON lacks it.
+ */
+async function applyRejectionSourceFallback(rows = []) {
+  const needs = rows.filter((r) => r && isIprRejectionType(r.type) && !r.pjobcardno && r.seed_coil_uid);
+  if (!needs.length) return rows;
+  const irByCoil = await findIssueRequestRegisterMetaByCoilUids(needs.map((r) => r.seed_coil_uid));
+  return rows.map((r) => {
+    if (!needs.includes(r)) return r;
+    const hit = irByCoil.get(String(r.seed_coil_uid).trim().toLowerCase());
+    if (!hit) return r;
+    return {
+      ...r,
+      pjobcardno: str(hit.pjobcardno),
+      macname: r.macname || str(hit.macname),
+      fg_item_code: r.fg_item_code ?? hit.fg_item_code ?? null,
+      fg_item_desc: r.fg_item_desc ?? hit.fg_item_desc ?? null,
+    };
+  });
+}
+
 export const findInProcessRequest = async (ipr_uid) => {
   const id = Number(ipr_uid);
   if (!Number.isFinite(id)) return null;
@@ -1064,7 +1095,9 @@ export const findInProcessRequest = async (ipr_uid) => {
      LIMIT 1`,
     [id]
   );
-  return row ? summarizeRowAsync(row) : null;
+  if (!row) return null;
+  const [summarized] = await applyRejectionSourceFallback([await summarizeRowAsync(row)]);
+  return summarized;
 };
 
 /** Distinct reasons used before, newest first — powers the reason suggest field. */
@@ -1261,7 +1294,9 @@ export const findInProcessRejectionsPendingRejection = async (options = {}) => {
     [...values, safeLimit, offset]
   );
 
-  const summarized = await Promise.all((rows || []).map((raw) => summarizeRowAsync(raw)));
+  const summarized = await applyRejectionSourceFallback(
+    await Promise.all((rows || []).map((raw) => summarizeRowAsync(raw)))
+  );
   const data = summarized.map((row) => {
     const coils = row?.coils || [];
     const mrnUidSet = new Set();
@@ -1307,6 +1342,14 @@ export const findInProcessRejectionsPendingRejection = async (options = {}) => {
       inspected_by_name: row.approved_by || row.created_by || null,
       inspected_at: row.approved_at || row.created_at || null,
       approved: false,
+      acc_code: row.acc_code ?? null,
+      acc_name: row.acc_name || null,
+      vendor_acc_code: row.acc_code ?? null,
+      vendor_acc_name: row.acc_name || null,
+      pjobcardno: row.pjobcardno || null,
+      macname: row.macname || null,
+      fg_item_code: row.fg_item_code || null,
+      source_out_uid: row.source_out_uid ?? null,
       coils,
     };
   });

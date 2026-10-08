@@ -87,8 +87,9 @@ async function resolveCoilsForInward(uids, { editInUid = null } = {}) {
     const status = String(coil.status || "active").toLowerCase();
     const coilInUid = coil.in_uid != null ? Number(coil.in_uid) : null;
     const belongsToEditInward = editInUid != null && coilInUid === Number(editInUid);
+    const iprRejected = status === "rejected" && coil.ipr_uid != null;
 
-    if (status !== "active" && !belongsToEditInward) {
+    if (status !== "active" && !iprRejected && !belongsToEditInward) {
       if (status === "rejected") {
         const rejectRef = coil.rm_uid != null ? `REJECT-${coil.rm_uid}` : null;
         return {
@@ -301,7 +302,7 @@ export const createInward = async (req, res) => {
     const linkedRows = linked?.data || [];
     const linkedActiveWithLoc = linkedRows.filter(
       (c) =>
-        String(c.status || "active").toLowerCase() === "active" &&
+        (String(c.status || "active").toLowerCase() === "active" || (String(c.status).toLowerCase() === "rejected" && c.ipr_uid != null)) &&
         Number(c.in_uid) === Number(row.in_uid) &&
         c.location_id != null
     ).length;
@@ -463,7 +464,7 @@ export const updateInwardCtrl = async (req, res) => {
       const linkedRows = linkedAfter?.data || [];
       const linkedActiveWithLoc = linkedRows.filter(
         (c) =>
-          String(c.status || "active").toLowerCase() === "active" &&
+          (String(c.status || "active").toLowerCase() === "active" || (String(c.status).toLowerCase() === "rejected" && c.ipr_uid != null)) &&
           Number(c.in_uid) === id &&
           c.location_id != null
       ).length;

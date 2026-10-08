@@ -61,14 +61,23 @@ export function mrnPortalStickerCoilExistsSql(cAlias = "c") {
 
 /**
  * Physical warehouse status for Unassigned / Coil Area / Store In.
- * Independent of QC pass/fail. Held RM Rejection / IPR-rejected coils belong
- * on Coil Finder as RM Rejection (REJECT-#), not in Store In Unassigned.
+ * Independent of QC pass/fail. IPR-rejected coils (still on shop floor) also
+ * appear here so they can be racked; other RM Rejection holds do not.
  */
+export function iprRejectedCoilSql(cAlias = "c") {
+  return `(LOWER(COALESCE(${cAlias}.status, '')) = 'rejected' AND ${cAlias}.ipr_uid IS NOT NULL)`;
+}
+
 export function coilAreaPhysicalStatusSql(cAlias = "c") {
   return `(
     ${cAlias}.out_uid IS NULL
-    AND ${cAlias}.rm_uid IS NULL
-    AND LOWER(COALESCE(${cAlias}.status, 'active')) NOT IN ('consumed', 'out', 'rejected', 'returned')
+    AND (
+      (
+        ${cAlias}.rm_uid IS NULL
+        AND LOWER(COALESCE(${cAlias}.status, 'active')) NOT IN ('consumed', 'out', 'rejected', 'returned')
+      )
+      OR ${iprRejectedCoilSql(cAlias)}
+    )
   )`;
 }
 
@@ -84,6 +93,7 @@ export function coilAreaEligibleSql(cAlias = "c") {
       ${cAlias}.sa_id IS NOT NULL
       AND COALESCE(${cAlias}.sa_entry_type, '') = 'stock_in'
     )
+    OR ${iprRejectedCoilSql(cAlias)}
   )`;
 }
 

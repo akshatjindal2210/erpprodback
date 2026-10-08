@@ -39,7 +39,8 @@ export async function findInwardRegisterCoils(in_uid) {
 /** Active coils still on this store-in register (editable). */
 function isLiveInwardCoil(coil) {
   const st = String(coil?.status || "active").toLowerCase();
-  return st === "active" || st === "rejected";
+  if (st === "active") return true;
+  return st === "rejected" && coil?.ipr_uid != null;
 }
 
 /** Group register coils by location (IMS inward modal analog). */

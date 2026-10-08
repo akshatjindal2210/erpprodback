@@ -240,6 +240,18 @@ export const CRUD_MODULES = {
     filterFields: ["id", "itemdcode", "type", "approved", "month", "grpname", "from_date", "to_date"],
     searchFields: ["itemcode", "grpname", "type", "itemdcode"],
   },
+  eng_process_master: {
+    idField: "id",
+    listFields: [],
+    filterFields: ["id", "type", "parent_id", "stage", "approved", "from_date", "to_date"],
+    searchFields: ["name", "pattern", "type", "stage"],
+  },
+  eng_machine_master: {
+    idField: "id",
+    listFields: [],
+    filterFields: ["id", "process_id", "number", "approved", "from_date", "to_date"],
+    searchFields: ["name", "number", "make", "model"],
+  },
 };
 
 export const getCrudModuleConfig = (moduleKey) => CRUD_MODULES[moduleKey] ?? null;
