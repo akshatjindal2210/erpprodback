@@ -1,4 +1,6 @@
 import dbQuery from "../../../../../config/db/db.js";
+import { attachPathListRow, attachPathListRows } from "../../../../../lib/documents/index.js";
+import { MODULE as IPR_MODULE } from "../routes/inProcessRequest.routes.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
 import { findIssueRequestRegisterMetaByCoilUids, findIssueRequestRegisterMetaByPjobcardnos } from "../../issue-request/models/issueRequestJobCard.model.js";
@@ -774,7 +776,7 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
   return {
     ...base,
     previous_coils: lines.map((c) => slimCoilLineForApi(c, { detail: true })).filter(Boolean),
-    attachments: slimAttachmentsForStorage(row.attachments),
+    attachments: [], // filled from `documents` (attachPathListRow)
     proposed_coils: lines
       .filter((c) => num(c.remaining_qty) > 0)
       .map((c) => ({
@@ -793,7 +795,19 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
 export async function summarizeRowAsync(row, { mode = "detail" } = {}) {
   if (!row) return null;
   const { coils } = await enrichCoilsArrays(row.coils, []);
-  return summarizeRow(row, { coils, mode });
+  const summarized = summarizeRow(row, { coils, mode });
+  return attachPathListRow(IPR_MODULE, summarized, summarized.ipr_uid);
+}
+
+async function summarizeRowsAsync(rows = [], { mode = "detail" } = {}) {
+  if (!rows?.length) return [];
+  const base = await Promise.all(
+    rows.map(async (raw) => {
+      const { coils } = await enrichCoilsArrays(raw.coils, []);
+      return summarizeRow(raw, { coils, mode });
+    })
+  );
+  return attachPathListRows(IPR_MODULE, base, "ipr_uid");
 }
 
 function sqlRequestTypeFilter(filterValue) {
@@ -889,7 +903,6 @@ export const findInProcessRequests = async (options = {}) => {
       COALESCE(r.stage,'') ILIKE $${idx} OR
       COALESCE(r.created_by,'') ILIKE $${idx} OR
       COALESCE(r.coils::text,'') ILIKE $${idx} OR
-      COALESCE(r.attachments::text,'') ILIKE $${idx} OR
       r.ipr_uid::text ILIKE $${idx}
     )`);
   }
@@ -1132,11 +1145,11 @@ export const findInProcessReasons = async ({ search, request_type, type } = {}) 
 const WRITABLE = [
   "type", "reassign_jc", "stage",
   "reason", "remarks", "mrn_uid",
-  "coils", "attachments",
+  "coils",
   "approved", "approved_by", "approved_at",
   "created_by", "updated_by", "updated_at",
 ];
-const JSON_COLS = new Set(["coils", "attachments", "reassign_jc"]);
+const JSON_COLS = new Set(["coils", "reassign_jc"]);
 const STRIP_LEGACY_WRITE = [
   "request_type", "rejection_type", "lot_no", "mrn_no", "heat_no",
   "item_code", "item_desc", "seed_coil_uid", "scanned_coil_uids", "downstream",
@@ -1185,7 +1198,7 @@ function prepareWritablePayload(data = {}) {
   }
 
   if (out.coils !== undefined) out.coils = slimCoilsForStorage(out.coils);
-  if (out.attachments !== undefined) out.attachments = slimAttachmentsForStorage(out.attachments);
+  delete out.attachments; // files are saved in `documents` (controller), never on the IPR row
 
   for (const key of STRIP_LEGACY_WRITE) delete out[key];
   return out;
@@ -1294,9 +1307,7 @@ export const findInProcessRejectionsPendingRejection = async (options = {}) => {
     [...values, safeLimit, offset]
   );
 
-  const summarized = await applyRejectionSourceFallback(
-    await Promise.all((rows || []).map((raw) => summarizeRowAsync(raw)))
-  );
+  const summarized = await applyRejectionSourceFallback(await summarizeRowsAsync(rows || []));
   const data = summarized.map((row) => {
     const coils = row?.coils || [];
     const mrnUidSet = new Set();

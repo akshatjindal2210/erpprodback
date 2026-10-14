@@ -61,3 +61,10 @@ export async function resolveRmQcQrPayload(row = {}) {
   if (!uid) return "";
   return withPublicBase({ qc: uid }, `QC|${uid}`);
 }
+
+/** Engineering machine → `?machine_no=…` (public URL) or plain machine number. */
+export async function resolveMachineQrPayload(row = {}) {
+  const number = String(row?.number || row?.machine_no || "").trim();
+  if (!number) return "";
+  return withPublicBase({ machine_no: number }, number);
+}

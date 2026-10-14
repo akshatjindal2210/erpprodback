@@ -1,5 +1,6 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
+import { ensureColumns, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 
 export async function createRmStoreProductionMasterTable() {
   await dbQuery(`
@@ -9,6 +10,8 @@ export async function createRmStoreProductionMasterTable() {
       item_code       VARCHAR(100),
       item_desc       TEXT,
       rm_items        JSONB DEFAULT '[]'::jsonb,
+      prime_process   JSONB,
+      finish_process  JSONB,
       approved        BOOLEAN DEFAULT false,
       approved_by     TEXT,
       approved_at     TIMESTAMP,
@@ -23,4 +26,9 @@ export async function createRmStoreProductionMasterTable() {
 
     CREATE UNIQUE INDEX IF NOT EXISTS rmstore_master_production_item_rm_unique_active ON ${T.MASTER_PRODUCTION} (item_dcode) WHERE is_deleted = false;
   `);
+
+  await ensureColumns(dbQuery, T.MASTER_PRODUCTION, [
+    patchCol("prime_process", "JSONB"),
+    patchCol("finish_process", "JSONB"),
+  ]);
 }

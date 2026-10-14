@@ -16,11 +16,12 @@ import { logRmstoreActivity } from "../../../lib/utils/activity/logRmstoreActivi
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
+import { slotRemarkFromBody, upsertTcRmtcSlot } from "../../../../../lib/documents/index.js";
+import { MODULE } from "../routes/mrn.routes.js";
 import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
 import { splitQtyAcrossCoils, equalSplitQtyAcrossCoils } from "../../../lib/utils/coilQtySplit.js";
 export { splitQtyAcrossCoils, equalSplitQtyAcrossCoils };
 
-const MODULE = "rm_mrn_portal";
 const QTY_EPS = 0.001;
 
 const log = (req, action, entity_id, details, record = null) =>
@@ -536,6 +537,8 @@ async function mergeMrnDocUploads(req, uid, { requireBoth = false } = {}) {
 
   const tcFile = req.files?.tc?.[0] || null;
   const rmtcFile = req.files?.rmtc?.[0] || null;
+  const tcRemark = slotRemarkFromBody(req.body, "tc_remark", 0);
+  const rmtcRemark = slotRemarkFromBody(req.body, "rmtc_remark", 1);
 
   if (requireBoth && (!tcFile || !rmtcFile)) {
     return {
@@ -545,22 +548,46 @@ async function mergeMrnDocUploads(req, uid, { requireBoth = false } = {}) {
       },
     };
   }
-  if (!tcFile && !rmtcFile) {
+
+  const touchFiles = Boolean(tcFile || rmtcFile);
+  const touchRemarks = tcRemark !== undefined || rmtcRemark !== undefined;
+  if (!touchFiles && !touchRemarks) {
     return { mrn, docs: null };
   }
 
-  await stampRmstoreUploadedFiles(req);
+  if (touchFiles) await stampRmstoreUploadedFiles(req);
 
   const docs = {};
   if (tcFile) {
     docs.tc_file_path = toRmPublicUploadPath(tcFile, "tc");
-  }
-  if (rmtcFile) {
-    docs.rmtc_file_path = toRmPublicUploadPath(rmtcFile, "rmtc");
+    await upsertTcRmtcSlot(MODULE, {
+      modRef: key,
+      slot: "tc",
+      file: tcFile,
+      docPath: docs.tc_file_path,
+      remark: tcRemark !== undefined ? tcRemark : null,
+      userOrId: req,
+    });
+  } else if (tcRemark !== undefined) {
+    await upsertTcRmtcSlot(MODULE, { modRef: key, slot: "tc", remark: tcRemark, userOrId: req });
   }
 
-  const updated = await updateMrnDocs(key, docs);
-  return { mrn: updated ?? mrn, docs };
+  if (rmtcFile) {
+    docs.rmtc_file_path = toRmPublicUploadPath(rmtcFile, "rmtc");
+    await upsertTcRmtcSlot(MODULE, {
+      modRef: key,
+      slot: "rmtc",
+      file: rmtcFile,
+      docPath: docs.rmtc_file_path,
+      remark: rmtcRemark !== undefined ? rmtcRemark : null,
+      userOrId: req,
+    });
+  } else if (rmtcRemark !== undefined) {
+    await upsertTcRmtcSlot(MODULE, { modRef: key, slot: "rmtc", remark: rmtcRemark, userOrId: req });
+  }
+
+  const updated = touchFiles ? await updateMrnDocs(key) : await findMrnByUid(key);
+  return { mrn: updated ?? mrn, docs: touchFiles ? docs : null };
 }
 
 function mrnHasBothDocs(mrn) {
@@ -900,7 +927,8 @@ export const uploadMrnDocs = async (req, res) => {
     }
 
     const finalMrn = await findMrnByUid(uid);
-    if (!mrnHasBothDocs(finalMrn)) {
+    const uploadedFile = Boolean(req.files?.tc?.[0] || req.files?.rmtc?.[0]);
+    if (uploadedFile && !mrnHasBothDocs(finalMrn)) {
       return res.status(400).json({
         success: false,
         message: "Both the TC and RMTC documents are required.",

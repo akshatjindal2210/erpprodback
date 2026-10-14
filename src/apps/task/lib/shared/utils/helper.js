@@ -1,7 +1,4 @@
 import dbQuery from "../db.js";
-import fs from "fs";
-import path from "path";
-import config from "../../../../../config/app/config.js";
 
 const ALLOWED_CREATOR_TYPES = new Set(["admin", "super_admin", "user", "executive_assistant"]);
 
@@ -264,49 +261,18 @@ export function calculateNextOccurrence(recurrence_type, data = {}) {
 
 export const isValidDate = (val) => /^\d{4}-\d{2}-\d{2}$/.test(val) && !isNaN(Date.parse(val));
 
-export const ensureDir = (dir) => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-};
-
-export const chatMessage = (title, description) =>{
-   const cleanDesc = description
+export const chatMessage = (title, description) => {
+  const cleanDesc = description
     ? description
-        .replace(/<[^>]+>/g, "")   // Strip HTML tags
-        .replace(/&nbsp;/g, " ")   // &nbsp; space se replace
-        .replace(/&amp;/g, "&")    // &amp; fix
-        .replace(/&lt;/g, "<")     // &lt; fix
-        .replace(/&gt;/g, ">")     // &gt; fix
-        .replace(/&quot;/g, '"')   // &quot; fix
-        .replace(/\s+/g, " ")      // multiple spaces ek space
+        .replace(/<[^>]+>/g, "")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/\s+/g, " ")
         .trim()
     : null;
 
-  const chatMsg = `📋 Task: ${title.trim()}${cleanDesc ? `\n\n📝 ${cleanDesc}` : ""}`;
-  
-  return chatMsg;
-}
-
-export const saveAttachments = async (files, folder) => {
-  if (!files?.length) return [];
-
-  ensureDir(folder);
-
-  const attachments = [];
-  for (const f of files) {
-    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(f.originalname)}`;
-    const filePath = path.join(folder, uniqueName);
-
-    // Copy file from multer temp location
-    fs.copyFileSync(f.path, filePath);
-
-    const relativePath = path.relative(path.resolve(config.uploadPath), filePath);
-
-    attachments.push({
-      file_name: f.originalname,
-      file_path: path.join(config.uploadPublicPath, relativePath).replace(/\\/g, "/"),
-      file_size: f.size,
-      mime_type: f.mimetype,
-    });
-  }
-  return attachments;
+  return `📋 Task: ${title.trim()}${cleanDesc ? `\n\n📝 ${cleanDesc}` : ""}`;
 };

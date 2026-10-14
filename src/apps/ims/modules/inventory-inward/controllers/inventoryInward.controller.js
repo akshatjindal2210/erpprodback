@@ -4,7 +4,6 @@ import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js"
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { getPackingNumberFromBox, updateBoxesAfterInward, getDistinctPackingNumbersFromBoxNoUids, findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByAnyScanCodes, inwardScanRejectMessage, findPackingAreaBoxesByTrayId } from "../../box/models/box.model.js";
-import { isBoxInHand } from "../../box/utils/inventory/boxInventory.js";
 import { expandStickerScanLookupCodes, primaryStickerScanCode } from "../../box/utils/stickers/stickerScanParse.js";
 import { enrichRowsWithIMS, getImsMapsSafe, canonicalCode } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { logInwardLinkBatch } from "../../box/utils/transactions/logBoxTransaction.js";
@@ -409,9 +408,8 @@ export const batchScanInwardBoxes = async (req, res) => {
 
     const resolved = normalizedItems.map((item) => {
       const anyRow = item.lookupCodes.length ? matchBoxRowByAnyScanCodes(anyRows, item.lookupCodes) : null;
-      const sellableRow = item.lookupCodes.length ? matchBoxRowByAnyScanCodes(boxRows, item.lookupCodes) : null;
-      // Store In allows in-hand QC Hold boxes (sellable lookup excludes qc_hold_id).
-      const row = sellableRow || (anyRow && isBoxInHand(anyRow) ? anyRow : null);
+      // Sellable only — QC Area / qc_hold_id boxes stay out of Store In.
+      const row = item.lookupCodes.length ? matchBoxRowByAnyScanCodes(boxRows, item.lookupCodes) : null;
       return { ...item, row, anyRow };
     });
 

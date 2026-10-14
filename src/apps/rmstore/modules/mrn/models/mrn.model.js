@@ -1,5 +1,7 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { attachTcRmtcRow, attachTcRmtcRows } from "../../../../../lib/documents/index.js";
+import { MODULE as MRN_MODULE } from "../routes/mrn.routes.js";
 
 const TABLE = T.MRN;
 
@@ -88,7 +90,7 @@ const DEFAULT_FIELDS = [
   "m.sticker_status", "m.sticker_by", "m.sticker_at", "m.sticker_reject_uid",
   "m.internal_create_user", "m.internal_create_date",
   "m.system_generate_user", "m.system_generate_date",
-  "m.tc_file_path", "m.rmtc_file_path",
+  "m.tc_file", "m.rmtc_file",
   "m.sticker_draft",
   "NULLIF((regexp_match(m.uid, '_([0-9]+)$'))[1], '')::integer AS serial_no",
   "m.system_generate_user AS system_generate_user_name",
@@ -113,8 +115,14 @@ export const findMrnByUid = async (uid) => {
      LIMIT 1`,
     [String(uid)]
   );
-  return mapRow(row);
+  if (!row) return null;
+  return attachMrnDocPaths(mapRow(row));
 };
+
+async function attachMrnDocPaths(mrn) {
+  if (!mrn?.uid) return mrn;
+  return attachTcRmtcRow(MRN_MODULE, mrn, mrn.uid);
+}
 
 /** Resolve local MRN by uid, `{mrn_no}_{serial_no}`, or plain mrn_no. */
 export const findMrnByLookup = async (key) => {
@@ -133,7 +141,7 @@ export const findMrnByLookup = async (key) => {
        LIMIT 1`,
       [k, composite[1], composite[2]]
     );
-    if (row) return mapRow(row);
+    if (row) return attachMrnDocPaths(mapRow(row));
   }
 
   if (/^\d+$/.test(k)) {
@@ -152,7 +160,7 @@ export const findMrnByLookup = async (key) => {
        LIMIT 1`,
       [k]
     );
-    if (row) return mapRow(row);
+    if (row) return attachMrnDocPaths(mapRow(row));
   }
 
   return null;
@@ -238,7 +246,7 @@ export const findGeneratedMrns = async ({ search, page = 1, limit = 1000, from_d
     [...values, safeLimit, offset]
   );
 
-  return { data: mapRows(rows), total, page: safePage, limit: safeLimit };
+  return { data: await attachTcRmtcRows(MRN_MODULE, mapRows(rows), "uid"), total, page: safePage, limit: safeLimit }; // TC / RMTC path + remark from documents
 };
 
 export const insertMrn = async (data) => {
@@ -523,21 +531,9 @@ export const hardDeleteMrnByUid = async (uid) => {
   return Array.isArray(rows) && rows.length > 0;
 };
 
-/** Store TC / RMTC paths once on the MRN (not on each coil). */
-export const updateMrnDocs = async (uid, docs = {}) => {
+/** @deprecated Path columns kept for rollback; documents table is source of truth. */
+export const updateMrnDocs = async (uid) => {
   const key = String(uid || "").trim();
   if (!key) return null;
-  const [row] = await dbQuery(
-    `UPDATE ${TABLE}
-     SET tc_file_path = COALESCE($2::text, tc_file_path),
-         rmtc_file_path = COALESCE($3::text, rmtc_file_path)
-     WHERE uid = $1
-     RETURNING *`,
-    [
-      key,
-      docs.tc_file_path ?? null,
-      docs.rmtc_file_path ?? null,
-    ]
-  );
-  return mapRow(row);
+  return findMrnByUid(key);
 };

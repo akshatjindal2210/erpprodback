@@ -245,7 +245,8 @@ async function backfillIprLegacyHeavy() {
     `);
   }
 
-  if (hasRequestType) {
+  // `attachments` is dropped by the documents backfill (files live in `documents` + `doc_files`)
+  if (hasRequestType && (await columnExists(dbQuery, T.IN_PROCESS_REQUEST, "attachments"))) {
     await dbQuery(`
       UPDATE ${T.IN_PROCESS_REQUEST} r
       SET attachments = COALESCE((
@@ -289,7 +290,6 @@ export async function createRmStoreInProcessRequestTable() {
       mrn_uid           VARCHAR(100),
       reassign_jc       JSONB,
       coils             JSONB NOT NULL DEFAULT '[]'::jsonb,
-      attachments       JSONB DEFAULT '[]'::jsonb,
       stage             VARCHAR(30),
       approved          BOOLEAN DEFAULT false,
       approved_by       TEXT,

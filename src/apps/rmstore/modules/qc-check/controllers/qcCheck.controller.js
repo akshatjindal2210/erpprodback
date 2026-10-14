@@ -1,4 +1,4 @@
-import { findQcChecks, findQcCheck, findQcCheckItems, findPendingQcCheckByCoil, findPendingCoilsForQc, findLiveQcCheckByCoil, insertQcCheck, replaceQcCheckItems, updateQcCheck, softDeleteQcCheck } from "../models/qcCheck.model.js";
+import { findQcChecks, findQcCheck, findQcCheckItems, findPendingQcCheckByCoil, findPendingCoilsForQc, findLiveQcCheckByCoil, insertQcCheck, replaceQcCheckItems, updateQcCheck, stampQcInspectionStartIfEmpty, softDeleteQcCheck } from "../models/qcCheck.model.js";
 import { findCoilByUid, linkCoilsToQcCheck, clearCoilQcLink, clearCoilsForQcReject, markCoilsQcFailPending, markCoilsQcPassed, findCoilUidsByQcCheck, findCoilsByQcCheckUid } from "../../coil/models/coil.model.js";
 import { findMrnByUid } from "../../mrn/models/mrn.model.js";
 import { isCoilEligibleForQc, qcCoilIneligibilityMessage } from "../../../lib/utils/coilQcEligibility.js";
@@ -18,6 +18,21 @@ const MODULE = "rm_qc_check";
 const log = createRmstoreActivityLogger(MODULE);
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
 import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
+import { enrichQcItemsWithDocuments, persistQcSpecDocument, updateDocumentRemark } from "../../../../../lib/documents/index.js";
+
+function itemDocumentRemark(input, prior) {
+  if (input?.document_remark !== undefined && input?.document_remark !== null) {
+    const s = String(input.document_remark).trim();
+    return s || null;
+  }
+  return prior?.document_remark ?? null;
+}
+
+/** Set inspected once on draft/submit only — never via approve / generic update. */
+async function stampInspectionIfNeeded(checkId, check, inspectorName) {
+  if (check?.inspected_at || !checkId) return;
+  await stampQcInspectionStartIfEmpty(checkId, inspectorName);
+}
 
 const BATCH_COIL_INDEPENDENT_QC_MSG = "This MRN is batch-wise. Scan the batch QC sticker and submit QC for the whole batch — individual coils cannot be checked independently.";
 
@@ -123,7 +138,34 @@ async function buildCheckDetail(qc_check_uid) {
     qty: c.qty,
     mrn_uid: c.mrn_uid,
   }));
-  return { ...data, items, coils };
+  const enrichedItems = await enrichQcItemsWithDocuments(MODULE, qc_check_uid, items);
+  return { ...data, items: enrichedItems, coils };
+}
+
+async function persistQcItemsWithDocuments(checkId, evaluated, req) {
+  const priorItems = await findQcCheckItems(checkId);
+  const priorBySpec = new Map(priorItems.map((it) => [Number(it.spec_id), it]));
+  const stored = [];
+  for (const e of evaluated) {
+    const prior = priorBySpec.get(Number(e.spec_id)) || {};
+    const docPath = String(e.document_note || "").trim();
+    let document_id = prior.document_id != null && String(prior.document_id).trim()
+        ? String(prior.document_id).trim().toLowerCase()
+        : null;
+    if (docPath) {
+      document_id = await persistQcSpecDocument(MODULE, {
+        modRef: checkId,
+        docPath,
+        remark: e.document_remark ?? null,
+        userOrId: req,
+        priorDocumentId: document_id,
+      });
+    } else if (document_id && e.document_remark !== undefined) {
+      await updateDocumentRemark(document_id, e.document_remark);
+    }
+    stored.push({ ...e, document_id, document_note: null });
+  }
+  await replaceQcCheckItems(checkId, stored);
 }
 
 function buildChecklistFromSpecs(approvedSpecs = []) {
@@ -356,13 +398,18 @@ export const prepareQcCheck = async (req, res) => {
     // Draft / Register edit — merge previously saved answers into checklist
     let savedItems = [];
     if (check.qc_check_uid && (status === "draft" || (forEdit && editableSubmitted))) {
-      savedItems = await findQcCheckItems(check.qc_check_uid);
+      savedItems = await enrichQcItemsWithDocuments(
+        MODULE,
+        check.qc_check_uid,
+        await findQcCheckItems(check.qc_check_uid)
+      );
       const byId = new Map(savedItems.map((it) => [Number(it.spec_id), it]));
       for (const line of checklist) {
         const saved = byId.get(Number(line.spec_id));
         if (!saved) continue;
         line.actual_value = saved.actual_value ?? "";
         line.document_note = saved.document_note ?? "";
+        line.document_remark = saved.document_remark ?? "";
         line.result = saved.result ?? null;
       }
     }
@@ -571,7 +618,11 @@ export const submitQcCheck = async (req, res) => {
     // Keep prior draft docs when re-saving without re-upload
     let priorItems = [];
     if (check.qc_check_uid) {
-      priorItems = await findQcCheckItems(check.qc_check_uid);
+      priorItems = await enrichQcItemsWithDocuments(
+        MODULE,
+        check.qc_check_uid,
+        await findQcCheckItems(check.qc_check_uid)
+      );
     }
     const priorBySpec = new Map(priorItems.map((it) => [Number(it.spec_id), it]));
 
@@ -627,6 +678,7 @@ export const submitQcCheck = async (req, res) => {
         document_required: spec.document_required === true,
         actual_value: actual_value || null,
         document_note,
+        document_remark: itemDocumentRemark(input, prior),
         result,
         eval_message: message || null,
       });
@@ -674,16 +726,15 @@ export const submitQcCheck = async (req, res) => {
         }
       }
 
-      await replaceQcCheckItems(checkId, evaluated);
+      await persistQcItemsWithDocuments(checkId, evaluated, req);
       await linkCoilsToQcCheck(checkId, targetCoilUids, "draft", user);
+      await stampInspectionIfNeeded(checkId, check, inspectorName);
       await updateQcCheck(checkId, {
         status: "draft",
         overall_result: draftOverall,
         approved: false,
         failure_reason: failure_reason || null,
         remarks,
-        inspected_by: inspectorName,
-        inspected_at: new Date(),
         updated_by: user,
         updated_at: new Date(),
       });
@@ -756,7 +807,7 @@ export const submitQcCheck = async (req, res) => {
       }
     }
 
-    await replaceQcCheckItems(checkId, evaluated);
+    await persistQcItemsWithDocuments(checkId, evaluated, req);
 
     let qc_reject_uid = check.qc_reject_uid || null;
 
@@ -771,14 +822,13 @@ export const submitQcCheck = async (req, res) => {
 
     await linkCoilsToQcCheck(checkId, targetCoilUids, "awaiting_approval", user);
 
+    await stampInspectionIfNeeded(checkId, check, inspectorName);
     await updateQcCheck(checkId, {
       status: overallStatus,
       overall_result: storedOverall,
       approved: false,
       failure_reason: failure_reason || null,
       remarks,
-      inspected_by: inspectorName,
-      inspected_at: new Date(),
       qc_reject_uid,
       approved_by: null,
       approved_at: null,
@@ -896,7 +946,7 @@ export const approveQcCheck = async (req, res) => {
       });
     }
 
-    const priorItems = await findQcCheckItems(id);
+    const priorItems = await enrichQcItemsWithDocuments(MODULE, id, await findQcCheckItems(id));
     const priorBySpec = new Map(priorItems.map((it) => [Number(it.spec_id), it]));
 
     // If no items posted, keep prior answers for approve-as-is
@@ -955,6 +1005,7 @@ export const approveQcCheck = async (req, res) => {
         document_required: spec.document_required === true,
         actual_value: actual_value || null,
         document_note,
+        document_remark: itemDocumentRemark(input, prior),
         result,
         eval_message: message || null,
       });
@@ -1019,7 +1070,7 @@ export const approveQcCheck = async (req, res) => {
     const approvalOnly = usePriorOnly && remarksSame && failureSame && overallSame;
 
     if (!approvalOnly) {
-      await replaceQcCheckItems(id, evaluated);
+      await persistQcItemsWithDocuments(id, evaluated, req);
     }
 
     const overallStatus = forceFail ? "failed" : "passed";

@@ -1,6 +1,8 @@
 import Task from "../models/task.model.js";
-import fs   from "fs";
-import config from "../../../../../config/app/config.js";
+import { parseFileRemarks, syncRegisteredFiles } from "../../../../../lib/documents/index.js";
+import { stampRmstoreUploadedFiles } from "../../../../rmstore/lib/utils/stampRmstoreUploadedFiles.js";
+
+const SELF_NOTE_DOCS = "task_self_note";
 
 /** Store reminder as IST wall-clock (matches DB TIMESTAMP without TZ). */
 function normalizeReminderAt(value) {
@@ -49,18 +51,25 @@ export async function upsertSelfNote(req, res) {
 
     const filteredAttachments = existingAttachments.filter((a) => !removeFiles.includes(a.file_path));
 
-    // New file uploads
-    const newAttachments = (req.files ?? []).map(f => ({
-      file_name: f.originalname,
-      file_path: `${config.uploadPublicPath}/task_tasks/self/${f.filename}`,
-      file_size: f.size,
-      mime_type: f.mimetype,
-    }));
+    // New file uploads (uploader name + time stamped on images, like task chat)
+    await stampRmstoreUploadedFiles(req);
+    const newAttachments = (req.files ?? []).map((f, i) => {
+      const note = parseFileRemarks(req.body, i);
+      return {
+        file_name: f.originalname,
+        file_path: `${config.uploadPublicPath}/task_tasks/self/${f.filename}`,
+        file_size: f.size,
+        mime_type: f.mimetype,
+        ...(note ? { remark: note } : {}),
+      };
+    });
 
     // Merge kept attachments with new uploads
     const mergedAttachments = [...filteredAttachments, ...newAttachments];
 
     await Task.upsertSelfNote(id, user_id, note, normalizeReminderAt(reminder_at), mergedAttachments);
+    const saved = await Task.getSelfNoteRaw(id, user_id);
+    await syncRegisteredFiles(SELF_NOTE_DOCS, saved?.self_note_id, mergedAttachments, req);
 
     const updated = await Task.getSelfNote(id, user_id);
     res.json({ success: true, message: "Self note saved", data: updated });
@@ -80,21 +89,8 @@ export async function deleteSelfNote(req, res) {
     if (!note)
       return res.status(404).json({ success: false, message: "Self note not found" });
 
-    if (note.attachments) {
-      const files = typeof note.attachments === "string"
-        ? JSON.parse(note.attachments)
-        : (note.attachments ?? []);
-      files.forEach(f => {
-        try {
-          const relativePath = f.file_path.startsWith(`${config.uploadPublicPath}/`)
-            ? f.file_path.slice(config.uploadPublicPath.length + 1)
-            : f.file_path;
-          const fullPath = path.join(config.uploadPath, relativePath);
-          if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
-        } catch {}
-      });
-    }
-
+    // Soft-deactivate documents rows only — never delete files on disk (same as IMS/RM docs).
+    await syncRegisteredFiles(SELF_NOTE_DOCS, note.self_note_id, [], req);
     await Task.deleteSelfNote(id, user_id);
     res.json({ success: true, message: "Self note deleted successfully" });
   } catch (err) {

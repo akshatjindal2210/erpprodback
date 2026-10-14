@@ -1,5 +1,6 @@
 import express from "express";
-import { authenticate, authorize, chatUpload, selfUpload } from "../../../lib/shared/index.js";
+import { authenticate, authorize, chatUpload } from "../../../lib/shared/index.js";
+import { docUpload } from "../../../../../lib/documents/index.js";
 import { getTasks, getTaskById, createTask, createSelfTask, assignSubUsers, updateTask, deleteTask, forwardTask, requestCompletion, approveSubUser, rejectSubUser, creatorDecision, getTaskActivity, reassignTask } from "../controllers/task.controller.js";
 import { getChat, sendMessage, deleteMessage } from "../controllers/taskChat.controller.js";
 import { getSelfNote, upsertSelfNote, deleteSelfNote, toggleRecurringTaskStatus } from "../controllers/taskSelfNote.controller.js";
@@ -30,11 +31,11 @@ router.get("/:id/target-dates", allRoles, getTargetDates);
 router.post("/:id/target-date", allRoles, setTargetDate);
 
 router.get("/:id/chat", allRoles, getChat);
-router.post("/:id/chat", allRoles, chatUpload.array("files", 10), sendMessage);
+router.post("/:id/chat", allRoles, docUpload("tasks").array("files", 10), sendMessage);
 router.delete("/:id/chat/:chatId", allRoles, deleteMessage);
 
 router.get("/:id/self-note", allRoles, getSelfNote);
-router.put("/:id/self-note", allRoles, selfUpload.array("files", 10), upsertSelfNote);
+router.put("/:id/self-note", allRoles, docUpload("task_self_note").array("files", 10), upsertSelfNote);
 router.delete("/:id/self-note", allRoles, deleteSelfNote);
 
 router.post("/:id/toggle-status", allRoles, toggleRecurringTaskStatus);

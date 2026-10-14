@@ -40,6 +40,8 @@ function allowErpHelper(mod, act) {
   if (mod == null || act == null) return null;
   if (
     (mod === "rm_production_master" ||
+      mod === "eng_prime_item_master" ||
+      mod === "eng_finish_process_master" ||
       mod === "rm_spec_master" ||
       mod === "rm_store_location_master" ||
       mod === "rm_issue_request" ||
@@ -115,8 +117,8 @@ function fieldsForinProcessRequest(mod, act) {
 /** Spec lookup / header suggest — IMS-style GET: caller page view only. */
 function fieldsForSpec(mod, act) {
   if (mod == null || act == null) return null;
-  const allowed = ["rm_spec_master", "rm_mrn_portal", "rm_stock_adjustment"];
-  if (allowed.includes(mod) && act === VIEW) return [];
+  const allowed = ["rm_spec_master", "rm_mrn_portal", "rm_stock_adjustment", "eng_prime_item_master"];
+  if (allowed.includes(mod) && (act === VIEW || isForm(act))) return [];
   return null;
 }
 

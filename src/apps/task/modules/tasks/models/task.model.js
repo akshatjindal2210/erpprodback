@@ -256,7 +256,7 @@ const Task = {
       LEFT JOIN task_categories cat ON cat.id = t.category_id
       LEFT JOIN task_self_notes tsn ON tsn.task_id = t.task_id AND tsn.user_id = ?
       LEFT JOIN (
-        SELECT tc1.task_id, tc1.message, tc1.attachments, tc1.created_at
+        SELECT tc1.task_id, tc1.message, tc1.created_at
         FROM task_chat tc1
         INNER JOIN (
           SELECT task_id, MAX(created_at) AS last_msg_at
@@ -964,16 +964,14 @@ const Task = {
     return rows[0] ?? null;
   },
 
-  async addChatMessage(task_id, user_id, message, attachments = null) {
-    return dbQuery(
-      `INSERT INTO task_chat (task_id, user_id, message, attachments)
-       VALUES (?, ?, ?, ?)`,
-      [
-        task_id, user_id,
-        message || null,
-        attachments ? JSON.stringify(attachments) : null,
-      ]
+  async addChatMessage(task_id, user_id, message, _attachments = null) {
+    // RETURNING chat_id: the generic insertId picks task_id (chat files in `documents` are linked by chat_id)
+    const [row] = await dbQuery(
+      `INSERT INTO task_chat (task_id, user_id, message)
+       VALUES (?, ?, ?) RETURNING chat_id`,
+      [task_id, user_id, message || null]
     );
+    return { insertId: Number(row?.chat_id) || 0, affectedRows: row ? 1 : 0 };
   },
 
   // CHAT get all messages
@@ -981,7 +979,7 @@ const Task = {
     return dbQuery(
       `SELECT
          c.chat_id, c.task_id, c.user_id,
-         c.message, c.reply_to_id, c.attachments,
+         c.message, c.reply_to_id, c.doc_files,
          TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
          u.name AS sender_name,
          u.type AS sender_type,
@@ -1146,26 +1144,27 @@ const Task = {
 
   async getChatAttachments(task_id) {
     return dbQuery(
-      "SELECT attachments FROM task_chat WHERE task_id = ? AND attachments IS NOT NULL",
+      "SELECT chat_id, doc_files FROM task_chat WHERE task_id = ? AND doc_files IS NOT NULL",
       [task_id]
     );
   },
 
   async getSelfNoteAttachments(task_id) {
     return dbQuery(
-      "SELECT attachments FROM task_self_notes WHERE task_id = ? AND attachments IS NOT NULL",
+      "SELECT self_note_id, attachments FROM task_self_notes WHERE task_id = ? AND attachments IS NOT NULL",
       [task_id]
     );
   },
 
   // SEND CHAT MESSAGE WITH REPLY
-  async sendChatMessage(task_id, user_id, message, reply_to_id, attachments) {
-    const attachJson = attachments?.length > 0 ? JSON.stringify(attachments) : null;
-    return dbQuery(
-      `INSERT INTO task_chat (task_id, user_id, message, reply_to_id, attachments)
-       VALUES (?, ?, ?, ?, ?)`,
-      [task_id, user_id, message?.trim() || null, reply_to_id || null, attachJson]
+  async sendChatMessage(task_id, user_id, message, reply_to_id, _attachments) {
+    // RETURNING chat_id: the generic insertId picks task_id (chat files in `documents` are linked by chat_id)
+    const [row] = await dbQuery(
+      `INSERT INTO task_chat (task_id, user_id, message, reply_to_id)
+       VALUES (?, ?, ?, ?) RETURNING chat_id`,
+      [task_id, user_id, message?.trim() || null, reply_to_id || null]
     );
+    return { insertId: Number(row?.chat_id) || 0, affectedRows: row ? 1 : 0 };
   },
 
   // GET CHAT MESSAGE WITH SENDER (after insert)

@@ -5,17 +5,25 @@ import { formatIstDateTime, GATE_PENDING_MIN_BILL_DT, resolveGateImsBilldtFilter
 import { applyTimestamp, UPLOAD_TIMESTAMP_TYPES } from "../../../../rmstore/lib/utils/applyUploadTimestamp.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { buildGateReceivingPayload, isErpNullString, parseExistingPathsFromBody, parseReceivingMeta } from "../utils/buildInvReceivingUploadFilter.js";
+import { moduleDocuments, syncDocumentPaths, mapMulterFilesWithRemarks, receivingDocumentsFromRows, receivingFileFromRows } from "../../../../../lib/documents/index.js";
 
 const MODULE = "invoice_receiving";
+const irDocuments = moduleDocuments(MODULE);
 const MODE_PERM = { add: "can_add", edit: "can_edit", approve: "can_authorize" };
 
 /** Only bill_dt — uploaded_at / approved_at are already IST `DD-MM-YYYY HH:mm` in meta; re-formatting breaks dates. */
 const DATE_KEYS = ["billdt"];
 
 /** Map gate row → Invoice Receiving list/drawer shape (no ERP). */
-function mapGateToIrRow(gate, accName = null) {
+async function mapGateToIrRow(gate, accName = null, docRows = null) {
   if (!gate || typeof gate !== "object") return gate;
   const meta = parseReceivingMeta(gate.receiving_meta);
+
+  // list se rows aayi hain to wahi use karo, warna 1 query (update/delete ke liye)
+  const rows = docRows ?? (await irDocuments.listActive(gate.uid, { metadata: true }));
+  const receivingfile = receivingFileFromRows(rows);
+  const receiving_documents = receivingDocumentsFromRows(rows);
+
   const out = {
     gate_uid: gate.uid,
     prnbillno: String(gate.bill_no ?? "").trim() || null,
@@ -24,7 +32,8 @@ function mapGateToIrRow(gate, accName = null) {
     transport: gate.transporter_name || meta?.transport || null,
     vehicleno: gate.vehicle_number || meta?.vehicleno || null,
     remarks: gate.remarks ?? null,
-    receivingfile: gate.receiving_file ?? null,
+    receivingfile,
+    receiving_documents,
     receiverefno: gate.receiving_meta ?? null,
   };
 
@@ -78,17 +87,19 @@ async function mapGatesToIrRows(gates) {
   const list = gates || [];
   const billKeys = new Set(list.map((g) => String(g?.bill_no ?? "").trim().toLowerCase()).filter(Boolean));
   const accByBill = await accNameByBillKeys(billKeys);
-  return list.map((g) => {
-    const key = String(g?.bill_no ?? "")
-      .trim()
-      .toLowerCase();
-    return mapGateToIrRow(g, accByBill.get(key) || null);
-  });
+  const docsByUid = await irDocuments.listActiveMany(list.map((g) => g?.uid), { metadata: true });
+
+  return Promise.all(
+    list.map((g) => {
+      const key = String(g?.bill_no ?? "").trim().toLowerCase();
+      return mapGateToIrRow(g, accByBill.get(key) || null, docsByUid.get(String(g?.uid)) || []);
+    })
+  );
 }
 
 /**
  * Fully local on Gate Entry — no invreceiving / internal API.
- * Pending = unmatched OUT · Register = matched OUT with receiving_file.
+ * Pending = unmatched OUT · Register = matched OUT (files from `documents`).
  */
 export async function listInvoiceReceiving(req, res) {
   try {
@@ -104,7 +115,6 @@ export async function listInvoiceReceiving(req, res) {
       return res.json({ success: true, message: "Gate Out pending for invoice receiving.", data: rows });
     }
 
-    // Register / pending-merge: gate_registered_only is always true locally (data is gate-only).
     const gates = await findMatchedOutGateRows({
       from_date,
       to_date,
@@ -124,10 +134,9 @@ export async function updateInvoiceReceiving(req, res) {
     const mode = MODE_PERM[modeRaw] ? modeRaw : "add";
     if (!canMode(req, mode)) return res.status(403).json({ success: false, message: "No access for this action." });
 
-    const uploaded = Array.isArray(req.files) ? req.files : req.file ? [req.file] : [];
-    const newPaths = uploaded.map((f) => toImsIrPublicUploadPath(f)).filter(Boolean);
+    const newFiles = mapMulterFilesWithRemarks(req, (f) => toImsIrPublicUploadPath(f));
     const existingPaths = parseExistingPathsFromBody(req.body).filter((p) => !isErpNullString(p));
-    const file_paths = [...existingPaths, ...newPaths];
+    const file_paths = [...existingPaths, ...newFiles.map((f) => f.docPath)];
 
     if (file_paths.length === 0) {
       return res.status(400).json({ success: false, message: "At least one PDF or image attachment is required." });
@@ -139,28 +148,26 @@ export async function updateInvoiceReceiving(req, res) {
     }
 
     const wantApproved = parseTruthyFlag(req.body?.approved);
-    const touchUpload = newPaths.length > 0 || mode === "add";
+    const touchUpload = newFiles.length > 0 || mode === "add";
     const existingGate = await findGateByBillNo(prnbillno);
     const previousMeta = parseReceivingMeta(existingGate?.receiving_meta);
     const payload = buildGateReceivingPayload(req, {
-      file_paths,
       approved: wantApproved,
       remarks: req.body?.remarks,
       touchUpload,
       previousMeta,
     });
 
-    if (touchUpload && uploaded.length > 0) {
+    if (touchUpload && newFiles.length > 0) {
       const meta = parseReceivingMeta(payload.receiving_meta);
       const uploader = String(meta?.uploaded_by || auditUserName(req) || "").trim();
       const stampedAt = new Date();
-      for (const file of uploaded) {
+      for (const file of newFiles.map((x) => x.file)) {
         await applyTimestamp(file, UPLOAD_TIMESTAMP_TYPES.IMAGE, uploader, stampedAt);
       }
     }
 
     const gate = await saveGateInvoiceReceiving(prnbillno, {
-      receiving_file: payload.receiving_file,
       receiving_meta: payload.receiving_meta,
     });
 
@@ -171,10 +178,17 @@ export async function updateInvoiceReceiving(req, res) {
       });
     }
 
+    await syncDocumentPaths(irDocuments, {
+      modRef: gate.uid,
+      userOrId: req,
+      keepPaths: existingPaths,
+      newFiles,
+    });
+
     return res.json({
       success: true,
       message: "Invoice receiving saved on Gate Entry.",
-      data: { mode, row: mapGateToIrRow(gate) },
+      data: { mode, row: await mapGateToIrRow(gate) },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || "Failed to update invoice receiving." });
@@ -202,14 +216,14 @@ export async function deleteInvoiceReceiving(req, res) {
       });
     }
 
+    await irDocuments.removeAllActive(gate.uid);
+
     return res.json({
       success: true,
       message: "Invoice receiving cleared on Gate Entry.",
-      data: { row: mapGateToIrRow(gate) },
+      data: { row: await mapGateToIrRow(gate) },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || "Failed to clear invoice receiving." });
   }
 }
-
-export { MODULE };

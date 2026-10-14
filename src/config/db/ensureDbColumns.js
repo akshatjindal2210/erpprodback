@@ -245,3 +245,29 @@ export async function dropTableIfExists(query, tableName) {
   await query(`DROP TABLE IF EXISTS ${tableName}`);
 }
 
+
+/**
+ * Unique index that never breaks boot: created only when the table has no duplicate keys.
+ * If duplicates exist → skipped with a warning (fix the data; it is created on the next restart).
+ *   await ensureUniqueIndex(dbQuery, "eng_machine_master", "eng_machine_name_unique_active", "lower(trim(name))", "is_deleted = false");
+ */
+export async function ensureUniqueIndex(query, tableName, indexName, keySql, whereSql = "") {
+  const [exists] = await query(`SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, [indexName]);
+  if (exists) return true;
+  const where = whereSql ? `WHERE ${whereSql}` : "";
+  const [dup] = await query(`SELECT ROW(${keySql})::text AS key FROM ${tableName} ${where} GROUP BY ${keySql} HAVING COUNT(*) > 1 LIMIT 1`);
+  if (dup) {
+    console.warn(`[${tableName}] unique index ${indexName} not created — duplicate ${dup.key}; fix the data and restart`);
+    return false;
+  }
+  await query(`CREATE UNIQUE INDEX IF NOT EXISTS ${indexName} ON ${tableName} (${keySql}) ${where}`);
+  return true;
+}
+
+/**
+ * Remove indexes (e.g. a unique rule that is no longer wanted). Missing ones are skipped — safe on every boot.
+ *   await dropIndexesIfExist(dbQuery, ["eng_machine_name_unique_active"]);
+ */
+export async function dropIndexesIfExist(query, indexNames = []) {
+  for (const name of indexNames) await query(`DROP INDEX IF EXISTS ${name}`);
+}

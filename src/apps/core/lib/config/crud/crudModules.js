@@ -243,8 +243,8 @@ export const CRUD_MODULES = {
   eng_process_master: {
     idField: "id",
     listFields: [],
-    filterFields: ["id", "type", "parent_id", "stage", "approved", "from_date", "to_date"],
-    searchFields: ["name", "pattern", "type", "stage"],
+    filterFields: ["id", "parent_id", "stage", "depth", "approved", "from_date", "to_date"],
+    searchFields: ["name", "pattern", "stage"],
   },
   eng_machine_master: {
     idField: "id",

@@ -333,7 +333,7 @@ export const findPackingAreaBoxesByTrayId = async (trayId) => {
      WHERE b.is_deleted = false
        AND t.id = $1
        AND b.location_id IS NULL
-       AND ${sqlBoxInHand("b")}
+       AND ${sqlBoxSellable("b")}
      ORDER BY b.box_uid ASC`,
     [id]
   );
@@ -369,6 +369,9 @@ export function inwardScanRejectMessage(row) {
     row.out_uid == null || String(row.out_uid).trim() === "";
   if (!outEmpty) {
     return "Box is already outward (Store Out) and cannot be stored inward";
+  }
+  if (row.qc_hold_id != null && String(row.qc_hold_id).trim() !== "") {
+    return "Box is in QC Area / on QC hold and cannot be stored inward";
   }
   return "Box not found or not eligible for inward";
 }

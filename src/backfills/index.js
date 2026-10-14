@@ -1,7 +1,7 @@
 /**
- * Startup backfills (tables = schema only).
- * Safe / idempotent — already-done rows are no-ops. Failures never block boot.
- * SA packing meta is not run (legacy done; new SA fills on approve).
+ * Manual data backfills — none of these run on boot by default.
+ * Run one: uncomment its line in `config/db/initDB.js` (section 5) → restart once → check the log → comment again.
+ * Each job is idempotent; a failure is logged and never blocks boot.
  */
 import dbQuery from "../config/db/db.js";
 import { columnExists, runIfColumnExists } from "../config/db/ensureDbColumns.js";
@@ -19,6 +19,7 @@ async function safe(label, fn) {
   }
 }
 
+// ── Old small data fixes (IMS / core) — safe to re-run ─────────────────────
 export async function runStartupBackfills() {
   await safe("audit user names", runAuditUserNamesBackfill);
 
@@ -75,22 +76,24 @@ export async function runStartupBackfills() {
   });
 
   await safe("box category", async () => {
-    const { runBoxCategoryBackfillOnStartup } = await import(
+    const { runBoxCategoryBackfillOnStartup, runBoxIsLooseBackfillOnStartup } = await import(
       "../apps/ims/modules/box/utils/backfill/backfillBoxCategory.js"
     );
     await runBoxCategoryBackfillOnStartup();
-  });
-
-  await safe("box is_loose", async () => {
-    const { runBoxIsLooseBackfillOnStartup } = await import(
-      "../apps/ims/modules/box/utils/backfill/backfillBoxCategory.js"
-    );
     await runBoxIsLooseBackfillOnStartup();
   });
 
-  // ── Invoice Receiving: one-time ERP → Gate Entry ─────────────────────────
-  // After live backup + first successful run → COMMENT OUT this line:
-  await safe("IR ERP → gate", runImportErpInvoiceReceivingToGate);
+  console.log("✅ Startup backfills finished");
 }
 
+// ── One-time imports — run once, then keep commented ───────────────────────
+
+/** ERP invreceiving → ims_gate_entry. ⚠ Calls ERP; files → `documents`, meta → receiving_meta, only on gates that have no IR files yet. */
+export const backfillIrErpToGate = () => safe("IR ERP → gate", runImportErpInvoiceReceivingToGate);
+
+/** v4.1.5 Shortage.grpname from IMS. */
 export { default as backfillShortageGrpname } from "../migrations/v4.1.5/shortageGrpname.mjs";
+
+/** v5.0.0 old file paths → documents (`<uuid>.<ext>`). Auto while the version is 5.0.0; run manually after a version bump if needed. */
+export { default as backfillDocFiles } from "../migrations/v5.0.0/docFileBackfill.js";
+

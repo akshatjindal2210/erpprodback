@@ -1,6 +1,7 @@
 import express from "express";
 import { getRecurringTasks, getRecurringTaskById, createRecurringTask, updateRecurringTask, deleteRecurringTask, getRecurringTaskStats, removeAttachmentFromRecurringTask } from "../controllers/recurringTask.controller.js";
-import { authenticate, authorize, activityLogger, recurringUpload } from "../../../lib/shared/index.js";
+import { authenticate, authorize, activityLogger } from "../../../lib/shared/index.js";
+import { docUpload } from "../../../../../lib/documents/index.js";
 
 const router = express.Router();
 const allRoles = authorize("super_admin", "admin", "user", "executive_assistant");
@@ -15,7 +16,7 @@ router.get("/:id", allRoles, getRecurringTaskById);
 // Route intentionally disabled to preserve existing behavior.
 // router.post("/", staffOnly, activityLogger, createRecurringTask);
 
-router.put("/:id", allRoles, recurringUpload.array("attachments", 10), activityLogger, updateRecurringTask);
+router.put("/:id", allRoles, docUpload("task_recurring_chat").array("attachments", 10), activityLogger, updateRecurringTask);
 router.delete("/:id", allRoles, activityLogger, deleteRecurringTask);
 router.delete("/:id/attachments", allRoles, activityLogger, removeAttachmentFromRecurringTask);
 

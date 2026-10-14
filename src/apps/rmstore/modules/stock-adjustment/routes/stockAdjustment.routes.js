@@ -3,10 +3,10 @@ import { getAdjustments, getAdjustmentById, getActiveCoilsForMinus, createAdjust
 import { renderSingleSaCoilSticker, renderBulkSaCoilStickers, uploadSaDocs } from "../controllers/stockAdjustmentSticker.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
-import { rmTcUpload } from "../../../lib/middleware/upload.js";
+import { docUpload } from "../../../../../lib/documents/index.js";
 
 const router = express.Router();
-const MODULE = "rm_stock_adjustment";
+export const MODULE = "rm_stock_adjustment";
 
 router.post("/list", authenticate, accessControl(MODULE, "view"), getAdjustments);
 router.post("/get", authenticate, accessControl(MODULE, "view"), getAdjustmentById);
@@ -18,6 +18,6 @@ router.post("/delete", authenticate, accessControl(MODULE, "delete"), deleteAdju
 /** RM coil sticker design (MRN Portal style). */
 router.post("/sticker/render-single", authenticate, accessControl(MODULE, "view"), renderSingleSaCoilSticker);
 router.post("/sticker/render-bulk", authenticate, accessControl(MODULE, "view"), renderBulkSaCoilStickers);
-router.post("/upload-docs", authenticate, accessControl(MODULE, "add"), rmTcUpload.fields([{ name: "tc", maxCount: 1 }, { name: "rmtc", maxCount: 1 }]), uploadSaDocs);
+router.post("/upload-docs", authenticate, accessControl(MODULE, "add"), docUpload(MODULE).fields([{ name: "tc", maxCount: 1 }, { name: "rmtc", maxCount: 1 }]), uploadSaDocs);
 
 export default router;

@@ -146,12 +146,11 @@ export function parseReceiverefnoFromIms(raw) {
 }
 
 /**
- * Build local gate payload for invoice receiving save (no ERP / invreceiving).
+ * Build local gate payload for invoice receiving save (no ERP / invreceiving). Files go to `documents`, not here.
  */
 export function buildGateReceivingPayload(req, opts = {}) {
-  const { file_paths = [], approved = false, remarks = "", touchUpload = true, previousMeta = null } = opts;
+  const { approved = false, remarks = "", touchUpload = true, previousMeta = null } = opts;
   const prev = previousMeta && typeof previousMeta === "object" && !Array.isArray(previousMeta) ? previousMeta : null;
-  const paths = (Array.isArray(file_paths) ? file_paths : []).map((p) => String(p).trim()).filter((p) => !isErpNullString(p));
 
   const user = auditUserName(req) || "system";
   const now = formatIstDateTime(new Date());
@@ -176,7 +175,6 @@ export function buildGateReceivingPayload(req, opts = {}) {
   };
 
   return {
-    receiving_file: serializeReceivingFile(paths),
     receiving_meta: receivingMetaToString(receiving_meta),
   };
 }

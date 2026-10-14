@@ -1,339 +1,224 @@
-import { findProcesses, findProcess, findStageConflict, insertProcess, updateProcesses, deleteProcesses, countActiveChildren, PROCESS_DEFAULT_FIELDS } from "../models/processMaster.model.js";
+import {
+  findProcesses, findProcess, insertProcess, updateProcess as updateProcessRow, softDeleteProcess,
+  countActiveChildren, syncProcessDepth, findSiblingByName, loadTree, PROCESS_DEFAULT_FIELDS,
+} from "../models/processMaster.model.js";
+import { resolveParent, subtreeIds } from "../utils/processTree.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput, applyApprovalUpdateFields, prepareUpdateByRules } from "../../../../core/lib/utils/auth/approval.js";
+import { assertWithinEditDays } from "../../../../core/lib/utils/auth/permissionDays.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import logger from "../../../../core/lib/utils/logging/logger.js";
 
-const CFG = getCrudModuleConfig("eng_process_master");
 const ENTITY = "eng_process_master";
-const TYPES = new Set(["MASTER", "SUB", "SUB_SUB"]);
+const CFG = getCrudModuleConfig(ENTITY);
 const STAGES = new Set(["START", "MID", "END"]);
+const FLAGS = ["multi_jc", "rm_wire", "tooling", "fg", "prime", "rework"];
 
 const log = (req, action, entity_id, details, record = null, existing = null) =>
   logActivity(req, { action, entity: ENTITY, entity_id, details, record, existing }).catch(() => {});
 
-function normalizeType(v) {
-  return String(v ?? "").trim().toUpperCase();
-}
-
-function normalizeStage(v) {
+const toStage = (v) => {
   const s = String(v ?? "MID").trim().toUpperCase();
   return STAGES.has(s) ? s : "MID";
-}
+};
+const toBool = (v) => v === true || v === "true" || v === 1 || v === "1";
+const toName = (v) => String(v ?? "").trim();
 
-function validateRegexPattern(pattern) {
-  if (pattern == null || String(pattern).trim() === "") return null;
-  const text = String(pattern).trim();
+/** Empty → null; otherwise must be a valid regular expression. */
+function toPattern(v) {
+  if (v == null || String(v).trim() === "") return null;
+  const text = String(v).trim();
   try {
-    // eslint-disable-next-line no-new
-    new RegExp(text);
+    new RegExp(text); // eslint-disable-line no-new
     return text;
   } catch {
-    const err = new Error("Invalid pattern — must be a valid regular expression");
-    err.statusCode = 400;
-    throw err;
+    throw Object.assign(new Error("Invalid pattern — must be a valid regular expression"), { statusCode: 400 });
   }
 }
 
-async function assertParentForType(type, parent_id) {
-  if (type === "MASTER") {
-    if (parent_id) {
-      const err = new Error("MASTER process cannot have a parent");
-      err.statusCode = 400;
-      throw err;
-    }
-    return null;
-  }
-  if (!parent_id) {
-    const err = new Error(`${type} process requires a parent`);
-    err.statusCode = 400;
-    throw err;
-  }
-  const parent = await findProcess({ id: parent_id });
-  if (!parent) {
-    const err = new Error("Parent process not found");
-    err.statusCode = 400;
-    throw err;
-  }
-  if (type === "SUB" && parent.type !== "MASTER") {
-    const err = new Error("SUB parent must be a MASTER process");
-    err.statusCode = 400;
-    throw err;
-  }
-  if (type === "SUB_SUB" && parent.type !== "SUB") {
-    const err = new Error("SUB_SUB parent must be a SUB process");
-    err.statusCode = 400;
-    throw err;
-  }
-  return parent;
+const parentIdOf = (body) => (body?.parent_id == null || body.parent_id === "" ? null : parsePositiveIntId(body.parent_id));
+
+/** Same name twice under one parent (or twice as a master) is not allowed. */
+async function assertUniqueName(name, parentId, exceptId = null) {
+  const dup = await findSiblingByName(name, parentId, exceptId);
+  if (!dup) return;
+  const where = parentId ? `under "${dup.parent_name}"` : "as a master process";
+  throw Object.assign(new Error(`Process "${name}" already exists ${where}`), { statusCode: 409 });
 }
 
-async function assertUniqueStage(stage, excludeId = null) {
-  const conflict = await findStageConflict({ stage, excludeId });
-  if (conflict) {
-    const err = new Error(
-      `Only one active ${stage} process is allowed. Existing: "${conflict.name}" (id ${conflict.id})`
-    );
-    err.statusCode = 409;
-    throw err;
-  }
-}
+/** Dropdown row (helper API). */
+const toOption = (r) => ({
+  id: r.id,
+  name: r.name,
+  label: r.name,
+  path_label: r.path_label || r.name,
+  depth: r.depth,
+  stage: r.stage,
+  parent_id: r.parent_id,
+});
 
-export const listProcesses = async (req, res) => {
+/** Wrap a handler: one place for the error log + status (400 from validation, else 500). */
+const handle = (name, fn) => async (req, res) => {
   try {
-    const { page, limit, sortBy, order, search, filters } = extractListParams(req.body || {});
-    const safeFilters = sanitizeFilters(filters, CFG?.filterFields || []);
-    const result = await findProcesses({
-      filters: safeFilters,
-      search: sanitizeSearch(search),
-      sort: { by: sortBy, order },
-      page,
-      limit,
-      fields: CFG?.listFields?.length ? CFG.listFields : PROCESS_DEFAULT_FIELDS,
-    });
-    return res.json({ success: true, data: result });
+    return await fn(req, res);
   } catch (err) {
-    logger.error(`[eng_process_master] list error user=${req?.user?.id}: ${err?.message || err}`);
-    return res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const getProcess = async (req, res) => {
-  try {
-    const id = parsePositiveIntId(req.body?.id);
-    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
-    const data = await findProcess({ id });
-    if (!data) return res.status(404).json({ success: false, message: "Not found" });
-    return res.json({ success: true, data });
-  } catch (err) {
-    logger.error(`[eng_process_master] get error user=${req?.user?.id}: ${err?.message || err}`);
-    return res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const createProcess = async (req, res) => {
-  try {
-    const name = String(req.body?.name ?? "").trim();
-    const type = normalizeType(req.body?.type);
-    const stage = normalizeStage(req.body?.stage);
-    const parent_id = req.body?.parent_id ? parsePositiveIntId(req.body.parent_id) : null;
-    const multi_mc = !!req.body?.multi_mc;
-    const pattern = validateRegexPattern(req.body?.pattern);
-    const normalizedApproved = normalizeApprovedInput(req.body?.approved);
-
-    if (!name) return res.status(400).json({ success: false, message: "name required" });
-    if (!TYPES.has(type)) return res.status(400).json({ success: false, message: "type must be MASTER, SUB or SUB_SUB" });
-
-    await assertParentForType(type, parent_id);
-    await assertUniqueStage(stage);
-
-    const row = await insertProcess({
-      name,
-      type,
-      parent_id: type === "MASTER" ? null : parent_id,
-      stage,
-      multi_mc,
-      pattern,
-      created_by: auditUserName(req),
-    });
-
-    if (normalizedApproved === true) {
-      const approvalFields = {
-        updated_by: auditUserName(req),
-        updated_at: new Date(),
-      };
-      applyApprovalWorkflow({
-        req,
-        fields: approvalFields,
-        incomingApproved: true,
-        hasBusinessChanges: false,
-        auditAsName: true,
-        approvalTimestamp: row?.created_at || new Date(),
-      });
-      await updateProcesses(approvalFields, { id: row.id });
-    }
-
-    const data = await findProcess({ id: row.id });
-    logger.info(`[eng_process_master] create user=${req?.user?.id} id=${row.id} name=${name}`);
-    await log(req, "create", row.id, { name, type, stage, parent_id }, data);
-
-    return res.status(201).json({ success: true, data, message: "Process created successfully" });
-  } catch (err) {
-    logger.error(`[eng_process_master] create error user=${req?.user?.id}: ${err?.message || err}`);
-    if (err?.code === "23505") {
-      return res.status(409).json({
-        success: false,
-        message: "Only one active START and one active END process is allowed",
-      });
-    }
+    if (err?.code === "23505" && /name_unique/.test(err.constraint || "")) Object.assign(err, { statusCode: 409, message: "Process with this name already exists under the same parent" });
+    logger.error(`[${ENTITY}] ${name} error user=${req?.user?.id}: ${err?.message || err}`);
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
 };
 
-export const updateProcess = async (req, res) => {
-  try {
-    const id = parsePositiveIntId(req.body?.id);
-    const normalizedApproved = normalizeApprovedInput(req.body?.approved);
-    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
+export const listProcesses = handle("list", async (req, res) => {
+  const { page, limit, sortBy, order, search, filters } = extractListParams(req.body || {});
+  const data = await findProcesses({
+    filters: sanitizeFilters(filters, CFG?.filterFields || []),
+    search: sanitizeSearch(search),
+    sort: { by: sortBy, order },
+    page,
+    limit,
+    fields: CFG?.listFields?.length ? CFG.listFields : PROCESS_DEFAULT_FIELDS,
+  });
+  return res.json({ success: true, data });
+});
 
-    const existing = await findProcess({ id });
-    if (!existing) return res.status(404).json({ success: false, message: "Not found" });
+export const getProcess = handle("get", async (req, res) => {
+  const id = parsePositiveIntId(req.body?.id);
+  if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
+  const data = await findProcess(id);
+  if (!data) return res.status(404).json({ success: false, message: "Not found" });
+  return res.json({ success: true, data });
+});
 
-    if (req.user.type !== "super_admin" && req.permission && req.permission.can_edit_days > 0) {
-      const createdAt = new Date(existing.created_at);
-      const diffDays = Math.ceil(Math.abs(Date.now() - createdAt) / (1000 * 60 * 60 * 24));
-      if (diffDays > req.permission.can_edit_days) {
-        return res.status(403).json({
-          success: false,
-          message: `Edit time limit exceeded. You can only edit records from the last ${req.permission.can_edit_days} days.`,
-        });
-      }
-    }
+export const createProcess = handle("create", async (req, res) => {
+  const body = req.body || {};
+  const name = toName(body.name);
+  if (!name) return res.status(400).json({ success: false, message: "name required" });
 
-    const input = {
-      name: req.body?.name,
-      type: req.body?.type !== undefined ? normalizeType(req.body.type) : undefined,
-      parent_id: req.body?.parent_id !== undefined
-        ? (req.body.parent_id ? parsePositiveIntId(req.body.parent_id) : null)
-        : undefined,
-      stage: req.body?.stage !== undefined ? normalizeStage(req.body.stage) : undefined,
-      multi_mc: req.body?.multi_mc,
-      pattern: req.body?.pattern !== undefined ? validateRegexPattern(req.body.pattern) : undefined,
-    };
+  const { parent_id, depth } = resolveParent(await loadTree(), parentIdOf(body));
+  const fields = { name, parent_id, depth, stage: toStage(body.stage), pattern: toPattern(body.pattern), created_by: auditUserName(req) };
+  for (const f of FLAGS) fields[f] = toBool(body[f]);
 
-    const { hasChanges: hasBusinessChanges, fields: preparedFields } = prepareUpdateByRules({
-      existing,
-      input,
-      rules: [
-        { field: "name", normalize: (v) => String(v ?? "").trim() },
-        { field: "type", normalize: normalizeType },
-        { field: "parent_id", normalize: (v) => (v == null || v === "" ? null : Number(v)) },
-        { field: "stage", normalize: normalizeStage },
-        { field: "multi_mc", normalize: (v) => !!v },
-        { field: "pattern", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
-      ],
-    });
+  await assertUniqueName(name, parent_id);
 
-    if (!hasBusinessChanges && normalizedApproved === undefined) {
-      return res.status(400).json({ success: false, message: "No fields to update" });
-    }
+  const { id } = await insertProcess(fields);
 
-    const fields = { ...preparedFields };
-    const finalType = fields.type ?? existing.type;
-    const finalParent = fields.parent_id !== undefined ? fields.parent_id : existing.parent_id;
-    const finalStage = fields.stage ?? existing.stage;
-
-    if (fields.name !== undefined && !fields.name) {
-      return res.status(400).json({ success: false, message: "name required" });
-    }
-    if (fields.type !== undefined && !TYPES.has(fields.type)) {
-      return res.status(400).json({ success: false, message: "type must be MASTER, SUB or SUB_SUB" });
-    }
-
-    await assertParentForType(finalType, finalType === "MASTER" ? null : finalParent);
-    if (finalType === "MASTER") fields.parent_id = null;
-    if (finalStage !== existing.stage) await assertUniqueStage(finalStage, id);
-
-    applyApprovalUpdateFields({
-      req,
-      fields,
-      incomingApproved: normalizedApproved,
-      hasBusinessChanges,
-      alreadyApproved: existing.approved === true,
-      auditAsName: true,
-    });
-
-    await updateProcesses(fields, { id });
-    const data = await findProcess({ id });
-
-    logger.info(`[eng_process_master] update user=${req?.user?.id} id=${id} approved=${normalizedApproved}`);
-    await log(req, "update", id, { updated_fields: fields }, data, existing);
-
-    return res.json({ success: true, data, message: "Process updated successfully" });
-  } catch (err) {
-    logger.error(`[eng_process_master] update error user=${req?.user?.id}: ${err?.message || err}`);
-    if (err?.code === "23505") {
-      return res.status(409).json({
-        success: false,
-        message: "Only one active START and one active END process is allowed",
-      });
-    }
-    return res.status(err.statusCode || 500).json({ success: false, message: err.message });
+  if (normalizeApprovedInput(body.approved) === true) {
+    const approval = { updated_by: auditUserName(req), updated_at: new Date() };
+    applyApprovalWorkflow({ req, fields: approval, incomingApproved: true, hasBusinessChanges: false, auditAsName: true, approvalTimestamp: new Date() });
+    await updateProcessRow(id, approval);
   }
-};
 
-export const deleteProcess = async (req, res) => {
-  try {
-    const id = parsePositiveIntId(req.body?.id);
-    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
+  const data = await findProcess(id);
+  logger.info(`[${ENTITY}] create user=${req?.user?.id} id=${id} name=${name}`);
+  await log(req, "create", id, { name, depth, parent_id }, data);
+  return res.status(201).json({ success: true, data, message: "Process created successfully" });
+});
 
-    const existing = await findProcess({ id });
-    if (!existing) return res.status(404).json({ success: false, message: "Not found" });
+export const updateProcess = handle("update", async (req, res) => {
+  const body = req.body || {};
+  const id = parsePositiveIntId(body.id);
+  if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
 
-    const childCount = await countActiveChildren(id);
-    if (childCount > 0) {
-      return res.status(409).json({
-        success: false,
-        message: `Cannot delete — ${childCount} child process(es) still active`,
-      });
-    }
+  const existing = await findProcess(id);
+  if (!existing) return res.status(404).json({ success: false, message: "Not found" });
 
-    await deleteProcesses({ id }, { deleted_by: auditUserName(req) });
-    logger.info(`[eng_process_master] delete user=${req?.user?.id} id=${id}`);
-    await log(req, "delete", id, { name: existing.name }, existing);
+  const blocked = assertWithinEditDays(req, existing.created_at, "edit");
+  if (blocked) return res.status(blocked.status).json({ success: false, message: blocked.message });
 
-    return res.json({ success: true, message: "Process deleted successfully" });
-  } catch (err) {
-    logger.error(`[eng_process_master] delete error user=${req?.user?.id}: ${err?.message || err}`);
-    return res.status(500).json({ success: false, message: err.message });
+  const input = {
+    name: body.name,
+    stage: body.stage,
+    pattern: body.pattern !== undefined ? toPattern(body.pattern) : undefined,
+  };
+  for (const f of FLAGS) input[f] = body[f];
+
+  const { hasChanges, fields } = prepareUpdateByRules({
+    existing,
+    input,
+    rules: [
+      { field: "name", normalize: toName },
+      { field: "stage", normalize: toStage },
+      { field: "pattern", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
+      ...FLAGS.map((field) => ({ field, normalize: toBool })),
+    ],
+  });
+  if (fields.name !== undefined && !fields.name) return res.status(400).json({ success: false, message: "name required" });
+
+  let moved = false;
+  if (body.parent_id !== undefined) {
+    const { parent_id, depth } = resolveParent(await loadTree(), parentIdOf(body), id);
+    moved = Number(existing.parent_id ?? 0) !== Number(parent_id ?? 0);
+    if (moved) Object.assign(fields, { parent_id, depth });
   }
-};
 
-export const listProcessViews = async (req, res) => {
-  try {
-    const body = req.body || {};
-    const { page, limit, search, filters } = extractListParams(body);
-    const safeFilters = sanitizeFilters(filters || {}, ["id", "type", "approved", "parent_id", "stage"]);
+  const renamed = fields.name !== undefined && fields.name !== existing.name;
+  if (renamed || moved) await assertUniqueName(fields.name ?? existing.name, moved ? fields.parent_id : existing.parent_id, id);
 
-    // Single-row resolve for SearchableSelect getById (via helper, no eng_process_master.view needed)
-    const byId = parsePositiveIntId(body.id ?? safeFilters.id);
-    if (byId) {
-      const row = await findProcess({ id: byId });
-      if (!row) {
-        return res.json({ success: true, data: [], total: 0 });
-      }
-      const item = {
-        id: row.id,
-        name: row.name,
-        label: row.path_label || row.name,
-        type: row.type,
-        stage: row.stage,
-        parent_id: row.parent_id,
-      };
-      return res.json({ success: true, data: [item], total: 1 });
-    }
-
-    const views = await findProcesses({
-      filters: { approved: true, ...safeFilters },
-      search: sanitizeSearch(search),
-      sort: { by: "name", order: "ASC" },
-      page: page || 1,
-      limit: limit || 50,
-    });
-    const data = (views.data || []).map((r) => ({
-      id: r.id,
-      name: r.name,
-      label: r.path_label || r.name,
-      type: r.type,
-      stage: r.stage,
-      parent_id: r.parent_id,
-    }));
-    return res.json({ success: true, data, total: views.total });
-  } catch (err) {
-    logger.error(`[eng_process_master] helper error user=${req?.user?.id}: ${err?.message || err}`);
-    return res.status(500).json({ success: false, message: err.message });
+  const approved = normalizeApprovedInput(body.approved);
+  if (!hasChanges && !moved && approved === undefined) {
+    return res.status(400).json({ success: false, message: "No fields to update" });
   }
-};
+
+  applyApprovalUpdateFields({
+    req,
+    fields,
+    incomingApproved: approved,
+    hasBusinessChanges: hasChanges || moved,
+    alreadyApproved: existing.approved === true,
+    auditAsName: true,
+  });
+
+  await updateProcessRow(id, fields);
+  // Parent changed → fix depth of its sub-processes. A rename needs nothing: path_label is built when reading.
+  if (moved) await syncProcessDepth();
+
+  const data = await findProcess(id);
+  logger.info(`[${ENTITY}] update user=${req?.user?.id} id=${id} approved=${approved}`);
+  await log(req, "update", id, { updated_fields: fields }, data, existing);
+  return res.json({ success: true, data, message: "Process updated successfully" });
+});
+
+export const deleteProcess = handle("delete", async (req, res) => {
+  const id = parsePositiveIntId(req.body?.id);
+  if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
+
+  const existing = await findProcess(id);
+  if (!existing) return res.status(404).json({ success: false, message: "Not found" });
+
+  const children = await countActiveChildren(id);
+  if (children > 0) {
+    return res.status(409).json({ success: false, message: `Cannot delete — ${children} child process(es) still active` });
+  }
+
+  await softDeleteProcess(id, auditUserName(req));
+  logger.info(`[${ENTITY}] delete user=${req?.user?.id} id=${id}`);
+  await log(req, "delete", id, { name: existing.name }, existing);
+  return res.json({ success: true, message: "Process deleted successfully" });
+});
+
+/** Dropdown: approved processes; `id` → that one row; `exclude_id` → hides it and its sub-processes (parent picker). */
+export const listProcessViews = handle("helper", async (req, res) => {
+  const body = req.body || {};
+  const { page, limit, search, filters } = extractListParams(body);
+  const safeFilters = sanitizeFilters(filters || {}, ["id", "approved", "parent_id", "stage", "depth", "fg", "prime"]);
+
+  const byId = parsePositiveIntId(body.id ?? safeFilters.id);
+  if (byId) {
+    const row = await findProcess(byId);
+    return res.json({ success: true, data: row ? [toOption(row)] : [], total: row ? 1 : 0 });
+  }
+
+  const excludeId = parsePositiveIntId(body.exclude_id);
+  const { data, total } = await findProcesses({
+    filters: { approved: true, ...safeFilters },
+    search: sanitizeSearch(search),
+    sort: { by: "id", order: "ASC" },
+    page: page || 1,
+    limit: limit || 50,
+    excludeIds: excludeId ? subtreeIds(await loadTree(), excludeId) : [],
+  });
+  return res.json({ success: true, data: data.map(toOption), total });
+});

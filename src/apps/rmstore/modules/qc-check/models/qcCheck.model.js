@@ -8,13 +8,15 @@ const TABLE = T.QC_CHECK;
 
 const QC_MRN_JOIN = `LEFT JOIN ${T.MRN} m ON m.uid = q.mrn_uid`;
 
-/** MRN display fields (item/qty come from join / coil aggregate). */
+/** MRN display fields (item/qty/supplier come from join / coil aggregate). */
 const QC_ENRICH_SELECT = `
   m.mrn_no,
   m.heat_no,
   m.item_dcode,
   m.item_code,
-  m.item_desc`;
+  m.item_desc,
+  m.acc_code,
+  m.acc_name`;
 
 const QC_APPROVED_COND = `q.approved = true`;
 
@@ -34,6 +36,8 @@ function qcSearchSql(idx) {
       COALESCE(m.heat_no,'') ILIKE $${idx} OR
       COALESCE(m.item_code,'') ILIKE $${idx} OR
       COALESCE(m.item_desc,'') ILIKE $${idx} OR
+      COALESCE(m.acc_name,'') ILIKE $${idx} OR
+      COALESCE(m.acc_code::text,'') ILIKE $${idx} OR
       COALESCE(q.failure_reason,'') ILIKE $${idx} OR
       COALESCE(q.remarks,'') ILIKE $${idx} OR
       m.mrn_no::text ILIKE $${idx}
@@ -393,6 +397,8 @@ export const findPendingCoilsForQc = async (options = {}) => {
           qpend.remarks,
           qpend.inspected_by,
           qpend.inspected_at,
+          m.sticker_by AS qc_pending_by,
+          COALESCE(m.sticker_at, c.created_at) AS qc_pending_at,
           NULL::text AS approved_by,
           NULL::timestamp AS approved_at,
           false AS approved,
@@ -401,6 +407,7 @@ export const findPendingCoilsForQc = async (options = {}) => {
           c.created_at,
           c.created_by AS created_by_name,
           qpend.inspected_by AS inspected_by_name,
+          m.sticker_by AS qc_pending_by_name,
           NULL::text AS approved_by_name,
           (qpend.qc_check_uid IS NULL) AS is_virtual_pending,
           1::int AS coil_count,
@@ -467,6 +474,8 @@ export const findPendingCoilsForQc = async (options = {}) => {
          qpend.remarks,
          qpend.inspected_by,
          qpend.inspected_at,
+         m.sticker_by AS qc_pending_by,
+         COALESCE(m.sticker_at, c.created_at) AS qc_pending_at,
          c.created_by,
          c.created_at,
          (qpend.qc_check_uid IS NULL) AS is_virtual_pending
@@ -501,6 +510,8 @@ export const findPendingCoilsForQc = async (options = {}) => {
          remarks,
          inspected_by,
          inspected_at,
+         qc_pending_by,
+         qc_pending_at,
          created_by,
          created_at,
          is_virtual_pending,
@@ -530,6 +541,8 @@ export const findPendingCoilsForQc = async (options = {}) => {
          (ARRAY_AGG(remarks ORDER BY qc_check_uid DESC NULLS LAST))[1] AS remarks,
          (ARRAY_AGG(inspected_by ORDER BY qc_check_uid DESC NULLS LAST))[1] AS inspected_by,
          (ARRAY_AGG(inspected_at ORDER BY qc_check_uid DESC NULLS LAST))[1] AS inspected_at,
+         (ARRAY_AGG(qc_pending_by ORDER BY qc_check_uid DESC NULLS LAST))[1] AS qc_pending_by,
+         MAX(qc_pending_at) AS qc_pending_at,
          (ARRAY_AGG(created_by ORDER BY created_at ASC))[1] AS created_by,
          MIN(created_at) AS created_at,
          BOOL_AND(qc_check_uid IS NULL) AS is_virtual_pending,
@@ -560,6 +573,8 @@ export const findPendingCoilsForQc = async (options = {}) => {
        remarks,
        inspected_by,
        inspected_at,
+       qc_pending_by,
+       qc_pending_at,
        NULL::text AS approved_by,
        NULL::timestamp AS approved_at,
        false AS approved,
@@ -568,6 +583,7 @@ export const findPendingCoilsForQc = async (options = {}) => {
        created_at,
        created_by AS created_by_name,
        inspected_by AS inspected_by_name,
+       qc_pending_by AS qc_pending_by_name,
        NULL::text AS approved_by_name,
        is_virtual_pending,
        coil_count,
@@ -687,6 +703,7 @@ export const replaceQcCheckItems = async (qc_check_uid, items = []) => {
     document_required: it.document_required === true,
     actual_value: it.actual_value ?? null,
     document_note: it.document_note ?? null,
+    document_id: it.document_id != null ? String(it.document_id).trim().toLowerCase() : null,
     result: it.result ?? null,
   }));
   const [row] = await dbQuery(
@@ -699,9 +716,24 @@ export const replaceQcCheckItems = async (qc_check_uid, items = []) => {
   return normalizeItems(row?.items).map((it) => ({ ...it, qc_check_uid: id }));
 };
 
+export const stampQcInspectionStartIfEmpty = async (qc_check_uid, inspected_by = null) => {
+  const id = Number(qc_check_uid);
+  if (!Number.isFinite(id)) return null;
+  const by = inspected_by != null ? String(inspected_by).trim() || null : null;
+  const [row] = await dbQuery(
+    `UPDATE ${TABLE}
+     SET inspected_by = COALESCE(inspected_by, $2),
+         inspected_at = COALESCE(inspected_at, NOW())
+     WHERE qc_check_uid = $1 AND is_deleted = false
+     RETURNING *`,
+    [id, by]
+  );
+  return row ?? null;
+};
+
 export const updateQcCheck = async (qc_check_uid, fields = {}) => {
   const allowed = [
-    "status", "overall_result", "failure_reason", "remarks", "inspected_by", "inspected_at",
+    "status", "overall_result", "failure_reason", "remarks",
     "approved", "approved_by", "approved_at",
     "qc_reject_uid", "updated_by", "updated_at",
   ];
@@ -712,7 +744,9 @@ export const updateQcCheck = async (qc_check_uid, fields = {}) => {
   const keys = Object.keys(safe);
   if (!keys.length) return findQcCheck(qc_check_uid);
 
-  const { setParts, values, nextIndex } = buildNaiveTimestampUpdateParts(safe);
+  const { setParts, values, nextIndex } = buildNaiveTimestampUpdateParts(safe, {
+    nowKeys: ["updated_at", "approved_at", "deleted_at"],
+  });
   values.push(Number(qc_check_uid));
   const [row] = await dbQuery(
     `UPDATE ${TABLE} SET ${setParts.join(", ")}
@@ -853,6 +887,8 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
       COALESCE(m.heat_no,'') ILIKE $${idx} OR
       COALESCE(m.item_code,'') ILIKE $${idx} OR
       COALESCE(m.item_desc,'') ILIKE $${idx} OR
+      COALESCE(m.acc_name,'') ILIKE $${idx} OR
+      COALESCE(m.acc_code::text,'') ILIKE $${idx} OR
       COALESCE(q.failure_reason,'') ILIKE $${idx} OR
       m.mrn_no::text ILIKE $${idx} OR
       q.qc_check_uid::text ILIKE $${idx}
@@ -880,6 +916,8 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
             m.item_dcode,
             m.item_code,
             m.item_desc,
+            m.acc_code,
+            m.acc_name,
             q.status,
             q.failure_reason,
             q.remarks,
@@ -921,6 +959,8 @@ export const findFailedQcChecksPendingRejection = async (options = {}) => {
     total_qty: r.qty ?? 0,
     coil_count: Number(r.coil_count) || 1,
     approved: false,
+    vendor_acc_code: r.acc_code || null,
+    vendor_acc_name: r.acc_name || null,
   }));
 
   return { data, total, page: safePage, limit: safeLimit, totalPages: Math.ceil(total / safeLimit) };

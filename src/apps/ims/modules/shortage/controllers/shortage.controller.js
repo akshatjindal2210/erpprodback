@@ -56,7 +56,10 @@ async function enrichShortageRows(rows = []) {
   // Saved shortage grpname wins over IMS item master (user may override group on form).
   return enriched.map((row, i) => {
     const saved = rows[i]?.grpname;
-    return saved != null && String(saved).trim() !== "" ? { ...row, grpname: String(saved).trim() } : row;
+    const item_weight = itemMap.get(canonicalCode(row.itemdcode))?.weight ?? null;
+    return saved != null && String(saved).trim() !== ""
+      ? { ...row, grpname: String(saved).trim(), item_weight }
+      : { ...row, item_weight };
   });
 }
 

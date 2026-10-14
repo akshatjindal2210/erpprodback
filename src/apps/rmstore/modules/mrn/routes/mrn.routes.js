@@ -4,10 +4,10 @@ import { getMrnDetail, generateMrnStickers, getMrnCoils, uploadMrnDocs, saveMrnS
 import { previewCoilSticker, renderSingleCoilSticker, renderBulkCoilStickers, renderBatchQcSticker } from "../controllers/coilStickerPrint.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
-import { rmTcUpload } from "../../../lib/middleware/upload.js";
+import { docUpload } from "../../../../../lib/documents/index.js";
 
 const router = express.Router();
-const MODULE = "rm_mrn_portal";
+export const MODULE = "rm_mrn_portal";
 
 const mrnErpReader = accessControlAny([
   { moduleName: MODULE, actions: ["view", "add"] },
@@ -32,10 +32,10 @@ router.post("/reject", authenticate, accessControl(MODULE, "authorize"), rejectM
 router.post("/cancel-rejection", authenticate, accessControl(MODULE, "authorize"), cancelMrnPortalRejection);
 
 /** Save sticker form draft — optional TC/RMTC upload, no coils created. */
-router.post("/save-sticker-draft", authenticate, accessControl(MODULE, "add"), rmTcUpload.fields([{ name: "tc", maxCount: 1 }, { name: "rmtc", maxCount: 1 }]), saveMrnStickerDraftCtrl);
+router.post("/save-sticker-draft", authenticate, accessControl(MODULE, "add"), docUpload(MODULE).fields([{ name: "tc", maxCount: 1 }, { name: "rmtc", maxCount: 1 }]), saveMrnStickerDraftCtrl);
 
 /** Simple TC/RMTC upload after generate. */
-router.post("/upload-docs", authenticate, accessControl(MODULE, "add"), rmTcUpload.fields([{ name: "tc", maxCount: 1 }, { name: "rmtc", maxCount: 1 }]), uploadMrnDocs);
+router.post("/upload-docs", authenticate, accessControl(MODULE, "add"), docUpload(MODULE).fields([{ name: "tc", maxCount: 1 }, { name: "rmtc", maxCount: 1 }]), uploadMrnDocs);
 
 /** 
  * Sticker print/preview — HTML from coilStickerDesign.js only.

@@ -454,12 +454,13 @@ function mapIncompleteRejectionRow(row) {
         : row.out_created_at || row.approved_at || row.created_at,
     created_at: row.created_at,
     created_by_name: row.created_by_name,
-    // MRN join — mal is vendor/item se aaya; BPS match isi pe
+    // MRN join — vendor/item for list + view
     vendor_acc_code: row.vendor_acc_code != null ? String(row.vendor_acc_code).trim() || null : null,
     vendor_acc_name: row.vendor_acc_name != null ? String(row.vendor_acc_name).trim() || null : null,
     match_item_dcode: row.match_item_dcode != null ? String(row.match_item_dcode).trim() || null : null,
     match_item_code: row.match_item_code != null ? String(row.match_item_code).trim() || null : null,
     acc_code: row.vendor_acc_code != null ? String(row.vendor_acc_code).trim() || null : null,
+    acc_name: row.vendor_acc_name != null ? String(row.vendor_acc_name).trim() || null : null,
     item_dcode: row.match_item_dcode != null ? String(row.match_item_dcode).trim() || null : null,
   };
 }

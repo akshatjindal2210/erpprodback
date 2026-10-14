@@ -2,7 +2,10 @@ import dbQuery from "../../../../../../config/db/db.js";
 import { patchTableSchema, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 import { IMS_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
-/** Gate Entry + Invoice Receiving columns (local — no ERP invreceiving). */
+/**
+ * Gate Entry + Invoice Receiving columns (local — no ERP invreceiving).
+ * IR files: `documents` + `doc_files`. Old `receiving_file` is dropped by the documents backfill (migrations/v5.0.0).
+ */
 export async function createGateEntryTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.GATE_ENTRY} (
@@ -24,7 +27,6 @@ export async function createGateEntryTable() {
       deleted_by     TEXT,
       deleted_at     TIMESTAMP,
       invoice_matched BOOLEAN NOT NULL DEFAULT false,
-      receiving_file  TEXT,
       receiving_meta  TEXT
     );
 
@@ -37,7 +39,6 @@ export async function createGateEntryTable() {
     columns: [
       patchCol("type", "VARCHAR(16) NOT NULL DEFAULT 'out'"),
       patchCol("invoice_matched", "BOOLEAN NOT NULL DEFAULT false"),
-      patchCol("receiving_file", "TEXT"),
       patchCol("receiving_meta", "TEXT"),
     ],
   });

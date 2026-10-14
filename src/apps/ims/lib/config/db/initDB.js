@@ -29,9 +29,6 @@ export async function initImsDB() {
   await createStickerTypeTable();
   await createAppConfigTable();
   await createLocationMasterTable();
-  await createTrayBatchTable();
-  await createTrayMasterTable();
-  await createTrayManageTable();
   await createPackingStandardTable();
   await createInventoryInwardsTable();
   await createForwardingNoteMasterTable();
@@ -40,11 +37,14 @@ export async function initImsDB() {
   await createShortageTable();
   await createOutEntryTable();
   await createGateEntryTable();
+  await createStockAdjustmentTable(); // before box (box.sa_id → stock adjustment)
   await createBoxTable();
+  await createTrayBatchTable(); // tray after box (tray_master.box_uid → box)
+  await createTrayMasterTable();
+  await createTrayManageTable();
   await createDailyProdTable();
   await createSchedulePlanTable();
   await createSchedulePlanTransactionTable();
-  await createStockAdjustmentTable();
   await createBoxDownloadLogTable();
   await createBoxOverrideRequestTable();
   await createOutEntryScannedBoxTable();

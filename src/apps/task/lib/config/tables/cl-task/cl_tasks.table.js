@@ -27,7 +27,6 @@ export async function createTaskClTasksMasterTable() {
       approved_by            TEXT,
       approved_at            TIMESTAMP,
       form_schema            JSONB NOT NULL DEFAULT '[]'::jsonb,
-      attachment             JSONB DEFAULT NULL,
       verification_required  BOOLEAN NOT NULL DEFAULT TRUE,
       scoring_enabled        BOOLEAN NOT NULL DEFAULT TRUE,
       sop_required           BOOLEAN NOT NULL DEFAULT FALSE,
@@ -47,6 +46,7 @@ export async function createTaskClTasksMasterTable() {
       patchCol("include_sunday", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ],
   });
+  // Legacy JSON `attachment`: dropped by documents backfill after files → `doc_files` + `documents`.
 }
 
 export async function createTaskClTasksTable() {

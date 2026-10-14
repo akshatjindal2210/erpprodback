@@ -2,7 +2,9 @@ import ClTask from "../models/clTask.model.js";
 import RedTicket from "../../red-ticket/models/redTicket.model.js";
 import MisScore from "../../reports/models/misScore.model.js";
 import { getISTDateString, normalizeDueTime, getClTaskFillBlockedReason, canSubmitPreviousTask, toYmd, getClTaskFillDeadlineYmd, isClTaskMissed } from "../helpers/time/clTaskTime.helper.js";
-import { parseFormSchema, parseFormResponses, validateFormEntries, mergeEntryUploadedFiles, buildClAttachmentMeta, parseClAttachments, getOpenFills, archiveOpenFill, buildOpenFormResponses, getAwaitingOpenFills, approveOpenFillInResponses, rejectOpenFillInResponses, serializeOpenFillAsSubmission, patchOpenFillInResponses } from "../helpers/form/clTaskForm.helper.js";
+import { parseFormSchema, parseFormResponses, validateFormEntries, mergeEntryUploadedFiles, buildClAttachmentMeta, parseClAttachments, rewriteClEntryFilePaths, getOpenFills, archiveOpenFill, buildOpenFormResponses, getAwaitingOpenFills, approveOpenFillInResponses, rejectOpenFillInResponses, serializeOpenFillAsSubmission, patchOpenFillInResponses } from "../helpers/form/clTaskForm.helper.js";
+import { parseFileRemarks, syncAttachmentList, registerUploadedFiles } from "../../../../../lib/documents/index.js";
+import { stampRmstoreUploadedFiles } from "../../../../rmstore/lib/utils/stampRmstoreUploadedFiles.js";
 import { buildRecurrencePayload, validateClRecurrence, computeClNextOccurrence, computeClFirstOccurrence, clampDayOffset, parseRecurrenceArray, serializeClDate, isClOccurrenceDay } from "../helpers/recurrence/clTaskRecurrence.helper.js";
 import { parseIdList, resolveClMasterAssignees, userMatchesClMasterScope, getUserOrgIds } from "../helpers/assignee/clTaskAssignee.helper.js";
 import { masterSnapshotForInstance, spawnInstancesForMasterDay } from "../helpers/spawn/clTaskSpawn.helper.js";
@@ -14,6 +16,15 @@ import { MST_TABLES as M } from "../../../../../config/db/dbTables.js";
 import { moduleSortOrderNumericExpr } from "../../../../core/lib/utils/config/moduleSortOrderSql.js";
 
 const MODULE_SORT_ORDER = moduleSortOrderNumericExpr("m");
+
+/** CL files → `documents`: master SOP files (mod_ref = cl_task_id, `doc_files`) and form-fill uploads (mod_ref = instance_id). */
+const CL_MASTER_DOCS = "cl_task_master";
+const CL_FILL_DOCS = "cl_task_fill";
+const uploadedFileMetas = (req) => (req.files || []).map(buildClAttachmentMeta).filter(Boolean);
+
+/** CL `{ file_path, remark, size }` → `syncAttachmentList` shape. */
+const toSyncAttachments = (list = []) =>
+  list.filter((a) => a?.file_path).map((a) => ({ path: a.file_path, remark: a.remark ?? null, size: a.size ?? a.file_size ?? null }));
 
 async function loadUserModulePermissions(userId) {
   let permissions = getCachedPermissions(userId);
@@ -976,7 +987,15 @@ export async function createClTask(req, res) {
       });
     }
 
-    const uploaded = (req.files || []).map(buildClAttachmentMeta).filter(Boolean);
+    await stampRmstoreUploadedFiles(req);
+    const uploaded = (req.files || [])
+      .map((f, i) => {
+        const meta = buildClAttachmentMeta(f);
+        if (!meta) return null;
+        const note = parseFileRemarks(req.body, i);
+        return note ? { ...meta, remark: note } : meta;
+      })
+      .filter(Boolean);
     const kept = parseClAttachments(req.body.existing_attachments ?? req.body.attachment);
     const attachment = [...kept, ...uploaded];
 
@@ -994,10 +1013,10 @@ export async function createClTask(req, res) {
       approved_at: new Date(),
       created_by: actor.id,
       created_by_name: actor.name,
-      attachment: attachment.length ? attachment : null,
     };
 
     const clTaskId = await ClTask.createMaster(masterData);
+    if (attachment.length) await syncAttachmentList(CL_MASTER_DOCS, clTaskId, toSyncAttachments(attachment), req);
     const master = await ClTask.getMasterById(clTaskId);
     /** Report: instances spawn when due (cron) — not at master create. */
     const after = await ClTask.getMasterById(clTaskId);
@@ -1080,20 +1099,31 @@ export async function updateClTask(req, res) {
       req.body.existing_attachments != null
         ? parseClAttachments(req.body.existing_attachments)
         : parseClAttachments(existing.attachment);
-    const uploaded = (req.files || []).map(buildClAttachmentMeta).filter(Boolean);
+    await stampRmstoreUploadedFiles(req);
+    const uploaded = (req.files || [])
+      .map((f, i) => {
+        const meta = buildClAttachmentMeta(f);
+        if (!meta) return null;
+        const note = parseFileRemarks(req.body, i);
+        return note ? { ...meta, remark: note } : meta;
+      })
+      .filter(Boolean);
     const attachment = [...kept, ...uploaded];
 
     const actor = actorFromReq(req);
     const payload = {
       ...built.data,
-      attachment: attachment.length ? attachment : null,
       updated_by: actor.id,
       updated_by_name: actor.name,
     };
 
     await ClTask.updateMaster(id, payload);
+    await syncAttachmentList(CL_MASTER_DOCS, id, toSyncAttachments(attachment), req);
     // Pending assigned tasks get latest form / SOP / attachment so assignee sees fields
-    await ClTask.syncPendingInstancesFromMaster(id, payload);
+    await ClTask.syncPendingInstancesFromMaster(id, {
+      ...payload,
+      attachment: attachment.length ? attachment : null,
+    });
 
     // Reconcile assignee scope: drop pending for removed people; spawn today for new ones
     const allowedIds = assignees.map((u) => Number(u.id));
@@ -1242,12 +1272,16 @@ export async function submitClTask(req, res) {
       return res.status(400).json({ success: false, message: "At least one form entry is required" });
     }
 
+    await stampRmstoreUploadedFiles(req);
     entries = mergeEntryUploadedFiles(entries, req.files || []);
 
     const validationErrors = validateFormEntries(schema, entries);
     if (validationErrors.length) {
       return res.status(400).json({ success: false, message: validationErrors[0] });
     }
+    // Every new multer file → `documents` (cl_task_fill); rewrite form paths to stored paths.
+    const registered = await registerUploadedFiles(CL_FILL_DOCS, id, uploadedFileMetas(req), req);
+    if (registered.length) entries = rewriteClEntryFilePaths(entries, registered);
 
     const needsVerification = task.verification_required !== false;
     const formPayload = schema.length ? { entries } : {};
@@ -1357,6 +1391,7 @@ export async function updateClTaskSubmission(req, res) {
       });
     }
 
+    await stampRmstoreUploadedFiles(req);
     entries = mergeEntryUploadedFiles(entries, req.files || []);
     if (schema.length) {
       const validationErrors = validateFormEntries(schema, entries);
@@ -1364,6 +1399,8 @@ export async function updateClTaskSubmission(req, res) {
         return res.status(400).json({ success: false, message: validationErrors[0] });
       }
     }
+    const registered = await registerUploadedFiles(CL_FILL_DOCS, id, uploadedFileMetas(req), req);
+    if (registered.length) entries = rewriteClEntryFilePaths(entries, registered);
 
     const actor = actorFromReq(req);
 

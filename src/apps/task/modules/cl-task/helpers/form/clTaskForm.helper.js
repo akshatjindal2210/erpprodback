@@ -1,5 +1,4 @@
-import path from "path";
-import config from "../../../../../../config/app/config.js";
+import { publicPathOf, normDocPath } from "../../../../../../lib/documents/documents.utils.js";
 
 export function parseFormSchema(raw) {
   if (!raw) return [];
@@ -60,11 +59,11 @@ export function validateFormResponses(schema, responses) {
 export function mergeUploadedFiles(responses, files = []) {
   const merged = { ...responses };
   for (const file of files) {
-    const fieldId = file.fieldname;
-    const relativePath = path.relative(path.resolve(config.uploadPath), file.path);
-    merged[fieldId] = {
+    const file_path = publicPathOf(file);
+    if (!file_path) continue;
+    merged[file.fieldname] = {
       file_name: file.originalname,
-      file_path: path.join(config.uploadPublicPath, relativePath).replace(/\\/g, "/"),
+      file_path,
       mime_type: file.mimetype,
       size: file.size,
     };
@@ -312,10 +311,11 @@ export function mergeEntryUploadedFiles(entries, files = []) {
     const idx = Number(match[1]);
     const fieldId = match[2];
     if (!result[idx]) continue;
-    const relativePath = path.relative(path.resolve(config.uploadPath), file.path);
+    const file_path = publicPathOf(file);
+    if (!file_path) continue;
     const meta = {
       file_name: file.originalname,
-      file_path: path.join(config.uploadPublicPath, relativePath).replace(/\\/g, "/"),
+      file_path,
       mime_type: file.mimetype,
       size: file.size,
     };
@@ -335,13 +335,50 @@ export function mergeEntryUploadedFiles(entries, files = []) {
 /** Build public attachment meta from a multer file for CL master/instance. */
 export function buildClAttachmentMeta(file) {
   if (!file) return null;
-  const relativePath = path.relative(path.resolve(config.uploadPath), file.path);
+  const file_path = publicPathOf(file);
+  if (!file_path) return null;
   return {
     file_name: file.originalname,
-    file_path: path.join(config.uploadPublicPath, relativePath).replace(/\\/g, "/"),
+    file_path,
     mime_type: file.mimetype,
     size: file.size,
   };
+}
+
+/**
+ * After `registerUploadedFiles`, point form entry attachment paths at the
+ * `documents` public paths (and set `document_id` when present).
+ * `mapped` = `[{ from, to, uuid }]`.
+ */
+export function rewriteClEntryFilePaths(entries = [], mapped = []) {
+  if (!Array.isArray(entries) || !mapped?.length) return entries;
+  const pathMap = new Map();
+  for (const m of mapped) {
+    const from = normDocPath(m?.from);
+    const to = normDocPath(m?.to);
+    if (from && to) pathMap.set(from, { to, uuid: m.uuid || null });
+  }
+  if (!pathMap.size) return entries;
+
+  const rewriteOne = (a) => {
+    if (!a?.file_path) return a;
+    const hit = pathMap.get(normDocPath(a.file_path));
+    if (!hit) return a;
+    return {
+      ...a,
+      file_path: hit.to,
+      document_id: hit.uuid || a.document_id || null,
+    };
+  };
+
+  return entries.map((e) => {
+    const responses = { ...(e.responses || {}) };
+    for (const [k, v] of Object.entries(responses)) {
+      if (Array.isArray(v)) responses[k] = v.map(rewriteOne);
+      else if (v?.file_path) responses[k] = rewriteOne(v);
+    }
+    return { ...e, responses };
+  });
 }
 
 /** Always return attachment list. Legacy single object → [object]. */

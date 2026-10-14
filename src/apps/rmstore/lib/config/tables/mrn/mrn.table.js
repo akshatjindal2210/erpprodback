@@ -36,8 +36,6 @@ export async function createRmStoreMrnTable() {
       internal_create_date     TIMESTAMP WITH TIME ZONE,
       system_generate_user     VARCHAR(255),
       system_generate_date     TIMESTAMP WITH TIME ZONE,
-      tc_file_path             TEXT,
-      rmtc_file_path           TEXT,
       sticker_draft            JSONB,
       sticker_status           VARCHAR(24) DEFAULT 'pending',
       sticker_by               VARCHAR(255),
@@ -64,8 +62,6 @@ export async function createRmStoreMrnTable() {
       patchCol("sticker_reject_uid", "INTEGER"),
       patchCol("qty", "NUMERIC"),
       patchCol("coil_no", "VARCHAR(100)"),
-      patchCol("tc_file_path", "TEXT"),
-      patchCol("rmtc_file_path", "TEXT"),
       patchCol("sticker_draft", "JSONB"),
       patchCol("sticker_mode", "VARCHAR(24)"),
       patchCol("internal_create_user", "VARCHAR(255)"),
@@ -118,10 +114,10 @@ export async function createRmStoreMrnTable() {
     }
   }
 
+  // tc_file_path / rmtc_file_path / tc_file_name / rmtc_file_name: dropped by the documents backfill
+  // (migrations/v5.0.0/docFileBackfill.js) only after their files are copied into `documents` — not here.
   await dropColumnsIfExist(dbQuery, T.MRN, [
     "serial_no",
-    "tc_file_name",
-    "rmtc_file_name",
     "sticker_generated",
     "sticker_draft_at",
     "sticker_draft_by",

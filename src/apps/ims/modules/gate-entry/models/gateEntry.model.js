@@ -151,7 +151,7 @@ export async function updateGateEntryMeta(uid, { remarks, transporter_name, vehi
 const IR_GATE_SELECT = `
   uid, type, bill_no, bill_dt, remarks, transporter_name, vehicle_number,
   created_by, created_at, updated_by, updated_at, approved_at,
-  invoice_matched, receiving_file, receiving_meta
+  invoice_matched, receiving_meta
 `;
 
 /** Gate Out rows not yet invoice-received (IR Pending). */
@@ -182,7 +182,6 @@ export async function findMatchedOutGateRows({ from_date, to_date, apply_pending
     "is_deleted = false",
     "LOWER(COALESCE(type, 'out')) = 'out'",
     "invoice_matched = true",
-    "NULLIF(TRIM(COALESCE(receiving_file, '')), '') IS NOT NULL",
   ];
 
   const billDtExpr = GATE_BILL_DT_DATE_SQL;
@@ -219,9 +218,9 @@ export async function findMatchedOutGateRows({ from_date, to_date, apply_pending
   return (rows || []).filter(gateRowMeetsPendingMinBillDt);
 }
 
-/** Save invoice receiving attachment + audit meta on the gate row (no ERP).
+/** Save invoice receiving audit meta on the gate row (no ERP). Files are saved in `documents` by the caller.
  * Does NOT touch Gate Entry updated_at / updated_by — IR-only columns. */
-export async function saveGateInvoiceReceiving(bill_no, { receiving_file, receiving_meta }) {
+export async function saveGateInvoiceReceiving(bill_no, { receiving_meta }) {
   const bill = String(bill_no || "").trim();
   if (!bill) return null;
   const [row] = await dbQuery(
@@ -229,13 +228,12 @@ export async function saveGateInvoiceReceiving(bill_no, { receiving_file, receiv
     UPDATE ${T.GATE_ENTRY}
     SET
       invoice_matched = true,
-      receiving_file = $2,
-      receiving_meta = $3
+      receiving_meta = $2
     WHERE is_deleted = false
       AND LOWER(TRIM(bill_no)) = LOWER($1)
     RETURNING *
     `,
-    [bill, receiving_file ?? null, receiving_meta ?? null]
+    [bill, receiving_meta ?? null]
   );
   return row || null;
 }
@@ -250,7 +248,6 @@ export async function clearGateInvoiceReceiving(bill_no) {
     UPDATE ${T.GATE_ENTRY}
     SET
       invoice_matched = false,
-      receiving_file = NULL,
       receiving_meta = NULL
     WHERE is_deleted = false
       AND LOWER(TRIM(bill_no)) = LOWER($1)

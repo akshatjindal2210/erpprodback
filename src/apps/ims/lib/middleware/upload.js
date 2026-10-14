@@ -2,6 +2,7 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import config from "../../../../config/app/config.js";
+import { multerUuidFilename } from "../../../../lib/documents/index.js";
 
 // Helper to create folder if it doesn't exist
 const ensureDir = (dir) => {
@@ -33,10 +34,7 @@ const chatStorage = multer.diskStorage({
     ensureDir(dir);
     cb(null, dir);
   },
-  filename: (req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `${unique}${path.extname(file.originalname)}`);
-  },
+  filename: multerUuidFilename,
 });
 
 export const chatUpload = multer({
@@ -52,10 +50,7 @@ const selfStorage = multer.diskStorage({
     ensureDir(dir);
     cb(null, dir);
   },
-  filename: (req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `${unique}${path.extname(file.originalname)}`);
-  },
+  filename: multerUuidFilename,
 });
 
 export const selfUpload = multer({
@@ -103,48 +98,10 @@ export function toPublicUploadPath(file, fallbackParts = []) {
   return null;
 }
 
-/** Invoice Receiving — `uploads/ims/invoice-receiving` */
-const IMS_IR_ROOT = path.join(config.uploadPath, "ims", "invoice-receiving");
-export const invoiceReceivingUpload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => {
-      ensureDir(IMS_IR_ROOT);
-      cb(null, IMS_IR_ROOT);
-    },
-    filename: (_req, file, cb) => {
-      const orig = String(file.originalname || "attachment");
-      let ext = path.extname(orig).toLowerCase();
-      if (!/^\.(pdf|png|jpe?g|webp|gif)$/.test(ext)) ext = ".bin";
-      const hint = path.basename(orig, path.extname(orig)).replace(/[^\w]/g, "").slice(0, 8).toLowerCase();
-      const uniq = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 4)}`;
-      cb(null, hint ? `${uniq}_${hint}${ext}` : `${uniq}${ext}`);
-    },
-  }),
-  fileFilter,
-  limits: { fileSize: 20 * 1024 * 1024 },
-});
-
+/*
+ * Invoice Receiving and Machine Master uploads use the global `docUpload(MODULE)`
+ * (`lib/documents`, see its README) — folders and file types live in `DOC_FILE_LINKS`.
+ */
 export const toImsIrPublicUploadPath = (file) => toPublicUploadPath(file, ["ims", "invoice-receiving"]);
-
-/** Engineering Machine Master — `uploads/eng/machine` */
-const ENG_MACHINE_ROOT = path.join(config.uploadPath, "eng", "machine");
-export const engineeringMachineUpload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => {
-      ensureDir(ENG_MACHINE_ROOT);
-      cb(null, ENG_MACHINE_ROOT);
-    },
-    filename: (_req, file, cb) => {
-      const orig = String(file.originalname || "attachment");
-      let ext = path.extname(orig).toLowerCase();
-      if (!/^\.(pdf|png|jpe?g|webp|gif|doc|docx|xls|xlsx|txt|csv)$/.test(ext)) ext = ".bin";
-      const hint = path.basename(orig, path.extname(orig)).replace(/[^\w]/g, "").slice(0, 8).toLowerCase();
-      const uniq = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 4)}`;
-      cb(null, hint ? `${uniq}_${hint}${ext}` : `${uniq}${ext}`);
-    },
-  }),
-  fileFilter,
-  limits: { fileSize: 20 * 1024 * 1024 },
-});
 
 export const toEngMachinePublicUploadPath = (file) => toPublicUploadPath(file, ["eng", "machine"]);

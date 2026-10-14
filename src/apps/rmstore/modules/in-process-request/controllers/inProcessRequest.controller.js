@@ -25,8 +25,11 @@ import {
   IPR_REQUEST_TYPE,
   IPR_DOWNSTREAM,
   IPR_TYPE,
+  slimAttachmentsForStorage,
 } from "../models/inProcessRequest.model.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
+import { syncPathsFromList } from "../../../../../lib/documents/index.js";
+import { MODULE as IPR_MODULE } from "../routes/inProcessRequest.routes.js";
 import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
@@ -504,6 +507,11 @@ const sameCoilSet = (a = [], b = []) => {
   return x.length === y.length && x.every((v, idx) => v === y[idx]);
 };
 
+async function saveIprAttachmentsToDocuments(iprUid, attachments, req) {
+  const paths = slimAttachmentsForStorage(attachments).map((p) => String(p).trim().replace(/\\/g, "/"));
+  await syncPathsFromList(IPR_MODULE, iprUid, paths, req, []);
+}
+
 const IPR_BUSINESS_KEYS = [
   "type", "reassign_jc", "stage",
   "request_type", "rejection_type", "reason", "remarks",
@@ -620,6 +628,10 @@ async function assertCoilsForStoreInReturn(coils = [], iprUid = null) {
     }
     const status = String(coil.status || "active").toLowerCase();
     if (isIssuedToShopFloor(coil)) continue;
+    if (iprUid && status === "out") {
+      const hist = await findLatestOutUidForCoil(uid);
+      if (hist?.out_uid) continue;
+    }
     if (iprUid && status === "active") {
       throw Object.assign(
         new Error(`Coil ${c.coil_no_uid} is already back in stock.`),
@@ -659,7 +671,10 @@ async function reconcileCoilsForStoreInReceive(coils = [], storeInIprUid, user, 
     const status = String(coil?.status || "active").toLowerCase();
     if (status !== "rejected" || coil?.ipr_uid == null) continue;
 
-    const restored = await releaseCoilFromIprRejectionHoldForStoreIn(uid, user);
+    const hintOut = c?.out_uid != null && c.out_uid !== "" ? Number(c.out_uid) : null;
+    const restored = await releaseCoilFromIprRejectionHoldForStoreIn(uid, user, {
+      outUid: Number.isFinite(hintOut) && hintOut > 0 ? hintOut : null,
+    });
     if (!restored) continue;
 
     released.push(restored);
@@ -1293,15 +1308,36 @@ async function releaseRejectedCoils(row, user, req) {
   const restored = await revertCoilsInProcessRejection(row.ipr_uid, user);
   if (!restored.length) return 0;
 
-  const restoreOutUids = [];
+  const snapshot = normalizeCoils(row.previous_coils?.length ? row.previous_coils : row.coils);
+  const lineByUid = new Map(
+    snapshot.map((c) => [String(c.coil_no_uid || "").trim().toLowerCase(), c])
+  );
+
+  const shopFloorUids = [];
+  const outUidByCoil = {};
   for (const coil of restored) {
     const uid = String(coil?.coil_no_uid || "").trim();
     if (!uid) continue;
+    const line = lineByUid.get(uid.toLowerCase());
     const pending = await findPendingStoreInForCoil(uid);
-    if (pending?.ipr_uid) restoreOutUids.push(uid);
+    const hist = await findLatestOutUidForCoil(uid);
+    const hintOut = line?.out_uid != null ? Number(line.out_uid) : NaN;
+    const resolvedOut =
+      Number.isFinite(hintOut) && hintOut > 0
+        ? hintOut
+        : hist?.out_uid != null
+          ? Number(hist.out_uid)
+          : null;
+    const fromShopFloor =
+      Boolean(pending?.ipr_uid) ||
+      Boolean(resolvedOut) ||
+      Boolean(String(line?.pjobcardno || "").trim());
+    if (!fromShopFloor) continue;
+    shopFloorUids.push(uid);
+    if (resolvedOut) outUidByCoil[uid] = resolvedOut;
   }
-  if (restoreOutUids.length) {
-    await restoreCoilsToShopFloorOut(restoreOutUids, user);
+  if (shopFloorUids.length) {
+    await restoreCoilsToShopFloorOut(shopFloorUids, user, { outUidByCoil });
   }
 
   logCoilTransactionSafe({
@@ -1682,7 +1718,9 @@ export const createInProcessRequest = async (req, res) => {
       record.downstream = resolveDownstream(fields.request_type, true);
     }
 
-    const row = await insertInProcessRequest(record);
+    const iprAttachmentPaths = record.attachments;
+    const row = await insertInProcessRequest({ ...record, attachments: [] });
+    await saveIprAttachmentsToDocuments(row.ipr_uid, iprAttachmentPaths, req);
     let data = await findInProcessRequest(row.ipr_uid);
 
     if (isApprovedConsume(data)) {
@@ -1886,7 +1924,18 @@ export const updateInProcessRequestCtrl = async (req, res) => {
       }
     }
 
+    let iprAttachmentPaths;
+    if (updateFields.attachments !== undefined) {
+      iprAttachmentPaths = updateFields.attachments;
+      delete updateFields.attachments;
+    } else if (Array.isArray(fields.attachments)) {
+      iprAttachmentPaths = fields.attachments;
+    }
+
     await updateInProcessRequest(id, updateFields);
+    if (iprAttachmentPaths !== undefined) {
+      await saveIprAttachmentsToDocuments(id, iprAttachmentPaths, req);
+    }
 
     if (wasConsumed && (!willConsume || willReapplyConsume)) {
       await releaseConsumedCoils(existing, user, req);

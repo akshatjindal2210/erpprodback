@@ -1,4 +1,4 @@
-import { findMachines, findMachine, findMachineByNumber, insertMachine, updateMachines, deleteMachines, MACHINE_DEFAULT_FIELDS } from "../models/machineMaster.model.js";
+import { findMachines, findMachine, findMachineDuplicate, insertMachine, updateMachines, deleteMachines, MACHINE_DEFAULT_FIELDS } from "../models/machineMaster.model.js";
 import { findProcess } from "../../process-master/models/processMaster.model.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
@@ -7,39 +7,34 @@ import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput, applyApprovalUpdateFields, prepareUpdateByRules } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { toEngMachinePublicUploadPath } from "../../../../ims/lib/middleware/upload.js";
+import { mapMulterFilesWithRemarks, syncAttachmentList } from "../../../../../lib/documents/index.js";
+import { stampRmstoreUploadedFiles } from "../../../../rmstore/lib/utils/stampRmstoreUploadedFiles.js";
+import { resolveMachineQrPayload } from "../../../../core/lib/utils/qr/publicQrUrl.js";
 import logger from "../../../../core/lib/utils/logging/logger.js";
 
-const CFG = getCrudModuleConfig("eng_machine_master");
-const ENTITY = "eng_machine_master";
+const MODULE = "eng_machine_master";
+const CFG = getCrudModuleConfig(MODULE);
+const ENTITY = MODULE;
 
 const log = (req, action, entity_id, details, record = null, existing = null) => logActivity(req, { action, entity: ENTITY, entity_id, details, record, existing }).catch(() => {});
 
-/** FE sends duration_value + duration_unit; API may send `duration` as seconds. */
-function parseDuration(body) {
-  const hasUnitInput = body?.duration_value !== undefined || body?.duration_unit !== undefined;
-  if (!hasUnitInput && body?.duration !== undefined && body?.duration !== null && body?.duration !== "") {
-    const n = Number(body.duration);
-    if (!Number.isFinite(n) || n < 0) {
-      const err = new Error("duration must be a non-negative number");
-      err.statusCode = 400;
-      throw err;
-    }
-    return Math.round(n);
-  }
-  const value = Number(body?.duration_value ?? 60);
-  const unit = String(body?.duration_unit || "sec").trim().toLowerCase();
+/** Time fields stored in seconds. FE sends `<field>_value` + `<field>_unit` (sec / min / hour); API may send `<field>` in seconds. */
+const TIME_FIELDS = { duration: 60, setup_time: 0 }; // field → default seconds
+const UNIT_SECONDS = { sec: 1, min: 60, hour: 3600 };
+const UNIT_ALIAS = { mins: "min", minute: "min", minutes: "min", hours: "hour", hr: "hour", hrs: "hour" };
+
+const hasTimeInput = (body, field) =>
+  body?.[`${field}_value`] !== undefined || body?.[`${field}_unit`] !== undefined || body?.[field] !== undefined;
+
+function parseSeconds(body, field) {
+  const hasUnitInput = body?.[`${field}_value`] !== undefined || body?.[`${field}_unit`] !== undefined;
+  const raw = hasUnitInput ? body?.[`${field}_value`] : body?.[field];
+  const value = raw === undefined || raw === null || raw === "" ? TIME_FIELDS[field] : Number(raw);
   if (!Number.isFinite(value) || value < 0) {
-    const err = new Error("duration must be a non-negative number");
-    err.statusCode = 400;
-    throw err;
+    throw Object.assign(new Error(`${field} must be a non-negative number`), { statusCode: 400 });
   }
-  if (unit === "min" || unit === "mins" || unit === "minute" || unit === "minutes") {
-    return Math.round(value * 60);
-  }
-  if (unit === "hour" || unit === "hours" || unit === "hr" || unit === "hrs") {
-    return Math.round(value * 3600);
-  }
-  return Math.round(value);
+  const unit = String(hasUnitInput ? body?.[`${field}_unit`] || "sec" : "sec").trim().toLowerCase();
+  return Math.round(value * (UNIT_SECONDS[UNIT_ALIAS[unit] ?? unit] ?? 1));
 }
 
 function normalizeAttachments(raw) {
@@ -71,19 +66,11 @@ function parseRemoveAttachmentIds(body) {
 }
 
 function mapUploadedFiles(req) {
-  const files = Array.isArray(req.files) ? req.files : [];
-  return files
-    .map((file, idx) => {
-      const path = toEngMachinePublicUploadPath(file);
-      if (!path) return null;
-      return {
-        id: `${Date.now().toString(36)}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
-        file_name: file.originalname || file.filename,
-        path,
-        size: file.size ?? null,
-      };
-    })
-    .filter(Boolean);
+  return mapMulterFilesWithRemarks(req, (f) => toEngMachinePublicUploadPath(f)).map((u) => ({
+    file_name: u.file.originalname || u.file.filename,
+    path: u.docPath,
+    size: u.file.size ?? null,
+  }));
 }
 
 /** Store speed exactly as typed (no 10 → 10.0000). */
@@ -99,8 +86,18 @@ function mergeAttachments(existing = [], uploaded = [], removeIds = []) {
   return [...kept, ...uploaded];
 }
 
+/** 409 message when another active machine already has this name or number, else null. */
+async function duplicateMessage(fields, excludeId = null) {
+  for (const field of ["name", "number"]) {
+    if (fields[field] !== undefined && (await findMachineDuplicate(field, fields[field], excludeId))) {
+      return `Machine ${field} "${fields[field]}" already exists`;
+    }
+  }
+  return null;
+}
+
 async function assertApprovedProcess(process_id) {
-  const process = await findProcess({ id: process_id });
+  const process = await findProcess(process_id);
   if (!process) {
     const err = new Error("Process not found");
     err.statusCode = 400;
@@ -139,6 +136,34 @@ export const listMachines = async (req, res) => {
   }
 };
 
+/** Machine dropdown (helper) — approved machines, optional `filters.process_id`; `id` resolves one row. */
+export const listMachineViews = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const toView = (r) => ({ id: r.id, name: r.name, number: r.number, process_id: r.process_id, label: `${r.number} — ${r.name}` });
+
+    const byId = parsePositiveIntId(body.id);
+    if (byId) {
+      const row = await findMachine({ id: byId });
+      return res.json({ success: true, data: row ? [toView(row)] : [], total: row ? 1 : 0 });
+    }
+
+    const { page, limit, search, filters } = extractListParams(body);
+    const safeFilters = sanitizeFilters(filters || {}, ["process_id"]);
+    const result = await findMachines({
+      filters: { ...safeFilters, approved: true },
+      search: sanitizeSearch(search),
+      sort: { by: "id", order: "ASC" },
+      page: page || 1,
+      limit: limit || 50,
+    });
+    return res.json({ success: true, data: (result.data || []).map(toView), total: result.total });
+  } catch (err) {
+    logger.error(`[eng_machine_master] helper error user=${req?.user?.id}: ${err?.message || err}`);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const getMachine = async (req, res) => {
   try {
     const id = parsePositiveIntId(req.body?.id);
@@ -158,11 +183,13 @@ export const createMachine = async (req, res) => {
     const number = String(req.body?.number ?? "").trim();
     const process_id = parsePositiveIntId(req.body?.process_id);
     const speed = normalizeSpeed(req.body?.speed);
-    const duration = parseDuration(req.body);
+    const duration = parseSeconds(req.body, "duration");
+    const setup_time = parseSeconds(req.body, "setup_time");
     const make = req.body?.make != null ? String(req.body.make).trim() : null;
     const model = req.body?.model != null ? String(req.body.model).trim() : null;
     const remark = req.body?.remark != null ? String(req.body.remark).trim() : null;
     const normalizedApproved = normalizeApprovedInput(normalizeApprovedBody(req.body?.approved));
+    await stampRmstoreUploadedFiles(req);
     const attachments = mapUploadedFiles(req);
 
     if (!name) return res.status(400).json({ success: false, message: "name required" });
@@ -170,10 +197,8 @@ export const createMachine = async (req, res) => {
     if (!process_id) return res.status(400).json({ success: false, message: "process required" });
 
     await assertApprovedProcess(process_id);
-    const dup = await findMachineByNumber({ number });
-    if (dup) {
-      return res.status(409).json({ success: false, message: `Machine number "${number}" already exists` });
-    }
+    const dup = await duplicateMessage({ name, number });
+    if (dup) return res.status(409).json({ success: false, message: dup });
 
     const row = await insertMachine({
       name,
@@ -181,12 +206,16 @@ export const createMachine = async (req, res) => {
       process_id,
       speed,
       duration,
+      setup_time,
       make: make || null,
       model: model || null,
       remark: remark || null,
-      attachments,
       created_by: auditUserName(req),
     });
+
+    if (attachments.length) {
+      await syncAttachmentList(MODULE, row.id, attachments, req);
+    }
 
     if (normalizedApproved === true) {
       const approvalFields = {
@@ -216,7 +245,7 @@ export const createMachine = async (req, res) => {
   } catch (err) {
     logger.error(`[eng_machine_master] create error user=${req?.user?.id}: ${err?.message || err}`);
     if (err?.code === "23505") {
-      return res.status(409).json({ success: false, message: "Machine number already exists" });
+      return res.status(409).json({ success: false, message: `Machine ${/name/.test(err.constraint || "") ? "name" : "number"} already exists` });
     }
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
@@ -242,17 +271,13 @@ export const updateMachine = async (req, res) => {
       }
     }
 
-    const hasDurationInput =
-      req.body?.duration_value !== undefined ||
-      req.body?.duration !== undefined ||
-      req.body?.duration_unit !== undefined;
-
     const input = {
       name: req.body?.name,
       number: req.body?.number,
       process_id: req.body?.process_id !== undefined ? parsePositiveIntId(req.body.process_id) : undefined,
       speed: req.body?.speed !== undefined ? normalizeSpeed(req.body.speed) : undefined,
-      duration: hasDurationInput ? parseDuration(req.body) : undefined,
+      duration: hasTimeInput(req.body, "duration") ? parseSeconds(req.body, "duration") : undefined,
+      setup_time: hasTimeInput(req.body, "setup_time") ? parseSeconds(req.body, "setup_time") : undefined,
       make: req.body?.make,
       model: req.body?.model,
       remark: req.body?.remark,
@@ -267,6 +292,7 @@ export const updateMachine = async (req, res) => {
         { field: "process_id", normalize: (v) => Number(v) },
         { field: "speed", normalize: (v) => normalizeSpeed(v) },
         { field: "duration", normalize: (v) => Math.round(Number(v)) },
+        { field: "setup_time", normalize: (v) => Math.round(Number(v)) },
         { field: "make", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
         { field: "model", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
         { field: "remark", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
@@ -274,6 +300,7 @@ export const updateMachine = async (req, res) => {
     });
 
     const removeIds = parseRemoveAttachmentIds(req.body);
+    await stampRmstoreUploadedFiles(req);
     const uploaded = mapUploadedFiles(req);
     const nextAttachments = mergeAttachments(existing.attachments, uploaded, removeIds);
     const hasAttachmentChanges = removeIds.length > 0 || uploaded.length > 0;
@@ -284,7 +311,6 @@ export const updateMachine = async (req, res) => {
     }
 
     const fields = { ...preparedFields };
-    if (hasAttachmentChanges) fields.attachments = nextAttachments;
 
     if (fields.name !== undefined && !fields.name) {
       return res.status(400).json({ success: false, message: "name required" });
@@ -295,12 +321,13 @@ export const updateMachine = async (req, res) => {
     if (fields.process_id !== undefined) {
       await assertApprovedProcess(fields.process_id);
     }
-    if (fields.number !== undefined) {
-      const dup = await findMachineByNumber({ number: fields.number, excludeId: id });
-      if (dup) {
-        return res.status(409).json({ success: false, message: `Machine number "${fields.number}" already exists` });
-      }
-    }
+    // Only a name / number that actually changed is checked (old duplicates must not block other edits)
+    const same = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
+    const dup = await duplicateMessage({
+      name: same(fields.name, existing.name) ? undefined : fields.name,
+      number: same(fields.number, existing.number) ? undefined : fields.number,
+    }, id);
+    if (dup) return res.status(409).json({ success: false, message: dup });
 
     applyApprovalUpdateFields({
       req,
@@ -315,6 +342,10 @@ export const updateMachine = async (req, res) => {
       await updateMachines(fields, { id });
     }
 
+    if (hasAttachmentChanges) {
+      await syncAttachmentList(MODULE, id, nextAttachments, req);
+    }
+
     const data = await findMachine({ id });
     logger.info(`[eng_machine_master] update user=${req?.user?.id} id=${id} approved=${normalizedApproved}`);
     await log(req, "update", id, { updated_fields: fields, removeIds, uploaded: uploaded.length }, data, existing);
@@ -327,7 +358,7 @@ export const updateMachine = async (req, res) => {
   } catch (err) {
     logger.error(`[eng_machine_master] update error user=${req?.user?.id}: ${err?.message || err}`);
     if (err?.code === "23505") {
-      return res.status(409).json({ success: false, message: "Machine number already exists" });
+      return res.status(409).json({ success: false, message: `Machine ${/name/.test(err.constraint || "") ? "name" : "number"} already exists` });
     }
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
@@ -348,6 +379,40 @@ export const deleteMachine = async (req, res) => {
     return res.json({ success: true, message: "Machine deleted successfully" });
   } catch (err) {
     logger.error(`[eng_machine_master] delete error user=${req?.user?.id}: ${err?.message || err}`);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/** QR payload for print/download — public URL when base configured, else plain machine number. */
+export const getMachineQr = async (req, res) => {
+  try {
+    const id = parsePositiveIntId(req.body?.id);
+    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
+
+    const data = await findMachine({ id });
+    if (!data) return res.status(404).json({ success: false, message: "Not found" });
+    if (!data.approved) {
+      return res.status(400).json({ success: false, message: "Authorize machine before printing QR" });
+    }
+
+    const number = String(data.number || "").trim();
+    if (!number) return res.status(400).json({ success: false, message: "Machine number is missing" });
+
+    const qr_value = await resolveMachineQrPayload({ number });
+    return res.json({
+      success: true,
+      data: {
+        id: data.id,
+        number,
+        name: data.name,
+        process_name: data.process_name,
+        make: data.make,
+        model: data.model,
+        qr_value,
+      },
+    });
+  } catch (err) {
+    logger.error(`[eng_machine_master] qr error user=${req?.user?.id}: ${err?.message || err}`);
     return res.status(500).json({ success: false, message: err.message });
   }
 };

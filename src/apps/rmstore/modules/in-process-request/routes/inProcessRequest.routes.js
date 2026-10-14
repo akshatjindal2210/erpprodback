@@ -2,11 +2,11 @@ import express from "express";
 import { getInProcessRequests, getInProcessRequestById, getInProcessReasons, getCoilHelper, getReassignJobCards, getPendingStoreIn, getPendingStoreInById, getPendingStoreOut, getPendingShopFloor, createInProcessRequest, updateInProcessRequestCtrl, completeStoreInCtrl, deleteInProcessRequest } from "../controllers/inProcessRequest.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
-import { rmIprUpload } from "../../../lib/middleware/upload.js";
+import { docUpload } from "../../../../../lib/documents/index.js";
 import { helperAccess } from "../../../lib/config/views/helperViews.js";
 
 const router = express.Router();
-const MODULE = "rm_in_process_request";
+export const MODULE = "rm_in_process_request";
 
 /** Pending queues render inside Store In / Store Out, so those modules may read them too. */
 const storeInReader = accessControlAny([
@@ -31,9 +31,9 @@ router.post("/pending-shop-floor", authenticate, accessControl(MODULE, "view"), 
 router.post("/pending-store-in", authenticate, storeInReader, getPendingStoreIn);
 router.post("/pending-store-in/get", authenticate, storeInReader, getPendingStoreInById);
 router.post("/pending-store-out", authenticate, storeOutReader, getPendingStoreOut);
-router.post("/create", authenticate, accessControl(MODULE, "add"), rmIprUpload.array("attachments"), createInProcessRequest);
-router.post("/update", authenticate, accessControl(MODULE, "edit"), rmIprUpload.array("attachments"), updateInProcessRequestCtrl);
-router.post("/approve", authenticate, accessControl(MODULE, "authorize"), rmIprUpload.array("attachments"), updateInProcessRequestCtrl);
+router.post("/create", authenticate, accessControl(MODULE, "add"), docUpload(MODULE).array("attachments"), createInProcessRequest);
+router.post("/update", authenticate, accessControl(MODULE, "edit"), docUpload(MODULE).array("attachments"), updateInProcessRequestCtrl);
+router.post("/approve", authenticate, accessControl(MODULE, "authorize"), docUpload(MODULE).array("attachments"), updateInProcessRequestCtrl);
 router.post("/complete-store-in", authenticate, storeInReceiver, completeStoreInCtrl);
 router.post("/delete", authenticate, accessControl(MODULE, "delete"), deleteInProcessRequest);
 

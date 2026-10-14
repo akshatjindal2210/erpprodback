@@ -5,6 +5,9 @@ import config from "../../config/app/config.js";
 import { addTaskActivityLog } from "../../apps/task/manage/activity-log/services/taskActivityLog.service.js";
 import { scheduleDeferred, getCronDateString, addCalendarDaysYmd, addCalendarMonthsYmd, addCalendarYearsYmd } from "../shared/cronUtil.js";
 import { toYmd } from "../../apps/task/modules/cl-task/helpers/time/clTaskTime.helper.js";
+import { moduleDocuments } from "../../lib/documents/index.js";
+
+const taskChatDocuments = moduleDocuments("tasks");
 
 async function copyRecurringChatAttachments(files) {
   const newDir = path.join(config.uploadPath, "task_tasks", "chat");
@@ -135,11 +138,23 @@ async function processRecurringTasks() {
             }
           }
 
-          await dbQuery(
-            `INSERT INTO task_chat (task_id, user_id, message, reply_to_id, attachments)
-             VALUES (?, ?, ?, ?, ?)`,
-            [newTaskId, chat.user_id, chat.message, null, JSON.stringify(attachments)]
+          const [newChat] = await dbQuery(
+            `INSERT INTO task_chat (task_id, user_id, message, reply_to_id)
+             VALUES (?, ?, ?, ?) RETURNING chat_id`,
+            [newTaskId, chat.user_id, chat.message, null]
           );
+          // Same flow as a task upload: documents row + task_chat.doc_files (a used file name gets its own copy).
+          if (attachments.length && newChat?.chat_id) {
+            try {
+              await taskChatDocuments.saveFiles(
+                newChat.chat_id,
+                attachments.map((a) => ({ docPath: a.file_path, remark: a.remark ?? null, file: { size: a.file_size ?? null } })),
+                { userId: chat.user_id }
+              );
+            } catch (e) {
+              console.error("Failed to save recurring chat files to documents:", e?.message || e);
+            }
+          }
         }
 
         await addTaskActivityLog(

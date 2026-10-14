@@ -5,7 +5,7 @@ import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/q
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
-import { loadMappedItems } from "../../production/utils/erpItems.js";
+import { loadMappedItems, enrichRmMasterRows } from "../../production/utils/erpItems.js";
 import { normalizeItemSpecsPayload } from "../utils/specPayload.js";
 
 const CFG = getCrudModuleConfig("rm_spec_master");
@@ -120,7 +120,8 @@ export const getSpecs = async (req, res) => {
       page,
       limit,
     });
-    return res.json({ success: true, ...result });
+    const data = await enrichRmMasterRows(result.data || []);
+    return res.json({ success: true, ...result, data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -133,8 +134,9 @@ export const getSpecById = async (req, res) => {
     if (!itemDcode) {
       return res.status(400).json({ success: false, message: "A valid RM item code is required." });
     }
-    const data = await findSpecItemDetail(itemDcode);
-    if (!data) return res.status(404).json({ success: false, message: "RM spec record not found." });
+    const row = await findSpecItemDetail(itemDcode);
+    if (!row) return res.status(404).json({ success: false, message: "RM spec record not found." });
+    const [data] = await enrichRmMasterRows([row]);
     return res.json({ success: true, data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

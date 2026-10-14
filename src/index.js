@@ -78,6 +78,15 @@ app.use((err, req, res, next) => {
       message: "Request payload is too large. Try saving fewer widgets or contact support.",
     });
   }
+  // Upload rejected (multer limits or fileFilter) → tell the user why, not a generic 500.
+  if (err?.name === "MulterError" || /invalid file type|only .* files (are )?allowed/i.test(err?.message || "")) {
+    logger.warn(`Upload rejected: ${err.message} — ${req.method} ${req.originalUrl}`);
+    const message =
+      err?.code === "LIMIT_FILE_SIZE" && !err.limitMb
+        ? "File is too large. Each file must be 20 MB or less — please choose a smaller file."
+        : err.message;
+    return res.status(400).json({ success: false, message });
+  }
   logger.error(`${err.message} — ${req.method} ${req.originalUrl}`);
   res.status(500).json({ success: false, message: "Internal server error" });
 });

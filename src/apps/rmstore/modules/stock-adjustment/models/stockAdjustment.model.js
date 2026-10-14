@@ -1,5 +1,7 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { attachTcRmtcRows } from "../../../../../lib/documents/index.js";
+import { MODULE as SA_MODULE } from "../routes/stockAdjustment.routes.js";
 
 import { SA_ADD_LIKE_ENTRY_TYPES_SQL } from "../utils/stockAdjustmentEntryTypes.js";
 import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
@@ -30,10 +32,6 @@ const ALLOWED_UPDATE = [
   "removed_coil_uids",
   "remarks",
   "doc_dt",
-  "tc_file_path",
-  "tc_file_name",
-  "rmtc_file_path",
-  "rmtc_file_name",
   "approved",
   "approved_by",
   "approved_at",
@@ -133,7 +131,7 @@ export async function findAdjustments({ filters = {}, search, page = 1, limit = 
   );
 
   return {
-    data: rows,
+    data: await attachTcRmtcRows(SA_MODULE, rows, "adjustment_id"), // TC / RMTC path + remark from documents
     total,
     page: safePage,
     limit: safeLimit,

@@ -38,8 +38,13 @@ async function fetchAndPaginate(req, res, loader, filterFn, mapper, idKey) {
 }
 
 // Exported Handlers
+/** Same source as Item RM Master “Production Item” dropdown (`prdprimitem`). */
 export const getProductionItemsViews = (req, res) =>
   fetchAndPaginate(req, res, () => loadMappedItems("prdprimitem"), filterItemsBySearch, toPickerRow, "itemdcode");
+
+/** FG finished-goods from IMS item master (Finish Process Master dropdown). */
+export const getFgItemsViews = (req, res) =>
+  fetchAndPaginate(req, res, () => loadMappedItems("item", { type: "fg" }), filterItemsBySearch, toPickerRow, "itemdcode");
 
 export const getRmItemsViews = (req, res) =>
   fetchAndPaginate(req, res, () => loadMappedItems("item", { type: "rm" }), filterItemsBySearch, toPickerRow, "itemdcode");

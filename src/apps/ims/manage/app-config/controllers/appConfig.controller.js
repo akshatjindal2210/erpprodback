@@ -22,6 +22,11 @@ import {
   HRMS_APP_CONFIG_DEFINITIONS,
   HRMS_APP_CONFIG_SEEDS,
 } from "../../../../hrms/lib/config/app.config.js";
+import {
+  ENGINEERING_APP_CONFIG_SECTION,
+  ENGINEERING_APP_CONFIG_DEFINITIONS,
+  ENGINEERING_APP_CONFIG_SEEDS,
+} from "../../../../engineering/lib/config/app.config.js";
 
 const LIST_VIEW_SPAN_MIN = IMS_LIST_VIEW_SPAN.MIN;
 const LIST_VIEW_SPAN_MAX = IMS_LIST_VIEW_SPAN.MAX;
@@ -32,6 +37,7 @@ const APP_CONFIG_DEFAULTS = {
   ...IMS_APP_CONFIG_SEEDS,
   ...RMSTORE_APP_CONFIG_SEEDS,
   ...HRMS_APP_CONFIG_SEEDS,
+  ...ENGINEERING_APP_CONFIG_SEEDS,
 };
 
 /** UI sections — values stored in `ims_app_config` (per-app files own their sections). */
@@ -40,9 +46,10 @@ export const APP_CONFIG_SECTIONS = [
   IMS_APP_CONFIG_SECTION,
   RMSTORE_APP_CONFIG_SECTION,
   HRMS_APP_CONFIG_SECTION,
+  ENGINEERING_APP_CONFIG_SECTION,
 ];
 
-const VALID_SCOPES = new Set(["global", "ims", "task", "rmstore", "hrms"]);
+const VALID_SCOPES = new Set(["global", "ims", "task", "rmstore", "hrms", "engineering"]);
 
 export function resolveAppConfigScope(raw) {
   const key = String(raw ?? "").trim().toLowerCase();
@@ -59,6 +66,7 @@ export const APP_CONFIG_DEFINITIONS = [
   ...IMS_APP_CONFIG_DEFINITIONS,
   ...RMSTORE_APP_CONFIG_DEFINITIONS,
   ...HRMS_APP_CONFIG_DEFINITIONS,
+  ...ENGINEERING_APP_CONFIG_DEFINITIONS,
 ];
 
 const DEF_BY_KEY = Object.fromEntries(APP_CONFIG_DEFINITIONS.map((d) => [d.key, d]));

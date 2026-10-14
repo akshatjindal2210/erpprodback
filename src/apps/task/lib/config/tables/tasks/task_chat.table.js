@@ -9,7 +9,6 @@ export async function createTaskChatTable() {
       user_id     INT NOT NULL REFERENCES ${C.USERS}(id) ON DELETE CASCADE,
       message     TEXT NULL,
       reply_to_id INT DEFAULT NULL REFERENCES ${T.CHAT}(chat_id) ON DELETE SET NULL,
-      attachments JSONB DEFAULT NULL,
       created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
@@ -19,4 +18,7 @@ export async function createTaskChatTable() {
   await dbQuery(`CREATE INDEX IF NOT EXISTS idx_tc_user_id ON ${T.CHAT} (user_id)`);
   await dbQuery(`CREATE INDEX IF NOT EXISTS idx_tc_reply_to ON ${T.CHAT} (reply_to_id)`);
   await dbQuery(`CREATE INDEX IF NOT EXISTS idx_tc_created_at ON ${T.CHAT} (created_at)`);
+
+  // Old `attachments` JSON: dropped by the documents backfill (migrations/v5.0.0/docFileBackfill.js)
+  // only after its files are copied into `documents` — not here.
 }

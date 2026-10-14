@@ -1,5 +1,6 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../../config/db/dbTables.js";
+import { dropColumnsIfExist } from "../../../../../../config/db/ensureDbColumns.js";
 
 export async function createRmStoreStockAdjustmentTable() {
   await dbQuery(`
@@ -28,10 +29,6 @@ export async function createRmStoreStockAdjustmentTable() {
       removed_coil_uids   TEXT,
       remarks             TEXT,
       doc_dt              DATE,
-      tc_file_path        TEXT,
-      tc_file_name        VARCHAR(255),
-      rmtc_file_path      TEXT,
-      rmtc_file_name      VARCHAR(255),
       approved            BOOLEAN DEFAULT false,
       approved_by         TEXT,
       approved_at         TIMESTAMP,
@@ -52,4 +49,7 @@ export async function createRmStoreStockAdjustmentTable() {
       ON ${T.STOCK_ADJUSTMENT}(entry_type)
       WHERE is_deleted = false;
   `);
+
+  // tc_file_path / rmtc_file_path / tc_file_name / rmtc_file_name: dropped by the documents backfill
+  // (migrations/v5.0.0/docFileBackfill.js) only after their files are copied into `documents` — not here.
 }

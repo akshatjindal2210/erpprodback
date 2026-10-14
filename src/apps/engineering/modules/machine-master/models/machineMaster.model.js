@@ -1,13 +1,16 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { ENGINEERING_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { attachmentsFromDocuments } from "../../../../../lib/documents/index.js";
+
+const MACHINE_MODULE = "eng_machine_master";
 
 const ALLOWED_FILTER_FIELDS = ["id", "process_id", "number", "approved", "from_date", "to_date"];
 const ALLOWED_SORT_FIELDS = [
-  "id", "name", "number", "process_id", "speed", "duration",
+  "id", "name", "number", "process_id", "speed", "duration", "setup_time",
   "approved", "created_at", "updated_at",
 ];
 const ALLOWED_UPDATE_FIELDS = [
-  "name", "number", "process_id", "speed", "duration", "make", "model", "remark", "attachments",
+  "name", "number", "process_id", "speed", "duration", "setup_time", "make", "model", "remark",
   "approved", "approved_by", "approved_at", "updated_by", "updated_at",
 ];
 
@@ -17,9 +20,8 @@ const JOINS = `
 
 const DEFAULT_FIELDS = [
   "mm.id", "mm.name", "mm.number", "mm.process_id",
-  "mm.speed", "mm.duration", "mm.make", "mm.model", "mm.remark",
-  "COALESCE(mm.attachments, '[]'::jsonb) AS attachments",
-  "pm.name AS process_name", "pm.type AS process_type",
+  "mm.speed", "mm.duration", "mm.setup_time", "mm.make", "mm.model", "mm.remark",
+  "pm.name AS process_name", "pm.depth AS process_depth",
   "mm.approved", "mm.approved_by", "mm.approved_at",
   "mm.created_by", "mm.created_at", "mm.updated_by", "mm.updated_at",
   "mm.deleted_by", "mm.deleted_at",
@@ -102,29 +104,26 @@ export const findMachine = async ({ id }) => {
      LIMIT 1`,
     [id]
   );
-  return row || null;
+  if (!row) return null;
+  const attachments = await attachmentsFromDocuments(MACHINE_MODULE, row.id, [], "machine");
+  return { ...row, attachments };
 };
 
-export const findMachineByNumber = async ({ number, excludeId = null }) => {
-  const values = [String(number).trim().toLowerCase()];
-  let sql = `
-    SELECT id, number FROM ${T.MACHINE_MASTER}
-    WHERE is_deleted = false AND lower(trim(number)) = $1
-  `;
-  if (excludeId) {
-    values.push(excludeId);
-    sql += ` AND id <> $2`;
-  }
-  sql += ` LIMIT 1`;
-  const [row] = await dbQuery(sql, values);
+/** Another active machine with the same `name` or `number` (case / spaces ignored), other than `excludeId`. */
+export const findMachineDuplicate = async (field, value, excludeId = null) => {
+  if (!["name", "number"].includes(field)) return null;
+  const [row] = await dbQuery(
+    `SELECT id FROM ${T.MACHINE_MASTER}
+     WHERE is_deleted = false AND lower(trim(${field})) = lower(trim($1)) AND id IS DISTINCT FROM $2::int
+     LIMIT 1`,
+    [String(value), excludeId]
+  );
   return row || null;
 };
 
 export const insertMachine = async (fields) => {
   const cols = Object.keys(fields);
-  const vals = cols.map((key) =>
-    key === "attachments" ? JSON.stringify(fields[key] ?? []) : fields[key]
-  );
+  const vals = cols.map((key) => fields[key]);
   const placeholders = cols.map((_, idx) => `$${idx + 1}`);
   const [row] = await dbQuery(
     `INSERT INTO ${T.MACHINE_MASTER} (${cols.join(", ")})
@@ -142,7 +141,7 @@ export const updateMachines = async (fields, where) => {
   for (const [key, val] of Object.entries(fields)) {
     if (!ALLOWED_UPDATE_FIELDS.includes(key)) continue;
     setParts.push(`${key} = $${i++}`);
-    values.push(key === "attachments" ? JSON.stringify(val ?? []) : val);
+    values.push(val);
   }
   if (!setParts.length) return null;
 

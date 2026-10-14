@@ -6,36 +6,39 @@ Temporary data fixes / one-time DB work. **No migration table** — you control 
 
 ```
 src/migrations/
-  index.js              ← auto-runs v*/\*.js on boot
+  index.js              ← runVersionMigrations(): auto-runs v<current version>/*.js on boot
   README.md
   v3.4.34/
-    README.md
-    locationMaster.js   ← auto on boot (via runVersionMigrations)
+    locationMaster.js   ← auto job of v3.4.34 (no longer runs — app is past that version)
   v4.1.5/
-    README.md
     shortageGrpname.mjs ← manual only (via initDB)
+  v5.0.0/
+    docFileBackfill.js  ← auto job of v5.0.0 (documents: old paths → uuid files, drops old path columns)
+    README.md           ← removed columns list + deploy checklist
 ```
 
 ## Two ways to run
 
 | Type | File | Runs when |
 |------|------|-----------|
-| **Auto** | `vX.Y.Z/job.js` with `export default` | `await runVersionMigrations()` in `initDB.js` |
-| **Manual** | `vX.Y.Z/job.mjs` (`.mjs` = not auto-scanned) | You uncomment a call in `initDB.js` |
+| **Auto** | `vX.Y.Z/job.js` with `export default` | `await runVersionMigrations()` in `initDB.js` **and** `X.Y.Z` = the `version` in `package.json` |
+| **Manual** | `vX.Y.Z/job.mjs` (`.mjs` = never auto-run) | You uncomment its call in `initDB.js` (section 5) |
 
 ---
 
-## Auto migration (e.g. v3.4.34)
+## Auto migration
+
+Only the **current version** folder runs: `package.json` `"version": "5.0.0"` → `migrations/v5.0.0/*.js`.
+Bumping the version (`npm version patch --no-git-tag-version`) automatically stops the older folders.
 
 **Steps**
 
-1. Add `vX.Y.Z/myJob.js` → `export default async function () { ... }`
+1. Add `v<current version>/myJob.js` → `export default async function () { ... }` (must be safe to re-run)
 2. Keep `await runVersionMigrations();` **ON** in `initDB.js`
-3. Deploy / restart — job runs (idempotent)
-4. All envs done → comment out `runVersionMigrations()` → redeploy
-5. Optional: delete the version folder
+3. Deploy / restart — job runs on every boot of this version; log `✅ [migration] vX.Y.Z/myJob.js`
+4. Done on all envs → delete the job (or bump the version)
 
-**Turn off**
+**Turn off all auto jobs**
 
 ```js
 // await runVersionMigrations();
@@ -45,42 +48,23 @@ src/migrations/
 
 ## Manual backfill (e.g. v4.1.5 shortage grpname)
 
-**Steps**
-
-1. Code lives in `migrations/v4.1.5/shortageGrpname.mjs`
-2. Export wired in `backfills/index.js` as `backfillShortageGrpname`
-3. In `initDB.js`, uncomment:
-
-   ```js
-   await backfillShortageGrpname();
-   ```
-
-4. Restart backend — check logs
-5. Done → comment line again → delete `v4.1.5/` folder
-
-See `v4.1.5/README.md` for details.
+1. Code lives in `migrations/vX.Y.Z/job.mjs`
+2. Export wired in `backfills/index.js` (e.g. `backfillShortageGrpname`)
+3. In `initDB.js` section 5, uncomment its line
+4. Restart backend once — check logs
+5. Done → comment the line again
 
 ---
 
 ## Boot order (`initDB.js`)
 
 ```
-tables (init*DB)
-  → runVersionMigrations()     auto *.js only
-  → syncSerialSequences()
-  → backfillShortageGrpname()  only if uncommented
-  → runStartupBackfills()      only if uncommented
+1. app tables (init*DB)
+2. global tables (createDocumentsTable)
+3. runVersionMigrations()     auto *.js of the current version
+4. syncSerialSequences()
+5. manual backfills           only the lines you uncomment
 ```
-
----
-
-## Delete a version folder
-
-```text
-delete  src/migrations/v3.4.34/
-```
-
-No registry. App starts fine. Restore from git if needed.
 
 ---
 
@@ -89,5 +73,5 @@ No registry. App starts fine. Restore from git if needed.
 |                         | `*.table.js`        | `migrations/v*/`                        |
 |-------------------------|---------------------|-----------------------------------------|
 | Purpose                 | Permanent schema    | One-time / temporary                    |
-| On every boot           | Yes                 | Only while you enable the call          |
-| Safe to delete folder?  | No                  | Yes, after job is done                  |
+| On every boot           | Yes                 | Auto jobs: only for the current version |
+| Safe to delete folder?  | No                  | Yes, after the job is done              |

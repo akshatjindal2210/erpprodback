@@ -1564,6 +1564,34 @@ export const linkCoilsToQcCheck = async (qc_uid, coil_no_uids = [], _qc_check_st
   );
 };
 
+/** Latest approved Store Out that scanned this coil — used when IPR delete must restore shop floor. */
+export const findLatestOutUidForCoil = async (coil_no_uid) => {
+  const uid = String(coil_no_uid || "").trim();
+  if (!uid) return null;
+  const [row] = await dbQuery(
+    `SELECT o.out_uid, o.pjobcardno
+     FROM ${T.OUT_ENTRY_SCANNED_COIL} s
+     JOIN ${OUT_ENTRY} o ON o.out_uid = s.out_uid AND o.is_deleted = false
+     WHERE LOWER(TRIM(s.coil_no_uid)) = LOWER(TRIM($1))
+     ORDER BY
+       CASE WHEN COALESCE(o.approved, false) = true THEN 0 ELSE 1 END,
+       COALESCE(o.approved_at, o.created_at) DESC NULLS LAST,
+       o.out_uid DESC
+     LIMIT 1`,
+    [uid]
+  );
+  return row ?? null;
+};
+
+async function resolveOutUidForShopFloorRestore(coil_no_uid, hintOutUid = null) {
+  let outUid = hintOutUid != null && hintOutUid !== "" ? Number(hintOutUid) : NaN;
+  if (!Number.isFinite(outUid) || outUid <= 0) {
+    const hist = await findLatestOutUidForCoil(coil_no_uid);
+    if (hist?.out_uid != null) outUid = Number(hist.out_uid);
+  }
+  return Number.isFinite(outUid) && outUid > 0 ? outUid : null;
+}
+
 /** Restore coils held for an in-process rejection (not yet in qc_rejection register). */
 export const revertCoilsInProcessRejection = async (ipr_uid, _userName) => {
   const id = Number(ipr_uid);
@@ -1581,41 +1609,67 @@ export const revertCoilsInProcessRejection = async (ipr_uid, _userName) => {
   return fetchCoilsWithMrnDetails(rows?.map((row) => row.coil_no_uid) ?? []);
 };
 
-/** After IPR rejection hold is released — restore shop-floor out when Store In is still pending. */
-export const restoreCoilsToShopFloorOut = async (coil_no_uids = [], _userName) => {
-  const uids = (coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean);
-  if (!uids.length) return [];
-  const rows = await dbQuery(
-    `UPDATE ${TABLE}
-     SET status = 'out',
-         ipr_uid = NULL
-     WHERE coil_no_uid = ANY($1::text[])
-       AND LOWER(COALESCE(status, 'active')) IN ('active', 'rejected')
-     RETURNING coil_no_uid`,
-    [uids]
-  );
-  return fetchCoilsWithMrnDetails(rows?.map((row) => row.coil_no_uid) ?? []);
+/** After IPR rejection hold is released — restore shop-floor out (with Store Out link when known). */
+export const restoreCoilsToShopFloorOut = async (coil_no_uids = [], _userName, { outUidByCoil = null } = {}) => {
+  const restoredUids = [];
+  for (const raw of coil_no_uids || []) {
+    const uid = String(raw || "").trim();
+    if (!uid) continue;
+    const hint =
+      outUidByCoil?.[uid] ??
+      outUidByCoil?.[uid.toLowerCase()] ??
+      null;
+    const outUid = await resolveOutUidForShopFloorRestore(uid, hint);
+    if (!outUid) continue;
+    const rows = await dbQuery(
+      `UPDATE ${TABLE}
+       SET status = 'out',
+           ipr_uid = NULL,
+           out_uid = $2
+       WHERE coil_no_uid = $1
+         AND LOWER(COALESCE(status, 'active')) IN ('active', 'rejected')
+       RETURNING coil_no_uid`,
+      [uid, outUid]
+    );
+    if (rows?.[0]) restoredUids.push(rows[0].coil_no_uid);
+  }
+  return fetchCoilsWithMrnDetails(restoredUids);
 };
 
 /**
  * Store In receive wins over an in-process rejection hold on the same coil —
  * release hold and restore shop-floor out so receive can proceed.
  */
-export const releaseCoilFromIprRejectionHoldForStoreIn = async (coil_no_uid, _userName) => {
+export const releaseCoilFromIprRejectionHoldForStoreIn = async (
+  coil_no_uid,
+  _userName,
+  { outUid: hintOutUid = null } = {}
+) => {
   const uid = String(coil_no_uid || "").trim();
   if (!uid) return null;
+  const outUid = await resolveOutUidForShopFloorRestore(uid, hintOutUid);
   const rows = await dbQuery(
-    `UPDATE ${TABLE}
-     SET ipr_uid = NULL,
-         location_id = NULL,
-         in_uid = NULL,
-         out_uid = NULL,
-         status = 'out'
-     WHERE coil_no_uid = $1
-       AND LOWER(COALESCE(status, 'active')) = 'rejected'
-       AND rm_uid IS NULL
-     RETURNING coil_no_uid, ipr_uid AS released_from_ipr_uid`,
-    [uid]
+    outUid
+      ? `UPDATE ${TABLE}
+         SET ipr_uid = NULL,
+             location_id = NULL,
+             in_uid = NULL,
+             out_uid = $2,
+             status = 'out'
+         WHERE coil_no_uid = $1
+           AND LOWER(COALESCE(status, 'active')) = 'rejected'
+           AND rm_uid IS NULL
+         RETURNING coil_no_uid, ipr_uid AS released_from_ipr_uid`
+      : `UPDATE ${TABLE}
+         SET ipr_uid = NULL,
+             location_id = NULL,
+             in_uid = NULL,
+             status = 'active'
+         WHERE coil_no_uid = $1
+           AND LOWER(COALESCE(status, 'active')) = 'rejected'
+           AND rm_uid IS NULL
+         RETURNING coil_no_uid, ipr_uid AS released_from_ipr_uid`,
+    outUid ? [uid, outUid] : [uid]
   );
   if (!rows?.[0]) return null;
   const detail = (await fetchCoilsWithMrnDetails([rows[0].coil_no_uid]))[0] ?? null;
@@ -1746,25 +1800,6 @@ export const markCoilsConsumed = async (ipr_uid, coil_no_uids = [], userName) =>
     [Number(ipr_uid), uids]
   );
   return rows ?? [];
-};
-
-/** Latest approved Store Out that scanned this coil — used when IPR delete must restore shop floor. */
-export const findLatestOutUidForCoil = async (coil_no_uid) => {
-  const uid = String(coil_no_uid || "").trim();
-  if (!uid) return null;
-  const [row] = await dbQuery(
-    `SELECT o.out_uid, o.pjobcardno
-     FROM ${T.OUT_ENTRY_SCANNED_COIL} s
-     JOIN ${OUT_ENTRY} o ON o.out_uid = s.out_uid AND o.is_deleted = false
-     WHERE LOWER(TRIM(s.coil_no_uid)) = LOWER(TRIM($1))
-     ORDER BY
-       CASE WHEN COALESCE(o.approved, false) = true THEN 0 ELSE 1 END,
-       COALESCE(o.approved_at, o.created_at) DESC NULLS LAST,
-       o.out_uid DESC
-     LIMIT 1`,
-    [uid]
-  );
-  return row ?? null;
 };
 
 /** Undo a consume request — its coils return to the Coil Area as active. */

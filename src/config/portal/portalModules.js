@@ -111,6 +111,8 @@ export const MODULES = {
   engineering: [
     { name: "eng_process_master", label: "Process Master" },
     { name: "eng_machine_master", label: "Machine Master" },
+    { name: "eng_prime_item_master", label: "Prime Process Master" },
+    { name: "eng_finish_process_master", label: "Finish Process Master" },
   ],
 };
 
@@ -187,4 +189,6 @@ export const SEED_MODULES = [
   { name: "production_activity_logs",     label: "Activity Logs",                   sort_order: 57,       app_type: "production" },
   { name: "eng_process_master",           label: "Process Master",                  sort_order: 58,       app_type: "engineering" },
   { name: "eng_machine_master",           label: "Machine Master",                  sort_order: 59,       app_type: "engineering" },
+  { name: "eng_prime_item_master",        label: "Prime Process Master",            sort_order: 60,       app_type: "engineering" },
+  { name: "eng_finish_process_master",    label: "Finish Process Master",           sort_order: 61,       app_type: "engineering" },
 ];

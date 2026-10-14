@@ -3,14 +3,35 @@ import Task from "../models/task.model.js";
 import User from "../../../../core/identity/users/models/user.model.js";
 import { sendTaskNotification } from "../../../manage/notifications/services/notification.service.js";
 import { markTaskViewed } from "../../../manage/activity-log/services/taskActivityLog.service.js";
-import { calculateNextOccurrence, chatMessage, ensureDir, saveAttachments, upsertRecurring, isDbTrue, parseSubUsers, parseAttachmentsJson, asArray, normalizeCreatorType } from "../../../lib/shared/index.js";
+import { calculateNextOccurrence, chatMessage, upsertRecurring, isDbTrue, parseSubUsers, parseAttachmentsJson, asArray, normalizeCreatorType } from "../../../lib/shared/index.js";
 import { isAssignedTask } from "../../../lib/shared/utils/targetDateHelper.js";
 import TargetDate from "../../reminders/models/targetDate.model.js";
 import { canUserSetTargetDate, canAdminOverrideTargetDate } from "../../reminders/controllers/targetDate.controller.js";
 import fs from "fs";
 import path from "path";
 import config from "../../../../../config/app/config.js";
+import { parseFileRemarks, moduleDocuments, publicPathOf, syncRegisteredFiles } from "../../../../../lib/documents/index.js";
+import { persistTaskChatUploads } from "./taskChat.controller.js";
+import { stampRmstoreUploadedFiles } from "../../../../rmstore/lib/utils/stampRmstoreUploadedFiles.js";
 const log = (task_id, user_id, performed_by, action, action_detail = null, assignment_id = null) => Task.addLog(task_id, user_id, performed_by, action, action_detail, assignment_id);
+
+/** Multer files already in DOC_FILE_LINKS folder → register JSON for recurring chat / syncRegisteredFiles. */
+function multerRegisterAttachments(req) {
+  return (req.files || [])
+    .map((f, i) => {
+      const file_path = publicPathOf(f);
+      if (!file_path) return null;
+      const remark = parseFileRemarks(req.body, i);
+      return {
+        file_name: f.originalname,
+        file_path,
+        file_size: f.size,
+        mime_type: f.mimetype,
+        ...(remark ? { remark } : {}),
+      };
+    })
+    .filter(Boolean);
+}
 
 function isTaskStaffFullAccess(reqUser) {
   const t = String(reqUser?.type || "").toLowerCase();
@@ -190,6 +211,8 @@ export async function createSelfTask(req, res) {
     let task_id = null;
     let assignment_id = null;
 
+    await stampRmstoreUploadedFiles(req); // before files are copied (recurring) — same stamp as task chat
+
     if (recurringFlag) {
       const scheduleResult = await RecurringTask.create({
         title: title.trim(),
@@ -210,9 +233,7 @@ export async function createSelfTask(req, res) {
       schedule_id = scheduleResult.insertId;
 
       // Always seed default chat message for new/clone recurring task
-      const recurringAttachments = req.files?.length > 0
-        ? await saveAttachments(req.files, path.join(config.uploadPath, "task_recurring_tasks/chat"))
-        : null;
+      const recurringAttachments = req.files?.length ? multerRegisterAttachments(req) : null;
       const recurringChatMsg = chatMessage(title, description);
       await RecurringTask.addChatMessage(schedule_id, user_id, recurringChatMsg, recurringAttachments);
     }
@@ -248,11 +269,9 @@ export async function createSelfTask(req, res) {
       await Task.setCurrentAssignment(task_id, assignment_id);
 
       // Always seed default chat message for new/clone task
-      const normalAttachments = req.files?.length > 0
-        ? await saveAttachments(req.files, path.join(config.uploadPath, "task_tasks/chat"))
-        : null;
       const normalChatMsg = chatMessage(title, description);
-      await Task.addChatMessage(task_id, user_id, normalChatMsg, normalAttachments);
+      const chatInsert = await Task.addChatMessage(task_id, user_id, normalChatMsg, null);
+      await persistTaskChatUploads(req, chatInsert.insertId);
 
       await log(task_id, user_id, user_name, "self_task_created", `"${title.trim()}"`, assignment_id);
     }
@@ -309,6 +328,8 @@ export async function createTask(req, res) {
     let task_id       = null;
     let assignment_id = null;
 
+    await stampRmstoreUploadedFiles(req); // before files are copied (recurring) — same stamp as task chat
+
     if (recurringFlag && recurrence_type) {
       const scheduleResult = await RecurringTask.create({
         title:                  title.trim(),
@@ -329,9 +350,7 @@ export async function createTask(req, res) {
       schedule_id = scheduleResult.insertId;
 
       // Always seed default chat message for new/clone recurring task
-      const recurringAttachments = req.files?.length > 0
-        ? await saveAttachments(req.files, path.join(config.uploadPath, "task_recurring_tasks/chat"))
-        : null;
+      const recurringAttachments = req.files?.length ? multerRegisterAttachments(req) : null;
       const recurringChatMsg = chatMessage(title, description);
       await RecurringTask.addChatMessage(schedule_id, created_by, recurringChatMsg, recurringAttachments);
 
@@ -410,11 +429,9 @@ export async function createTask(req, res) {
       }
 
       // Always seed default chat message for new/clone task
-      const normalAttachments = req.files?.length > 0
-        ? await saveAttachments(req.files, path.join(config.uploadPath, "task_tasks/chat"))
-        : null;
       const chatMsg = chatMessage(title, description);
-      await Task.addChatMessage(task_id, created_by, chatMsg, normalAttachments);
+      const chatInsert = await Task.addChatMessage(task_id, created_by, chatMsg, null);
+      await persistTaskChatUploads(req, chatInsert.insertId);
 
       await log(task_id, created_by, created_name, "task_created", null, null);
       await log(task_id, created_by, created_name, "task_assigned", `Assigned to ${assignee.name} (Level-1)`, assignment_id);
@@ -690,12 +707,8 @@ export async function updateTask(req, res) {
     }
 
     if (req.files?.length > 0 || note?.trim()) {
-      const attachments = req.files?.map(f => ({
-        file_name: f.originalname,
-        file_path: `${config.uploadPublicPath}/task_tasks/chat/${f.filename}`,
-        file_size: f.size, mime_type: f.mimetype,
-      }));
-      await Task.addChatMessage(id, user_id, note?.trim() || null, attachments);
+      const chatInsert = await Task.addChatMessage(id, user_id, note?.trim() || null, null);
+      await persistTaskChatUploads(req, chatInsert.insertId);
     }
 
     // Rating edit only after completion (assigned tasks, Super Admin / Admin)
@@ -761,6 +774,9 @@ export async function deleteTask(req, res) {
     });
 
     await log(id, user_id, user_name, "task_deleted", `"${task.title}"`);
+    // documents rows of this task → status = false (kept as history)
+    for (const c of chatFiles) await moduleDocuments("tasks").removeAllActive(c.chat_id).catch((e) => console.warn("[documents] tasks:", e.message));
+    for (const n of selfNoteFiles) await syncRegisteredFiles("task_self_note", n.self_note_id, []);
     await Task.delete(id);
 
     res.json({ success: true, message: "Task deleted successfully" });

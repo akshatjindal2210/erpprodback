@@ -1,85 +1,56 @@
-import multer from "multer";
-import path from "path";
+/**
+ * Task create/update upload — folders + UUID names from shared DOC_FILE_LINKS.
+ * Recurring create → `task_recurring_chat`; normal → `tasks`.
+ * Fixed modules (chat send, self-note, CL, recurring update): use `docUpload(MODULE)`.
+ */
 import fs from "fs";
-import config from "../../../../../config/app/config.js";
+import multer from "multer";
+import { DOC_FILE_LINKS, DEFAULT_MAX_MB, folderOf } from "../../../../../lib/documents/documents.config.js";
+import { absUploadPath, lowerExt, multerUuidFilename } from "../../../../../lib/documents/documents.utils.js";
 
-// Helper to create folder if it doesn't exist
-const ensureDir = (dir) => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-};
+function isRecurringBody(body) {
+  const v = body?.is_recurring;
+  return v === true || v === 1 || v === "true" || v === "1";
+}
 
-// Allowed file types
-const allowedTypes = [
-  "image/jpeg",
-  "image/png",
-  "image/jpg",
-  "image/gif",
-  "image/webp",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-];
-
-// File filter
-const fileFilter = (req, file, cb) => {
-  if (allowedTypes.includes(file.mimetype)) cb(null, true);
-  else cb(new Error("Invalid file type"), false);
-};
-
-// ── Chat upload ── (dynamic folder for recurring task_tasks)
-const chatStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    // Check if task is recurring
-    const isRecurring = req.body.is_recurring === true || req.body.is_recurring === "true" || req.body.is_recurring === 1;
-    const dir = isRecurring 
-      ? path.join(config.uploadPath, "task_recurring_tasks/chat") 
-      : path.join(config.uploadPath, "task_tasks/chat");
-    ensureDir(dir);
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `${unique}${path.extname(file.originalname)}`);
-  },
-});
+function taskCreateModule(req) {
+  return isRecurringBody(req.body) ? "task_recurring_chat" : "tasks";
+}
 
 export const chatUpload = multer({
-  storage: chatStorage,
-  fileFilter,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
-});
-
-// ── Self-note upload ──
-const selfStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = path.join(config.uploadPath, "task_tasks/self");
-    ensureDir(dir);
-    cb(null, dir);
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const mod = taskCreateModule(req);
+      const folder = folderOf(mod, file.fieldname);
+      if (!folder) return cb(new Error(`Invalid upload: unknown folder for ${mod}`));
+      const dir = absUploadPath(folder);
+      fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: multerUuidFilename,
+  }),
+  fileFilter: (req, file, cb) => {
+    const mod = taskCreateModule(req);
+    const exts = DOC_FILE_LINKS[mod]?.exts || [];
+    const ok = exts.includes(lowerExt(file.originalname).slice(1));
+    cb(ok ? null : new Error(`Invalid file type: ${file.originalname}. Allowed: ${exts.join(", ").toUpperCase()}.`), ok);
   },
-  filename: (req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `${unique}${path.extname(file.originalname)}`);
-  },
+  limits: { fileSize: DEFAULT_MAX_MB * 1024 * 1024 },
 });
 
-export const selfUpload = multer({
-  storage: selfStorage,
-  fileFilter,
-  limits: { fileSize: 20 * 1024 * 1024 },
-});
-
-// ── CSV / Excel upload ──
-const excelFilter = (req, file, cb) => {
-  const allowedTypes = [
+// CSV / Excel (holidays etc.) — not part of documents module
+const excelFilter = (_req, file, cb) => {
+  const allowed = [
     "text/csv",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/vnd.ms-excel" // .xls
+    "application/vnd.ms-excel",
   ];
-
-  if (allowedTypes.includes(file.mimetype) || 
-      file.originalname.endsWith(".csv") || 
-      file.originalname.endsWith(".xlsx") || 
-      file.originalname.endsWith(".xls")) {
+  if (
+    allowed.includes(file.mimetype) ||
+    file.originalname.endsWith(".csv") ||
+    file.originalname.endsWith(".xlsx") ||
+    file.originalname.endsWith(".xls")
+  ) {
     cb(null, true);
   } else {
     cb(new Error("Only CSV or Excel files are allowed"), false);

@@ -8,6 +8,8 @@ import { findAdjustmentById, updateAdjustment } from "../models/stockAdjustment.
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
+import { slotRemarkFromBody, upsertTcRmtcSlot } from "../../../../../lib/documents/index.js";
+import { MODULE } from "../routes/stockAdjustment.routes.js";
 import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
 import { buildCoilStickerCardHtml, buildCoilStickerPrintDocument, buildCoilStickerPrintDocumentTitle, buildCoilStickerPrintRow, resolveSpecStickerFields } from "../../../lib/sticker/coilStickerDesign.js";
 import { isSaAddLikeEntryType, normalizeSaApproved } from "../utils/stockAdjustmentEntryTypes.js";
@@ -357,23 +359,43 @@ export const uploadSaDocs = async (req, res) => {
 
     const tcFile = req.files?.tc?.[0] || null;
     const rmtcFile = req.files?.rmtc?.[0] || null;
-    if (!tcFile && !rmtcFile) {
+    const tcRemark = slotRemarkFromBody(req.body, "tc_remark", 0);
+    const rmtcRemark = slotRemarkFromBody(req.body, "rmtc_remark", 1);
+    if (!tcFile && !rmtcFile && tcRemark === undefined && rmtcRemark === undefined) {
       return res.status(400).json({ success: false, message: "Upload at least one document (TC or RMTC)." });
     }
 
-    await stampRmstoreUploadedFiles(req);
+    if (tcFile || rmtcFile) await stampRmstoreUploadedFiles(req);
 
     const fields = { updated_by: auditUserName(req), updated_at: new Date() };
     if (tcFile) {
-      fields.tc_file_path = toRmPublicUploadPath(tcFile, "tc");
-      fields.tc_file_name = tcFile.originalname;
+      const tcPath = toRmPublicUploadPath(tcFile, "tc");
+      await upsertTcRmtcSlot(MODULE, {
+        modRef: id,
+        slot: "tc",
+        file: tcFile,
+        docPath: tcPath,
+        remark: tcRemark !== undefined ? tcRemark : null,
+        userOrId: req,
+      });
+    } else if (tcRemark !== undefined) {
+      await upsertTcRmtcSlot(MODULE, { modRef: id, slot: "tc", remark: tcRemark, userOrId: req });
     }
     if (rmtcFile) {
-      fields.rmtc_file_path = toRmPublicUploadPath(rmtcFile, "rmtc");
-      fields.rmtc_file_name = rmtcFile.originalname;
+      const rmtcPath = toRmPublicUploadPath(rmtcFile, "rmtc");
+      await upsertTcRmtcSlot(MODULE, {
+        modRef: id,
+        slot: "rmtc",
+        file: rmtcFile,
+        docPath: rmtcPath,
+        remark: rmtcRemark !== undefined ? rmtcRemark : null,
+        userOrId: req,
+      });
+    } else if (rmtcRemark !== undefined) {
+      await upsertTcRmtcSlot(MODULE, { modRef: id, slot: "rmtc", remark: rmtcRemark, userOrId: req });
     }
 
-    await updateAdjustment(fields, { adjustment_id: id });
+    if (tcFile || rmtcFile) await updateAdjustment(fields, { adjustment_id: id });
     const data = await findAdjustmentById(id);
     log(req, "upload_docs", String(id), {
       adjustment_id: id,

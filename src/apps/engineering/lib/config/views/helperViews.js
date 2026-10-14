@@ -23,10 +23,28 @@ const PICKER = [VIEW, ...FORM]; // list + form modes
  * -------------------------|---------------------------
  * eng_machine_master       | view, add, edit, authorize
  * eng_process_master       | view, add, edit, authorize  (parent picker)
+ * eng_prime_item_master    | view, add, edit, authorize
+ * eng_finish_process_master| view, add, edit, authorize
  */
 const PROCESS_MASTER_HELPER = {
   eng_machine_master: PICKER,
   eng_process_master: PICKER,
+  eng_prime_item_master: PICKER,
+  eng_finish_process_master: PICKER,
+};
+
+/**
+ * /machine-master/helper
+ * Who can load machine dropdown (without needing eng_machine_master.view).
+ *
+ * page module              | allowed actions
+ * -------------------------|---------------------------
+ * eng_prime_item_master    | view, add, edit, authorize
+ * eng_finish_process_master| view, add, edit, authorize
+ */
+const MACHINE_MASTER_HELPER = {
+  eng_prime_item_master: PICKER,
+  eng_finish_process_master: PICKER,
 };
 
 /** [] = allowed (access-only helpers; no SQL field lists yet). null = deny. */
@@ -41,8 +59,13 @@ function fieldsForProcessMaster(mod, act) {
   return allowFromMap(PROCESS_MASTER_HELPER, mod, act);
 }
 
+function fieldsForMachineMaster(mod, act) {
+  return allowFromMap(MACHINE_MASTER_HELPER, mod, act);
+}
+
 const BY_HELPER = {
   processMaster: fieldsForProcessMaster,
+  machineMaster: fieldsForMachineMaster,
 };
 
 function resolveHelperFields(helper, { permission_module, permission_action } = {}) {
@@ -56,7 +79,7 @@ export function resolveViewsFields(helper, perms = {}) {
   return resolveHelperFields(helper, perms);
 }
 
-/** Route middleware — helperAccess("processMaster") */
+/** Route middleware — helperAccess("processMaster" | "machineMaster") */
 export function helperAccess(helper) {
   return (req, res, next) => {
     const page = req.body?.permission_module;

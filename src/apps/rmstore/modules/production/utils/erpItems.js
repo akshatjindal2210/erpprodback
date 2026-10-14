@@ -1,5 +1,6 @@
 import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
+import { enrichProductionRow, normalizeRmItems } from "./productionRmHelpers.js";
 
 const MASTER_CACHE_MS = 2 * 60 * 1000; // 2 min
 const masterCache = { rm: { loadedAt: 0, data: null }, fg: { loadedAt: 0, data: null } };
@@ -221,6 +222,34 @@ export async function enrichRmMasterRows(rows = []) {
       item_desc: item?.item_desc ?? row.item_desc ?? null,
       acc_name: (acc && ledgerMap.get(acc)) || row.acc_name || null,
     };
+  });
+}
+
+/** List/export display only — latest FG + RM labels from IMS; DB snapshot unchanged. */
+export async function enrichProductionMasterRows(rows = []) {
+  if (!rows.length) return rows;
+  const [prodRows, rmMap] = await Promise.all([fgItemRows(), rmItemMap()]);
+  const fgMap = new Map();
+  for (const r of prodRows) {
+    const key = canonicalCode(r.itemdcode);
+    if (key) fgMap.set(key, { item_code: r.item_code ?? null, item_desc: r.itemdesc ?? null });
+  }
+  return rows.map((row) => {
+    const fg = fgMap.get(canonicalCode(row.item_dcode));
+    const rm_items = normalizeRmItems(row).map((rm) => {
+      const live = rmMap.get(canonicalCode(rm.rm_item_dcode));
+      return {
+        ...rm,
+        rm_item_code: live?.item_code ?? rm.rm_item_code ?? null,
+        rm_item_desc: live?.item_desc ?? rm.rm_item_desc ?? null,
+      };
+    });
+    return enrichProductionRow({
+      ...row,
+      item_code: fg?.item_code ?? row.item_code ?? null,
+      item_desc: fg?.item_desc ?? row.item_desc ?? null,
+      rm_items,
+    });
   });
 }
 

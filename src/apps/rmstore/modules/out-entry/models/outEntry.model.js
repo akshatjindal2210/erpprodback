@@ -1062,6 +1062,8 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
         c.mrn_uid,
         m.mrn_no,
         m.heat_no,
+        m.acc_code,
+        m.acc_name,
         lm.location_no
       FROM ${COIL} c
       LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
@@ -1135,7 +1137,9 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
         s.coil_no_uid,
         s.qty,
         s.mrn_uid,
-        s.mrn_no
+        s.mrn_no,
+        s.acc_code,
+        s.acc_name
       FROM reserved_mrns rm
       INNER JOIN available_coils s ON s.mrn_uid = rm.mrn_uid
       LEFT JOIN draft_blocked db ON db.coil_key = s.coil_key
@@ -1170,7 +1174,25 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
         )::float8 AS pending_qty,
         (SELECT STRING_AGG(DISTINCT p.mrn_no::text, ', ' ORDER BY p.mrn_no::text) FROM pool p WHERE p.issue_uid = h.issue_uid AND UPPER(TRIM(p.pjobcardno)) = UPPER(TRIM(h.pjobcardno))) AS mrn_nos,
         (SELECT MIN(p.mrn_uid) FROM pool p WHERE p.issue_uid = h.issue_uid AND UPPER(TRIM(p.pjobcardno)) = UPPER(TRIM(h.pjobcardno))) AS mrn_uid,
-        (SELECT STRING_AGG(p.coil_no_uid, ', ' ORDER BY p.coil_no_uid) FROM pool p WHERE p.issue_uid = h.issue_uid AND UPPER(TRIM(p.pjobcardno)) = UPPER(TRIM(h.pjobcardno))) AS coil_no_uids
+        (SELECT STRING_AGG(p.coil_no_uid, ', ' ORDER BY p.coil_no_uid) FROM pool p WHERE p.issue_uid = h.issue_uid AND UPPER(TRIM(p.pjobcardno)) = UPPER(TRIM(h.pjobcardno))) AS coil_no_uids,
+        (
+          SELECT p.acc_code
+          FROM pool p
+          WHERE p.issue_uid = h.issue_uid
+            AND UPPER(TRIM(p.pjobcardno)) = UPPER(TRIM(h.pjobcardno))
+            AND NULLIF(TRIM(p.acc_name), '') IS NOT NULL
+          ORDER BY p.mrn_uid
+          LIMIT 1
+        ) AS acc_code,
+        (
+          SELECT p.acc_name
+          FROM pool p
+          WHERE p.issue_uid = h.issue_uid
+            AND UPPER(TRIM(p.pjobcardno)) = UPPER(TRIM(h.pjobcardno))
+            AND NULLIF(TRIM(p.acc_name), '') IS NOT NULL
+          ORDER BY p.mrn_uid
+          LIMIT 1
+        ) AS acc_name
       FROM jc_headers h
       LEFT JOIN jc_fulfillment f
         ON f.issue_uid = h.issue_uid
@@ -1259,7 +1281,9 @@ export const findPendingJobCardStoreOutDrafts = async (options = {}) => {
     LEFT JOIN ${ISSUE_REQUEST_JC} jc
       ON jc.issue_uid = ir.issue_uid
      AND jc.is_deleted = false
-     AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(o.pjobcardno))`;
+     AND UPPER(TRIM(jc.pjobcardno)) = UPPER(TRIM(o.pjobcardno))
+    LEFT JOIN ${MRN} vendor_mrn
+      ON vendor_mrn.uid = NULLIF(TRIM(split_part(COALESCE(o.mrn_uids, ''), '|', 1)), '')`;
 
   const countRes = await dbQuery(`SELECT COUNT(*)::int AS count ${fromClause} ${where}`, values);
   const total = Number(countRes[0]?.count || 0);
@@ -1288,6 +1312,8 @@ export const findPendingJobCardStoreOutDrafts = async (options = {}) => {
        jc.item_code,
        jc.item_desc,
        jc.issue_qty,
+       vendor_mrn.acc_code AS acc_code,
+       vendor_mrn.acc_name AS acc_name,
        'job_card'::varchar AS pending_type,
        false AS is_virtual_pending,
        (

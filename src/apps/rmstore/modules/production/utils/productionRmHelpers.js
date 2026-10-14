@@ -33,6 +33,27 @@ export function productionAllowedRmCodes(prod) {
   return rmFieldList(prod, "rm_item_code").map((c) => String(c).trim()).filter(Boolean);
 }
 
+function normalizeJsonObject(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "object") return raw;
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export function normalizePrimeProcess(row) {
+  return normalizeJsonObject(row?.prime_process);
+}
+
+export function normalizeFinishProcess(row) {
+  return normalizeJsonObject(row?.finish_process);
+}
+
 /** Flatten rm_items onto row for list consumers expecting legacy flat columns. */
 export function enrichProductionRow(row) {
   if (!row) return row;
@@ -43,6 +64,8 @@ export function enrichProductionRow(row) {
   return {
     ...row,
     rm_items: rmItems,
+    prime_process: normalizePrimeProcess(row),
+    finish_process: normalizeFinishProcess(row),
     rm_item_code: rmCodes.join(", ") || row.rm_item_code || "",
     rm_item_desc: rmDescs.join(", ") || row.rm_item_desc || "",
     rm_item_dcode: rmDcodes[0] ?? row.rm_item_dcode ?? null,

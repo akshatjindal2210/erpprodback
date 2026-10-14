@@ -21,6 +21,8 @@ export function rmstoreUploadPersonName(req) {
 
 /** Stamp all uploaded images with uploader name + IST time. Pass the Express `req` from the upload handler. */
 export async function stampRmstoreUploadedFiles(req) {
+  if (!req || req.uploadsStamped) return; // once per request — a file is never stamped twice
+  req.uploadsStamped = true;
   const uploadedByName = rmstoreUploadPersonName(req);
   for (const file of flattenMulterFiles(req?.files)) {
     await applyTimestamp(file, UPLOAD_TIMESTAMP_TYPES.IMAGE, uploadedByName);

@@ -1,6 +1,10 @@
 import dbQuery from "../../../lib/shared/db.js";
 import { MST_TABLES as M } from "../../../../../config/db/dbTables.js";
 import { asArray } from "../../../lib/shared/utils/helper.js";
+import { syncRegisteredFiles } from "../../../../../lib/documents/index.js";
+
+/** Recurring chat files → `documents` (mod_type = task_recurring_chat, mod_ref = chat_id). */
+const CHAT_DOCS = "task_recurring_chat";
 
 const RecurringTask = {
   tableName: "task_recurring_tasks",
@@ -221,11 +225,13 @@ const RecurringTask = {
 
   async addChatMessage(recurring_id, user_id, message = null, attachments = []) {
     const list = asArray(attachments);
-    return await dbQuery(
+    const result = await dbQuery(
       `INSERT INTO task_recurring_task_chat (recurring_id, user_id, message, attachments)
        VALUES (?, ?, ?, ?)`,
       [recurring_id, user_id, message, list.length ? JSON.stringify(list) : null]
     );
+    if (list.length) await syncRegisteredFiles(CHAT_DOCS, result.insertId, list, { userId: user_id });
+    return result;
   },
 
   async deactivateAllL1(recurring_id) {
@@ -297,10 +303,12 @@ const RecurringTask = {
 
   async updateChatAttachments(chat_id, attachments) {
     const list = asArray(attachments);
-    return await dbQuery(
+    const result = await dbQuery(
       `UPDATE task_recurring_task_chat SET attachments = ? WHERE chat_id = ?`,
       [list.length > 0 ? JSON.stringify(list) : null, chat_id]
     );
+    await syncRegisteredFiles(CHAT_DOCS, chat_id, list);
+    return result;
   },
 
   async updateOrAddChatMessage(recurring_id, user_id, message) {

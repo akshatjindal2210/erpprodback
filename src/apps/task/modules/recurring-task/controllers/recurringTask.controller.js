@@ -1,5 +1,6 @@
 import fs from "fs";
 import RecurringTask from "../models/recurringTask.model.js";
+import { stampRmstoreUploadedFiles } from "../../../../rmstore/lib/utils/stampRmstoreUploadedFiles.js";
 import { chatMessage, parseSubUsers, parseAttachmentsJson, asArray } from "../../../lib/shared/index.js";
 import config from "../../../../../config/app/config.js";
 
@@ -243,6 +244,7 @@ export async function updateRecurringTask(req, res) {
       }
     }
 
+    await stampRmstoreUploadedFiles(req);
     if (req.files?.length > 0 || note?.trim()) {
       const attachments = req.files?.map(f => ({
         file_name: f.originalname,

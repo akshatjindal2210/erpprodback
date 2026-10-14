@@ -1,6 +1,115 @@
 import dbQuery from "../../../lib/shared/db.js";
 import { MST_TABLES as M } from "../../../../../config/db/dbTables.js";
+import { attachmentsFromDocuments, moduleDocuments } from "../../../../../lib/documents/index.js";
+import { parseClAttachments } from "../helpers/form/clTaskForm.helper.js";
 import { getISTDateString, getISTTimeHM } from "../helpers/time/clTaskTime.helper.js";
+
+const CL_MASTER_DOCS = "cl_task_master";
+
+/** Documents rows → CL attachment meta (`file_path` …) for API / spawn. */
+function clMetaFromDoc(r) {
+  const file_path = r.doc_path || r.file_path || r.path;
+  const bytes = r.file_size ?? ((Number(r.doc_size) || 0) * 1024);
+  return {
+    file_name: r.file_name || (file_path ? String(file_path).split("/").pop() : null),
+    file_path,
+    remark: r.remark ?? null,
+    size: bytes || undefined,
+    file_size: bytes || undefined,
+    document_id: r.uuid || r.document_id || null,
+    by: r.created_by_name ?? r.by ?? null,
+  };
+}
+
+async function withMasterAttachment(row) {
+  if (!row) return null;
+  try {
+    const list = await attachmentsFromDocuments(CL_MASTER_DOCS, row.cl_task_id, [], "task");
+    return { ...row, attachment: list.length ? list.map(clMetaFromDoc) : null };
+  } catch (err) {
+    console.warn(`[cl_task] master attachment load failed id=${row.cl_task_id}:`, err?.message || err);
+    return { ...row, attachment: parseClAttachments(row.attachment).length ? parseClAttachments(row.attachment) : null };
+  }
+}
+
+async function withMasterAttachments(rows = []) {
+  if (!rows.length) return rows;
+  try {
+    const byRef = await moduleDocuments(CL_MASTER_DOCS).listActiveMany(
+      rows.map((r) => r.cl_task_id),
+      { metadata: true },
+    );
+    return rows.map((r) => {
+      const docs = byRef.get(String(r.cl_task_id)) ?? [];
+      const attachment = docs.map((d) =>
+        clMetaFromDoc({
+          ...d,
+          file_path: d.doc_path,
+          file_name: d.doc_path ? String(d.doc_path).split("/").pop() : null,
+          file_size: (Number(d.doc_size) || 0) * 1024,
+        }),
+      );
+      return { ...r, attachment: attachment.length ? attachment : null };
+    });
+  } catch (err) {
+    console.warn(`[cl_task] master attachments batch load failed:`, err?.message || err);
+    return rows.map((r) => {
+      const own = parseClAttachments(r.attachment);
+      return { ...r, attachment: own.length ? own : null };
+    });
+  }
+}
+
+/** Instance keeps its own snapshot JSON; empty → fall back to master documents. */
+async function withInstanceAttachment(row) {
+  if (!row) return null;
+  const own = parseClAttachments(row.attachment);
+  if (own.length) return { ...row, attachment: own };
+  try {
+    const list = await attachmentsFromDocuments(CL_MASTER_DOCS, row.cl_task_id, [], "task");
+    return { ...row, attachment: list.length ? list.map(clMetaFromDoc) : null };
+  } catch (err) {
+    console.warn(`[cl_task] instance attachment fallback failed id=${row.instance_id}:`, err?.message || err);
+    return { ...row, attachment: null };
+  }
+}
+
+async function withInstanceAttachments(rows = []) {
+  if (!rows.length) return rows;
+  const needMaster = [];
+  const out = rows.map((r) => {
+    const own = parseClAttachments(r.attachment);
+    if (own.length) return { ...r, attachment: own };
+    needMaster.push(r);
+    return r;
+  });
+  if (!needMaster.length) return out;
+  try {
+    const byRef = await moduleDocuments(CL_MASTER_DOCS).listActiveMany(
+      needMaster.map((r) => r.cl_task_id),
+      { metadata: true },
+    );
+    return out.map((r) => {
+      if (parseClAttachments(r.attachment).length) return r;
+      const docs = byRef.get(String(r.cl_task_id)) ?? [];
+      const attachment = docs.map((d) =>
+        clMetaFromDoc({
+          ...d,
+          file_path: d.doc_path,
+          file_name: d.doc_path ? String(d.doc_path).split("/").pop() : null,
+          file_size: (Number(d.doc_size) || 0) * 1024,
+        }),
+      );
+      return { ...r, attachment: attachment.length ? attachment : null };
+    });
+  } catch (err) {
+    console.warn(`[cl_task] instance attachments batch load failed:`, err?.message || err);
+    return out.map((r) => {
+      const own = parseClAttachments(r.attachment);
+      return { ...r, attachment: own.length ? own : null };
+    });
+  }
+}
 
 /** Fill deadline calendar day (scheduled + day_offset). */
 const FILL_DEADLINE_SQL = `(i.scheduled_date + COALESCE(i.day_offset, m.day_offset, 0) * INTERVAL '1 day')::date`;
@@ -32,12 +141,7 @@ const INSTANCE_SELECT = `
       THEN m.form_schema
       ELSE i.form_schema
     END AS form_schema,
-    CASE
-      WHEN i.attachment IS NULL
-        OR i.attachment::text IN ('null', '[]', '{}', '')
-      THEN m.attachment
-      ELSE i.attachment
-    END AS attachment,
+    i.attachment AS attachment,
     COALESCE(NULLIF(TRIM(i.sop_description), ''), m.sop_description) AS sop_description,
     COALESCE(i.sop_required, m.sop_required, FALSE) AS sop_required,
     d.name  AS department_name,
@@ -328,13 +432,14 @@ const ClTask = {
     const finalOrder = order?.toUpperCase() === "DESC" ? "DESC" : "ASC";
     const { where, params } = buildMasterFilters(filters);
 
-    return dbQuery(
+    const rows = await dbQuery(
       `${MASTER_SELECT}
        WHERE ${where}
        ORDER BY m.${finalSort} ${finalOrder}
        LIMIT ? OFFSET ?`,
       [...params, finalLimit, Number(offset)],
     );
+    return withMasterAttachments(rows);
   },
 
   async countMasters(filters) {
@@ -348,7 +453,7 @@ const ClTask = {
 
   async getMasterById(id) {
     const rows = await dbQuery(`${MASTER_SELECT} WHERE m.cl_task_id = ?`, [id]);
-    return rows[0] || null;
+    return withMasterAttachment(rows[0] || null);
   },
 
   async setMasterActive(id, isActive, actor = null) {
@@ -419,7 +524,8 @@ const ClTask = {
       LIMIT ? OFFSET ?
     `;
 
-    return dbQuery(query, [...params, finalLimit, Number(offset)]);
+    const rows = await dbQuery(query, [...params, finalLimit, Number(offset)]);
+    return withInstanceAttachments(rows);
   },
 
   async countInstances(filters) {
@@ -437,7 +543,7 @@ const ClTask = {
 
   async getInstanceById(id) {
     const rows = await dbQuery(`${INSTANCE_SELECT} WHERE i.instance_id = ?`, [id]);
-    return rows[0] || null;
+    return withInstanceAttachment(rows[0] || null);
   },
 
   async createMaster(data) {
@@ -449,8 +555,8 @@ const ClTask = {
         assignee_person_ids,
         due_time, day_offset, include_sunday, next_occurrence, approved,
         created_by, created_by_name, approved_by, approved_at,
-        form_schema, verification_required, scoring_enabled, sop_required, attachment
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        form_schema, verification_required, scoring_enabled, sop_required
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         data.title,
         data.description || null,
@@ -485,9 +591,6 @@ const ClTask = {
         data.verification_required !== false,
         data.scoring_enabled !== false,
         data.sop_required === true,
-        data.attachment == null
-          ? null
-          : (typeof data.attachment === "string" ? data.attachment : JSON.stringify(data.attachment)),
       ],
     );
     return result.insertId;
@@ -521,7 +624,6 @@ const ClTask = {
         verification_required = ?,
         scoring_enabled = ?,
         sop_required = ?,
-        attachment = ?,
         updated_by = ?,
         updated_by_name = ?,
         updated_at = CURRENT_TIMESTAMP
@@ -550,9 +652,6 @@ const ClTask = {
         data.verification_required !== false,
         data.scoring_enabled !== false,
         data.sop_required === true,
-        data.attachment == null
-          ? null
-          : (typeof data.attachment === "string" ? data.attachment : JSON.stringify(data.attachment)),
         data.updated_by ?? null,
         data.updated_by_name ?? null,
         id,
