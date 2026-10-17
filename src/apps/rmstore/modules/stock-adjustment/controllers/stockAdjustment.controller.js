@@ -2,7 +2,7 @@ import { findAdjustments, findAdjustmentById, insertAdjustment, updateAdjustment
 import { computeMrnQtyBudget } from "../utils/mrnQtyBudget.js";
 import { applyStockAdjustmentOnApprove, syncStockAdjustmentAddCoils, revertStockAdjustmentOnUnapprove, parseRemovedCoilUids, buildRemovedCoilUidsJson, assertSaAddCoilsUnusedForEdit, needsSaAddCoilResync, shouldSyncStockAdjustmentAddCoils } from "../utils/apply/stockAdjustmentApply.js";
 import { findActiveCoilsForMinus } from "../utils/minusCoilLookup.js";
-import { findCoilsBySaId, findCoilsBySaIdWithMrn, findCoilByUid } from "../../coil/models/coil.model.js";
+import { findCoilsBySaIdWithMrn, findCoilByUid } from "../../coil/models/coil.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
@@ -42,31 +42,25 @@ function hasSaEditPayload(body = {}) {
   return Object.keys(body).some((k) => !skip.has(k) && body[k] !== undefined);
 }
 
+/**
+ * Coils for GET/open only — never sync/materialize on read (that made edit/approve drawers slow).
+ * Pending Add without DB coils → preview rows; sync happens on create/update/approve.
+ */
 async function loadAdjustmentCoils(row) {
   const entryType = String(row?.entry_type || "").toLowerCase();
 
   if (isSaAddLikeEntryType(entryType)) {
-    let dbCoils = await findCoilsBySaIdWithMrn(row.adjustment_id, "stock_in");
-    if (!dbCoils.length && !row?.approved) {
-      try {
-        await syncStockAdjustmentAddCoils({
-          adjustment: row,
-          userName: row.updated_by || row.created_by || "system",
-          userId: null,
-        });
-        dbCoils = await findCoilsBySaIdWithMrn(row.adjustment_id, "stock_in");
-      } catch {
-        /* fall back to preview below */
-      }
-    }
+    const dbCoils = await findCoilsBySaIdWithMrn(row.adjustment_id, "stock_in");
     if (dbCoils.length) return dbCoils;
+    return buildPendingAddPreviewCoils(row);
   }
 
   if (!row?.approved) {
     if (entryType === "minus") {
-      return (
-        await Promise.all(parseRemovedCoilUids(row.removed_coil_uids).map((uid) => findCoilByUid(uid)))
-      ).filter(Boolean);
+      const uids = parseRemovedCoilUids(row.removed_coil_uids);
+      if (!uids.length) return [];
+      // Parallel lookups — cap concurrency cost for large selections
+      return (await Promise.all(uids.map((uid) => findCoilByUid(uid)))).filter(Boolean);
     }
     return buildPendingAddPreviewCoils(row);
   }
@@ -492,7 +486,7 @@ export const createAdjustment = async (req, res) => {
       success: true,
       data: { ...savedRow, coils },
       toast_type: "warning",
-      message: "Stock adjustment saved. Coils are available in Store In — approve when ready for downstream use.",
+      message: "Stock adjustment saved. Coils are available in Store In — approve to reflect in inventory.",
     });
   } catch (err) {
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
@@ -555,7 +549,8 @@ export const updateAdjustmentCtrl = async (req, res) => {
           message: "You do not have permission to set this stock adjustment back to pending.",
         });
       }
-      // Add/Old: keep coils in Store In — approval only gates downstream modules.
+      // Add/Old: keep coils for Store In — approval only gates inventory totals / downstream.
+      // Minus: restore coils to hand when unapproved.
       if (String(existing.entry_type || "").toLowerCase() === "minus") {
         await revertStockAdjustmentOnUnapprove({
           adjustment: existing,
@@ -756,7 +751,7 @@ export const updateAdjustmentCtrl = async (req, res) => {
     const addLike = isSaAddLikeEntryType(String(entry_type || existing.entry_type || ""));
     const coilResyncNeeded = addLike && needsSaAddCoilResync(existing, mergedPreview);
 
-    // Validate first — only revert inventory when coil-defining fields change.
+    // Validate first — only revert Add coils when coil-defining fields change.
     if (existing.approved) {
       if (addLike && coilResyncNeeded) {
         await assertSaAddCoilsUnusedForEdit(id);
@@ -797,7 +792,7 @@ export const updateAdjustmentCtrl = async (req, res) => {
       success: true,
       data: { ...data, coils },
       toast_type: "warning",
-      message: "Stock adjustment updated. Coils are available in Store In — approve when ready for downstream use.",
+      message: "Stock adjustment updated. Coils are available in Store In — approve to reflect in inventory.",
     });
   } catch (err) {
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });

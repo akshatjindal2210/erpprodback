@@ -8,7 +8,7 @@
  *   rmstore_* — RM Store app tables only
  *   hrms_*    — HRMS app tables only
  *   purchase_* — Purchase app tables only
- *   production_* — Production app tables only
+ *   prod_*      — Production app tables only
  *   eng_*       — Engineering app tables only
  *
  * Imports:
@@ -26,7 +26,7 @@ export const TABLE_PREFIX = {
   rmstore: "rmstore_",
   hrms: "hrms_",
   purchase: "purchase_",
-  production: "production_",
+  production: "prod_",
   engineering: "eng_",
 };
 
@@ -119,20 +119,20 @@ export const DB_TABLES = {
     "rmstore_out_entry_scanned_coil",
     "rmstore_stock_adjustment",
     "rmstore_coil_transaction",
-    "rmstore_audit_master",
-    "rmstore_audit_locations",
   ],
 
   /** HRMS application tables. */
   hrms: ["hrms_attendance_log", "hrms_attendance", "hrms_gate_pass", "hrms_leave", "hrms_loan", "hrms_deduction"],
 
   purchase: [],
-  production: [],
+  /** Production application tables. */
+  production: ["prod_job_card", "prod_shortage"],
 
   /** Engineering application tables. */
   engineering: [
     "eng_process_master",
     "eng_machine_master",
+    "eng_item_process",
   ],
 };
 

@@ -4,7 +4,7 @@ import { enrichProductionRow } from "../utils/productionRmHelpers.js";
 
 const TBL = T.MASTER_PRODUCTION;
 
-const ALLOWED_FILTER_FIELDS = ["production_id", "item_dcode", "approved", "from_date", "to_date", "has_prime_process", "has_finish_process"];
+const ALLOWED_FILTER_FIELDS = ["production_id", "item_dcode", "approved", "from_date", "to_date"];
 const ALLOWED_SORT_FIELDS = ["production_id", "item_dcode", "item_code", "approved", "created_at", "updated_at"];
 
 function normalizeApprovedFilter(value) {
@@ -38,20 +38,6 @@ export const findProductions = async ({ filters = {}, search, sort = {}, page = 
       conds.push(`created_at <= $${i++}`);
       continue;
     }
-    // Engineering list: only rows where process JSON was saved
-    if (key === "has_prime_process") {
-      if (rawVal === true || rawVal === "true" || rawVal === 1 || rawVal === "1") {
-        conds.push(`prime_process IS NOT NULL AND jsonb_typeof(prime_process) = 'object' AND COALESCE(jsonb_array_length(prime_process->'stages'), 0) > 0`);
-      }
-      continue;
-    }
-    if (key === "has_finish_process") {
-      if (rawVal === true || rawVal === "true" || rawVal === 1 || rawVal === "1") {
-        conds.push(`finish_process IS NOT NULL AND jsonb_typeof(finish_process) = 'object' AND COALESCE(jsonb_array_length(finish_process->'stages'), 0) > 0`);
-      }
-      continue;
-    }
-
     const val = key === "approved" ? normalizeApprovedFilter(rawVal) : rawVal;
     values.push(val);
     conds.push(`${key} = $${i++}`);
@@ -60,7 +46,7 @@ export const findProductions = async ({ filters = {}, search, sort = {}, page = 
   if (search) {
     values.push(`%${search}%`);
     conds.push(
-      `(item_dcode::text ILIKE $${i} OR COALESCE(item_code, '') ILIKE $${i} OR COALESCE(item_desc, '') ILIKE $${i} OR rm_items::text ILIKE $${i} OR COALESCE(prime_process::text, '') ILIKE $${i} OR COALESCE(finish_process::text, '') ILIKE $${i})`
+      `(item_dcode::text ILIKE $${i} OR COALESCE(item_code, '') ILIKE $${i} OR COALESCE(item_desc, '') ILIKE $${i} OR rm_items::text ILIKE $${i})`
     );
     i++;
   }
@@ -94,24 +80,17 @@ export const findProduction = async (filters) => {
   return row ? enrichProductionRow(row) : null;
 };
 
-function asJsonb(value) {
-  if (value == null) return null;
-  if (typeof value === "string") return value;
-  return JSON.stringify(value);
-}
-
 export const insertProduction = async (data) => {
   const [row] = await dbQuery(
     `INSERT INTO ${TBL}
-     (item_dcode, item_code, item_desc, rm_items, prime_process, approved, approved_by, approved_at, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     (item_dcode, item_code, item_desc, rm_items, approved, approved_by, approved_at, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
     [
       data.item_dcode,
       data.item_code,
       data.item_desc,
       JSON.stringify(data.rm_items || []),
-      asJsonb(data.prime_process ?? null),
       data.approved === true,
       data.approved_by ?? null,
       data.approved_at ?? null,
@@ -124,11 +103,6 @@ export const insertProduction = async (data) => {
 export const updateProductions = async (fields, id) => {
   if (fields.rm_items != null && typeof fields.rm_items !== "string") {
     fields.rm_items = JSON.stringify(fields.rm_items);
-  }
-  for (const key of ["prime_process", "finish_process"]) {
-    if (Object.prototype.hasOwnProperty.call(fields, key) && fields[key] != null && typeof fields[key] !== "string") {
-      fields[key] = JSON.stringify(fields[key]);
-    }
   }
   const keys = Object.keys(fields);
   if (!keys.length) return findProduction({ production_id: id });

@@ -4,9 +4,13 @@ import { BOX_TX_TYPES } from "../../../lib/constants/boxTransactionTypes.js";
 import { sqlBoxInHand } from "../../box/utils/inventory/boxInventorySql.js";
 import { logBoxTransaction, singlePackingFromRows } from "../../box/utils/transactions/logBoxTransaction.js";
 import { fetchBoxSnapshotForLocation, fetchBoxDetailsByUids, flattenScansFromLocations, mergeScannedBoxes, removeScannedBox, parseExpectedBoxes, parseScannedBoxes, compareLocationBoxSets, resolveLocationStatusAfterScan, isLocationClosed, isLocationPending, resolveBoxAccName, resolveAuditBoxAccName, pickAuditAccCode, enrichAuditBoxRows, buildAuditEnrichContext } from "../utils/snapshot/auditBoxSnapshot.js";
-import { findAudits, ASSIGNED_USERS_SUBQUERY, AUDIT_DEFAULT_SELECT_FIELDS, AUDIT_LOCATIONS_JSON } from "../utils/list/auditList.js";
+import { createInventoryAuditList, INVENTORY_AUDIT_APP_IMS, assertAuditLocationIdsForAppType } from "../../../../core/lib/inventory-audit/auditList.js";
 
-export { findAudits } from "../utils/list/auditList.js";
+const { findAudits, ASSIGNED_USERS_SUBQUERY, AUDIT_DEFAULT_SELECT_FIELDS, AUDIT_LOCATIONS_JSON } = createInventoryAuditList({ appType: INVENTORY_AUDIT_APP_IMS });
+
+export { findAudits };
+
+const AUDIT_APP_TYPE = INVENTORY_AUDIT_APP_IMS;
 
 const ALLOWED_FILTER_FIELDS = ["audit_id", "status", "approved", "from_date", "to_date"];
 const ALLOWED_UPDATE_FIELDS = ["start_date", "end_date", "remarks", "status", "approved", "approved_by", "approved_at", "updated_by", "updated_at"];
@@ -16,9 +20,9 @@ export const findAudit = async (filters = {}) => {
   const keys = Object.keys(filters);
   if (!keys.length) return null;
 
-  const values = [];
-  let i = 1;
-  const conditions = ["am.is_deleted = false"];
+  const values = [AUDIT_APP_TYPE];
+  let i = 2;
+  const conditions = ["am.is_deleted = false", "am.app_type = $1"];
 
   for (const key of keys) {
     if (key !== "audit_id" && !ALLOWED_FILTER_FIELDS.includes(key)) continue;
@@ -110,12 +114,15 @@ export const insertAudit = async (data, { client = null } = {}) => {
         .filter((row) => row.assigned_user_id && row.location_ids.length)
     : [];
 
+  const allLocationIds = normalizedAssignments.flatMap((a) => a.location_ids);
+  await assertAuditLocationIdsForAppType(allLocationIds, AUDIT_APP_TYPE, { client });
+
   const res = await run(
     `INSERT INTO ${T.AUDIT_MASTER}
-     (start_date, end_date, remarks, created_by, approved, approved_by, approved_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     (start_date, end_date, remarks, created_by, approved, approved_by, approved_at, app_type)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
-    [start_date, end_date, remarks, created_by, Boolean(approved), approved_by ?? null, approved_at ?? null]
+    [start_date, end_date, remarks, created_by, Boolean(approved), approved_by ?? null, approved_at ?? null, AUDIT_APP_TYPE]
   );
   const row = client ? res.rows[0] : res[0];
 
@@ -146,15 +153,16 @@ export const updateAudit = async (fields = {}, filters = {}, { client = null } =
   if (!fieldKeys.length) throw new Error("No valid fields to update");
   if (!filterKeys.length) throw new Error("No valid filters provided");
 
-  const values = [...Object.values(safeFields), ...Object.values(safeFilters)];
+  const values = [...Object.values(safeFields), ...Object.values(safeFilters), AUDIT_APP_TYPE];
 
   const setClause = fieldKeys.map((k, i) => `${k} = $${i + 1}`).join(", ");
   const whereClause = filterKeys.map((k, i) => `${k} = $${fieldKeys.length + i + 1}`).join(" AND ");
+  const appTypeIdx = values.length;
 
   const res = await run(
     `UPDATE ${T.AUDIT_MASTER}
      SET ${setClause}
-     WHERE ${whereClause} AND is_deleted = false
+     WHERE ${whereClause} AND is_deleted = false AND app_type = $${appTypeIdx}
      RETURNING *`,
     values
   );
@@ -170,6 +178,9 @@ export const updateAudit = async (fields = {}, filters = {}, { client = null } =
     : [];
 
   if (normalizedAssignments.length) {
+    const allLocationIds = normalizedAssignments.flatMap((a) => a.location_ids);
+    await assertAuditLocationIdsForAppType(allLocationIds, AUDIT_APP_TYPE, { client });
+
     const existingRes = await run(
       `SELECT assignment_id, location_id, status, is_active, plan_assigned_user_id, assigned_user_id
        FROM ${T.AUDIT_LOCATIONS} WHERE audit_id = $1`,
@@ -220,6 +231,7 @@ export const updateAudit = async (fields = {}, filters = {}, { client = null } =
       }
     }
   } else if (fields.location_ids) {
+    await assertAuditLocationIdsForAppType(fields.location_ids, AUDIT_APP_TYPE, { client });
     await run(`DELETE FROM ${T.AUDIT_LOCATIONS} WHERE audit_id = $1`, [row.audit_id]);
     for (const locId of fields.location_ids) {
       await insertAuditLocationRow(run, row.audit_id, locId, fields.assigned_user_id ?? null, { client });
@@ -243,14 +255,15 @@ export const deleteAudit = async (filters = {}, meta = {}) => {
 
   if (!conditions.length) throw new Error("Invalid filters");
 
-  values.push(meta.deleted_by ?? null);
+  values.push(meta.deleted_by ?? null, AUDIT_APP_TYPE);
+  const appTypeIdx = values.length;
 
   await dbQuery(
     `UPDATE ${T.AUDIT_MASTER}
      SET is_deleted = true,
          deleted_at = NOW(),
          deleted_by = $${i}
-     WHERE ${conditions.join(" AND ")}`,
+     WHERE ${conditions.join(" AND ")} AND app_type = $${appTypeIdx}`,
     values
   );
 };
@@ -732,11 +745,15 @@ export const getAuditLocationScores = async (audit_id, { client = null } = {}) =
      JOIN ${T.LOCATION_MASTER} lm ON al.location_id = lm.location_id
      LEFT JOIN ${M.USERS} u_loc ON al.assigned_user_id = u_loc.id
      LEFT JOIN ${M.USERS} u_plan ON al.plan_assigned_user_id = u_plan.id
+     JOIN ${T.AUDIT_MASTER} am ON am.audit_id = al.audit_id
+       AND am.is_deleted = false
+       AND am.app_type = $2
      WHERE al.audit_id = $1
        AND al.is_active = true
        AND al.score_at IS NOT NULL
+       AND lower(trim(COALESCE(lm.type, ''))) = $2
      ORDER BY location_no ASC, al.assignment_id ASC`,
-    [audit_id]
+    [audit_id, AUDIT_APP_TYPE]
   );
   const rows = client ? res.rows : res;
   const location_scores = (rows || []).map(mapLocationScoreRow);

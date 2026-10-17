@@ -9,7 +9,7 @@ function isMasterCacheFresh(entry) {
   return entry.data != null && Date.now() - entry.loadedAt < MASTER_CACHE_MS;
 }
 
-async function rmItemMap() {
+export async function rmItemMap() {
   if (isMasterCacheFresh(masterCache.rm)) return masterCache.rm.data;
   const map = new Map();
   for (const row of await loadMappedItems("item", { type: "rm" })) {
@@ -251,6 +251,21 @@ export async function enrichProductionMasterRows(rows = []) {
       rm_items,
     });
   });
+}
+
+/** RM code / desc on stage RM items (DB keeps only rm_item_dcode). */
+export async function labelStageRm(stages = [], rmMap = null) {
+  const map = rmMap || (await rmItemMap());
+  return stages.map((st) => ({
+    ...st,
+    processes: st.processes.map((p) => ({
+      ...p,
+      rm_items: p.rm_items.map((r) => {
+        const live = map.get(canonicalCode(r.rm_item_dcode));
+        return { ...r, rm_item_code: live?.item_code || `RM ${r.rm_item_dcode}`, rm_item_desc: live?.item_desc ?? null };
+      }),
+    })),
+  }));
 }
 
 export async function mergeProductionSnapshot(base, prod, cache = null) {

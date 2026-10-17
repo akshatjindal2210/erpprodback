@@ -525,7 +525,9 @@ async function loadCoilMetaByUids(uids = []) {
        m.item_code,
        m.item_desc,
        m.acc_code,
-       m.acc_name
+       m.acc_name,
+       m.bill_no,
+       m.bill_dt
      FROM ${COIL_TABLE} c
      LEFT JOIN ${MRN_TABLE} m ON m.uid = c.mrn_uid
      WHERE c.coil_no_uid IN (${placeholders})`,
@@ -553,6 +555,8 @@ function enrichCoilLine(line, meta) {
     status: line.status || str(meta.status),
     acc_code: line.acc_code ?? str(meta.acc_code),
     acc_name: line.acc_name || str(meta.acc_name),
+    bill_no: line.bill_no || str(meta.bill_no),
+    bill_dt: line.bill_dt ?? meta.bill_dt ?? null,
   };
 }
 
@@ -764,6 +768,8 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
     source_out_uid: first.out_uid ?? null,
     acc_code: first.acc_code ?? null,
     acc_name: first.acc_name || null,
+    bill_no: first.bill_no || null,
+    bill_dt: first.bill_dt ?? null,
     fg_item_code: null,
     fg_item_desc: null,
     coil_label:
@@ -978,6 +984,35 @@ export const findInProcessRequests = async (options = {}) => {
     }
     return merged;
   });
+
+  /** Register list — FG + machine from prdrunjc for the job card shown on the row (IR is fallback). */
+  if (applyRegisterEnrich && data.length) {
+    const registerDisplayJc = (row) => str(row.pjobcardno);
+    const registerJcs = [...new Set(data.map(registerDisplayJc).filter(Boolean))];
+    if (registerJcs.length) {
+      const [irByJc, prodByJc] = await Promise.all([
+        findIssueRequestRegisterMetaByPjobcardnos(registerJcs),
+        findProductionJcMetaByPjobcardnos(registerJcs),
+      ]);
+      data = data.map((row) => {
+        const jc = registerDisplayJc(row);
+        if (!jc) return row;
+        const key = productionJcMetaKey(jc);
+        const hit = mergePendingJcDisplayMeta(prodByJc.get(key), irByJc.get(key));
+        if (!hit.macname && !hit.fg_item_code && !hit.fg_item_desc) return row;
+        return {
+          ...row,
+          ...(hit.macname ? { macname: hit.macname } : {}),
+          ...(hit.fg_item_code || hit.fg_item_desc
+            ? {
+                fg_item_code: hit.fg_item_code ?? row.fg_item_code ?? null,
+                fg_item_desc: hit.fg_item_desc ?? row.fg_item_desc ?? null,
+              }
+            : {}),
+        };
+      });
+    }
+  }
 
   if (applyRegisterEnrich && data.length) {
     const prodJcs = [
@@ -1357,6 +1392,8 @@ export const findInProcessRejectionsPendingRejection = async (options = {}) => {
       acc_name: row.acc_name || null,
       vendor_acc_code: row.acc_code ?? null,
       vendor_acc_name: row.acc_name || null,
+      bill_no: row.bill_no || first.bill_no || null,
+      bill_dt: row.bill_dt ?? first.bill_dt ?? null,
       pjobcardno: row.pjobcardno || null,
       macname: row.macname || null,
       fg_item_code: row.fg_item_code || null,

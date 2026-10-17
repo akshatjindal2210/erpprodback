@@ -145,6 +145,7 @@ export const createForwardingNote = async (req, res) => {
         fuid: inserted.fuid,
         items,
         userName: auditUserName(req),
+        user: req.user,
         client,
       });
       if (normalizedApproved === true) {
@@ -413,6 +414,7 @@ export const updateForwardingNote = async (req, res) => {
           fuid,
           items,
           userName: auditUserName(req),
+          user: req.user,
           excludeFuid: fuid,
           client,
         });

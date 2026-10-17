@@ -11,13 +11,83 @@ import { findAvailableBoxes } from "../../models/forwardingNote.model.js";
 import { findBoxesByNoUids } from "../../../box/models/box.model.js";
 import { deleteForwardingNoteItems, findActiveForwardingNoteItemsByFuid, insertForwardingNoteItem } from "../../models/forwardingNoteItem.model.js";
 import { docNoFromStandardBoxNoUid } from "../../../../lib/stickerUidHelpers.js";
-import { buildForwardingAvailableBoxes, enrichForwardingBoxesWithPackingStd, inferForwardingPackingStandardQty, isForwardingLooseBox, standardFifoQtyAtBalance, sumBoxQty } from "../stock/forwardingAvailableStock.js";
+import { assertForwardingFifoBoxSelection, buildForwardingAvailableBoxes, enrichForwardingBoxesWithPackingStd, fifoOrderedBoxesForForwardingItem, inferForwardingPackingStandardQty, isForwardingLooseBox, standardFifoQtyAtBalance, sumBoxQty } from "../stock/forwardingAvailableStock.js";
 import { loadScheduleDispatchQtyMap, loadScheduleQtyForKeys, planKey } from "../../../schedule-planning/utils/db/schedulePlanDb.js";
 import { fetchImsDataRaw } from "../../../../lib/services/ims.service.js";
 import { getForwardingShortageQtyPercentage } from "../../../../../core/configuration/models/appConfig.model.js";
 
 const FN_RESERVE_LOCK_NS = 71;
 const IMS_SCHEDULE_LIST = "schdule";
+
+function isSuperAdminUser(user) {
+  return String(user?.type || user?.role || "").toLowerCase().trim() === "super_admin";
+}
+
+function sanitizeFifoStartFields(items = [], user) {
+  const canFifo = isSuperAdminUser(user);
+  return (items || []).map((item) => {
+    if (item?.is_pre_calculated) return item;
+    let fifo = item?.fifo_start_packing_number;
+    if (!canFifo || fifo == null || String(fifo).trim() === "") {
+      fifo = null;
+    } else {
+      fifo = String(fifo).trim();
+    }
+    return { ...item, fifo_start_packing_number: fifo };
+  });
+}
+
+async function assertForwardingFifoSelections(items = [], exclude_fuid = null, { client } = {}) {
+  const claimedByDcode = new Map();
+
+  for (const item of items || []) {
+    if (item?.is_pre_calculated || !item?.selected_boxes?.length) continue;
+    const fifoStart = String(item?.fifo_start_packing_number || "").trim();
+    if (!fifoStart) continue;
+    const item_dcode = Number(item.item_dcode);
+    if (!Number.isFinite(item_dcode)) continue;
+
+    const dcodeKey = String(item_dcode);
+    const claimed = claimedByDcode.get(dcodeKey) || new Set();
+
+    const physical = await findAvailableBoxes(item_dcode, { client });
+    const allowed = await buildForwardingAvailableBoxes(physical, item_dcode, exclude_fuid, {
+      approvedOnly: false,
+      client,
+    });
+    const pool = (allowed || []).filter((box) => {
+      const key = String(box?.box_no_uid ?? box?.box_uid ?? "")
+        .trim()
+        .toLowerCase();
+      return !key || !claimed.has(key);
+    });
+    const ordered = fifoOrderedBoxesForForwardingItem({
+      availableBoxes: pool,
+      loose_priority: item.loose_priority,
+      fifo_start_packing_number: item.fifo_start_packing_number,
+    });
+    const targetRaw = item?.dispatch_target;
+    const target =
+      targetRaw != null && targetRaw !== "" && Number.isFinite(Number(targetRaw))
+        ? Number(targetRaw)
+        : sumBoxQty(item.selected_boxes);
+
+    assertForwardingFifoBoxSelection({
+      orderedBoxes: ordered,
+      selectedBoxes: item.selected_boxes,
+      targetQty: target,
+      itemLabel: `item ${item_dcode}`,
+    });
+
+    for (const box of item.selected_boxes || []) {
+      const key = String(box?.box_no_uid ?? box?.box_uid ?? "")
+        .trim()
+        .toLowerCase();
+      if (key) claimed.add(key);
+    }
+    claimedByDcode.set(dcodeKey, claimed);
+  }
+}
 
 async function enrichSelectedBoxes(selected_boxes = []) {
   if (!selected_boxes?.length) return [];
@@ -41,6 +111,19 @@ async function enrichSelectedBoxes(selected_boxes = []) {
       qty: box.qty != null && box.qty !== "" ? box.qty : db?.qty,
     };
   });
+}
+
+/** First-seen packing order from FIFO box pick (stable for DB insert / reopen table). */
+function packingKeysInBoxSelectionOrder(selected_boxes = []) {
+  const seen = new Set();
+  const order = [];
+  for (const box of selected_boxes || []) {
+    const pNo = String(box.packing_number ?? "").trim() || "N/A";
+    if (seen.has(pNo)) continue;
+    seen.add(pNo);
+    order.push(pNo);
+  }
+  return order;
 }
 
 function groupSelectedBoxesByPacking(selected_boxes = []) {
@@ -365,7 +448,10 @@ async function insertOneItemRow(fuid, item, userName, client) {
   }
 
   const grouped = groupSelectedBoxesByPacking(item.selected_boxes);
-  for (const [packing_number, stats] of Object.entries(grouped)) {
+  const packingOrder = packingKeysInBoxSelectionOrder(item.selected_boxes);
+  for (const packing_number of packingOrder) {
+    const stats = grouped[packing_number];
+    if (!stats) continue;
     await insertForwardingNoteItem(
       {
         fuid,
@@ -410,16 +496,18 @@ export async function validateExistingForwardingNoteItems({ fuid, excludeFuid = 
   await assertForwardingItemsWithinRemaining(items, excludeFuid ?? fuid, { client, approvedOnly: false });
 }
 
-async function persistForwardingNoteItems({ fuid, items, userName, excludeFuid, replaceExisting, client }) {
-  assertUniqueForwardingItemDcodes(items);
-  assertNoDuplicateSelectedBoxes(items);
+async function persistForwardingNoteItems({ fuid, items, userName, user, excludeFuid, replaceExisting, client }) {
+  const sanitized = sanitizeFifoStartFields(items, user);
+  assertUniqueForwardingItemDcodes(sanitized);
+  assertNoDuplicateSelectedBoxes(sanitized);
 
-  const enrichedItems = await enrichItems(items);
+  const enrichedItems = await enrichItems(sanitized);
   const itemDcodes = enrichedItems.map((i) => i.item_dcode);
 
   await lockItemDcodes(client, itemDcodes);
   await assertScheduleDispatchWithinBalance(enrichedItems, excludeFuid, { client });
   await assertForwardingItemsWithinRemaining(enrichedItems, excludeFuid, { client, approvedOnly: false });
+  await assertForwardingFifoSelections(enrichedItems, excludeFuid, { client });
 
   if (replaceExisting) {
     await deleteForwardingNoteItems({ fuid }, { deleted_by: userName }, { client });
@@ -431,7 +519,7 @@ async function persistForwardingNoteItems({ fuid, items, userName, excludeFuid, 
 }
 
 /** Insert all items for create (after master insert). */
-export async function saveForwardingNoteItems({ fuid, items = [], userName, excludeFuid = null, client = null }) {
+export async function saveForwardingNoteItems({ fuid, items = [], userName, user = null, excludeFuid = null, client = null }) {
   if (!items.length) return;
 
   const work = async (txnClient) => {
@@ -439,6 +527,7 @@ export async function saveForwardingNoteItems({ fuid, items = [], userName, excl
       fuid,
       items,
       userName,
+      user,
       excludeFuid,
       replaceExisting: false,
       client: txnClient,
@@ -450,7 +539,7 @@ export async function saveForwardingNoteItems({ fuid, items = [], userName, excl
 }
 
 /** Replace all items on update — delete + insert in one transaction. */
-export async function replaceForwardingNoteItems({ fuid, items = [], userName, excludeFuid = null, client = null }) {
+export async function replaceForwardingNoteItems({ fuid, items = [], userName, user = null, excludeFuid = null, client = null }) {
   if (!items.length) return;
 
   const work = async (txnClient) => {
@@ -458,6 +547,7 @@ export async function replaceForwardingNoteItems({ fuid, items = [], userName, e
       fuid,
       items,
       userName,
+      user,
       excludeFuid,
       replaceExisting: true,
       client: txnClient,

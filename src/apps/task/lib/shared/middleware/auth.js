@@ -7,9 +7,6 @@ function getTokenFromRequest(req) {
   const fromCookie = req.cookies?.[config.cookie_name];
   if (fromCookie) return fromCookie;
 
-  const legacyTaskCookie = req.cookies?.token;
-  if (legacyTaskCookie) return legacyTaskCookie;
-
   const auth = req.headers.authorization;
   if (typeof auth === "string" && auth.toLowerCase().startsWith("bearer ")) {
     return auth.slice(7).trim();

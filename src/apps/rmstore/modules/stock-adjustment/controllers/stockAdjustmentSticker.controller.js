@@ -118,11 +118,6 @@ async function resolveSaCoilForStickerPrint(coilUid, req) {
     err.statusCode = 404;
     throw err;
   }
-  if (normalizeSaApproved(adj.approved)) {
-    const err = new Error("Coil not found in inventory for this approved adjustment.");
-    err.statusCode = 404;
-    throw err;
-  }
   if (!isSaAddLikeEntryType(adj.entry_type)) {
     const err = new Error("Preview stickers are only for pending Add (+) or Old adjustments.");
     err.statusCode = 400;
@@ -144,7 +139,7 @@ async function resolveSaCoilForStickerPrint(coilUid, req) {
       item_desc: preview.item_desc ?? adj.item_desc ?? null,
       heat_no: preview.heat_no ?? adj.heat_no ?? null,
     },
-    preview: true,
+    preview: !normalizeSaApproved(adj.approved),
   };
 }
 

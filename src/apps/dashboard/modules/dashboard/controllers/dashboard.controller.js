@@ -25,8 +25,8 @@ const APP_TABLE_PREFIX = {
   rmstore: ["rmstore_"],
   hrms: ["hrms_"],
   purchase: ["purchase_"],
-  production: ["production_"],
-  engineering: [],
+  production: ["prod_"],
+  engineering: ["eng_"],
 };
 
 function extractReferencedTables(rawSql = "") {

@@ -110,6 +110,8 @@ const PURCHASE_MODULE_ROUTES = {
 const PRODUCTION_MODULE_ROUTES = {
   production_master: `${PRODUCTION}/master`,
   production_shortage: `${PRODUCTION}/shortage`,
+  production_job_card: `${PRODUCTION}/job-card`,
+  production_tooling: `${PRODUCTION}/tooling`,
   production_activity_logs: `${PRODUCTION}/logs`,
 };
 
@@ -133,6 +135,8 @@ const MODULE_ROUTE_ALIASES = {
   rm_rejection: "rm_rejection",
   purchase_shortage: "purchase_shortage",
   production_shortage: "production_shortage",
+  production_job_card: "production_job_card",
+  production_tooling: "production_tooling",
   hrms_employee: "hrms_employee",
   employees: "hrms_employee",
 };

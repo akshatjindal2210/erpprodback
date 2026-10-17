@@ -274,6 +274,27 @@ async function loadIprRejectionDocs(coil) {
  */
 /** @param {string} coil_no_uid
  *  @param {object} [existingCoil] — skip second DB read when caller already loaded the row */
+/** Prefer linked / failed QC batch totals for PDF Qty / Coils. */
+function attachReportQtyCoils(coil, qcChecks = []) {
+  const checks = Array.isArray(qcChecks) ? qcChecks : [];
+  const linkedId = coil?.qc_uid != null ? Number(coil.qc_uid) : null;
+  const check =
+    (Number.isFinite(linkedId) && checks.find((c) => Number(c.qc_check_uid) === linkedId)) ||
+    checks.find((c) => String(c.status || "").toLowerCase() === "failed") ||
+    checks[checks.length - 1] ||
+    null;
+
+  const coilCount = Math.max(1, Number(check?.coil_count) || 1);
+  const batchQty = check?.qty != null && Number.isFinite(Number(check.qty)) ? Number(check.qty) : null;
+  const singleQty = coil?.qty != null && Number.isFinite(Number(coil.qty)) ? Number(coil.qty) : null;
+
+  return {
+    ...coil,
+    report_coil_count: coilCount,
+    report_total_qty: batchQty != null && coilCount > 0 ? batchQty : singleQty,
+  };
+}
+
 export async function loadCoilFinderReportData(coil_no_uid, existingCoil = null) {
   const uid = String(coil_no_uid || "").trim();
   if (!uid) return null;
@@ -281,13 +302,14 @@ export async function loadCoilFinderReportData(coil_no_uid, existingCoil = null)
   const coil = existingCoil || (await findCoilByUid(uid));
   if (!coil) return null;
 
-  const details = buildCoilDetailRows(coil);
   const [qcChecks, iprDocs, stickerDocs] = await Promise.all([
     loadQcChecks(coil),
     loadIprRejectionDocs(coil),
     loadStickerDocs(coil),
   ]);
+  const coilForDetails = attachReportQtyCoils(coil, qcChecks);
+  const details = buildCoilDetailRows(coilForDetails);
   const documents = [...iprDocs, ...collectQcDocuments(qcChecks), ...stickerDocs];
 
-  return { coil, details, qcChecks, documents };
+  return { coil: coilForDetails, details, qcChecks, documents };
 }

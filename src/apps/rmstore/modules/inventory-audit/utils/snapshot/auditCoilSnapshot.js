@@ -2,6 +2,8 @@ import dbQuery from "../../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T, IMS_TABLES as IT } from "../../../../../../config/db/dbTables.js";
 import { coilQcJoinForAlias } from "../../../../lib/utils/coilQcStatusSql.js";
 
+const COIL_MRN_JOIN = `LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid`;
+
 /** Physical in-store coils at this RM location (matches inventory report IN_STORE bucket). */
 const COIL_IN_STORE_WHERE = `
   c.location_id = $1
@@ -28,7 +30,7 @@ const SNAPSHOT_SQL = `
     NULLIF(TRIM(m.acc_name), '') AS acc_name,
     COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.coil_no), '')) AS heat_no
   FROM ${T.COIL_TABLE} c
-  LEFT JOIN ${T.MRN} m ON m.mrn_uid = c.mrn_uid AND m.is_deleted = false
+  ${COIL_MRN_JOIN}
   ${coilQcJoinForAlias("c", "q")}
   WHERE ${COIL_IN_STORE_WHERE}
   ORDER BY c.coil_no_uid
@@ -53,7 +55,7 @@ const COIL_DETAIL_BY_UID_SQL = `
     COALESCE(NULLIF(TRIM(m.heat_no), ''), NULLIF(TRIM(m.coil_no), '')) AS heat_no,
     COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no
   FROM ${T.COIL_TABLE} c
-  LEFT JOIN ${T.MRN} m ON m.mrn_uid = c.mrn_uid AND m.is_deleted = false
+  ${COIL_MRN_JOIN}
   LEFT JOIN ${IT.LOCATION_MASTER} lm ON c.location_id = lm.location_id
   ${coilQcJoinForAlias("c", "q")}
   WHERE TRIM(UPPER(c.coil_no_uid::text)) = ANY($1::text[])
@@ -142,6 +144,17 @@ export function parseExpectedCoils(raw) {
   if (!raw) return [];
   const list = Array.isArray(raw) ? raw : typeof raw === "string" ? JSON.parse(raw) : [];
   return list.map(normalizeSnapshotCoilFromJson).filter((row) => row.coil_no_uid);
+}
+
+/** Location row from list/detail JSON (RM aliases coils; DB columns are expected_boxes). */
+export function auditLocationExpectedUnits(loc) {
+  if (loc == null || typeof loc !== "object") return null;
+  return loc.expected_boxes ?? loc.expected_coils ?? null;
+}
+
+export function auditLocationScannedUnits(loc) {
+  if (loc == null || typeof loc !== "object") return null;
+  return loc.scanned_boxes ?? loc.scanned_coils ?? null;
 }
 
 function normalizeSnapshotCoilFromJson(row) {

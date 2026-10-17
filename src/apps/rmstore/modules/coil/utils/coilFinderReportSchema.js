@@ -39,6 +39,17 @@ export function hasValue(v) {
   return s !== "" && s !== "—" && s !== "-";
 }
 
+/** e.g. `1,234 / 4 coils` — PDF / print coil details. */
+export function formatQtyAndCoilCount(qty, count) {
+  const n = Math.max(0, Number(count) || 0);
+  const qNum = qty != null && String(qty).trim() !== "" ? Number(qty) : NaN;
+  const q = Number.isFinite(qNum) ? qNum.toLocaleString("en-IN") : null;
+  if (q == null && !n) return null;
+  if (q == null) return `${n} coil${n === 1 ? "" : "s"}`;
+  if (!n) return q;
+  return `${q} / ${n} coil${n === 1 ? "" : "s"}`;
+}
+
 /** Calendar date only (DD/MM/YYYY) — no timezone shift for YYYY-MM-DD / date columns. */
 export function formatHumanDate(v) {
   if (v == null || v === "") return null;
@@ -228,7 +239,12 @@ export const COIL_DETAIL_FIELDS = [
   { key: "item_desc", label: "Description", get: (c) => c.item_desc },
   { key: "heat_no", label: "Heat No", get: (c) => c.heat_no },
   // Never expose internal ids: item_dcode, acc_code — only vendor name (header) + item_code/name.
-  { key: "qty", label: "Qty", get: (c) => c.qty },
+  { key: "qty", label: "Qty / Coils", get: (c) =>
+      formatQtyAndCoilCount(
+        c.report_total_qty != null ? c.report_total_qty : c.qty,
+        c.report_coil_count != null ? c.report_coil_count : 1
+      ),
+  },
   { key: "bill_no", label: "Bill Number", get: (c) => c.bill_no || null },
   {
     key: "bill_dt",

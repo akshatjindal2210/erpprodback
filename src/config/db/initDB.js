@@ -12,6 +12,7 @@ import { runVersionMigrations } from "../../migrations/index.js";
 import { createDocumentsTable } from "../../lib/documents/index.js";
 import { runStartupBackfills, backfillIrErpToGate, backfillShortageGrpname, backfillDocFiles } from "../../backfills/index.js";
 import { syncSerialSequences } from "./syncSequences.js";
+import { runLegacyTableDrops } from "./legacyTableDrops.js";
 
 /** Boot: structure (tables) → one-shot migrations → sequences. */
 export const initDB = async () => {
@@ -29,6 +30,8 @@ export const initDB = async () => {
     await initProductionDB();
     await initEngineeringDB();
     await initDashboardDB();
+    
+    await runLegacyTableDrops();    // Drop legacy tables (if any)
 
     // 2. Global tables
     await createDocumentsTable(); // documents + module file columns (lib/documents/documents.config.js)

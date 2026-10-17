@@ -1,5 +1,5 @@
 import { findShortages, findShortage, insertShortage, updateShortages, deleteShortages } from "../models/shortage.model.js";
-import { normalizeShortageMonth, SHORTAGE_BULK_IMPORT_TYPES, SHORTAGE_LIST_TYPES, SHORTAGE_TYPES } from "../shortage.config.js";
+import { normalizeShortageMonth, SHORTAGE_BULK_IMPORT_TYPES, SHORTAGE_LIST_TYPES, SHORTAGE_TYPES, fromDateSql } from "../shortage.config.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getCrudModuleConfig } from "../../../../core/lib/config/crud/crudModules.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -44,7 +44,7 @@ function sameMonth(a, b) {
   return normalizeShortageMonth(a, null).slice(0, 7) === normalizeShortageMonth(b, null).slice(0, 7);
 }
 
-async function enrichShortageRows(rows = []) {
+export async function enrichShortageRows(rows = []) {
   if (!Array.isArray(rows) || rows.length === 0) return rows;
   const { itemMap } = await getImsMapsSafe();
   const enriched = await enrichRowsWithIMS(rows, {
@@ -54,9 +54,13 @@ async function enrichShortageRows(rows = []) {
     maps: { itemMap },
   });
   // Saved shortage grpname wins over IMS item master (user may override group on form).
+  // item_weight = IMS item master weight per piece (kg) — UI shows weight × qty, same as IMS shortage.
   return enriched.map((row, i) => {
     const saved = rows[i]?.grpname;
-    return saved != null && String(saved).trim() !== "" ? { ...row, grpname: String(saved).trim() } : row;
+    const item_weight = itemMap.get(canonicalCode(row.itemdcode))?.weight ?? null;
+    return saved != null && String(saved).trim() !== ""
+      ? { ...row, grpname: String(saved).trim(), item_weight }
+      : { ...row, item_weight };
   });
 }
 
@@ -775,7 +779,7 @@ export const getShortageMasterList = async (req, res) => {
       : null;
 
     const values = [];
-    const where = [`s.is_deleted = false`];
+    const where = [`s.is_deleted = false`, fromDateSql("s")]; // only entries from SHORTAGE_FROM_DATE
 
     pushMasterTypeFilter(where, values, filters);
     if (approved === true) {

@@ -106,6 +106,8 @@ export const MODULES = {
   production: [
     { name: "production_master", label: "Product Master" },
     { name: "production_shortage", label: "Shortage" },
+    { name: "production_job_card", label: "Maintain Job Card" },
+    { name: "production_tooling", label: "Tooling" },
     { name: "production_activity_logs", label: "Activity Logs" },
   ],
   engineering: [
@@ -191,4 +193,6 @@ export const SEED_MODULES = [
   { name: "eng_machine_master",           label: "Machine Master",                  sort_order: 59,       app_type: "engineering" },
   { name: "eng_prime_item_master",        label: "Prime Process Master",            sort_order: 60,       app_type: "engineering" },
   { name: "eng_finish_process_master",    label: "Finish Process Master",           sort_order: 61,       app_type: "engineering" },
+  { name: "production_job_card",          label: "Maintain Job Card",               sort_order: 62,       app_type: "production" },
+  { name: "production_tooling",           label: "Tooling",                         sort_order: 63,       app_type: "production" },
 ];

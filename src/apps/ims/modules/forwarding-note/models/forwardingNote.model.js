@@ -233,7 +233,7 @@ export const findForwardingNote = async (filters = {}) => {
     }
     const groupedItem = itemMap.get(key);
     groupedItem.total_qty += Number(item.total_qty);
-    // Breakdowns already sorted by fi.id ASC from query
+    // Breakdowns sorted by fi.id ASC from query (matches FIFO pick insert order)
     groupedItem.breakdowns.push(item);
   }
 

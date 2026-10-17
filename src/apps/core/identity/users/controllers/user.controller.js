@@ -730,6 +730,8 @@ export const logoutUser = async (req, res) => {
     }
 
     res.clearCookie(config.cookie_name, config.cookie_options);
+    // Legacy Task cookie — clear so portal logout fully ends Task API sessions too.
+    res.clearCookie("token", config.cookie_options);
 
     res.json({ success: true, message: "Logged out successfully" });
   } catch (err) {

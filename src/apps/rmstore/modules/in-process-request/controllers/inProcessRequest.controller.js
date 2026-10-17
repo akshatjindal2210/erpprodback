@@ -1679,7 +1679,7 @@ export const createInProcessRequest = async (req, res) => {
 
     if (isConsume) {
       incomingApproved = true;
-    } else if (isRejection) {
+    } else if (isRejection && incomingApproved !== true) {
       incomingApproved = false;
     }
 
@@ -1713,7 +1713,7 @@ export const createInProcessRequest = async (req, res) => {
         hasBusinessChanges: false,
         alreadyApproved: false,
         auditAsName: true,
-        ...((isStoreIn || isConsume) ? { canAuthorize: true } : {}),
+        ...((isStoreIn || isConsume || isRejection) ? { canAuthorize: true } : {}),
       });
       record.downstream = resolveDownstream(fields.request_type, true);
     }
@@ -2102,6 +2102,7 @@ function rmWireSequenceInProduction(prodRow, rmCodeUpper, dcodeToCode, rmDcode =
 }
 
 /** Reassign job card picker — one request (no per-FG production-mapping loop on client). */
+// Production mapping + open job cards se aati hai — same wire ke FG par chal rahe doosre job cards, purana JC hata ke
 export const getReassignJobCards = async (req, res) => {
   try {
     const rm_item_code = String(req.body?.rm_item_code || "").trim();

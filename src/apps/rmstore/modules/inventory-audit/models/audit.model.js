@@ -1,11 +1,19 @@
 import dbQuery from "../../../../../config/db/db.js";
-import { MST_TABLES as M, RMSTORE_TABLES as T, IMS_TABLES as IT } from "../../../../../config/db/dbTables.js";
+import { MST_TABLES as M, IMS_TABLES as A, RMSTORE_TABLES as RT } from "../../../../../config/db/dbTables.js";
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilTransaction.js";
-import { fetchCoilSnapshotForLocation, fetchCoilDetailsByUids, flattenScansFromLocations, mergeScannedCoils, removeScannedCoil, parseExpectedCoils, parseScannedCoils, compareLocationCoilSets, resolveLocationStatusAfterScan, isLocationClosed, isLocationPending, resolveCoilAccName, sqlCoilInStoreAtLocation } from "../utils/snapshot/auditCoilSnapshot.js";
-import { findAudits, ASSIGNED_USERS_SUBQUERY, AUDIT_DEFAULT_SELECT_FIELDS, AUDIT_LOCATIONS_JSON } from "../utils/list/auditList.js";
+import { fetchCoilSnapshotForLocation, fetchCoilDetailsByUids, flattenScansFromLocations, mergeScannedCoils, removeScannedCoil, parseExpectedCoils, parseScannedCoils, compareLocationCoilSets, resolveLocationStatusAfterScan, isLocationClosed, isLocationPending, resolveCoilAccName, sqlCoilInStoreAtLocation, auditLocationExpectedUnits, auditLocationScannedUnits } from "../utils/snapshot/auditCoilSnapshot.js";
+import { createInventoryAuditList, INVENTORY_AUDIT_APP_RMSTORE, assertAuditLocationIdsForAppType } from "../../../../core/lib/inventory-audit/auditList.js";
 
-export { findAudits } from "../utils/list/auditList.js";
+const { findAudits, ASSIGNED_USERS_SUBQUERY, AUDIT_DEFAULT_SELECT_FIELDS, AUDIT_LOCATIONS_JSON } = createInventoryAuditList({
+  appType: INVENTORY_AUDIT_APP_RMSTORE,
+  expectedJsonKey: "expected_coils",
+  scannedJsonKey: "scanned_coils",
+});
+
+export { findAudits };
+
+const AUDIT_APP_TYPE = INVENTORY_AUDIT_APP_RMSTORE;
 
 const ALLOWED_FILTER_FIELDS = ["audit_id", "status", "approved", "from_date", "to_date"];
 const ALLOWED_UPDATE_FIELDS = ["start_date", "end_date", "remarks", "status", "approved", "approved_by", "approved_at", "updated_by", "updated_at"];
@@ -15,9 +23,9 @@ export const findAudit = async (filters = {}) => {
   const keys = Object.keys(filters);
   if (!keys.length) return null;
 
-  const values = [];
-  let i = 1;
-  const conditions = ["am.is_deleted = false"];
+  const values = [AUDIT_APP_TYPE];
+  let i = 2;
+  const conditions = ["am.is_deleted = false", "am.app_type = $1"];
 
   for (const key of keys) {
     if (key !== "audit_id" && !ALLOWED_FILTER_FIELDS.includes(key)) continue;
@@ -29,7 +37,7 @@ export const findAudit = async (filters = {}) => {
     `SELECT ${DEFAULT_FIELDS.join(", ")},
      ${ASSIGNED_USERS_SUBQUERY} AS assigned_user_names,
      ${AUDIT_LOCATIONS_JSON} AS locations
-     FROM ${T.AUDIT_MASTER} am
+     FROM ${A.AUDIT_MASTER} am
      WHERE ${conditions.join(" AND ")}
      LIMIT 1`,
     values
@@ -46,8 +54,8 @@ const insertAuditLocationRow = async (run, auditId, locationId, assignedUserId, 
   // Expected boxes freeze when user starts scanning — not at create time.
   const userId = assignedUserId ?? null;
   await run(
-    `INSERT INTO ${T.AUDIT_LOCATIONS}
-     (audit_id, location_id, assigned_user_id, plan_assigned_user_id, expected_coils, scanned_coils, is_active)
+    `INSERT INTO ${A.AUDIT_LOCATIONS}
+     (audit_id, location_id, assigned_user_id, plan_assigned_user_id, expected_boxes, scanned_boxes, is_active)
      VALUES ($1, $2, $3, $3, '[]'::jsonb, '[]'::jsonb, true)`,
     [auditId, locationId, userId]
   );
@@ -60,8 +68,8 @@ const insertAuditLocationRow = async (run, auditId, locationId, assignedUserId, 
 export const ensureExpectedBoxesAtScanStart = async (audit_id, location_id, { client = null } = {}) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const locRes = await run(
-    `SELECT expected_coils, scanned_coils, status
-     FROM ${T.AUDIT_LOCATIONS}
+    `SELECT expected_boxes, scanned_boxes, status
+     FROM ${A.AUDIT_LOCATIONS}
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id]
   );
@@ -69,18 +77,18 @@ export const ensureExpectedBoxesAtScanStart = async (audit_id, location_id, { cl
   if (!locRow) throw new Error("Audit location not found");
 
   if (isLocationClosed(locRow.status)) {
-    return parseExpectedCoils(locRow.expected_coils);
+    return parseExpectedCoils(locRow.expected_boxes);
   }
 
-  const scans = parseScannedCoils(locRow.scanned_coils);
+  const scans = parseScannedCoils(locRow.scanned_boxes);
   if (scans.length > 0) {
-    return parseExpectedCoils(locRow.expected_coils);
+    return parseExpectedCoils(locRow.expected_boxes);
   }
 
   const expectedBoxes = await fetchCoilSnapshotForLocation(location_id, { client });
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS}
-     SET expected_coils = $3::jsonb
+    `UPDATE ${A.AUDIT_LOCATIONS}
+     SET expected_boxes = $3::jsonb
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id, JSON.stringify(expectedBoxes)]
   );
@@ -109,12 +117,15 @@ export const insertAudit = async (data, { client = null } = {}) => {
         .filter((row) => row.assigned_user_id && row.location_ids.length)
     : [];
 
+  const allLocationIds = normalizedAssignments.flatMap((a) => a.location_ids);
+  await assertAuditLocationIdsForAppType(allLocationIds, AUDIT_APP_TYPE, { client });
+
   const res = await run(
-    `INSERT INTO ${T.AUDIT_MASTER}
-     (start_date, end_date, remarks, created_by, approved, approved_by, approved_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO ${A.AUDIT_MASTER}
+     (start_date, end_date, remarks, created_by, approved, approved_by, approved_at, app_type)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
-    [start_date, end_date, remarks, created_by, Boolean(approved), approved_by ?? null, approved_at ?? null]
+    [start_date, end_date, remarks, created_by, Boolean(approved), approved_by ?? null, approved_at ?? null, AUDIT_APP_TYPE]
   );
   const row = client ? res.rows[0] : res[0];
 
@@ -145,15 +156,16 @@ export const updateAudit = async (fields = {}, filters = {}, { client = null } =
   if (!fieldKeys.length) throw new Error("No valid fields to update");
   if (!filterKeys.length) throw new Error("No valid filters provided");
 
-  const values = [...Object.values(safeFields), ...Object.values(safeFilters)];
+  const values = [...Object.values(safeFields), ...Object.values(safeFilters), AUDIT_APP_TYPE];
 
   const setClause = fieldKeys.map((k, i) => `${k} = $${i + 1}`).join(", ");
   const whereClause = filterKeys.map((k, i) => `${k} = $${fieldKeys.length + i + 1}`).join(" AND ");
+  const appTypeIdx = values.length;
 
   const res = await run(
-    `UPDATE ${T.AUDIT_MASTER}
+    `UPDATE ${A.AUDIT_MASTER}
      SET ${setClause}
-     WHERE ${whereClause} AND is_deleted = false
+     WHERE ${whereClause} AND is_deleted = false AND app_type = $${appTypeIdx}
      RETURNING *`,
     values
   );
@@ -169,9 +181,12 @@ export const updateAudit = async (fields = {}, filters = {}, { client = null } =
     : [];
 
   if (normalizedAssignments.length) {
+    const allLocationIds = normalizedAssignments.flatMap((a) => a.location_ids);
+    await assertAuditLocationIdsForAppType(allLocationIds, AUDIT_APP_TYPE, { client });
+
     const existingRes = await run(
       `SELECT assignment_id, location_id, status, is_active, plan_assigned_user_id, assigned_user_id
-       FROM ${T.AUDIT_LOCATIONS} WHERE audit_id = $1`,
+       FROM ${A.AUDIT_LOCATIONS} WHERE audit_id = $1`,
       [row.audit_id]
     );
     const existingRows = client ? existingRes.rows : existingRes;
@@ -194,7 +209,7 @@ export const updateAudit = async (fields = {}, filters = {}, { client = null } =
       if (!newLocationKeys.has(locKey)) {
         if (hasCloneForLocation.has(locKey)) continue;
         await run(
-          `DELETE FROM ${T.AUDIT_LOCATIONS}
+          `DELETE FROM ${A.AUDIT_LOCATIONS}
            WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
           [row.audit_id, Number(locKey)]
         );
@@ -207,7 +222,7 @@ export const updateAudit = async (fields = {}, filters = {}, { client = null } =
         if (activeByLocation.has(locKey)) {
           if (hasCloneForLocation.has(locKey)) continue;
           await run(
-            `UPDATE ${T.AUDIT_LOCATIONS}
+            `UPDATE ${A.AUDIT_LOCATIONS}
              SET assigned_user_id = $3,
                  plan_assigned_user_id = $3
              WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
@@ -219,7 +234,8 @@ export const updateAudit = async (fields = {}, filters = {}, { client = null } =
       }
     }
   } else if (fields.location_ids) {
-    await run(`DELETE FROM ${T.AUDIT_LOCATIONS} WHERE audit_id = $1`, [row.audit_id]);
+    await assertAuditLocationIdsForAppType(fields.location_ids, AUDIT_APP_TYPE, { client });
+    await run(`DELETE FROM ${A.AUDIT_LOCATIONS} WHERE audit_id = $1`, [row.audit_id]);
     for (const locId of fields.location_ids) {
       await insertAuditLocationRow(run, row.audit_id, locId, fields.assigned_user_id ?? null, { client });
     }
@@ -242,14 +258,15 @@ export const deleteAudit = async (filters = {}, meta = {}) => {
 
   if (!conditions.length) throw new Error("Invalid filters");
 
-  values.push(meta.deleted_by ?? null);
+  values.push(meta.deleted_by ?? null, AUDIT_APP_TYPE);
+  const appTypeIdx = values.length;
 
   await dbQuery(
-    `UPDATE ${T.AUDIT_MASTER}
+    `UPDATE ${A.AUDIT_MASTER}
      SET is_deleted = true,
          deleted_at = NOW(),
          deleted_by = $${i}
-     WHERE ${conditions.join(" AND ")}`,
+     WHERE ${conditions.join(" AND ")} AND app_type = $${appTypeIdx}`,
     values
   );
 };
@@ -259,17 +276,17 @@ export const insertAuditScan = async (data, { client = null } = {}) => {
   const { audit_id, location_id, coil_no_uid, scanned_by } = data;
 
   const locRes = await run(
-    `SELECT scanned_coils FROM ${T.AUDIT_LOCATIONS}
+    `SELECT scanned_boxes FROM ${A.AUDIT_LOCATIONS}
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id]
   );
   const locRow = client ? locRes.rows[0] : locRes[0];
   if (!locRow) throw new Error("Audit location not found");
 
-  const merged = mergeScannedCoils(locRow.scanned_coils, [coil_no_uid], scanned_by);
+  const merged = mergeScannedCoils(locRow.scanned_boxes, [coil_no_uid], scanned_by);
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS}
-     SET scanned_coils = $3::jsonb
+    `UPDATE ${A.AUDIT_LOCATIONS}
+     SET scanned_boxes = $3::jsonb
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id, JSON.stringify(merged)]
   );
@@ -282,7 +299,7 @@ export const appendAuditScannedBoxes = async (data, { client = null } = {}) => {
   const { audit_id, location_id, coil_no_uids = [], scanned_by } = data;
 
   const locRes = await run(
-    `SELECT scanned_coils FROM ${T.AUDIT_LOCATIONS}
+    `SELECT scanned_boxes FROM ${A.AUDIT_LOCATIONS}
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id]
   );
@@ -291,11 +308,11 @@ export const appendAuditScannedBoxes = async (data, { client = null } = {}) => {
 
   await ensureExpectedBoxesAtScanStart(audit_id, location_id, { client });
 
-  const merged = mergeScannedCoils(locRow.scanned_coils, coil_no_uids, scanned_by);
+  const merged = mergeScannedCoils(locRow.scanned_boxes, coil_no_uids, scanned_by);
   const nextStatus = merged.length ? "draft" : "pending";
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS}
-     SET scanned_coils = $3::jsonb,
+    `UPDATE ${A.AUDIT_LOCATIONS}
+     SET scanned_boxes = $3::jsonb,
          status = CASE
            WHEN status IN ('completed', 'mismatch') THEN status
            ELSE $4
@@ -310,7 +327,7 @@ export const appendAuditScannedBoxes = async (data, { client = null } = {}) => {
 export const updateAuditLocationStatus = async (audit_id, location_id, status, { client = null } = {}) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS} SET status = $3
+    `UPDATE ${A.AUDIT_LOCATIONS} SET status = $3
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id, status]
   );
@@ -319,7 +336,7 @@ export const updateAuditLocationStatus = async (audit_id, location_id, status, {
 export const countPendingAuditLocations = async (audit_id, { client = null } = {}) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const res = await run(
-    `SELECT COUNT(*)::int AS count FROM ${T.AUDIT_LOCATIONS}
+    `SELECT COUNT(*)::int AS count FROM ${A.AUDIT_LOCATIONS}
      WHERE audit_id = $1 AND is_active = true AND status = 'pending'`,
     [audit_id]
   );
@@ -330,8 +347,8 @@ export const countPendingAuditLocations = async (audit_id, { client = null } = {
 async function allActiveLocationsCoilMatched(audit_id, { client = null } = {}) {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const res = await run(
-    `SELECT expected_coils, scanned_coils
-     FROM ${T.AUDIT_LOCATIONS}
+    `SELECT expected_boxes, scanned_boxes
+     FROM ${A.AUDIT_LOCATIONS}
      WHERE audit_id = $1 AND is_active = true`,
     [audit_id]
   );
@@ -339,7 +356,7 @@ async function allActiveLocationsCoilMatched(audit_id, { client = null } = {}) {
   if (!rows?.length) return false;
 
   for (const row of rows) {
-    const comparison = compareLocationCoilSets(row.expected_coils, parseScannedCoils(row.scanned_coils));
+    const comparison = compareLocationCoilSets(row.expected_boxes, parseScannedCoils(row.scanned_boxes));
     if (!comparison.exact) return false;
   }
   return true;
@@ -348,7 +365,7 @@ async function allActiveLocationsCoilMatched(audit_id, { client = null } = {}) {
 export const syncAuditMasterStatus = async (audit_id, { client = null } = {}) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const res = await run(
-    `SELECT status FROM ${T.AUDIT_LOCATIONS} WHERE audit_id = $1 AND is_active = true`,
+    `SELECT status FROM ${A.AUDIT_LOCATIONS} WHERE audit_id = $1 AND is_active = true`,
     [audit_id]
   );
   const rows = client ? res.rows : res;
@@ -376,20 +393,20 @@ export const evaluateAuditLocationProgress = async (
 ) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const locRes = await run(
-    `SELECT expected_coils, scanned_coils, status
-     FROM ${T.AUDIT_LOCATIONS}
+    `SELECT expected_boxes, scanned_boxes, status
+     FROM ${A.AUDIT_LOCATIONS}
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id]
   );
   const locRow = client ? locRes.rows[0] : locRes[0];
   if (!locRow) throw new Error("Audit location not found");
 
-  const activeScans = parseScannedCoils(locRow.scanned_coils);
-  const comparison = compareLocationCoilSets(locRow.expected_coils, activeScans);
+  const activeScans = parseScannedCoils(locRow.scanned_boxes);
+  const comparison = compareLocationCoilSets(locRow.expected_boxes, activeScans);
   const nextStatus = resolveLocationStatusAfterScan(comparison, { forceComplete });
 
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS} SET status = $3
+    `UPDATE ${A.AUDIT_LOCATIONS} SET status = $3
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id, nextStatus]
   );
@@ -398,8 +415,8 @@ export const evaluateAuditLocationProgress = async (
 
   if (isLocationClosed(nextStatus)) {
     const locMetaRes = await run(
-      `SELECT location_id, assignment_id, assigned_user_id, plan_assigned_user_id, expected_coils, scanned_coils
-       FROM ${T.AUDIT_LOCATIONS}
+      `SELECT location_id, assignment_id, assigned_user_id, plan_assigned_user_id, expected_boxes, scanned_boxes
+       FROM ${A.AUDIT_LOCATIONS}
        WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
       [audit_id, location_id]
     );
@@ -423,7 +440,7 @@ export const countIncompleteAuditLocations = countPendingAuditLocations;
 export const reopenAuditLocation = async (audit_id, location_id, { client = null } = {}) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const locRes = await run(
-    `SELECT scanned_coils, status FROM ${T.AUDIT_LOCATIONS}
+    `SELECT scanned_boxes, status FROM ${A.AUDIT_LOCATIONS}
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id]
   );
@@ -435,11 +452,11 @@ export const reopenAuditLocation = async (audit_id, location_id, { client = null
     throw new Error("Only completed or mismatch locations can be reopened");
   }
 
-  const scanned = parseScannedCoils(locRow.scanned_coils);
+  const scanned = parseScannedCoils(locRow.scanned_boxes);
   const nextStatus = scanned.length > 0 ? "draft" : "pending";
 
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS} SET status = $3, result_rejected = false
+    `UPDATE ${A.AUDIT_LOCATIONS} SET status = $3, result_rejected = false
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id, nextStatus]
   );
@@ -459,8 +476,8 @@ export const reassignAuditLocation = async (audit_id, location_id, assigned_user
   }
 
   const locRes = await run(
-    `SELECT assignment_id, assigned_user_id, plan_assigned_user_id, status, expected_coils, scanned_coils
-     FROM ${T.AUDIT_LOCATIONS}
+    `SELECT assignment_id, assigned_user_id, plan_assigned_user_id, status, expected_boxes, scanned_boxes
+     FROM ${A.AUDIT_LOCATIONS}
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id]
   );
@@ -477,13 +494,13 @@ export const reassignAuditLocation = async (audit_id, location_id, assigned_user
   const userRow = client ? userRes.rows[0] : userRes[0];
   if (!userRow) throw new Error("User not found");
 
-  const activeScans = parseScannedCoils(locRow.scanned_coils);
+  const activeScans = parseScannedCoils(locRow.scanned_boxes);
   const currentStatus = String(locRow.status || "").toLowerCase();
   const hasStarted = activeScans.length > 0 || !isLocationPending(currentStatus);
 
   if (!hasStarted) {
     await run(
-      `UPDATE ${T.AUDIT_LOCATIONS}
+      `UPDATE ${A.AUDIT_LOCATIONS}
        SET assigned_user_id = $3
        WHERE assignment_id = $1 AND audit_id = $2`,
       [locRow.assignment_id, audit_id, nextUserId]
@@ -507,15 +524,15 @@ export const reassignAuditLocation = async (audit_id, location_id, assigned_user
   const clonedAt = new Date();
 
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS}
+    `UPDATE ${A.AUDIT_LOCATIONS}
      SET is_active = false, reassigned_at = $3
      WHERE assignment_id = $1 AND audit_id = $2`,
     [locRow.assignment_id, audit_id, clonedAt]
   );
 
   const insertRes = await run(
-    `INSERT INTO ${T.AUDIT_LOCATIONS}
-     (audit_id, location_id, assigned_user_id, plan_assigned_user_id, expected_coils, scanned_coils, status, is_active)
+    `INSERT INTO ${A.AUDIT_LOCATIONS}
+     (audit_id, location_id, assigned_user_id, plan_assigned_user_id, expected_boxes, scanned_boxes, status, is_active)
      VALUES ($1, $2, $3, $4, '[]'::jsonb, '[]'::jsonb, 'pending', true)
      RETURNING assignment_id`,
     [audit_id, location_id, nextUserId, planUserId]
@@ -540,18 +557,18 @@ export const deleteAuditScan = async (audit_id, location_id, coil_no_uid, { clie
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
 
   const locRes = await run(
-    `SELECT scanned_coils, status FROM ${T.AUDIT_LOCATIONS}
+    `SELECT scanned_boxes, status FROM ${A.AUDIT_LOCATIONS}
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id]
   );
   const locRow = client ? locRes.rows[0] : locRes[0];
   if (!locRow) return;
 
-  const next = removeScannedCoil(locRow.scanned_coils, coil_no_uid);
+  const next = removeScannedCoil(locRow.scanned_boxes, coil_no_uid);
   const nextStatus = next.length ? "draft" : "pending";
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS}
-     SET scanned_coils = $3::jsonb,
+    `UPDATE ${A.AUDIT_LOCATIONS}
+     SET scanned_boxes = $3::jsonb,
          status = CASE
            WHEN status IN ('completed', 'mismatch') THEN status
            ELSE $4
@@ -629,7 +646,7 @@ export function scoreBreakdownFromComparison(comparison) {
 }
 
 export function scoreBreakdownFromLocation(loc) {
-  const comparison = compareLocationCoilSets(loc?.expected_coils, loc?.scanned_coils);
+  const comparison = compareLocationCoilSets(auditLocationExpectedUnits(loc), auditLocationScannedUnits(loc));
   return scoreBreakdownFromComparison(comparison);
 }
 
@@ -657,7 +674,7 @@ export const saveLocationScorePct = async (
   }
 
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS}
+    `UPDATE ${A.AUDIT_LOCATIONS}
      SET score_pct = $3,
          score_at = NOW()
      WHERE ${conditions.join(" AND ")}`,
@@ -690,7 +707,7 @@ export const saveLocationResultRejected = async (
   }
 
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS}
+    `UPDATE ${A.AUDIT_LOCATIONS}
      SET result_rejected = $3
      WHERE ${conditions.join(" AND ")}`,
     values
@@ -720,22 +737,26 @@ export const getAuditLocationScores = async (audit_id, { client = null } = {}) =
        al.audit_id,
        al.location_id,
        al.assigned_user_id,
-       al.expected_coils,
-       al.scanned_coils,
+       al.expected_boxes,
+       al.scanned_boxes,
        COALESCE(al.plan_assigned_user_id, al.assigned_user_id) AS score_user_id,
        al.score_pct,
        al.score_at,
        COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no,
        COALESCE(u_plan.name, u_loc.name) AS assigned_user_name
-     FROM ${T.AUDIT_LOCATIONS} al
-     JOIN ${IT.LOCATION_MASTER} lm ON al.location_id = lm.location_id
+     FROM ${A.AUDIT_LOCATIONS} al
+     JOIN ${A.LOCATION_MASTER} lm ON al.location_id = lm.location_id
      LEFT JOIN ${M.USERS} u_loc ON al.assigned_user_id = u_loc.id
      LEFT JOIN ${M.USERS} u_plan ON al.plan_assigned_user_id = u_plan.id
+     JOIN ${A.AUDIT_MASTER} am ON am.audit_id = al.audit_id
+       AND am.is_deleted = false
+       AND am.app_type = $2
      WHERE al.audit_id = $1
        AND al.is_active = true
        AND al.score_at IS NOT NULL
+       AND lower(trim(COALESCE(lm.type, ''))) = $2
      ORDER BY location_no ASC, al.assignment_id ASC`,
-    [audit_id]
+    [audit_id, AUDIT_APP_TYPE]
   );
   const rows = client ? res.rows : res;
   const location_scores = (rows || []).map(mapLocationScoreRow);
@@ -796,10 +817,8 @@ export const getAuditComparisonReport = async (audit_id, { locationId = null } =
     const locId = Number(loc.location_id);
     if (locationId != null && locId !== Number(locationId)) continue;
 
-    const expectedBoxes = await enrichExpectedCoilDetails(parseExpectedCoils(loc.expected_coils));
-    const expectedByUid = new Map(
-      expectedBoxes.map((b) => [normalizeCoilUid(b.coil_no_uid), b]).filter(([uid]) => uid)
-    );
+    const expectedBoxes = await enrichExpectedCoilDetails(parseExpectedCoils(auditLocationExpectedUnits(loc)));
+    const expectedByUid = new Map(expectedBoxes.map((b) => [normalizeCoilUid(b.coil_no_uid), b]).filter(([uid]) => uid));
     let systemSet;
 
     if (expectedBoxes.length) {
@@ -807,7 +826,7 @@ export const getAuditComparisonReport = async (audit_id, { locationId = null } =
     } else {
       const systemRows = await dbQuery(
         `SELECT TRIM(c.coil_no_uid::text) AS coil_no_uid
-         FROM ${T.COIL_TABLE} c
+         FROM ${RT.COIL_TABLE} c
          WHERE ${sqlCoilInStoreAtLocation.replace(/\$1/g, "$1")}
          ORDER BY c.coil_no_uid`,
         [locId]
@@ -815,9 +834,7 @@ export const getAuditComparisonReport = async (audit_id, { locationId = null } =
       systemSet = new Set(systemRows.map((r) => normalizeCoilUid(r.coil_no_uid)).filter(Boolean));
     }
 
-    const scannedSet = new Set(
-      parseScannedCoils(loc.scanned_coils).map((s) => normalizeCoilUid(s.coil_no_uid)).filter(Boolean)
-    );
+    const scannedSet = new Set(parseScannedCoils(auditLocationScannedUnits(loc)).map((s) => normalizeCoilUid(s.coil_no_uid)).filter(Boolean));
 
     const missing_coils = [...systemSet].filter((uid) => !scannedSet.has(uid)).sort();
     const extra_coils = [...scannedSet].filter((uid) => !systemSet.has(uid)).sort();
@@ -827,7 +844,7 @@ export const getAuditComparisonReport = async (audit_id, { locationId = null } =
     const lookupUids = [...new Set([...missing_coils, ...extra_coils, ...matched_scanned_coils])];
     const fetchedDetails = await fetchCoilDetailsByUids(lookupUids);
 
-    // Prefer live box_table + SA join over frozen expected_coils (old snapshots lack acc_name).
+    // Prefer live box_table + SA join over frozen expected_boxes (old snapshots lack acc_name).
     const resolveDetail = (uid) => fetchedDetails.get(uid) ?? expectedByUid.get(uid) ?? null;
 
     const not_scanned_rows = missing_coils.map((uid) =>
@@ -933,8 +950,8 @@ export const applyAuditComparisonAdjustment = async (
     if (!missing.length && !extra.length) continue;
 
     const auditLocRes = await run(
-      `SELECT assignment_id, assigned_user_id, plan_assigned_user_id, expected_coils, scanned_coils
-       FROM ${T.AUDIT_LOCATIONS}
+      `SELECT assignment_id, assigned_user_id, plan_assigned_user_id, expected_boxes, scanned_boxes
+       FROM ${A.AUDIT_LOCATIONS}
        WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
       [audit_id, locId]
     );
@@ -943,7 +960,7 @@ export const applyAuditComparisonAdjustment = async (
 
     if (missing.length) {
       const removeRes = await run(
-        `UPDATE ${T.COIL_TABLE} c
+        `UPDATE ${RT.COIL_TABLE} c
          SET location_id = NULL
          WHERE c.location_id = $1
            AND TRIM(UPPER(c.coil_no_uid::text)) = ANY($2::text[])
@@ -974,7 +991,7 @@ export const applyAuditComparisonAdjustment = async (
     if (extra.length) {
       const extraUids = extra.map((u) => normalizeCoilUid(u));
       const extraRes = await run(
-        `UPDATE ${T.COIL_TABLE} c
+        `UPDATE ${RT.COIL_TABLE} c
          SET location_id = $1
          WHERE TRIM(UPPER(c.coil_no_uid::text)) = ANY($2::text[])
          RETURNING c.coil_uid, c.coil_no_uid, c.qty, c.location_id, c.mrn_uid`,
@@ -1002,14 +1019,14 @@ export const applyAuditComparisonAdjustment = async (
     }
 
     const refreshedExpected = await fetchCoilSnapshotForLocation(locId, { client });
-    const activeScans = parseScannedCoils(auditLoc.scanned_coils);
+    const activeScans = parseScannedCoils(auditLoc.scanned_boxes);
     const postComparison = compareLocationCoilSets(refreshedExpected, activeScans);
 
     await run(
-      `UPDATE ${T.AUDIT_LOCATIONS}
+      `UPDATE ${A.AUDIT_LOCATIONS}
        SET status = 'completed',
            result_rejected = $3,
-           expected_coils = $4::jsonb
+           expected_boxes = $4::jsonb
        WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
       [audit_id, locId, Boolean(result_rejected), JSON.stringify(refreshedExpected)]
     );
@@ -1041,16 +1058,16 @@ export const completeAuditLocation = async (
 ) => {
   const run = client ? (sql, params) => client.query(sql, params) : (sql, params) => dbQuery(sql, params);
   const locRes = await run(
-    `SELECT expected_coils, scanned_coils, status, assignment_id, assigned_user_id, plan_assigned_user_id
-     FROM ${T.AUDIT_LOCATIONS}
+    `SELECT expected_boxes, scanned_boxes, status, assignment_id, assigned_user_id, plan_assigned_user_id
+     FROM ${A.AUDIT_LOCATIONS}
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id]
   );
   const locRow = client ? locRes.rows[0] : locRes[0];
   if (!locRow) throw new Error("Audit location not found");
 
-  const activeScans = parseScannedCoils(locRow.scanned_coils);
-  const comparison = compareLocationCoilSets(locRow.expected_coils, activeScans);
+  const activeScans = parseScannedCoils(locRow.scanned_boxes);
+  const comparison = compareLocationCoilSets(locRow.expected_boxes, activeScans);
 
   const currentStatus = String(locRow.status || "").trim().toLowerCase();
   if (currentStatus === "completed") {
@@ -1064,7 +1081,7 @@ export const completeAuditLocation = async (
   }
 
   await run(
-    `UPDATE ${T.AUDIT_LOCATIONS}
+    `UPDATE ${A.AUDIT_LOCATIONS}
      SET status = 'completed', result_rejected = $3
      WHERE audit_id = $1 AND location_id = $2 AND is_active = true`,
     [audit_id, location_id, Boolean(result_rejected)]

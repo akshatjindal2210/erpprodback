@@ -16,7 +16,9 @@ const QC_ENRICH_SELECT = `
   m.item_code,
   m.item_desc,
   m.acc_code,
-  m.acc_name`;
+  m.acc_name,
+  m.bill_no,
+  m.bill_dt`;
 
 const QC_APPROVED_COND = `q.approved = true`;
 

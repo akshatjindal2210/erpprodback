@@ -81,7 +81,34 @@ export function coilAreaPhysicalStatusSql(cAlias = "c") {
   )`;
 }
 
-/** Coil-area source filter — MRN portal stickers + production-return + SA stock-in add. */
+/** True when an SA stock-in coil belongs to an approved adjustment (live inventory). */
+export function approvedSaStockInExistsSql(cAlias = "c") {
+  return `EXISTS (
+    SELECT 1
+    FROM ${T.STOCK_ADJUSTMENT} sa
+    WHERE sa.adjustment_id = ${cAlias}.sa_id
+      AND sa.is_deleted = false
+      AND COALESCE(sa.approved, false) = true
+  )`;
+}
+
+/**
+ * Exclude pending (unapproved) SA Add/Old coils from physical inventory views/reports.
+ * Non-SA coils and non-stock_in SA rows are unchanged.
+ */
+export function excludePendingSaStockInSql(cAlias = "c") {
+  return `(
+    ${cAlias}.sa_id IS NULL
+    OR COALESCE(${cAlias}.sa_entry_type, '') <> 'stock_in'
+    OR ${approvedSaStockInExistsSql(cAlias)}
+  )`;
+}
+
+/**
+ * Coil-area / Store In source filter — MRN portal stickers + production-return + SA stock-in add.
+ * Pending (unapproved) SA coils are allowed here so Store In can run before approval;
+ * inventory reports still exclude them via excludePendingSaStockInSql.
+ */
 export function coilAreaEligibleSql(cAlias = "c") {
   return `(
     (

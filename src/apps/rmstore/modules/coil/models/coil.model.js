@@ -1328,7 +1328,8 @@ export const countCoilsForMrn = async (mrn_uid) => {
 };
 
 /**
- * Sum MRN-allocated coil qty (MRN Portal + approved SA Add).
+ * Sum MRN-allocated coil qty (MRN Portal + SA Add coils created for Store In).
+ * Inventory reports separately exclude unapproved SA stock-in via excludePendingSaStockInSql.
  * Uses current coil.qty plus partial IPR consume logged in coil transactions —
  * partial consume reduces coil.qty but the consumed portion still counts toward the MRN cap.
  */
@@ -1685,8 +1686,8 @@ export const markCoilsInProcessRejectionPending = async (ipr_uid, coil_no_uids =
   if (!uids.length) return [];
   const rows = await dbQuery(
     `UPDATE ${TABLE}
-     SET location_id = NULL,
-         in_uid = NULL,
+     SET location_id = CASE WHEN location_id IS NOT NULL THEN location_id ELSE NULL END,
+         in_uid = CASE WHEN location_id IS NOT NULL THEN in_uid ELSE NULL END,
          out_uid = NULL,
          ipr_uid = $1,
          status = 'rejected'

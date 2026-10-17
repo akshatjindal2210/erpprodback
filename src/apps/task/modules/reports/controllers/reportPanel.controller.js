@@ -291,6 +291,15 @@ function trackLatestInstance(group, inst, review, day) {
   }
 }
 
+/** Map calendar day → instance (and optional open fill) so report cell opens that day's data. */
+function trackDayInstance(group, day, instanceId, fillId = null) {
+  if (!day || !instanceId) return;
+  if (!group.dayInstanceIds) group.dayInstanceIds = {};
+  const row = { instance_id: Number(instanceId) };
+  if (fillId != null && fillId !== "") row.fill_id = String(fillId);
+  group.dayInstanceIds[day] = row;
+}
+
 /** Stable group key so same master task collapses to one report row. */
 function masterGroupKey(pid, inst) {
   const masterId = Number(inst.cl_task_id) || 0;
@@ -328,6 +337,7 @@ function emptyMasterGroup(pid, inst, weightage) {
     awaiting_instance_id: null,
     latest_instance_id: null,
     latest_day: null,
+    dayInstanceIds: {},
     is_red_flag: false,
     management_remark: null,
     review: null,
@@ -380,6 +390,7 @@ function absorbFrequentInstance(group, inst, review, today) {
     const missed = isClTaskMissed(inst);
     addDayScore(group.dayScoreAcc, day, 0);
     addDayState(group.dayStateAcc, day, missed ? "missed" : "pending");
+    trackDayInstance(group, day, inst.instance_id);
     trackLatestInstance(group, inst, null, day);
     return;
   }
@@ -391,6 +402,7 @@ function absorbFrequentInstance(group, inst, review, today) {
     addDayScore(group.dayScoreAcc, day, 0);
     /** Action taken — submitted, waiting verification */
     addDayState(group.dayStateAcc, day, "verification");
+    trackDayInstance(group, day, inst.instance_id);
     trackLatestInstance(group, inst, null, day);
     return;
   }
@@ -409,6 +421,7 @@ function absorbFrequentInstance(group, inst, review, today) {
     day,
     scoreRaw > 0 || doneVerified ? "done" : "pending",
   );
+  trackDayInstance(group, day, inst.instance_id);
 
   if (review?.is_red_flag) {
     group.is_red_flag = true;
@@ -514,6 +527,7 @@ function absorbOpenInstance(group, inst, review, today) {
     }
     addDayScore(group.dayScoreAcc, fillDay, scorePct);
     addDayState(group.dayStateAcc, fillDay, scoreRaw > 0 ? "done" : "pending");
+    trackDayInstance(group, fillDay, inst.instance_id, fill.id || null);
     if (!group.minDay || fillDay < group.minDay) group.minDay = fillDay;
     if (!group.maxDay || fillDay > group.maxDay) group.maxDay = fillDay;
   }
@@ -525,6 +539,7 @@ function absorbOpenInstance(group, inst, review, today) {
       group.awaiting_instance_id = inst.instance_id;
       group.not_done_count += 1;
       addDayState(group.dayStateAcc, group.awaiting_day, "verification");
+      trackDayInstance(group, group.awaiting_day, inst.instance_id);
     }
     trackLatestInstance(
       group,
@@ -551,6 +566,7 @@ function absorbOpenInstance(group, inst, review, today) {
     group.attempt_count += 1;
     addDayScore(group.dayScoreAcc, day, 0);
     addDayState(group.dayStateAcc, day, "verification");
+    trackDayInstance(group, day, inst.instance_id);
     if (!group.minDay || day < group.minDay) group.minDay = day;
     if (!group.maxDay || day > group.maxDay) group.maxDay = day;
     trackLatestInstance(group, inst, null, day);
@@ -568,6 +584,7 @@ function absorbOpenInstance(group, inst, review, today) {
   }
   addDayScore(group.dayScoreAcc, day, scorePct);
   addDayState(group.dayStateAcc, day, scoreRaw > 0 || isDoneVerified(inst, today) ? "done" : "pending");
+  trackDayInstance(group, day, inst.instance_id);
   if (!group.minDay || day < group.minDay) group.minDay = day;
   if (!group.maxDay || day > group.maxDay) group.maxDay = day;
 
@@ -759,6 +776,7 @@ export async function getDailyReport(req, res) {
           fill_count: group.attempt_count,
           day_scores,
           day_states,
+          day_instance_ids: { ...(group.dayInstanceIds || {}) },
           title: group.title,
           person_id: group.person_id,
           person_name: group.person_name,
@@ -1052,9 +1070,10 @@ export async function getReportInstance(req, res) {
       }
     }
 
+    // Latest first (All submissions in report drawer).
     submission_fills.sort((a, b) =>
-      String(a.submitted_at || a.scheduled_date || "").localeCompare(
-        String(b.submitted_at || b.scheduled_date || ""),
+      String(b.submitted_at || b.scheduled_date || "").localeCompare(
+        String(a.submitted_at || a.scheduled_date || ""),
       ),
     );
 

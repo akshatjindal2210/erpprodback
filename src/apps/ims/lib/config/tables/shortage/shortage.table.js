@@ -37,7 +37,18 @@ export async function createShortageTable() {
   await dbQuery(`ALTER TABLE ${T.SHORTAGE} DROP CONSTRAINT IF EXISTS ims_shortage_type_check`);
 
   // Use shared schema helper (single step) for existing DBs.
+  // Prime-item approval (Production → Shortage → Prime Item) is separate from entry `approved`:
+  // is_approved NULL = Pending (all new + existing rows), TRUE = Approved, FALSE = Rejected.
+  // approval_remark = remark given on approve / reject (entry's own remark stays in `remarks`).
+  // Who/when go to the activity log; job-card link lives in prod_job_card.shortage_ids.
   await patchTableSchema(dbQuery, T.SHORTAGE, {
-    columns: [patchCol("grpname", "VARCHAR(120)")],
+    columns: [
+      patchCol("grpname", "VARCHAR(120)"),
+      patchCol("is_approved", "BOOLEAN NULL DEFAULT NULL"),
+      patchCol("approval_remark", "TEXT"),
+    ],
+    indexes: [
+      `CREATE INDEX IF NOT EXISTS idx_shortage_is_approved ON ${T.SHORTAGE}(is_approved) WHERE is_deleted = false`,
+    ],
   });
 }

@@ -1,6 +1,7 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { IMS_TABLES as IT, RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { coilQcStatusExpr, coilQcJoinForAlias } from "../../../lib/utils/coilQcStatusSql.js";
+import { excludePendingSaStockInSql } from "../../../lib/utils/mrnPortalCoilSql.js";
 
 /**
  * RM Inventory Report — single source of truth (rmstore_coil_table only).
@@ -76,6 +77,7 @@ loc_parts AS (
   LEFT JOIN ${IT.LOCATION_MASTER} lm2
     ON lm2.location_id = c2.location_id AND lm2.is_deleted = false
   WHERE LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
+    AND ${excludePendingSaStockInSql("c2")}
     AND (${IN_STORE})
   GROUP BY ${mrnKey}, c2.location_id, ${label}
 
@@ -84,6 +86,7 @@ loc_parts AS (
   SELECT ${mrnKey}, 2, 'UA', 'UA (' || COUNT(*)::text || ')', NULL::text
   FROM ${T.COIL_TABLE} c2
   WHERE LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
+    AND ${excludePendingSaStockInSql("c2")}
     AND (${UNASSIGNED})
   GROUP BY ${mrnKey}
   HAVING COUNT(*) > 0
@@ -92,7 +95,8 @@ loc_parts AS (
 
   SELECT ${mrnKey}, 3, 'SF', 'SF (' || COUNT(*)::text || ')', NULL::text
   FROM ${T.COIL_TABLE} c2
-  WHERE (${SHOP_FLOOR})
+  WHERE ${excludePendingSaStockInSql("c2")}
+    AND (${SHOP_FLOOR})
   GROUP BY ${mrnKey}
   HAVING COUNT(*) > 0
 
@@ -102,6 +106,7 @@ loc_parts AS (
   FROM ${T.COIL_TABLE} c2
   ${coilQcJoinForAlias("c2", "q2")}
   WHERE LOWER(TRIM(COALESCE(c2.status, 'active'))) <> 'consumed'
+    AND ${excludePendingSaStockInSql("c2")}
     AND (${PENDING_QC})
   GROUP BY ${mrnKey}
   HAVING COUNT(*) > 0
@@ -180,6 +185,7 @@ LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
 ${coilQcJoinForAlias("c", "q")}
 
 WHERE LOWER(TRIM(COALESCE(c.status, 'active'))) <> 'consumed'
+  AND ${excludePendingSaStockInSql("c")}
 
 GROUP BY COALESCE(NULLIF(TRIM(c.mrn_uid::text), ''), '—')
 

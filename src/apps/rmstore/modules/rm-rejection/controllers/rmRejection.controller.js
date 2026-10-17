@@ -1,8 +1,9 @@
 import { findQcRejections, findQcRejection, findIncompleteRejectionRegisters, insertQcRejection, updateQcRejection, softDeleteQcRejection, attachRejectionCoils, hasApprovedRejectionStoreOut, isMrnPortalRejectionRow, permanentlyRemoveUnusedMrnPortalRejection, primaryMrnUidFromRejection } from "../models/rmRejection.model.js";
 import { findInProcessRequest, findInProcessRejectionsPendingRejection, normalizeRequestType, IPR_DOWNSTREAM, IPR_REQUEST_TYPE } from "../../in-process-request/models/inProcessRequest.model.js";
-import { findCoilByUid, findCoilUidsByQcCheck, linkCoilsToRejectionRegister, revertCoilsFromRejectionRegister, findCoils, updateCoilsAfterQcReject } from "../../coil/models/coil.model.js";
+import { findCoilByUid, findCoilUidsByQcCheck, linkCoilsToRejectionRegister, revertCoilsFromRejectionRegister, findCoils, updateCoilsAfterQcReject, clearCoilsForRejectionStoreOut } from "../../coil/models/coil.model.js";
 import { findQcCheck, findFailedQcChecksPendingRejection, reopenQcChecksForRejection, linkFailedQcChecksToRejection } from "../../qc-check/models/qcCheck.model.js";
-import { findOutEntry, findOutEntries, buildOutEntryCoilSummary } from "../../out-entry/models/outEntry.model.js";
+import { findOutEntry, findOutEntries, buildOutEntryCoilSummary, clearOutEntryScannedCoils, softDeleteOutEntry } from "../../out-entry/models/outEntry.model.js";
+import { isRmRejectionOutEntry } from "../../../lib/constants/outEntryTypes.js";
 import { findMrnByUid } from "../../mrn/models/mrn.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
@@ -37,13 +38,12 @@ async function resolveCoilsForQcCheck(check) {
 async function findActiveStoreOutForRejection(rejection) {
   const id = Number(rejection?.qc_reject_uid);
   if (!Number.isFinite(id)) return null;
-  const outId = Number(rejection?.out_uid);
-  if (Number.isFinite(outId) && outId > 0) {
-    const row = await findOutEntry(outId);
-    if (row) return row;
+  const pinned = Number(rejection?.out_uid);
+  if (pinned > 0) {
+    const row = await findOutEntry(pinned);
+    if (row?.is_deleted !== true) return row;
   }
-  const linked = await findOutEntries({ filters: { rm_uid: id }, limit: 1 });
-  return linked.data?.[0] ?? null;
+  return (await findOutEntries({ filters: { qc_reject_uid: id }, limit: 1 })).data?.[0] ?? null;
 }
 
 /** Save remarks + authorize register for Store Out Pending (no out_entry, no coil pre-fill). */
@@ -991,21 +991,22 @@ export const deleteQcRejection = async (req, res) => {
       });
     }
 
-    const activeOut = await findActiveStoreOutForRejection(existing);
-    if (activeOut) {
+    if (await hasApprovedRejectionStoreOut(id)) {
       return res.status(400).json({
         success: false,
-        message: `Store Out #${activeOut.out_uid} has started. Delete Store Out first.`,
+        message: "Store Out is authorized. Register cannot be deleted.",
       });
     }
 
     const user = auditUserName(req);
+    const drafts = (await findOutEntries({ filters: { qc_reject_uid: id, approved: false }, limit: 50 })).data || [];
+    for (const o of drafts) {
+      if (isRmRejectionOutEntry(o.entry_type)) await clearCoilsForRejectionStoreOut(o.out_uid, user);
+      await clearOutEntryScannedCoils(o.out_uid);
+      await softDeleteOutEntry(o.out_uid, user);
+    }
     if (existing.out_uid) {
-      await updateQcRejection(id, {
-        out_uid: null,
-        updated_by: user,
-        updated_at: new Date(),
-      });
+      await updateQcRejection(id, { out_uid: null, updated_by: user, updated_at: new Date() });
     }
 
     if (isMrnPortalRejectionRow(existing)) {

@@ -1,6 +1,6 @@
 import {
   findProcesses, findProcess, insertProcess, updateProcess as updateProcessRow, softDeleteProcess,
-  countActiveChildren, syncProcessDepth, findSiblingByName, loadTree, PROCESS_DEFAULT_FIELDS,
+  countActiveChildren, syncProcessDepth, findSiblingByName, loadTree, PROCESS_DEFAULT_FIELDS, PROCESS_FLAGS, flagsOf,
 } from "../models/processMaster.model.js";
 import { resolveParent, subtreeIds } from "../utils/processTree.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
@@ -15,7 +15,7 @@ import logger from "../../../../core/lib/utils/logging/logger.js";
 const ENTITY = "eng_process_master";
 const CFG = getCrudModuleConfig(ENTITY);
 const STAGES = new Set(["START", "MID", "END"]);
-const FLAGS = ["multi_jc", "rm_wire", "tooling", "fg", "prime", "rework"];
+const HELPER_FILTER_KEYS = ["id", "approved", "parent_id", "stage", "depth", ...PROCESS_FLAGS];
 
 const log = (req, action, entity_id, details, record = null, existing = null) =>
   logActivity(req, { action, entity: ENTITY, entity_id, details, record, existing }).catch(() => {});
@@ -58,6 +58,9 @@ const toOption = (r) => ({
   depth: r.depth,
   stage: r.stage,
   parent_id: r.parent_id,
+  // Every Process Master flag, as set (true / false) — Prime / Finish forms copy them onto the picked process
+  flags: flagsOf(r),
+  ...flagsOf(r),
 });
 
 /** Wrap a handler: one place for the error log + status (400 from validation, else 500). */
@@ -99,7 +102,7 @@ export const createProcess = handle("create", async (req, res) => {
 
   const { parent_id, depth } = resolveParent(await loadTree(), parentIdOf(body));
   const fields = { name, parent_id, depth, stage: toStage(body.stage), pattern: toPattern(body.pattern), created_by: auditUserName(req) };
-  for (const f of FLAGS) fields[f] = toBool(body[f]);
+  for (const f of PROCESS_FLAGS) fields[f] = toBool(body[f]);
 
   await assertUniqueName(name, parent_id);
 
@@ -133,7 +136,7 @@ export const updateProcess = handle("update", async (req, res) => {
     stage: body.stage,
     pattern: body.pattern !== undefined ? toPattern(body.pattern) : undefined,
   };
-  for (const f of FLAGS) input[f] = body[f];
+  for (const f of PROCESS_FLAGS) input[f] = body[f];
 
   const { hasChanges, fields } = prepareUpdateByRules({
     existing,
@@ -142,7 +145,7 @@ export const updateProcess = handle("update", async (req, res) => {
       { field: "name", normalize: toName },
       { field: "stage", normalize: toStage },
       { field: "pattern", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
-      ...FLAGS.map((field) => ({ field, normalize: toBool })),
+      ...PROCESS_FLAGS.map((field) => ({ field, normalize: toBool })),
     ],
   });
   if (fields.name !== undefined && !fields.name) return res.status(400).json({ success: false, message: "name required" });
@@ -203,7 +206,7 @@ export const deleteProcess = handle("delete", async (req, res) => {
 export const listProcessViews = handle("helper", async (req, res) => {
   const body = req.body || {};
   const { page, limit, search, filters } = extractListParams(body);
-  const safeFilters = sanitizeFilters(filters || {}, ["id", "approved", "parent_id", "stage", "depth", "fg", "prime"]);
+  const safeFilters = sanitizeFilters(filters || {}, HELPER_FILTER_KEYS);
 
   const byId = parsePositiveIntId(body.id ?? safeFilters.id);
   if (byId) {

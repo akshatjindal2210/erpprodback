@@ -10,6 +10,7 @@ export async function createAuditTables() {
       end_date              DATE,
       remarks               TEXT,
       status                VARCHAR(20) DEFAULT 'pending',
+      app_type              VARCHAR(20) NOT NULL DEFAULT 'ims',
       approved              BOOLEAN DEFAULT false,
       approved_by           TEXT,
       approved_at           TIMESTAMP,
@@ -41,6 +42,16 @@ export async function createAuditTables() {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_loc_one_active
       ON ${T.AUDIT_LOCATIONS} (audit_id, location_id)
       WHERE is_active = true;
+  `);
+
+  await patchTableSchema(dbQuery, T.AUDIT_MASTER, {
+    columns: [patchCol("app_type", "VARCHAR(20) NOT NULL DEFAULT 'ims'")],
+  });
+
+  await dbQuery(`
+    UPDATE ${T.AUDIT_MASTER}
+    SET app_type = 'ims'
+    WHERE app_type IS NULL OR TRIM(app_type) = '';
   `);
 
   await patchTableSchema(dbQuery, T.AUDIT_LOCATIONS, {

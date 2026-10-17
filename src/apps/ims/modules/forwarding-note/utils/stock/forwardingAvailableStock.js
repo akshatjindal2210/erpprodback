@@ -34,6 +34,11 @@ export function forwardedTotalQtyForPacking(forwardedByPacking = {}, packingNumb
 
 /** Same FIFO order as ForwardingModal `sortBoxesForFifo`. */
 export function sortBoxesForForwardingFifo(boxes = []) {
+  return reorderBoxesForForwardingSelection(boxes, false);
+}
+
+/** Loose-priority variant — matches ForwardingModal `reorderBoxesForSelection`. */
+export function reorderBoxesForForwardingSelection(boxes = [], loosePriority = false) {
   const enriched = enrichForwardingBoxesWithPackingStd(boxes);
   return [...enriched].sort((a, b) => {
     const pA = Number(a?.packing_number ?? 0);
@@ -42,10 +47,72 @@ export function sortBoxesForForwardingFifo(boxes = []) {
 
     const looseA = isForwardingLooseBox(a) ? 1 : 0;
     const looseB = isForwardingLooseBox(b) ? 1 : 0;
-    if (looseA !== looseB) return looseA - looseB;
+    if (looseA !== looseB) return loosePriority ? looseB - looseA : looseA - looseB;
 
     return Number(a?.box_uid ?? 0) - Number(b?.box_uid ?? 0);
   });
+}
+
+function packingGroupKey(box) {
+  return String(box?.packing_number ?? "").trim() || "N/A";
+}
+
+function orderedPackingKeysFromSorted(sorted = []) {
+  const keys = [];
+  for (const box of sorted) {
+    const k = packingGroupKey(box);
+    if (!keys.includes(k)) keys.push(k);
+  }
+  return keys;
+}
+
+/** Rotate packing groups: start packing first, then wrap (4→5→1→2…). */
+export function applyFifoStartPacking(sorted = [], startKey) {
+  const list = sorted || [];
+  const start = String(startKey || "").trim();
+  if (!start || !list.length) return list;
+  const keys = orderedPackingKeysFromSorted(list);
+  const idx = keys.indexOf(start);
+  if (idx <= 0) return list;
+  const rotated = [...keys.slice(idx), ...keys.slice(0, idx)];
+  const byPacking = new Map();
+  for (const box of list) {
+    const k = packingGroupKey(box);
+    if (!byPacking.has(k)) byPacking.set(k, []);
+    byPacking.get(k).push(box);
+  }
+  return rotated.flatMap((k) => byPacking.get(k) || []);
+}
+
+export function fifoOrderedBoxesForForwardingItem({
+  availableBoxes = [],
+  loose_priority = false,
+  fifo_start_packing_number = null,
+} = {}) {
+  const sorted = reorderBoxesForForwardingSelection(availableBoxes, Boolean(loose_priority));
+  const start = String(fifo_start_packing_number || "").trim();
+  return applyFifoStartPacking(sorted, start || null);
+}
+
+function boxSelectionKey(box) {
+  return String(box?.box_no_uid ?? box?.box_uid ?? "").trim().toLowerCase();
+}
+
+/** Selected boxes must match FIFO prefix for target qty (full boxes only). */
+export function assertForwardingFifoBoxSelection({
+  orderedBoxes = [],
+  selectedBoxes = [],
+  targetQty,
+  itemLabel = "item",
+} = {}) {
+  if (!selectedBoxes?.length) return;
+  const qty = Number(targetQty) > 0 ? Number(targetQty) : sumBoxQty(selectedBoxes);
+  const { selectedBoxes: expected } = calculateFifoBoxes(orderedBoxes, qty);
+  const expKeys = expected.map(boxSelectionKey).filter(Boolean);
+  const selKeys = selectedBoxes.map(boxSelectionKey).filter(Boolean);
+  if (expKeys.length !== selKeys.length || expKeys.some((k, i) => k !== selKeys[i])) {
+    throw Object.assign(new Error(`Selected boxes for ${itemLabel} must follow packing FIFO order. Please refresh and try again.`), { status: 400 });
+  }
 }
 
 function applyQtySkipToBoxes(boxList, skipQty) {

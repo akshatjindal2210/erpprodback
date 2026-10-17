@@ -1,6 +1,8 @@
 import { extractListParams } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { filterItemsBySearch, filterPrdRunJcBySearch, loadMappedItems, loadMappedPrdRunJc, slicePage, toPickerRow, toPrdRunJcPickerRow } from "../utils/erpItems.js";
+import { findApprovedProductionRowsLite } from "../models/productionMaster.model.js";
+import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
 
 // Common Generic Runner
 async function fetchAndPaginate(req, res, loader, filterFn, mapper, idKey) {
@@ -42,7 +44,7 @@ async function fetchAndPaginate(req, res, loader, filterFn, mapper, idKey) {
 export const getProductionItemsViews = (req, res) =>
   fetchAndPaginate(req, res, () => loadMappedItems("prdprimitem"), filterItemsBySearch, toPickerRow, "itemdcode");
 
-/** FG finished-goods from IMS item master (Finish Process Master dropdown). */
+/** Finish Process Master dropdown — IMS `item` with `{ type: "fg" }`, as is. */
 export const getFgItemsViews = (req, res) =>
   fetchAndPaginate(req, res, () => loadMappedItems("item", { type: "fg" }), filterItemsBySearch, toPickerRow, "itemdcode");
 

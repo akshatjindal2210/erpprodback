@@ -110,7 +110,7 @@ export async function shouldSyncStockAdjustmentAddCoils(before = {}, after = {})
   return saAddCoilsOutOfSync(after);
 }
 
-/** Materialize coils for pending Add/Old rows saved before save-time sync existed. */
+/** Materialize coils for pending Add/Old rows so Store In can pick them up. */
 export async function materializePendingStockAdjustmentCoils({ userName = "system", userId = null, limit = 100 } = {}) {
   const pending = await findPendingAddAdjustmentsWithoutCoils(limit);
   let synced = 0;
@@ -129,7 +129,10 @@ export async function materializePendingStockAdjustmentCoils({ userName = "syste
   return synced;
 }
 
-/** Insert / refresh Add (+) / Old coils when an adjustment is saved (approved or pending). */
+/**
+ * Insert / refresh Add (+) / Old coils when an adjustment is saved.
+ * Coils are available for Store In immediately; inventory totals count them only after approve.
+ */
 export async function syncStockAdjustmentAddCoils({ adjustment, userName, userId }) {
   const adjId = adjustment.adjustment_id;
   const entryType = String(adjustment.entry_type || "").toLowerCase();

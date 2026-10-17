@@ -1,5 +1,6 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { fromDateSql } from "../shortage.config.js";
 
 /**
  * Production Shortage — DB layer. Uses the existing ims_shortage table (no new tables).
@@ -24,7 +25,7 @@ export const findShortages = async (options = {}) => {
 
   const values = [];
   let i = 1;
-  const conditions = ["s.is_deleted = false"];
+  const conditions = ["s.is_deleted = false", fromDateSql("s")]; // only entries from SHORTAGE_FROM_DATE
 
   // SAFE FILTERS
   for (const [key, val] of Object.entries(filters)) {

@@ -56,7 +56,11 @@ export function qcCoilIneligibilityMessage(coil) {
  */
 export function resolveCoilQcStatus(coil) {
   if (!coil) return "";
-  if (isSaStockInCoil(coil) && isSaAdjustmentApproved(coil)) return "passed";
+  if (isSaStockInCoil(coil)) {
+    if (isSaAdjustmentApproved(coil)) return "passed";
+    const raw = String(coil.qc_check_status || "").trim().toLowerCase();
+    return raw === "passed" ? "passed" : "";
+  }
   return String(coil.qc_check_status || "").trim().toLowerCase();
 }
 

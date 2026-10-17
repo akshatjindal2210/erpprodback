@@ -5,7 +5,7 @@ import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/q
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalWorkflow, applyApprovalUpdateFields, normalizeApprovedInput, auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { withTransaction } from "../../../../../config/db/db.js";
-import { canAccessAuditRecord, filterAuditLocationsForUser, isWithinAuditDateRange, isAuditCreator } from "../utils/access/auditAccess.js";
+import { canAccessAuditRecord, filterAuditLocationsForUser, isWithinAuditDateRange, isAuditCreator } from "../../../../core/lib/inventory-audit/auditAccess.js";
 import { isLocationClosed } from "../utils/snapshot/auditCoilSnapshot.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 

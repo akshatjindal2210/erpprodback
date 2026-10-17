@@ -51,8 +51,6 @@ export const RMSTORE_TABLE_TO_MODULE = {
   rmstore_out_entry_scanned_coil: "rm_out_entry",
   rmstore_stock_adjustment: "rm_stock_adjustment",
   rmstore_coil_transaction: "rm_coil_transaction_logs",
-  rmstore_audit_master: "rm_inventory_audit",
-  rmstore_audit_locations: "rm_inventory_audit",
 };
 
 /** Shared master and HRMS tables (non-IMS, non-RM Store). */
@@ -70,6 +68,11 @@ export const OTHER_TABLE_TO_MODULE = {
   hrms_leave: "hrms_leave",
   hrms_loan: "hrms_loan",
   hrms_deduction: "hrms_deduction",
+  prod_job_card: "production_job_card",
+  prod_shortage: "production_tooling",
+  prod_tooling: "production_tooling", // legacy → prod_shortage
+  prod_shortage_tooling: "production_tooling", // legacy → prod_shortage
+  prod_prime_tooling: "production_tooling", // legacy → prod_shortage
 };
 
 /** Used by dashboard SQL helpers and notifications: physical table to module name. */
@@ -117,7 +120,7 @@ export const MODULE_PRIMARY_TABLE = {
   rm_out_entry: "rmstore_out_entry",
   rm_stock_adjustment: "rmstore_stock_adjustment",
   rm_coil_transaction_logs: "rmstore_coil_transaction",
-  rm_inventory_audit: "rmstore_audit_master",
+  rm_inventory_audit: "ims_audit_master",
   users: "mst_users",
   training_videos: "mst_training_videos",
   modules: "mst_modules",
@@ -131,6 +134,8 @@ export const MODULE_PRIMARY_TABLE = {
   hrms_leave: "hrms_leave",
   hrms_loan: "hrms_loan",
   hrms_deduction: "hrms_deduction",
+  production_job_card: "prod_job_card",
+  production_tooling: "prod_shortage",
 };
 
 const ALL_TABLES = new Set([

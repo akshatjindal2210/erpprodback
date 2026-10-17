@@ -67,6 +67,7 @@ export async function attachRejectionCoils(rows = []) {
       `SELECT c.rm_uid, c.coil_no_uid, c.qty, c.mrn_uid,
               m.heat_no AS heat_no, m.item_code AS item_code, m.item_desc AS item_desc,
               m.acc_code AS acc_code, m.acc_name AS acc_name,
+              m.bill_no AS bill_no, m.bill_dt AS bill_dt,
               c.ipr_uid, c.qc_uid
        FROM ${COIL_TABLE} c
        LEFT JOIN ${T.MRN} m ON m.uid = c.mrn_uid
@@ -86,6 +87,8 @@ export async function attachRejectionCoils(rows = []) {
         item_desc: c.item_desc || null,
         acc_code: c.acc_code ?? null,
         acc_name: c.acc_name || null,
+        bill_no: c.bill_no || null,
+        bill_dt: c.bill_dt ?? null,
         ipr_uid: c.ipr_uid ?? null,
         qc_uid: c.qc_uid ?? null,
       });
@@ -148,6 +151,9 @@ export async function attachRejectionCoils(rows = []) {
     const coilItemDescs = [
       ...new Set(coils.map((c) => String(c?.item_desc || "").trim()).filter(Boolean)),
     ];
+    const coilBillNo =
+      coils.map((c) => String(c?.bill_no || "").trim()).find(Boolean) || null;
+    const coilBillDt = coils.find((c) => c?.bill_dt != null)?.bill_dt ?? null;
     const mrn_uid = row.mrn_uid || row.mrn_uids || (coilMrnUids.length ? coilMrnUids.join(" | ") : null);
     const item_descs = row.item_descs || (coilItemDescs.length ? coilItemDescs.join(" | ") : null);
     return {
@@ -161,6 +167,8 @@ export async function attachRejectionCoils(rows = []) {
       mrn_uids: row.mrn_uids || mrn_uid,
       item_descs,
       item_desc: row.item_desc || item_descs,
+      mrn_bill_no: row.mrn_bill_no || coilBillNo || null,
+      mrn_bill_dt: row.mrn_bill_dt ?? coilBillDt ?? null,
       coil_no_uid: uids.length === 1 ? uids[0] : uids.length > 1 ? uids.join(", ") : null,
       coil_count: Math.max(Number(row.coil_count) || 0, uids.length),
     };
@@ -248,7 +256,9 @@ export const findQcRejections = async (options = {}) => {
             m.acc_name AS vendor_acc_name,
             m.acc_name AS acc_name,
             m.item_dcode AS match_item_dcode,
-            m.item_code AS match_item_code
+            m.item_code AS match_item_code,
+            m.bill_no AS mrn_bill_no,
+            m.bill_dt AS mrn_bill_dt
      FROM ${TABLE} q
      LEFT JOIN ${OUT_TABLE} o ON o.out_uid = q.out_uid AND o.is_deleted = false
      LEFT JOIN ${T.MRN} m ON m.uid = NULLIF(TRIM(split_part(COALESCE(q.mrn_uids, ''), '|', 1)), '')
@@ -285,7 +295,9 @@ export const findQcRejection = async (qc_reject_uid) => {
             m.acc_name AS vendor_acc_name,
             m.acc_name AS acc_name,
             m.item_dcode AS match_item_dcode,
-            m.item_code AS match_item_code
+            m.item_code AS match_item_code,
+            m.bill_no AS mrn_bill_no,
+            m.bill_dt AS mrn_bill_dt
      FROM ${TABLE} q
      LEFT JOIN ${OUT_TABLE} o ON o.out_uid = q.out_uid AND o.is_deleted = false
      LEFT JOIN ${T.MRN} m ON m.uid = NULLIF(TRIM(split_part(COALESCE(q.mrn_uids, ''), '|', 1)), '')
@@ -462,6 +474,8 @@ function mapIncompleteRejectionRow(row) {
     acc_code: row.vendor_acc_code != null ? String(row.vendor_acc_code).trim() || null : null,
     acc_name: row.vendor_acc_name != null ? String(row.vendor_acc_name).trim() || null : null,
     item_dcode: row.match_item_dcode != null ? String(row.match_item_dcode).trim() || null : null,
+    mrn_bill_no: row.mrn_bill_no != null ? String(row.mrn_bill_no).trim() || null : null,
+    mrn_bill_dt: row.mrn_bill_dt ?? null,
   };
 }
 
@@ -526,7 +540,9 @@ export const findIncompleteRejectionRegisters = async (options = {}) => {
             m.acc_code AS vendor_acc_code,
             m.acc_name AS vendor_acc_name,
             m.item_dcode AS match_item_dcode,
-            m.item_code AS match_item_code
+            m.item_code AS match_item_code,
+            m.bill_no AS mrn_bill_no,
+            m.bill_dt AS mrn_bill_dt
      ${fromClause}
      ${where}
      ORDER BY COALESCE(o.approved_at, o.created_at, q.approved_at, q.created_at) DESC NULLS LAST,

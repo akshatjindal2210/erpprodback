@@ -8,7 +8,15 @@ import { pathLabel, levelOf } from "../utils/processTree.js";
 
 const TABLE = T.PROCESS_MASTER;
 
-const BOOL_FILTERS = new Set(["approved", "fg", "prime", "multi_jc", "rm_wire", "tooling", "rework"]);
+/**
+ * Boolean process options — single list. New flag: add name here + DB column in process_master.table.js.
+ */
+export const PROCESS_FLAGS = ["multi_jc", "rm_wire", "tooling", "fg", "prime", "rework", "inhouse", "jobwork"];
+
+/** Row → { multi_jc: true, rm_wire: false, … } — exactly as set in Process Master. */
+export const flagsOf = (row) => Object.fromEntries(PROCESS_FLAGS.map((f) => [f, row?.[f] === true]));
+
+const BOOL_FILTERS = new Set(["approved", ...PROCESS_FLAGS]);
 
 const FILTERS = {
   id: (i) => `pm.id = $${i}`,
@@ -16,26 +24,21 @@ const FILTERS = {
   stage: (i) => `pm.stage = $${i}`,
   depth: (i) => `pm.depth = $${i}`,
   approved: (i) => `pm.approved = $${i}`,
-  fg: (i) => `pm.fg = $${i}`,
-  prime: (i) => `pm.prime = $${i}`,
-  multi_jc: (i) => `pm.multi_jc = $${i}`,
-  rm_wire: (i) => `pm.rm_wire = $${i}`,
-  tooling: (i) => `pm.tooling = $${i}`,
-  rework: (i) => `pm.rework = $${i}`,
+  ...Object.fromEntries(PROCESS_FLAGS.map((f) => [f, (i) => `pm.${f} = $${i}`])),
   from_date: (i) => `pm.created_at::date >= $${i}::date`,
   to_date: (i) => `pm.created_at::date <= $${i}::date`,
 };
 const SORTS = ["id", "name", "stage", "depth", "parent_id", "approved", "created_at", "updated_at"];
 const UPDATABLE = [
-  "name", "parent_id", "depth", "stage", "multi_jc", "pattern",
-  "rm_wire", "tooling", "fg", "prime", "rework",
+  "name", "parent_id", "depth", "stage", "pattern",
+  ...PROCESS_FLAGS,
   "approved", "approved_by", "approved_at", "updated_by", "updated_at",
 ];
 
 const DEFAULT_FIELDS = [
   "pm.id", "pm.name", "pm.depth", "pm.parent_id", "pm.stage",
-  "pm.multi_jc", "pm.pattern",
-  "pm.rm_wire", "pm.tooling", "pm.fg", "pm.prime", "pm.rework",
+  "pm.pattern",
+  ...PROCESS_FLAGS.map((f) => `pm.${f}`),
   "parent.name AS parent_name",
   "pm.approved", "pm.approved_by", "pm.approved_at",
   "pm.created_by", "pm.created_at", "pm.updated_by", "pm.updated_at",

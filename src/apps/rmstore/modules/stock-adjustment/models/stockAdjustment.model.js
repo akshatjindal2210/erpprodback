@@ -219,7 +219,7 @@ export async function sumPriorAddQtyForMrn(mrn_uid, excludeAdjustmentId = null) 
   return Number(row?.total || 0);
 }
 
-/** Pending Add (+) qty on an MRN — header saved but coils not yet in inventory (exclude when editing that row). */
+/** Pending Add (+) qty on an MRN — header saved but coils not yet created (exclude when editing that row). */
 export async function sumPendingAddQtyForMrn(mrn_uid, excludeAdjustmentId = null) {
   const uid = String(mrn_uid || "").trim();
   if (!uid) return 0;
@@ -230,6 +230,7 @@ export async function sumPendingAddQtyForMrn(mrn_uid, excludeAdjustmentId = null
     values.push(excludeId);
     exclude = ` AND s.adjustment_id <> $2`;
   }
+  // Skip rows that already have coils — those are counted in sumCoilQtyForMrn.
   const [row] = await dbQuery(
     `SELECT COALESCE(SUM(s.qty), 0)::float AS total
      FROM ${TABLE} s
@@ -249,7 +250,7 @@ export async function sumPendingAddQtyForMrn(mrn_uid, excludeAdjustmentId = null
   return Number(row?.total || 0);
 }
 
-/** Pending Add/Old adjustments with no stock_in coils yet (legacy rows before save-time materialize). */
+/** Pending Add/Old adjustments with no stock_in coils yet (backfill for Store In lists). */
 export async function findPendingAddAdjustmentsWithoutCoils(limit = 100) {
   const safeLimit = Math.min(500, Math.max(1, Number(limit) || 100));
   const rows = await dbQuery(

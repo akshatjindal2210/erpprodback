@@ -21,15 +21,22 @@ export function coilQcJoinForAlias(cAlias = "c", qAlias = "q") {
 
 export const COIL_QC_JOIN = coilQcJoinForAlias("c", "q");
 
+/**
+ * SA stock-in coils bypass the QC Check module.
+ * Approved SA → passed (issuable). Pending SA → blank (not "QC Pending").
+ */
 export function coilQcStatusExpr(cAlias = "c", qAlias = "q") {
-  return `CASE
-  WHEN ${cAlias}.sa_id IS NOT NULL AND EXISTS (
+  const isSaStockIn = `${cAlias}.sa_id IS NOT NULL AND COALESCE(${cAlias}.sa_entry_type, 'stock_in') = 'stock_in'`;
+  const saApproved = `EXISTS (
     SELECT 1
     FROM ${T.STOCK_ADJUSTMENT} sa
     WHERE sa.adjustment_id = ${cAlias}.sa_id
       AND sa.is_deleted = false
-      AND sa.approved = true
-  ) THEN 'passed'
+      AND COALESCE(sa.approved, false) = true
+  )`;
+  return `CASE
+  WHEN ${isSaStockIn} AND ${saApproved} THEN 'passed'
+  WHEN ${isSaStockIn} THEN ''
   ELSE LOWER(TRIM(COALESCE(${qAlias}.status, '')))
 END`;
 }

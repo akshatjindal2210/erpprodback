@@ -6,7 +6,7 @@ import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
 
-const FILTER_FIELDS = ["production_id", "item_dcode", "approved", "from_date", "to_date", "has_prime_process", "has_finish_process"];
+const FILTER_FIELDS = ["production_id", "item_dcode", "approved", "from_date", "to_date"];
 const MODULE = "rm_production_master";
 const log = createRmstoreActivityLogger(MODULE);
 
@@ -36,19 +36,6 @@ function rmItemsChanged(existingItems, nextItems) {
   return a.some((v, i) => v !== b[i]);
 }
 
-function parsePrimeProcess(value) {
-  if (value == null) return null;
-  if (typeof value === "object") return value;
-  if (typeof value === "string" && value.trim()) {
-    try {
-      return JSON.parse(value);
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
 export const getProductions = async (req, res) => {
   try {
     const { page, limit, filters, sortBy, order, search } = extractListParams(req.body || {}, {
@@ -70,33 +57,6 @@ export const getProductions = async (req, res) => {
   } catch (err) {
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
-};
-
-/**
- * Engineering Prime Process Master list — saved `prime_process` only.
- * Item lookup (`filters.item_dcode`) skips that filter so the modal can load Item RM Master
- * RM wire for items that do not have a prime mapping yet.
- */
-export const listPrimeProcesses = async (req, res) => {
-  const filters = { ...(req.body?.filters || {}) };
-  const lookupByItem = filters.item_dcode != null && filters.item_dcode !== "";
-  if (lookupByItem) delete filters.has_prime_process;
-  else filters.has_prime_process = true;
-  req.body = { ...(req.body || {}), filters };
-  return getProductions(req, res);
-};
-
-/**
- * Engineering Finish Process Master list — saved `finish_process` only.
- * Item lookup (`filters.item_dcode`) skips that filter for form hydration + RM wire.
- */
-export const listFinishProcesses = async (req, res) => {
-  const filters = { ...(req.body?.filters || {}) };
-  const lookupByItem = filters.item_dcode != null && filters.item_dcode !== "";
-  if (lookupByItem) delete filters.has_finish_process;
-  else filters.has_finish_process = true;
-  req.body = { ...(req.body || {}), filters };
-  return getProductions(req, res);
 };
 
 export const getProductionById = async (req, res) => {
@@ -183,7 +143,6 @@ export const updateProduction = async (req, res) => {
     const hasBusinessChanges = Number(nextItemDcode) !== Number(existing.item_dcode) || rmItemsChanged(existing.rm_items, nextRmItems);
 
     const fields = hasBusinessChanges ? { ...(await resolveProductionSnapshot(nextItemDcode, nextRmItems)) } : {};
-
     applyApprovalUpdateFields({
       req,
       fields,
@@ -228,121 +187,6 @@ export const updateProduction = async (req, res) => {
     });
   } catch (err) {
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
-  }
-};
-
-/**
- * Engineering Prime Process Master — write only `prime_process` JSON.
- * No approve / audit / timestamp changes (RM Store owns those).
- */
-export const savePrimeProcess = async (req, res) => {
-  try {
-    const production_id = req.body.production_id || req.body.id || null;
-    const item_dcode = req.body.item_dcode != null && req.body.item_dcode !== "" ? Number(req.body.item_dcode) : null;
-    const prime_process = parsePrimeProcess(req.body.prime_process);
-
-    if (!prime_process || typeof prime_process !== "object") {
-      return res.status(400).json({ success: false, message: "prime_process JSON is required." });
-    }
-    if (!Array.isArray(prime_process.stages) || !prime_process.stages.length) {
-      return res.status(400).json({ success: false, message: "prime_process.stages must be a non-empty array." });
-    }
-
-    let existing = null;
-    if (production_id) existing = await findProduction({ production_id });
-    if (!existing && item_dcode) existing = await findProduction({ item_dcode });
-    if (!existing) {
-      return res.status(404).json({
-        success: false,
-        message: "Item RM mapping not found. Create the item in Item RM Master first.",
-      });
-    }
-
-    const data = await updateProductions({ prime_process }, existing.production_id);
-    return res.json({
-      success: true,
-      data,
-      toast_type: "success",
-      message: existing.prime_process ? "Prime process mapping updated." : "Prime process mapping saved.",
-    });
-  } catch (err) {
-    return res.status(err.statusCode || 500).json({ success: false, message: err.message });
-  }
-};
-
-/** Clear prime_process JSON only — does not soft-delete the Item RM row. */
-export const clearPrimeProcess = async (req, res) => {
-  try {
-    const id = req.body.production_id || req.body.id;
-    const existing = await findProduction({ production_id: id });
-    if (!existing) return res.status(404).json({ success: false, message: "Production mapping not found." });
-
-    const data = await updateProductions({ prime_process: null }, id);
-    return res.json({
-      success: true,
-      data,
-      toast_type: "success",
-      message: "Prime process mapping cleared.",
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-/**
- * Engineering Finish Process Master — write only `finish_process` JSON.
- * Same table / lookup as prime; no approve / audit / timestamps.
- */
-export const saveFinishProcess = async (req, res) => {
-  try {
-    const production_id = req.body.production_id || req.body.id || null;
-    const item_dcode = req.body.item_dcode != null && req.body.item_dcode !== "" ? Number(req.body.item_dcode) : null;
-    const finish_process = parsePrimeProcess(req.body.finish_process);
-
-    if (!finish_process || typeof finish_process !== "object") {
-      return res.status(400).json({ success: false, message: "finish_process JSON is required." });
-    }
-    if (!Array.isArray(finish_process.stages) || !finish_process.stages.length) {
-      return res.status(400).json({ success: false, message: "finish_process.stages must be a non-empty array." });
-    }
-
-    let existing = null;
-    if (production_id) existing = await findProduction({ production_id });
-    if (!existing && item_dcode) existing = await findProduction({ item_dcode });
-    if (!existing) {
-      return res.status(404).json({
-        success: false,
-        message: "Item RM mapping not found. Create the item in Item RM Master first.",
-      });
-    }
-
-    const data = await updateProductions({ finish_process }, existing.production_id);
-    return res.json({
-      success: true,
-      data,
-      toast_type: "success",
-      message: existing.finish_process ? "Finish process mapping updated." : "Finish process mapping saved.",
-    });
-  } catch (err) {
-    return res.status(err.statusCode || 500).json({ success: false, message: err.message });
-  }
-};
-
-export const clearFinishProcess = async (req, res) => {
-  try {
-    const id = req.body.production_id || req.body.id;
-    const existing = await findProduction({ production_id: id });
-    if (!existing) return res.status(404).json({ success: false, message: "Production mapping not found." });
-
-    const data = await updateProductions({ finish_process: null }, id);
-    return res.json({
-      success: true,
-      data,
-      toast_type: "success",
-      message: "Finish process mapping cleared.",
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
