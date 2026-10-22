@@ -1,6 +1,9 @@
+import dbQuery from "../../../../../config/db/db.js";
+import { IMS_TABLES, PRODUCTION_TABLES } from "../../../../../config/db/dbTables.js";
 import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
 import { enrichProductionRow, normalizeRmItems } from "./productionRmHelpers.js";
+import { issueQtyKg } from "../../../../production/modules/job-card/jobCard.config.js";
 
 const MASTER_CACHE_MS = 2 * 60 * 1000; // 2 min
 const masterCache = { rm: { loadedAt: 0, data: null }, fg: { loadedAt: 0, data: null } };
@@ -41,9 +44,97 @@ export async function loadMappedItems(reqData, filter) {
     .filter((r) => r.itemdcode);
 }
 
+/**
+ * Overlay Maintain Job Card (prod_job_card) onto ERP prdrunjc rows — simple:
+ *   Required Qty (rm_weight) = (prime gweight × planqty) + extra %
+ *   RM wire + macname from process_plan
+ */
+async function enrichPrdRunJcFromProdJobCards(erpRows = []) {
+  if (!erpRows.length) return erpRows;
+
+  const byNo = new Map();
+  for (const r of erpRows) {
+    const k = String(r.pjobcardno || "").trim().toUpperCase();
+    if (k) byNo.set(k, { ...r });
+  }
+  if (!byNo.size) return erpRows;
+
+  const cards = await dbQuery(
+    `SELECT pjobcardno, itemdcode, shortage_ids, process_plan
+     FROM ${PRODUCTION_TABLES.JOB_CARD}
+     WHERE is_deleted = false
+       AND UPPER(TRIM(pjobcardno)) = ANY($1::text[])`,
+    [[...byNo.keys()]]
+  );
+  if (!cards.length) return erpRows;
+
+  const allIds = [...new Set(cards.flatMap((c) => c.shortage_ids || []).map(Number).filter(Boolean))];
+  const lines = allIds.length
+    ? await dbQuery(
+        `SELECT id, itemdcode, qty FROM ${IMS_TABLES.SHORTAGE}
+         WHERE id = ANY($1::int[]) AND is_deleted = false`,
+        [allIds]
+      )
+    : [];
+  const bySid = new Map(lines.map((r) => [Number(r.id), r]));
+  const { itemMap } = await getImsMapsSafe();
+  const gweightOf = (dcode) => {
+    const n = Number(itemMap.get(canonicalCode(dcode))?.gweight);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  for (const c of cards) {
+    const key = String(c.pjobcardno || "").trim().toUpperCase();
+    const erp = byNo.get(key);
+    if (!erp) continue;
+
+    let planqty = 0;
+    for (const sid of c.shortage_ids || []) {
+      const line = bySid.get(Number(sid));
+      if (!line) continue;
+      planqty += Number(line.qty) || 0;
+    }
+    const rm_weight = issueQtyKg(gweightOf(c.itemdcode), planqty) || 0;
+    const part_weight =
+      planqty > 0 && rm_weight > 0 ? Math.round((rm_weight / planqty) * 1e6) / 1e6 : 0;
+
+    let rm_item_dcode = null;
+    let rm_item_code = null;
+    let macname = erp.macname;
+    for (const step of Array.isArray(c.process_plan) ? c.process_plan : []) {
+      if (!rm_item_code && (step.rm_items || []).length) {
+        const rm = step.rm_items[0];
+        rm_item_dcode = rm.rm_item_dcode ?? null;
+        rm_item_code = rm.rm_item_code ? String(rm.rm_item_code).trim() : null;
+      }
+      if (!macname && (step.machines || []).length) {
+        macname = step.machines[0].machine_name || null;
+      }
+      if (rm_item_code && macname) break;
+    }
+
+    byNo.set(key, {
+      ...erp,
+      itemdcode: c.itemdcode || erp.itemdcode,
+      planqty: planqty > 0 ? planqty : erp.planqty,
+      rm_weight: rm_weight > 0 ? rm_weight : erp.rm_weight,
+      part_weight: part_weight > 0 ? part_weight : erp.part_weight,
+      macname: macname || erp.macname,
+      rm_item_dcode: rm_item_dcode ?? erp.rm_item_dcode ?? null,
+      rm_item_code: rm_item_code || erp.rm_item_code || null,
+      from_prod_job_card: true,
+    });
+  }
+
+  return erpRows.map((r) => {
+    const k = String(r.pjobcardno || "").trim().toUpperCase();
+    return byNo.get(k) || r;
+  });
+}
+
 export async function loadMappedPrdRunJc() {
   const rows = (await fetchFromIMS("prdrunjc")) || [];
-  return rows
+  const mapped = rows
     .map((r) => ({
       pjobcardno: String(r.pjobcardno ?? r.Pjobcardno ?? r.PJobCardNo ?? "").trim(),
       pldt: r.pldt ?? r.Pldt ?? r.PLDt ?? null,
@@ -54,8 +145,11 @@ export async function loadMappedPrdRunJc() {
       macname: r.macname ?? r.MacName ?? r.mac_name ?? r.machine ?? r.Machine ?? r.MachineName ?? null,
       part_weight: Number(r.part_weight ?? r.partweight ?? r.PartWeight ?? r.PartWt ?? r.partwt ?? r.pwt ?? 0) || 0,
       rm_weight: Number(r.rm_weight ?? r.rmweight ?? r.RMWeight ?? r.RmWt ?? r.rmwt ?? r.rm_wt ?? 0) || 0,
+      rm_item_dcode: null,
+      rm_item_code: null,
     }))
     .filter((r) => r.pjobcardno);
+  return enrichPrdRunJcFromProdJobCards(mapped);
 }
 
 // 2. Picker Formatters
@@ -73,6 +167,7 @@ export function toPrdRunJcPickerRow(row) {
   const item_code = row.item_code ? String(row.item_code).trim() : "";
   const itemdesc = row.itemdesc ? String(row.itemdesc).trim() : "";
   const macname = row.macname ? String(row.macname).trim() : "";
+  const rmCode = row.rm_item_code ? String(row.rm_item_code).trim() : "";
   const label = item_code ? `${pjobcardno} (${item_code})` : pjobcardno;
   return {
     id: pjobcardno,
@@ -85,8 +180,11 @@ export function toPrdRunJcPickerRow(row) {
     macname: row.macname,
     part_weight: row.part_weight,
     rm_weight: row.rm_weight,
+    rm_item_dcode: row.rm_item_dcode ?? null,
+    rm_item_code: rmCode || null,
+    from_prod_job_card: Boolean(row.from_prod_job_card),
     label,
-    sub: [itemdesc, macname].filter(Boolean).join(" | "),
+    sub: [itemdesc, macname, rmCode].filter(Boolean).join(" | "),
   };
 }
 

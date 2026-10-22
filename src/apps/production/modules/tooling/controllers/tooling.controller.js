@@ -1,12 +1,14 @@
 /**
  * Production → Tooling (Pending + Register).
- * Source of truth: prod_shortage (item_dcode = prime item dcode).
- *   approved NULL → Pending | true/false → Register (Yes/No)
+ * Source of truth: prod_job_card.tooling_approved (per prime, latest card).
+ *   Pending: tooling_approved IS NULL | Register: true/false (+ remark, by, at)
  */
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
-import { groupByPrimeItem, loadProductionShortages, primeStatusSql } from "../../shortage/utils/primeItemShortage.js";
+import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
+import { issueQtyKg } from "../../job-card/jobCard.config.js";
+import { loadQtyItemsByShortageIds } from "../../job-card/models/jobCard.model.js";
 import { listProdShortageTooling, resetToolingToPending, saveTooling, toolingOf } from "../../shortage/models/primeTooling.model.js";
 
 const ENTITY = "production_tooling";
@@ -26,26 +28,52 @@ function slimRow(g, extra = {}) {
   };
 }
 
+function primeGweight(itemMap, itemdcode) {
+  const w = itemMap.get(canonicalCode(itemdcode))?.gweight;
+  const n = Number(w);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 async function loadToolingList(surface) {
   const isRegister = surface === "register";
   const toolingRows = await listProdShortageTooling(isRegister);
   if (!toolingRows.length) return [];
 
-  const groupMap = new Map(
-    groupByPrimeItem(await loadProductionShortages([primeStatusSql("approved")])).map((g) => [Number(g.prime_key), g])
-  );
+  const { itemMap } = await getImsMapsSafe();
+  const cards = toolingRows.map((r) => ({
+    docno: r.docno,
+    itemdcode: r.item_dcode,
+    shortage_ids: r.shortage_ids || [],
+  }));
+  const qtyByDoc = await loadQtyItemsByShortageIds(cards);
 
   const out = [];
   for (const row of toolingRows) {
-    const g = groupMap.get(Number(row.item_dcode));
-    if (!g) continue;
-
+    const primeKey = Number(row.item_dcode);
+    const info = itemMap.get(canonicalCode(primeKey)) || {};
+    const { qty = 0 } = qtyByDoc.get(row.docno) || {};
+    const gweight = primeGweight(itemMap, primeKey);
+    const total_weight_kg = issueQtyKg(gweight, qty);
     const tooling = toolingOf(row.approved);
+
     out.push(
-      slimRow(g, {
-        tooling: isRegister ? tooling : "pending",
-        tooling_remark: isRegister ? row.remark ?? null : null,
-      })
+      slimRow(
+        {
+          prime_key: primeKey,
+          prime_item_code: info.item_code || String(primeKey),
+          prime_item_desc: info.item_desc ?? null,
+          total_qty: qty,
+          total_weight_kg,
+          weight_missing: total_weight_kg == null,
+        },
+        {
+          tooling: isRegister ? tooling : "pending",
+          tooling_remark: isRegister ? row.remark ?? null : null,
+          tooling_by: isRegister ? row.tooling_by ?? null : null,
+          tooling_by_name: isRegister ? row.tooling_by ?? null : null,
+          tooling_at: isRegister ? row.tooling_at ?? null : null,
+        }
+      )
     );
   }
 
@@ -75,7 +103,13 @@ export const saveToolingDecision = async (req, res) => {
     }
 
     const user = auditUserName(req);
-    await saveTooling({ primeKey: prime_key, tooling, remark: String(remark).trim().slice(0, MAX_REMARK), user });
+    const saved = await saveTooling({ primeKey: prime_key, tooling, remark: String(remark).trim().slice(0, MAX_REMARK), user });
+    if (!saved) {
+      return res.status(404).json({
+        success: false,
+        message: "No shortage-approved job card found for this prime item. Approve shortage first.",
+      });
+    }
 
     await logActivity(req, {
       action: tooling ? "approve" : "reject",
@@ -92,7 +126,7 @@ export const saveToolingDecision = async (req, res) => {
   }
 };
 
-/** POST /tooling/delete — body { prime_key } — clears prod_shortage decision → Pending */
+/** POST /tooling/delete — body { prime_key } — clears tooling decision on job card → Pending */
 export const deleteToolingRegister = async (req, res) => {
   try {
     const prime_key = parsePositiveIntId(req.body?.prime_key ?? req.body?.id);

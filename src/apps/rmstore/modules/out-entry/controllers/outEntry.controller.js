@@ -267,6 +267,21 @@ async function resolveRejectionStoreOutCoils(coilInputs, { qcRejectUid, excludeO
   return { uids, resolved };
 }
 
+/**
+ * Submit / approve requires exactly the rejection register's coil count — a partial scan stays draft.
+ * Required = max(register coil_count, coils linked by rm_uid), same as the scan modal.
+ */
+async function assertRejectionStoreOutComplete(qcRejectUid, uids = []) {
+  const rejection = await findQcRejection(qcRejectUid);
+  const linked = await findCoils({ filters: { rm_uid: qcRejectUid }, limit: 5000 });
+  const requiredCount = Math.max(Number(rejection?.coil_count) || 0, (linked.data || []).length);
+  if (requiredCount > 0 && uids.length !== requiredCount) {
+    const err = new Error(`Rejection #${qcRejectUid} needs exactly ${requiredCount} coil(s) for Store Out; scanned ${uids.length}.`);
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 async function loadOutEntryPayload(out_uid) {
   const data = await findOutEntry(out_uid);
   if (!data) return null;
@@ -565,6 +580,7 @@ export const createOutEntry = async (req, res) => {
       }
 
       ({ uids, resolved } = await resolveRejectionStoreOutCoils(coilInputs, { qcRejectUid }));
+      if (scan_complete) await assertRejectionStoreOutComplete(qcRejectUid, uids);
       savedEntryType = OUT_ENTRY_TYPE.RM_REJECTION;
     } else if (isJobCardOutEntry(entry_type)) {
       const issue_uid = parsePositiveIntId(req.body?.issue_uid);
@@ -873,6 +889,7 @@ export const updateOutEntryCtrl = async (req, res) => {
         excludeOutUid: id,
       });
       uids = result.uids;
+      if (scan_complete) await assertRejectionStoreOutComplete(existing.qc_reject_uid, uids);
       coilsChanged = !sameUidList(existingScannedUids, uids);
       const summary = buildOutEntryCoilSummary(result.resolved);
       const coilBusinessChanges =
@@ -1077,6 +1094,7 @@ export const updateOutEntryCtrl = async (req, res) => {
         if (!draftUids.length) {
           return res.status(400).json({ success: false, message: "There are no scanned coils to authorize." });
         }
+        await assertRejectionStoreOutComplete(existing.qc_reject_uid, draftUids);
         await updateCoilsAfterRejectionStoreOut(
           id,
           existing.qc_reject_uid,

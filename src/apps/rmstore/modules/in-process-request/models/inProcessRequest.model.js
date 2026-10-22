@@ -240,6 +240,55 @@ export function autoStoreInFromConsumeRemarks(consumeIprUid) {
   return `${AUTO_STORE_IN_FROM_CONSUME_PREFIX}${Number(consumeIprUid)}`;
 }
 
+/** Links an auto-queued store-in row (shop-floor coils of a rejection) back to its rejection IPR. */
+export const AUTO_STORE_IN_FROM_REJECTION_PREFIX = "AUTO_FROM_REJECTION:";
+
+export function autoStoreInFromRejectionRemarks(rejectionIprUid) {
+  return `${AUTO_STORE_IN_FROM_REJECTION_PREFIX}${Number(rejectionIprUid)}`;
+}
+
+export function parseRejectionIprUidFromAutoStoreInRemarks(remarks) {
+  const s = String(remarks || "");
+  if (!s.startsWith(AUTO_STORE_IN_FROM_REJECTION_PREFIX)) return null;
+  const id = Number(s.slice(AUTO_STORE_IN_FROM_REJECTION_PREFIX.length));
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+/** Auto store-in rows queued for a rejection's shop-floor coils (pending or received). */
+export const findAutoStoreInsForRejection = async (rejectionIprUid) => {
+  const id = Number(rejectionIprUid);
+  if (!Number.isFinite(id)) return [];
+  const rows = await dbQuery(
+    `SELECT ${SELECT_COLS} FROM ${TABLE} r
+     WHERE r.is_deleted = false AND r.type = '${IPR_TYPE.RETURN}' AND r.remarks = $1
+     ORDER BY r.ipr_uid DESC`,
+    [autoStoreInFromRejectionRemarks(id)]
+  );
+  return summarizeRowsAsync(rows || []);
+};
+
+/** Another open (not store-out done) in-process rejection that already has this coil. */
+export const findOpenRejectionForCoil = async (coilUid, excludeIprUid = null) => {
+  const uid = String(coilUid || "").trim().toLowerCase();
+  if (!uid) return null;
+  const exclude = Number(excludeIprUid);
+  const [row] = await dbQuery(
+    `SELECT r.ipr_uid FROM ${TABLE} r
+     WHERE r.is_deleted = false
+       AND r.type IN ('${IPR_TYPE.COIL}', '${IPR_TYPE.LOT}')
+       AND COALESCE(r.stage, '') <> '${IPR_STAGE.STORE_OUT_DONE}'
+       AND r.ipr_uid <> $2
+       AND EXISTS (
+         SELECT 1
+         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(r.coils) = 'array' THEN r.coils ELSE '[]'::jsonb END) elem
+         WHERE lower(elem->>'coil_no_uid') = $1
+       )
+     ORDER BY r.ipr_uid DESC LIMIT 1`,
+    [uid, Number.isFinite(exclude) ? exclude : 0]
+  );
+  return row ?? null;
+};
+
 /** Parse source consume IPR id from auto-queued store-in remarks. */
 export function parseConsumeIprUidFromAutoStoreInRemarks(remarks) {
   const s = String(remarks || "");
@@ -267,6 +316,12 @@ const PENDING_STORE_IN_COIL_EXISTS = `EXISTS (
   WHERE lower(elem->>'coil_no_uid') = $1
 )`;
 
+/**
+ * Rejection rows wait in Store In Pending on the same row (no auto store-in child).
+ * Only coils still out on the shop floor are pending — store / received coils are already held.
+ */
+export const REJECTION_STORE_IN_PENDING_SQL = `(r.type IN ('${IPR_TYPE.COIL}', '${IPR_TYPE.LOT}') AND r.stage = '${IPR_STAGE.PENDING_STORE_IN}')`;
+
 /** Pending store-in queue row that already includes this coil. */
 export const findPendingStoreInForCoil = async (coilUid) => {
   const uid = String(coilUid || "").trim().toLowerCase();
@@ -276,7 +331,18 @@ export const findPendingStoreInForCoil = async (coilUid) => {
     `SELECT ${SELECT_COLS} FROM ${TABLE} r
      WHERE r.is_deleted = false AND r.approved = true
        AND r.stage = '${IPR_STAGE.PENDING_STORE_IN}'
-       AND r.type IN ('${IPR_TYPE.CONSUME}', '${IPR_TYPE.RETURN}')
+       AND (
+         r.type IN ('${IPR_TYPE.CONSUME}', '${IPR_TYPE.RETURN}')
+         OR (
+           ${REJECTION_STORE_IN_PENDING_SQL}
+           AND EXISTS (
+             SELECT 1 FROM ${COIL_TABLE} cx
+             WHERE LOWER(cx.coil_no_uid) = $1
+               AND LOWER(COALESCE(cx.status, 'active')) = 'out'
+               AND cx.out_uid IS NOT NULL
+           )
+         )
+       )
        AND ${PENDING_STORE_IN_COIL_EXISTS}
      ORDER BY r.ipr_uid DESC LIMIT 1`,
     [uid]
@@ -488,6 +554,8 @@ export function normalizeCoils(coils) {
         balance_in_store_in: c.balance_in_store_in === true,
         acc_code: str(c.acc_code),
         acc_name: str(c.acc_name),
+        bill_no: str(c.bill_no),
+        bill_dt: c.bill_dt ?? null,
       };
     });
 }
@@ -626,9 +694,18 @@ function reassignTargetByCoilUid(historyByUid) {
 
 /** Register list — JC, machine, FG, RM from Store Out Issue Request for the coil. */
 function resolveIprRegisterFromIssue(lines, coilIssueByUid) {
-  const first = lines[0] || {};
-  const uidKey = String(first.coil_no_uid || "").trim().toLowerCase();
-  const issue = uidKey ? coilIssueByUid?.get(uidKey) : null;
+  // Lot rejection: first coil may be a store coil never issued — use first line with Issue history.
+  let first = lines[0] || {};
+  let issue = null;
+  for (const line of lines) {
+    const uidKey = String(line?.coil_no_uid || "").trim().toLowerCase();
+    const hit = uidKey ? coilIssueByUid?.get(uidKey) : null;
+    if (hit) {
+      first = line;
+      issue = hit;
+      break;
+    }
+  }
   if (!issue) return null;
   const reassignWire = str(first.reassign_rm_item_code);
   const out = {
@@ -700,7 +777,9 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
   const consumedSum = lines.reduce((s, c) => s + num(c.consumed_qty), 0);
   const first = lines[0] || {};
   const balance_qty = isConsume || isReturn ? remainingSum : 0;
-  const balance_status = isReject
+  // Auto store-in of a rejection's shop-floor coils — received coils stay held for that rejection.
+  const sourceRejectionIprUid = isReturn ? parseRejectionIprUidFromAutoStoreInRemarks(row.remarks) : null;
+  const balance_status = isReject || sourceRejectionIprUid
     ? "Rejected"
     : !isConsume
       ? null
@@ -711,12 +790,14 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
           : "Balance";
 
   const reassignNo = reassignJcNo(reassignJcObj);
-  const fromCoil = str(first.pjobcardno) || str(first.source_pjobcardno);
+  // Lot rejection: store coil (no JC) can be first — take JC / machine from the first shop-floor line.
+  const jcLine = lines.find((c) => str(c.pjobcardno) || str(c.source_pjobcardno)) || first;
+  const fromCoil = str(jcLine.pjobcardno) || str(jcLine.source_pjobcardno);
   const sourceJc =
     fromCoil && !(reassignNo && fromCoil.toUpperCase() === reassignNo.toUpperCase())
       ? fromCoil
       : null;
-  const sourceMac = str(first.macname) || str(first.source_macname) || null;
+  const sourceMac = str(jcLine.macname) || str(jcLine.source_macname) || null;
 
   const total_qty = isConsume
     ? originalSum
@@ -756,6 +837,7 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
     consumed_qty,
     balance_qty,
     balance_status,
+    source_rejection_ipr_uid: sourceRejectionIprUid,
     item_code: first.item_code || null,
     item_desc: first.item_desc || null,
     mrn_no: first.mrn_no ?? null,
@@ -846,7 +928,7 @@ export const findInProcessRequests = async (options = {}) => {
 
   if (pendingStoreInQueue) {
     conditions.push(
-      `r.approved = true AND r.stage = '${IPR_STAGE.PENDING_STORE_IN}' AND r.type IN ('${IPR_TYPE.CONSUME}', '${IPR_TYPE.RETURN}')`
+      `r.approved = true AND r.stage = '${IPR_STAGE.PENDING_STORE_IN}' AND (r.type IN ('${IPR_TYPE.CONSUME}', '${IPR_TYPE.RETURN}') OR ${REJECTION_STORE_IN_PENDING_SQL})`
     );
   } else if (!includeAutoStoreInFromConsume) {
     conditions.push(

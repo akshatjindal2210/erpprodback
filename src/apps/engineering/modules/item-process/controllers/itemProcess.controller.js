@@ -1,6 +1,6 @@
 import {
   PROCESS_TYPE, PROCESS_TYPE_KEY, findPlans, loadStages, findPrimeIdsByItems,
-  savePrime, deletePrime, saveFg, deleteFg,
+  savePrime, deletePrime, saveFg, deleteFg, setPlanApproval,
 } from "../models/itemProcess.model.js";
 import { rmItemMap, labelStageRm } from "../../../../rmstore/modules/production/utils/erpItems.js";
 import dbQuery from "../../../../../config/db/db.js";
@@ -8,7 +8,7 @@ import { RMSTORE_TABLES as R } from "../../../../../config/db/dbTables.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { extractListParams } from "../../../../core/lib/utils/query/queryHelper.js";
-import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
+import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 
 /**
  * Prime / Finish Process Master — saved in eng_item_process only (item names from IMS). Item RM is only read for default RM.
@@ -57,7 +57,10 @@ async function toViews(rows, type) {
   const primeItems = rows.map((r) =>
     type === PROCESS_TYPE.PRIME ? Number(r.item_dcode) : Number(item(r.item_dcode).primitemdcode) || Number(r.item_dcode)
   );
-  const [primeIdByItem, rmByItem] = await Promise.all([findPrimeIdsByItems(primeItems), primeItemRm(primeItems, rmMap)]);
+  const [primeIdByItem, rmByItem] = await Promise.all([
+    findPrimeIdsByItems(primeItems, { approvedOnly: false }),
+    primeItemRm(primeItems, rmMap),
+  ]);
   const primeIdOf = (r, i) => (type === PROCESS_TYPE.PRIME ? r.id : primeIdByItem.get(primeItems[i])) || null;
   const stageMap = await loadStages(rows.flatMap((r, i) => [r.id, primeIdOf(r, i)]));
   const plan = async (id) => {
@@ -81,6 +84,9 @@ async function toViews(rows, type) {
         process: r.process || null,
         prime_process: await plan(primeId),
         fg_process: type === PROCESS_TYPE.FG && r.id ? await plan(r.id) : null,
+        is_approved: r.is_approved === true,
+        approved_by_name: r.approved_by || null,
+        approved_at: r.approved_at || null,
         created_by_name: r.created_by || null,
         created_at: r.created_at || null,
         updated_by_name: r.updated_by || null,
@@ -167,7 +173,32 @@ function itemProcessController(type) {
     }
   };
 
-  return { list, get, save, remove };
+  /** POST /approve — body { id, approved?: true | false } (default approve). */
+  const approve = async (req, res) => {
+    try {
+      const id = Number(req.body?.id);
+      if (!id) return res.status(400).json({ success: false, message: "id is required." });
+      const approved = normalizeApprovedInput(req.body?.approved);
+      if (approved !== true && approved !== false) {
+        return res.status(400).json({ success: false, message: "approved must be true or false." });
+      }
+      const user = auditUserName(req) || "system";
+      await setPlanApproval({ type, id, approved, user });
+      const [row] = await findPlans({ type, id });
+      log(req, approved ? "approve" : "update", id, { is_approved: approved, item_dcode: row?.item_dcode ?? null }, row);
+      const [data] = await toViews([row], type);
+      return res.json({
+        success: true,
+        data,
+        toast_type: "success",
+        message: approved ? `${label} approved.` : `${label} approval revoked — status is Pending.`,
+      });
+    } catch (err) {
+      return send(res, err);
+    }
+  };
+
+  return { list, get, save, remove, approve };
 }
 
 export const primeProcess = itemProcessController(PROCESS_TYPE.PRIME);

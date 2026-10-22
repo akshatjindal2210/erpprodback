@@ -1,5 +1,6 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { ENGINEERING_TABLES as T } from "../../../../../../config/db/dbTables.js";
+import { ensureColumns } from "../../../../../../config/db/ensureDbColumns.js";
 
 /**
  * Item process — Prime / FG process plan of an item (one row = one plan). Engineering only — no Item RM (rmstore) link.
@@ -28,10 +29,19 @@ export async function createItemProcessTable() {
       created_by  TEXT,
       created_at  TIMESTAMP DEFAULT NOW(),
       updated_by  TEXT,
-      updated_at  TIMESTAMP
+      updated_at  TIMESTAMP,
+      is_approved BOOLEAN NOT NULL DEFAULT false,
+      approved_by TEXT,
+      approved_at TIMESTAMP
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS eng_item_process_type_item_unique_active
       ON ${T.ITEM_PROCESS} (type, item_dcode) WHERE is_deleted = false;     -- one active plan per (type, item)
   `);
+
+  await ensureColumns(dbQuery, T.ITEM_PROCESS, [
+    { name: "is_approved", addSql: "is_approved BOOLEAN NOT NULL DEFAULT false" },
+    { name: "approved_by", addSql: "approved_by TEXT" },
+    { name: "approved_at", addSql: "approved_at TIMESTAMP" },
+  ]);
 }

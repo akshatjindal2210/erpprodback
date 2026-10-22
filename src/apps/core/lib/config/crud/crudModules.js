@@ -250,7 +250,7 @@ export const CRUD_MODULES = {
     idField: "id",
     listFields: [],
     filterFields: ["id", "process_id", "number", "approved", "from_date", "to_date"],
-    searchFields: ["name", "number", "make", "model"],
+    searchFields: ["macname", "number", "make", "model"],
   },
 };
 

@@ -61,7 +61,16 @@ function fromLine(line, index, m) {
     machines: (line.machines || [])
       .map((id) => m.macById.get(Number(id)))
       .filter(Boolean)
-      .map((mac) => ({ machine_id: Number(mac.id), machine_label: `${mac.number} — ${mac.name}`, name: mac.name, number: mac.number })),
+      .map((mac) => ({
+        machine_id: Number(mac.id),
+        machine_label: `${mac.number} — ${mac.macname}`,
+        name: mac.macname,
+        macname: mac.macname,
+        number: mac.number,
+        speed: mac.speed ?? null,
+        duration: Number(mac.duration) || 0,
+        setup_time: Number(mac.setup_time) || 0,
+      })),
     rm_items: flags.rm_wire ? (line.rm || []).map((d) => ({ rm_item_dcode: Number(d) })) : [],
   };
 }
@@ -71,7 +80,10 @@ async function loadMasters(lines, { activeOnly = false } = {}) {
   const active = activeOnly ? " AND is_deleted = false" : "";
   const [procs, machines] = await Promise.all([
     dbQuery(`SELECT id, name, ${PROCESS_FLAGS.join(", ")} FROM ${E.PROCESS_MASTER} WHERE id = ANY($1::int[])${active}`, [uniqNums(lines.map((l) => l.process))]),
-    dbQuery(`SELECT id, name, number, process_id FROM ${E.MACHINE_MASTER} WHERE id = ANY($1::int[])${active}`, [uniqNums(lines.flatMap((l) => l.machines || []))]),
+    dbQuery(
+      `SELECT id, macname, number, process_id, speed, duration, setup_time FROM ${E.MACHINE_MASTER} WHERE id = ANY($1::int[])${active}`,
+      [uniqNums(lines.flatMap((l) => l.machines || []))]
+    ),
   ]);
   return {
     procById: new Map(procs.map((p) => [Number(p.id), p])),
@@ -121,7 +133,7 @@ async function buildStages(processJson, type) {
       for (const id of line.machines) {
         const mac = m.macById.get(id);
         if (!mac) throw httpError(400, `Machine ${id} not found in Machine Master.`);
-        if (Number(mac.process_id) !== Number(proc.id)) throw httpError(400, `Machine ${mac.name} is not a ${proc.name} machine ${where}.`);
+        if (Number(mac.process_id) !== Number(proc.id)) throw httpError(400, `Machine ${mac.macname} is not a ${proc.name} machine ${where}.`);
       }
       return line;
     }),
@@ -143,25 +155,28 @@ export async function resolvePrimeItemDcode(itemDcode) {
   return Number(itemMap.get(canonicalCode(itemDcode))?.primitemdcode) || Number(itemDcode);
 }
 
-/** Active primes of these items → Map item_dcode → id. */
-export async function findPrimeIdsByItems(itemDcodes = []) {
+/** Active primes of these items → Map item_dcode → id. `approvedOnly` false = master UI / FG prime block. */
+export async function findPrimeIdsByItems(itemDcodes = [], { approvedOnly = true } = {}) {
   const dcodes = uniqNums(itemDcodes);
   if (!dcodes.length) return new Map();
+  const approvedSql = approvedOnly ? " AND is_approved = true" : "";
   const rows = await dbQuery(
-    `SELECT id, item_dcode FROM ${IP} WHERE type = ${PROCESS_TYPE.PRIME} AND item_dcode = ANY($1::int[]) AND is_deleted = false`,
+    `SELECT id, item_dcode FROM ${IP} WHERE type = ${PROCESS_TYPE.PRIME} AND item_dcode = ANY($1::int[]) AND is_deleted = false${approvedSql}`,
     [dcodes]
   );
   return new Map(rows.map((r) => [Number(r.item_dcode), Number(r.id)]));
 }
 
 /** Active rows of one type → [{ id, type, item_dcode, process, created_by, ... }]. */
-export async function findPlans({ type, id = null, item_dcode = null } = {}) {
+export async function findPlans({ type, id = null, item_dcode = null, approvedOnly = false } = {}) {
   const conds = [`type = $1`, `is_deleted = false`];
   const values = [type];
   if (id != null) conds.push(`id = $${values.push(Number(id))}`);
   if (item_dcode != null) conds.push(`item_dcode = $${values.push(Number(item_dcode))}`);
+  if (approvedOnly) conds.push(`is_approved = true`);
   return dbQuery(
-    `SELECT id, type, item_dcode, process, created_by, created_at, updated_by, updated_at
+    `SELECT id, type, item_dcode, process, is_approved, approved_by, approved_at,
+            created_by, created_at, updated_by, updated_at
      FROM ${IP} WHERE ${conds.join(" AND ")} ORDER BY id DESC`,
     values
   );
@@ -202,7 +217,13 @@ async function upsertPlan(client, { type, item_dcode, process, user }) {
     throw err;
   };
   if (found.length) {
-    await client.query(`UPDATE ${IP} SET process = $2, updated_by = $3, updated_at = NOW() WHERE id = $1`, [found[0].id, json, user]);
+    await client.query(
+      `UPDATE ${IP}
+       SET process = $2, updated_by = $3, updated_at = NOW(),
+           is_approved = false, approved_by = NULL, approved_at = NULL
+       WHERE id = $1`,
+      [found[0].id, json, user]
+    );
     return { id: Number(found[0].id), created: false };
   }
   const { rows } = await client.query(
@@ -257,11 +278,31 @@ export async function saveFg({ item_dcode, processJson, user }) {
   const itemDcode = Number(item_dcode);
   if (!itemDcode) throw httpError(400, "Select a finish item.");
   const primeItem = await resolvePrimeItemDcode(itemDcode);
-  if (!(await findPrimeIdsByItems([primeItem])).size) throw httpError(400, "Prime process not found for this item's prime item. Save it in Prime Process Master first.");
+  const [primePlan] = await findPlans({ type: PROCESS_TYPE.PRIME, item_dcode: primeItem });
+  if (!primePlan) throw httpError(400, "Prime process not found for this item's prime item. Save it in Prime Process Master first.");
+  if (!primePlan.is_approved) {
+    throw httpError(400, "Prime process is pending approval. Approve it in Engineering → Prime Process Master first.");
+  }
 
   const stages = await buildStages(processJson, PROCESS_TYPE.FG);
   const process = buildProcessJson({ type: PROCESS_TYPE.FG, stages });
   return withTransaction((client) => upsertPlan(client, { type: PROCESS_TYPE.FG, item_dcode: itemDcode, process, user }));
+}
+
+/** Approve or revoke a plan row (Prime / Finish Process Master). */
+export async function setPlanApproval({ type, id, approved, user }) {
+  const planId = Number(id);
+  if (!planId) throw httpError(400, "id is required.");
+  const ok = approved === true;
+  const [row] = await dbQuery(
+    `UPDATE ${IP}
+     SET is_approved = $3, approved_by = $4, approved_at = $5, updated_by = $6, updated_at = NOW()
+     WHERE id = $1 AND type = $2 AND is_deleted = false
+     RETURNING id`,
+    [planId, type, ok, ok ? user : null, ok ? new Date() : null, user]
+  );
+  if (!row) throw httpError(404, "Process plan not found.");
+  return { id: planId, is_approved: ok };
 }
 
 /** Delete a finish process. */

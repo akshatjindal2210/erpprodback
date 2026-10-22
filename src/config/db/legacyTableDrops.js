@@ -4,4 +4,5 @@ import dbQuery from "./db.js";
 export async function runLegacyTableDrops() {
   await dbQuery(`DROP TABLE IF EXISTS rmstore_audit_locations`);
   await dbQuery(`DROP TABLE IF EXISTS rmstore_audit_master`);
+  await dbQuery(`DROP TABLE IF EXISTS prod_shortage`);
 }

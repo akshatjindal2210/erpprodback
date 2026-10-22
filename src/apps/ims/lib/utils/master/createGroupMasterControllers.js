@@ -17,6 +17,7 @@ function mapItemRecord(r) {
     primitem_code: r.primitem_code ?? r.Primitem_code ?? r.PrimItem_Code ?? null,
     primitemdesc: r.PrimItemdesc ?? r.primItemDesc ?? r.primitemdesc ?? null,
     weight: r.weight ?? r.Weight ?? null,
+    gweight: r.gweight ?? r.Gweight ?? r.GWeight ?? r.g_weight ?? null,
     apvitem: r.apvitem ?? r.Apvitem ?? r.ITAPV,
     unit: r.Unit ?? r.unit,
     category_id: r.Category_Id ?? r.category_id,

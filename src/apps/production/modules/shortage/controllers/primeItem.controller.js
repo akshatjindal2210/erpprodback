@@ -9,7 +9,7 @@ import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
 import { PRIME_STATUSES, attachRmWireFromProduction, groupByPrimeItem, loadPrimeItemChildren, loadProductionShortages, primeKeyOf, primeStatusOf, primeStatusSql, slimPrimeGroup } from "../utils/primeItemShortage.js";
-import { addPendingTooling } from "../models/primeTooling.model.js";
+import { applyShortageDecisionToJobCards } from "../../job-card/models/jobCard.model.js";
 
 const ENTITY = "production_shortage";
 const MAX_REMARK = 500;
@@ -73,17 +73,47 @@ async function applyPrimeDecision(req, res, { from, to, action, verb, remarkRequ
     }
 
     // Prime mapping comes from the IMS item master, so children are resolved here, then locked by the UPDATE guard.
-    const wanted = new Set(primeKeys);
+    const wanted = new Set(primeKeys.map((k) => String(canonicalCode(k) || k)));
+    const matchPrime = (r) => wanted.has(String(primeKeyOf(r) || ""));
     const rows = await loadProductionShortages([primeStatusSql(from)]);
-    const ids = rows.filter((r) => wanted.has(primeKeyOf(r))).map((r) => r.id);
-    if (!ids.length) {
+    let ids = rows.filter(matchPrime).map((r) => r.id);
+    const user = auditUserName(req) || "system";
+
+    // Prior attempt may have approved IMS but failed on job-card columns — sync JC from already-approved rows.
+    if (!ids.length && to === true && from === "pending") {
+      const approvedRows = (await loadProductionShortages([primeStatusSql("approved")])).filter(matchPrime);
+      if (approvedRows.length) {
+        const shortageIdsByPrime = new Map();
+        for (const r of approvedRows) {
+          const key = Number(primeKeyOf(r));
+          if (!shortageIdsByPrime.has(key)) shortageIdsByPrime.set(key, []);
+          shortageIdsByPrime.get(key).push(r.id);
+        }
+        await applyShortageDecisionToJobCards({
+          primeKeys,
+          approved: true,
+          user,
+          shortageIdsByPrime,
+        });
+        return res.json({
+          success: true,
+          message: "Shortage already approved — job card synced.",
+          updated: 0,
+          skipped: approvedRows.length,
+        });
+      }
       return res.status(400).json({
         success: false,
         message: `No ${from} shortage entries found for the selected prime items. Refresh and try again.`,
       });
     }
 
-    const user = auditUserName(req) || "system";
+    if (!ids.length) {
+      return res.status(400).json({
+        success: false,
+        message: `No ${from} shortage entries found for the selected prime items. Refresh and try again.`,
+      });
+    }
 
     // Status + remark on the shortage row itself; who / when go to the activity log below.
     const updatedIds = await withTransaction(async (client) => {
@@ -99,9 +129,21 @@ async function applyPrimeDecision(req, res, { from, to, action, verb, remarkRequ
 
     const skipped = ids.length - updatedIds.length;
 
-    // Shortage approved → each prime item goes to Tooling as pending
-    if (to === true && updatedIds.length) {
-      for (const key of primeKeys) await addPendingTooling(key, user);
+    // Ensure JC has shortage_ids. Approval + remark stay on ims_shortage (joined via shortage_ids).
+    if (updatedIds.length) {
+      const shortageIdsByPrime = new Map();
+      for (const r of rows) {
+        if (!updatedIds.includes(r.id)) continue;
+        const key = Number(primeKeyOf(r));
+        if (!shortageIdsByPrime.has(key)) shortageIdsByPrime.set(key, []);
+        shortageIdsByPrime.get(key).push(r.id);
+      }
+      await applyShortageDecisionToJobCards({
+        primeKeys,
+        approved: to,
+        user,
+        shortageIdsByPrime,
+      });
     }
 
     await logActivity(req, {

@@ -14,6 +14,7 @@ router.post("/get", authenticate, accessControl(M, "view"), fgProcess.get);
 router.post("/create", authenticate, accessControl(M, "add"), fgProcess.save);
 router.post("/update", authenticate, accessControl(M, "edit"), fgProcess.save);
 router.post("/delete", authenticate, accessControl(M, "delete"), fgProcess.remove);
+router.post("/approve", authenticate, accessControl(M, "authorize"), fgProcess.approve);
 
 /** FG item dropdown — IMS item master `{ type: "fg" }`; RM dropdown — IMS RM items. */
 router.post("/production-items/helper", authenticate, helperAccess("productionItems"), getFgItemsViews);

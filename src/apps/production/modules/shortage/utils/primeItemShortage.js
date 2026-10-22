@@ -14,9 +14,12 @@ import { canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLooku
 import { SHORTAGE_LIST_TYPES, fromDateSql } from "../shortage.config.js";
 import { PRODUCTION_GROUP_NAME } from "../../../lib/config/groupFilter.js";
 import { enrichShortageRows } from "../controllers/shortage.controller.js";
-import { loadPrimeProcesses } from "../../job-card/models/jobCard.model.js";
+import { loadPrimeProcesses, shortageFullyApprovedSql, JOB_CARD_TYPE } from "../../job-card/models/jobCard.model.js";
 import { rmItemMap } from "../../../../rmstore/modules/production/utils/erpItems.js";
 import { RMSTORE_TABLES as R } from "../../../../../config/db/dbTables.js";
+import { issueQtyKg } from "../../job-card/jobCard.config.js";
+
+export { shortageFullyApprovedSql };
 
 /* ───────────────────────── Status ───────────────────────── */
 
@@ -43,11 +46,32 @@ export function primeStatusOf(row) {
 
 /* ───────────────────────── Scope ───────────────────────── */
 
-/** SQL: shortage row already used in an active job card. */
-export function usedInJobCardSql(alias = "s") {
+/**
+ * Shortage id reserved on a fully shortage-approved job card (drafts without approve do not count).
+ * Used by create/assert so the same card can still be updated.
+ */
+export function usedInJobCardSql(alias = "s", type = JOB_CARD_TYPE.JC) {
   return `EXISTS (
     SELECT 1 FROM ${PRODUCTION_TABLES.JOB_CARD} jc
-    WHERE jc.is_deleted = false AND ${alias}.id = ANY(jc.shortage_ids)
+    WHERE jc.is_deleted = false
+      AND jc.type = ${Number(type)}
+      AND ${shortageFullyApprovedSql("jc")}
+      AND ${alias}.id = ANY(jc.shortage_ids)
+  )`;
+}
+
+/**
+ * Fully assigned = shortage approved (via join) AND process plan saved (New done).
+ * Pending Shortage list keeps approved-but-unplanned rows so user can click New (normal, not gray).
+ */
+export function plannedInJobCardSql(alias = "s", type = JOB_CARD_TYPE.JC) {
+  return `EXISTS (
+    SELECT 1 FROM ${PRODUCTION_TABLES.JOB_CARD} jc
+    WHERE jc.is_deleted = false
+      AND jc.type = ${Number(type)}
+      AND ${shortageFullyApprovedSql("jc")}
+      AND jsonb_array_length(COALESCE(jc.process_plan, '[]'::jsonb)) > 0
+      AND ${alias}.id = ANY(jc.shortage_ids)
   )`;
 }
 
@@ -66,8 +90,8 @@ export function isProductionScopeRow(row) {
  * `where` = extra SQL conditions, e.g. [primeStatusSql("pending")].
  *
  * Each returned row has: id, itemdcode, qty, type, month, is_approved, approval_remark, ...
- *   + from IMS: item_code, item_desc, primitemdcode, primitem_code, primitemdesc, item_weight
- *   + weight_kg = item_weight × qty (null when item master has no weight)
+ *   + from IMS: item_code, item_desc, primitemdcode, primitem_code, primitemdesc, gweight
+ *   + weight_kg = Issue Qty = (gweight × qty) + 10%
  */
 export async function loadProductionShortages(where = []) {
   const conditions = [
@@ -86,14 +110,14 @@ export async function loadProductionShortages(where = []) {
     [SHORTAGE_LIST_TYPES, PRODUCTION_GROUP_NAME]
   );
 
-  // Adds item_code / item_desc / prime item / item_weight from IMS item master (cached).
+  // Adds item_code / item_desc / prime item / gweight from IMS item master (cached).
   const enriched = await enrichShortageRows(rows || []);
 
   const result = [];
   for (const row of enriched) {
-    const itemWeight = toNumberOrNull(row.item_weight);
-    const weightKg = itemWeight == null ? null : round2(itemWeight * (Number(row.qty) || 0));
-    result.push({ ...row, item_weight: itemWeight, weight_kg: weightKg });
+    const gweight = toNumberOrNull(row.gweight ?? row.item_weight);
+    const weightKg = issueQtyKg(gweight, row.qty);
+    result.push({ ...row, item_weight: gweight, gweight, weight_kg: weightKg });
   }
 
   return result;
@@ -149,16 +173,18 @@ function newGroup(key, row) {
   };
 }
 
-/** Totals for the parent row: qty, weight, item-wise list, remark. */
+/** Totals for the parent row: qty, required qty, item-wise list, remark. */
 function fillGroupTotals(group) {
   const children = group.children;
 
   group.entry_count = children.length;
   group.total_qty = sum(children.map((c) => c.qty));
 
-  // Weight: sum of known weights; weight_missing = some item has no weight (total is partial).
-  group.weight_missing = children.some((c) => c.weight_kg == null);
-  group.total_weight_kg = round2(sum(children.map((c) => c.weight_kg)));
+  // Required Qty (KG) = (prime gweight × total qty) + extra % — one simple formula.
+  const primeRow = children.find((c) => canonicalCode(c.itemdcode) === group.prime_key) || children[0];
+  group.gweight = toNumberOrNull(primeRow?.gweight ?? primeRow?.item_weight);
+  group.total_weight_kg = issueQtyKg(group.gweight, group.total_qty);
+  group.weight_missing = group.total_weight_kg == null;
 
   group.items = buildItemList(children, group.prime_key);
   group.item_count = group.items.length;
@@ -180,6 +206,7 @@ function buildItemList(children, primeKey) {
         itemdcode: c.itemdcode,
         item_code: c.item_code || c.itemcode || key,
         item_weight: c.item_weight ?? null,
+        gweight: c.gweight ?? c.item_weight ?? null,
         qty: 0,
         weight_kg: 0,
         weight_missing: false,
@@ -218,6 +245,7 @@ function slimPrimeTotals(group) {
     prime_item_code: group.prime_item_code,
     prime_item_desc: group.prime_item_desc ?? null,
     total_qty: group.total_qty ?? 0,
+    gweight: group.gweight ?? null,
     total_weight_kg: group.total_weight_kg ?? null,
     weight_missing: Boolean(group.weight_missing),
   });
@@ -241,7 +269,7 @@ export function slimShortageChild(row) {
   });
 }
 
-/** Shortage → Prime Item list — no nested rows (load on expand). */
+/** Shortage → Prime Item list — item-wise totals for table/drawer; line detail loads on expand. */
 export function slimPrimeGroup(group, { id, status } = {}) {
   return compact({
     ...slimPrimeTotals(group),
@@ -249,6 +277,16 @@ export function slimPrimeGroup(group, { id, status } = {}) {
     entry_count: group.entry_count ?? 0,
     approval_remark: group.approval_remark ?? null,
     item_codes: group.item_codes ?? [],
+    items: (group.items ?? []).map((it) =>
+      compact({
+        itemdcode: it.itemdcode,
+        item_code: it.item_code,
+        qty: it.qty,
+        item_weight: it.item_weight ?? null,
+        weight_kg: it.weight_kg ?? null,
+        weight_missing: it.weight_missing,
+      })
+    ),
     status,
   });
 }
@@ -272,6 +310,7 @@ export function slimJobCardPendingGroup(group) {
     item_codes: group.item_codes ?? [],
     items: group.items ?? [],
     shortage_ids: children.map((c) => c.id),
+    gweight: group.gweight ?? null,
     status: allApproved ? "approved" : "pending",
   });
 }

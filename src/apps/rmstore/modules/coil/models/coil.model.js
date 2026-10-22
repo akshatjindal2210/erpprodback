@@ -1001,8 +1001,6 @@ export const findCoils = async (options = {}) => {
     for (const uid of uids) {
       values.push(uid);
       orParts.push(`c.mrn_uid = $${i++}`);
-      values.push(`%${uid}`);
-      orParts.push(`c.mrn_uid LIKE $${i++}`);
     }
     if (no) {
       values.push(no);
@@ -1681,13 +1679,14 @@ export const releaseCoilFromIprRejectionHoldForStoreIn = async (
  * Hold coils for an approved in-process rejection until RM Rejection → Store Out.
  * Removes them from issue / store stock (status rejected, linked to ipr_uid).
  */
-export const markCoilsInProcessRejectionPending = async (ipr_uid, coil_no_uids = [], userName) => {
+export const markCoilsInProcessRejectionPending = async (ipr_uid, coil_no_uids = [], userName, { unassign = false } = {}) => {
   const uids = (coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean);
   if (!uids.length) return [];
+  // unassign: coil just received from the shop floor — goes to Unassigned, not its old rack.
   const rows = await dbQuery(
     `UPDATE ${TABLE}
-     SET location_id = CASE WHEN location_id IS NOT NULL THEN location_id ELSE NULL END,
-         in_uid = CASE WHEN location_id IS NOT NULL THEN in_uid ELSE NULL END,
+     SET location_id = ${unassign ? "NULL" : "CASE WHEN location_id IS NOT NULL THEN location_id ELSE NULL END"},
+         in_uid = ${unassign ? "NULL" : "CASE WHEN location_id IS NOT NULL THEN in_uid ELSE NULL END"},
          out_uid = NULL,
          ipr_uid = $1,
          status = 'rejected'
@@ -1726,11 +1725,13 @@ export const linkCoilsToRejectionRegister = async (
     : `(COALESCE(status, 'active') = 'active' OR (LOWER(COALESCE(status, 'active')) = 'rejected' AND (rm_uid IS NULL OR rm_uid = $1) AND ipr_uid IS NULL))`;
   const params = [Number(rm_uid), uids];
   if (hasIpr) params.push(iprId);
+  // Stamp ipr_uid (IPR) / clear stale ipr_uid (QC) — Store Out authorize matches on it.
   await dbQuery(
     `UPDATE ${TABLE}
      SET rm_uid = $1,
          status = 'rejected',
-         out_uid = NULL
+         out_uid = NULL,
+         ipr_uid = ${hasIpr ? "$3" : "NULL"}
      WHERE coil_no_uid = ANY($2::text[])
        AND ${statusClause}`,
     params
@@ -1744,6 +1745,7 @@ export const updateCoilsAfterQcReject = async (rm_uid, coil_no_uids = [], userNa
     `UPDATE ${TABLE}
      SET rm_uid = $1,
          out_uid = NULL,
+         ipr_uid = NULL,
          status = 'rejected'
      WHERE coil_no_uid = ANY($2::text[])
        AND (

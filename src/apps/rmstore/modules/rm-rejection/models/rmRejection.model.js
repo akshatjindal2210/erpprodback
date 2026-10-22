@@ -45,8 +45,9 @@ export async function hasApprovedRejectionStoreOut(qc_reject_uid) {
   const [row] = await dbQuery(
     `SELECT 1 AS ok
      FROM ${OUT_TABLE} ox
+     LEFT JOIN ${TABLE} q ON q.qc_reject_uid = $1
      WHERE ox.is_deleted = false
-       AND ox.qc_reject_uid = $1
+       AND (ox.qc_reject_uid = $1 OR (q.out_uid IS NOT NULL AND ox.out_uid = q.out_uid))
        AND COALESCE(ox.approved, false) = true
        AND LOWER(COALESCE(ox.entry_type, 'store_out')) = 'rm_rejection'
      LIMIT 1`,
@@ -308,6 +309,20 @@ export const findQcRejection = async (qc_reject_uid) => {
   return row ?? null;
 };
 
+/** Live register row already created from this in-process request (blocks duplicate generate). */
+export const findActiveRejectionByIprUid = async (ipr_uid) => {
+  const id = Number(ipr_uid);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const [row] = await dbQuery(
+    `SELECT qc_reject_uid FROM ${TABLE}
+     WHERE ipr_uid = $1 AND is_deleted = false
+     ORDER BY qc_reject_uid DESC
+     LIMIT 1`,
+    [id]
+  );
+  return row ?? null;
+};
+
 export const insertQcRejection = async (data) => {
   const {
     ipr_uid,
@@ -420,9 +435,8 @@ export async function permanentlyRemoveUnusedMrnPortalRejection(rejection, { mrn
  */
 function classifyIncompleteRejection(row) {
   if (isMrnPortalRejectionRow(row)) return "awaiting_bill";
-  const storeOutApproved =
-    row.out_uid != null &&
-    (row.store_out_approved === true || row.store_out_approved === "t");
+  // SQL flag already matches by qc_reject_uid or out_uid — same rule as bill save / Register stage.
+  const storeOutApproved = row.store_out_approved === true || row.store_out_approved === "t";
   if (storeOutApproved) return "awaiting_bill";
   return "awaiting_store_out";
 }

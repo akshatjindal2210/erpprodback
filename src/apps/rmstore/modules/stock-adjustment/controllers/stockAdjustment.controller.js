@@ -1,6 +1,6 @@
 import { findAdjustments, findAdjustmentById, insertAdjustment, updateAdjustment, softDeleteAdjustment } from "../models/stockAdjustment.model.js";
 import { computeMrnQtyBudget } from "../utils/mrnQtyBudget.js";
-import { applyStockAdjustmentOnApprove, syncStockAdjustmentAddCoils, revertStockAdjustmentOnUnapprove, parseRemovedCoilUids, buildRemovedCoilUidsJson, assertSaAddCoilsUnusedForEdit, needsSaAddCoilResync, shouldSyncStockAdjustmentAddCoils } from "../utils/apply/stockAdjustmentApply.js";
+import { applyStockAdjustmentOnApprove, syncStockAdjustmentAddCoils, revertStockAdjustmentOnUnapprove, parseRemovedCoilUids, buildRemovedCoilUidsJson, assertSaAddCoilsUnusedForEdit, assertStockAdjustmentDeletable, needsSaAddCoilResync, shouldSyncStockAdjustmentAddCoils } from "../utils/apply/stockAdjustmentApply.js";
 import { findActiveCoilsForMinus } from "../utils/minusCoilLookup.js";
 import { findCoilsBySaIdWithMrn, findCoilByUid } from "../../coil/models/coil.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -806,6 +806,8 @@ export const deleteAdjustment = async (req, res) => {
     const existing = await findAdjustmentById(id);
     if (!existing) return res.status(404).json({ success: false, message: "Stock adjustment not found." });
 
+    await assertStockAdjustmentDeletable(existing);
+
     const user = auditUserName(req);
     if (existing.approved || isSaAddLikeEntryType(String(existing.entry_type || ""))) {
       await revertStockAdjustmentOnUnapprove({
@@ -822,6 +824,6 @@ export const deleteAdjustment = async (req, res) => {
     });
     return res.json({ success: true, message: "Stock adjustment deleted successfully." });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
 };

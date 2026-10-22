@@ -11,12 +11,31 @@ import { getItemsMonthlyPackingUsedBatch } from "../../../../ims/lib/utils/inven
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { PRODUCTION_GROUP_NAME } from "../../../lib/config/groupFilter.js";
+import { ensureDraftJobCardForShortage } from "../../job-card/models/jobCard.model.js";
 
 const CFG = getCrudModuleConfig("shortage");
 const BULK_INSERT_CHUNK = 400;
 const MASTER_TYPE_QTY_KEYS = ["qty_ppc", "qty_additional"];
 
 const ENTITY = "production_shortage";
+
+/** After ims_shortage insert → draft prod_job_card (approval joined from shortage). */
+async function syncDraftJobCardFromShortageRow(row, user) {
+  if (!row?.id || !row?.itemdcode) return;
+  try {
+    const { itemMap } = await getImsMapsSafe();
+    const info = itemMap.get(canonicalCode(row.itemdcode)) || {};
+    const primeKey = Number(info.primitemdcode) || Number(row.itemdcode);
+    await ensureDraftJobCardForShortage({
+      primeKey,
+      shortageId: row.id,
+      user,
+    });
+  } catch (err) {
+    // Don't fail shortage create if draft JC sync fails — log via throw only in non-prod? keep soft.
+    console.error("[shortage] draft job card sync failed:", err?.message || err);
+  }
+}
 
 /* ─────────────────────────────  helpers  ───────────────────────────── */
 
@@ -54,13 +73,16 @@ export async function enrichShortageRows(rows = []) {
     maps: { itemMap },
   });
   // Saved shortage grpname wins over IMS item master (user may override group on form).
-  // item_weight = IMS item master weight per piece (kg) — UI shows weight × qty, same as IMS shortage.
+  // gweight = IMS per-pc gross weight — Issue Qty = (gweight × qty) + 10%.
   return enriched.map((row, i) => {
     const saved = rows[i]?.grpname;
-    const item_weight = itemMap.get(canonicalCode(row.itemdcode))?.weight ?? null;
+    const info = itemMap.get(canonicalCode(row.itemdcode)) || {};
+    const gweight = info.gweight ?? null;
+    const item_weight = gweight ?? info.weight ?? null;
+    const patch = { item_weight, gweight };
     return saved != null && String(saved).trim() !== ""
-      ? { ...row, grpname: String(saved).trim(), item_weight }
-      : { ...row, item_weight };
+      ? { ...row, grpname: String(saved).trim(), ...patch }
+      : { ...row, ...patch };
   });
 }
 
@@ -380,6 +402,7 @@ export const createShortage = async (req, res) => {
     if (forced) prepared.grpname = forced;
 
     const row = await insertShortage(prepared);
+    await syncDraftJobCardFromShortageRow(row, prepared.created_by);
 
     await logActivity(req, {
       action: "create",
@@ -476,6 +499,7 @@ export async function createShortageRecordInternal(record, req) {
     const prepared = await applyShortageApproval(data, { mode: "create", req, existing: null, autoApprove: true });
 
     const row = await insertShortage(prepared);
+    await syncDraftJobCardFromShortageRow(row, prepared.created_by);
     const [enriched] = await enrichShortageRows([row]);
     return { success: true, data: enriched };
   } catch (err) {
@@ -717,6 +741,7 @@ export const bulkCreateShortages = async (req, res) => {
     const approvedAt = new Date();
     let count = 0;
 
+    const insertedRows = [];
     await withTransaction(async (client) => {
       for (let i = 0; i < toInsert.length; i += BULK_INSERT_CHUNK) {
         const chunk = toInsert.slice(i, i + BULK_INSERT_CHUNK);
@@ -729,17 +754,23 @@ export const bulkCreateShortages = async (req, res) => {
           );
           params.push(row.itemdcode, row.itemcode, row.grpname || null, type, row.qty, month, user, approvedAt, user);
         }
-        await client.query(
+        const { rows: created } = await client.query(
           `
           INSERT INTO ${T.SHORTAGE}
             (itemdcode, itemcode, grpname, type, qty, month, remarks, approved, approved_by, approved_at, is_deleted, created_by, created_at)
           VALUES ${values.join(", ")}
+          RETURNING id, itemdcode, qty
           `,
           params
         );
+        insertedRows.push(...(created || []));
         count += chunk.length;
       }
     });
+
+    for (const row of insertedRows) {
+      await syncDraftJobCardFromShortageRow(row, user);
+    }
 
     return res.status(201).json({
       success: true,

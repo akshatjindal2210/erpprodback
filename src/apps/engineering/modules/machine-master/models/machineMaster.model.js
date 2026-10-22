@@ -6,11 +6,11 @@ const MACHINE_MODULE = "eng_machine_master";
 
 const ALLOWED_FILTER_FIELDS = ["id", "process_id", "number", "approved", "from_date", "to_date"];
 const ALLOWED_SORT_FIELDS = [
-  "id", "name", "number", "process_id", "speed", "duration", "setup_time",
+  "id", "macname", "number", "process_id", "speed", "duration", "setup_time",
   "approved", "created_at", "updated_at",
 ];
 const ALLOWED_UPDATE_FIELDS = [
-  "name", "number", "process_id", "speed", "duration", "setup_time", "make", "model", "remark",
+  "macname", "number", "process_id", "speed", "duration", "setup_time", "make", "model", "remark",
   "approved", "approved_by", "approved_at", "updated_by", "updated_at",
 ];
 
@@ -19,7 +19,7 @@ const JOINS = `
 `;
 
 const DEFAULT_FIELDS = [
-  "mm.id", "mm.name", "mm.number", "mm.process_id",
+  "mm.id", "mm.macname", "mm.macname AS name", "mm.number", "mm.process_id",
   "mm.speed", "mm.duration", "mm.setup_time", "mm.make", "mm.model", "mm.remark",
   "pm.name AS process_name", "pm.depth AS process_depth",
   "mm.approved", "mm.approved_by", "mm.approved_at",
@@ -65,7 +65,7 @@ export const findMachines = async (options = {}) => {
   if (search) {
     values.push(`%${search}%`);
     conditions.push(
-      `(mm.name ILIKE $${i} OR mm.number ILIKE $${i} OR COALESCE(mm.make,'') ILIKE $${i} OR COALESCE(mm.model,'') ILIKE $${i} OR COALESCE(pm.name,'') ILIKE $${i})`
+      `(mm.macname ILIKE $${i} OR mm.number ILIKE $${i} OR COALESCE(mm.make,'') ILIKE $${i} OR COALESCE(mm.model,'') ILIKE $${i} OR COALESCE(pm.name,'') ILIKE $${i})`
     );
     i += 1;
   }
@@ -109,14 +109,14 @@ export const findMachine = async ({ id }) => {
   return { ...row, attachments };
 };
 
-/** Another active machine with the same `name` or `number` (case / spaces ignored), other than `excludeId`. */
+/** Another active machine with the same `macname` or `number` (values stored CAPS), other than `excludeId`. */
 export const findMachineDuplicate = async (field, value, excludeId = null) => {
-  if (!["name", "number"].includes(field)) return null;
+  if (!["macname", "number"].includes(field)) return null;
   const [row] = await dbQuery(
     `SELECT id FROM ${T.MACHINE_MASTER}
-     WHERE is_deleted = false AND lower(trim(${field})) = lower(trim($1)) AND id IS DISTINCT FROM $2::int
+     WHERE is_deleted = false AND ${field} = $1 AND id IS DISTINCT FROM $2::int
      LIMIT 1`,
-    [String(value), excludeId]
+    [String(value ?? "").trim().toUpperCase(), excludeId]
   );
   return row || null;
 };

@@ -1,5 +1,6 @@
 import express from "express";
-import { getJobCardRegister, getJobCardPending, getPendingShortageForJobCard, createJobCard, getPrimeProcess, getJobCardById, updateJobCardById, approveJobCardById, deleteJobCardById } from "../controllers/jobCard.controller.js";
+import { getJobCardRegister, getJobCardPending, getPendingShortageForJobCard, createJobCard, getPrimeProcess, estimateJobCardProduction, getJobCardById, updateJobCardById, 
+  approveJobCardById, deleteJobCardById } from "../controllers/jobCard.controller.js";
 import { authenticate } from "../../../../core/lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
 
@@ -10,6 +11,7 @@ router.post("/register", authenticate, accessControl(MOD, "view"), getJobCardReg
 router.post("/pending", authenticate, accessControl(MOD, "view"), getJobCardPending);
 router.post("/pending-shortage", authenticate, accessControl(MOD, "view"), getPendingShortageForJobCard);
 router.post("/prime-process", authenticate, accessControl(MOD, "view"), getPrimeProcess);
+router.post("/estimate-production", authenticate, accessControl(MOD, "view"), estimateJobCardProduction);
 router.post("/get", authenticate, accessControl(MOD, "view"), getJobCardById);
 router.post("/create", authenticate, accessControl(MOD, "add"), createJobCard);
 router.post("/update", authenticate, accessControl(MOD, ["edit", "authorize"]), updateJobCardById);

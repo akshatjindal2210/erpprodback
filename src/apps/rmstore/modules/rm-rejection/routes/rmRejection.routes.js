@@ -2,6 +2,7 @@ import express from "express";
 import { getQcRejections, getPendingRejectionQueueList, getQcRejectionById, createQcRejection, registerQcRejectionFromCheck, generateStoreOutFromQcCheck, generateStoreOutFromInProcessRequest, approveRejectionRegister, updateQcRejectionBill, completeQcRejectionBill, getQcRejectionBillNumbersViews, deleteQcRejection } from "../controllers/rmRejection.controller.js";
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
+import { helperAccess } from "../../../lib/config/views/helperViews.js";
 
 const router = express.Router();
 const MODULE = "rm_rejection";
@@ -16,7 +17,9 @@ router.post("/generate-store-out-from-ipr", authenticate, accessControl(MODULE, 
 router.post("/approve-register", authenticate, accessControl(MODULE, "authorize"), approveRejectionRegister);
 router.post("/update-bill", authenticate, accessControl(MODULE, "add"), updateQcRejectionBill);
 router.post("/complete-bill", authenticate, accessControl(MODULE, "add"), completeQcRejectionBill);
-router.post("/bill-helper", authenticate, accessControl(MODULE, "view"), getQcRejectionBillNumbersViews);
 router.post("/delete", authenticate, accessControl(MODULE, "delete"), deleteQcRejection);
+
+router.post("/helper", authenticate, helperAccess("rmRejection"), getQcRejectionById);
+router.post("/bill-helper", authenticate, accessControl(MODULE, "view"), getQcRejectionBillNumbersViews);
 
 export default router;

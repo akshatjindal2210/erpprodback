@@ -23,5 +23,6 @@ router.post("/lock-store-out", authenticate, authorize("super_admin"), lockIssue
 router.post("/unlock-store-out", authenticate, authorize("super_admin"), unlockIssueRequestForStoreOut);
 
 router.post("/helper", authenticate, helperAccess("issueRequest"), getIssueRequestById);
+router.post("/machine-job-card-check-helper", authenticate, helperAccess("issueRequest"), checkMachineJobCardAssignment);
 
 export default router;

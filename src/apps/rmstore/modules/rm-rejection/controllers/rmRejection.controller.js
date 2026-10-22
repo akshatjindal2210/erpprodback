@@ -1,10 +1,9 @@
-import { findQcRejections, findQcRejection, findIncompleteRejectionRegisters, insertQcRejection, updateQcRejection, softDeleteQcRejection, attachRejectionCoils, hasApprovedRejectionStoreOut, isMrnPortalRejectionRow, permanentlyRemoveUnusedMrnPortalRejection, primaryMrnUidFromRejection } from "../models/rmRejection.model.js";
+import { findQcRejections, findQcRejection, findIncompleteRejectionRegisters, findActiveRejectionByIprUid, insertQcRejection, updateQcRejection, softDeleteQcRejection, attachRejectionCoils, hasApprovedRejectionStoreOut, isMrnPortalRejectionRow, permanentlyRemoveUnusedMrnPortalRejection } from "../models/rmRejection.model.js";
 import { findInProcessRequest, findInProcessRejectionsPendingRejection, normalizeRequestType, IPR_DOWNSTREAM, IPR_REQUEST_TYPE } from "../../in-process-request/models/inProcessRequest.model.js";
 import { findCoilByUid, findCoilUidsByQcCheck, linkCoilsToRejectionRegister, revertCoilsFromRejectionRegister, findCoils, updateCoilsAfterQcReject, clearCoilsForRejectionStoreOut } from "../../coil/models/coil.model.js";
 import { findQcCheck, findFailedQcChecksPendingRejection, reopenQcChecksForRejection, linkFailedQcChecksToRejection } from "../../qc-check/models/qcCheck.model.js";
 import { findOutEntry, findOutEntries, buildOutEntryCoilSummary, clearOutEntryScannedCoils, softDeleteOutEntry } from "../../out-entry/models/outEntry.model.js";
 import { isRmRejectionOutEntry } from "../../../lib/constants/outEntryTypes.js";
-import { findMrnByUid } from "../../mrn/models/mrn.model.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../../core/lib/utils/helper/helper.js";
 import { applyApprovalUpdateFields, applyApprovalWorkflow, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
@@ -13,7 +12,7 @@ import { logCoilTransactionSafe } from "../../../lib/utils/transactions/logCoilT
 import { COIL_TX_TYPES } from "../../../lib/constants/coilTransactionTypes.js";
 import { createRmstoreActivityLogger } from "../../../lib/utils/activity/logRmstoreActivity.js";
 import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
-import { assertWithinEditDays } from "../../../../../platform/utils/auth/permissionDays.js";
+import { assertWithinEditDays, isSuperAdminReq } from "../../../../../platform/utils/auth/permissionDays.js";
 
 const MODULE = "rm_rejection";
 const log = createRmstoreActivityLogger(MODULE);
@@ -33,6 +32,28 @@ async function resolveCoilsForQcCheck(check) {
     if (coil) resolved.push(coil);
   }
   return { coilUidList, resolved };
+}
+
+/** Coil must be active, or QC-fail held (rejected, not on a register / store out). Returns error message or null. */
+function qcCheckCoilIneligibleMessage(coil, qcCheckUid) {
+  const uid = coil.coil_no_uid;
+  const coilStatus = String(coil.status || "active").toLowerCase();
+  if (coilStatus === "rejected" && coil.ipr_uid) {
+    return `Coil ${uid} is already held for in-process rejection #${coil.ipr_uid}.`;
+  }
+  const qcFailHeld =
+    coilStatus === "rejected" &&
+    !coil.rm_uid &&
+    !coil.out_uid &&
+    (String(coil.qc_check_status || "").toLowerCase() === "failed" ||
+      Number(coil.qc_uid) === qcCheckUid);
+  if (coilStatus !== "active" && !qcFailHeld) {
+    return `Coil ${uid} is not available. Its current status is ${coilStatus}.`;
+  }
+  if (coil.out_uid) {
+    return `Coil ${uid} is already linked to Store Out #${coil.out_uid}.`;
+  }
+  return null;
 }
 
 async function findActiveStoreOutForRejection(rejection) {
@@ -138,172 +159,81 @@ function filterPendingRowsByType(rows, pendingType) {
   });
 }
 
-function normMatchKey(value) {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-}
-
-function firstItemCodeFromRow(row) {
-  const raw = row?.item_codes ?? row?.item_code ?? "";
-  return (
-    String(raw)
-      .split(/[,|]+/)
-      .map((s) => s.trim())
-      .find(Boolean) || null
-  );
-}
-
 /**
- * invfnote uid: `{acc_code}-{item_dcode}-{packing}-{qty}` (e.g. 931-17834-41619-18000)
- * Same join as Gate Entry / Forwarding Note.
+ * Bill match for a normal user (IMS style) — a bill matches when every field below is equal.
+ * Add / remove a field name here; super admin always sees all bills.
+ * Available: "acc_code", "item_dcode", "qty"
  */
-function invfnoteUidParts(rec = {}) {
-  const raw = String(rec?.uid ?? "").trim() || String(rec?.muid ?? "").trim();
-  const parts = raw.split("-").filter(Boolean);
-  return {
-    acc_code: parts[0] ? String(parts[0]).trim() : null,
-    item_dcode: parts[1] ? String(parts[1]).trim() : null,
-  };
+const BILL_MATCH_FIELDS = ["acc_code", "item_dcode"];
+
+// Where each match field lives: on the rejection row and on an IMS invfnote bill.
+// invfnote uid = `{acc_code}-{item_dcode}-{packing}-{qty}` (e.g. 931-17834-41619-18000).
+const BILL_MATCH_FROM = {
+  acc_code: { rejection: (r) => r?.vendor_acc_code, bill: (b) => b?.acc_code || invfnoteUid(b)[0] },
+  item_dcode: { rejection: (r) => r?.match_item_dcode, bill: (b) => b?.itemdcode || b?.item_dcode || invfnoteUid(b)[1] },
+  qty: { rejection: (r) => r?.total_qty, bill: (b) => b?.itqty },
+};
+
+function invfnoteUid(rec) {
+  return String(rec?.uid || rec?.muid || "").split("-");
 }
 
-function invfnoteSaleCat(rec = {}) {
-  return String(rec?.salecat ?? rec?.sale_cat ?? "").trim();
+/** "1931|13113" — null if any field is empty (then nothing matches). Numbers compare as numbers (1620 = "1620.000"). */
+function billMatchKey(src, side) {
+  const parts = BILL_MATCH_FIELDS.map((f) => {
+    const v = String(BILL_MATCH_FROM[f][side](src) ?? "").trim();
+    return v !== "" && Number.isFinite(Number(v)) ? String(Number(v)) : v;
+  });
+  return parts.every(Boolean) ? parts.join("|") : null;
 }
 
-function invfnoteQty(rec = {}) {
-  const n = Number(rec?.itqty ?? rec?.ITQTY ?? rec?.qty);
-  return Number.isFinite(n) ? n : null;
+/** Live IMS bills usable for RM Rejection (salecat 2). */
+async function loadRejectionBills() {
+  const records = await fetchFromIMS("invfnote");
+  return (records || []).filter((b) => String(b?.salecat ?? b?.sale_cat ?? "").trim() === "2" && normalizeImsBillNo(b));
 }
 
-function qtyEquals(a, b) {
-  const x = Number(a);
-  const y = Number(b);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
-  return Math.abs(x - y) < 0.001;
+const isGreenBill = (b) => String(b?.status ?? "").trim().toLowerCase() === "green";
+
+/** Save guard (IMS style): a normal user may attach only Green bills matching BILL_MATCH_FIELDS. Returns an error message or null. */
+async function billNotAllowedMessage(req, rejection, billNos) {
+  if (isSuperAdminReq(req)) return null;
+  const key = billMatchKey(rejection, "rejection");
+  if (!key) return "This rejection has no supplier / item to match a bill.";
+  const bills = await loadRejectionBills();
+  for (const no of String(billNos || "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const ok = bills.some((b) => normalizeImsBillNo(b) === no && isGreenBill(b) && billMatchKey(b, "bill") === key);
+    if (!ok) return `Bill ${no} is not a Green bill for this rejection's supplier / item.`;
+  }
+  return null;
 }
 
-/**
- * Pending awaiting_bill — only invfnote salecat=2 + Green.
- * Auto-match (no save): acc_code + item_code/itemdcode + qty (== itqty).
- * muid = `{acc}-{itemdcode}-{packing}` (e.g. 2377-18996-0).
- */
+/** Pending "Awaiting Bill" rows — show the first Green bill matching BILL_MATCH_FIELDS (display only, not saved). */
 async function enrichPendingMatchedInvfnoteBills(rows = []) {
-  const list = Array.isArray(rows) ? rows : [];
-  const needs = list.filter(
-    (r) =>
-      String(r?.pending_source || "").toLowerCase() === "awaiting_bill" &&
-      !String(r?.bill_no || "").trim()
-  );
-  if (!needs.length) return list;
+  const needs = (rows || []).some((r) => r?.pending_source === "awaiting_bill" && !String(r?.bill_no || "").trim());
+  if (!needs) return rows;
 
-  let records = [];
+  const billByKey = new Map();
   try {
-    const invfnote = await fetchFromIMS("invfnote");
-    records = (Array.isArray(invfnote) ? invfnote : []).filter(
-      (rec) =>
-        invfnoteSaleCat(rec) === "2" &&
-        String(rec?.status ?? "").trim().toLowerCase() === "green"
-    );
+    for (const b of await loadRejectionBills()) {
+      const key = billMatchKey(b, "bill");
+      if (key && isGreenBill(b) && !billByKey.has(key)) billByKey.set(key, b);
+    }
   } catch {
-    records = [];
+    /* IMS down — no auto-match */
   }
 
-  const mrnUids = [
-    ...new Set(
-      needs
-        .filter((r) => !String(r?.vendor_acc_code ?? r?.acc_code ?? "").trim())
-        .map((r) => primaryMrnUidFromRejection(r))
-        .filter(Boolean)
-    ),
-  ];
-  const mrnByUid = new Map();
-  await Promise.all(
-    mrnUids.map(async (uid) => {
-      try {
-        const mrn = await findMrnByUid(uid);
-        if (mrn) mrnByUid.set(String(uid), mrn);
-      } catch {
-        /* skip */
-      }
-    })
-  );
-
-  const emptyMatch = {
-    matched_bill_no: null,
-    matched_bill_dt: null,
-    matched_bill_status: null,
-    matched_bill_acc_name: null,
-    matched_bill_acc_code: null,
-    matched_bill_item_code: null,
-    matched_bill_muid: null,
-    matched_bill_itqty: null,
-    bill_matched: false,
-  };
-
-  return list.map((row) => {
-    if (String(row?.pending_source || "").toLowerCase() !== "awaiting_bill") return row;
-    if (String(row?.bill_no || "").trim()) return row;
-
-    const mrnUid = primaryMrnUidFromRejection(row);
-    const mrn = (mrnUid && mrnByUid.get(String(mrnUid))) || null;
-
-    // Prefer SQL join fields (rejection → MRN create-time vendor/item); lookup only if join missed
-    const vendorAccCode = String(row?.vendor_acc_code ?? row?.acc_code ?? mrn?.acc_code ?? "").trim() || null;
-    const vendorAccNameRaw = String(row?.vendor_acc_name ?? row?.acc_name ?? mrn?.acc_name ?? "").trim() || null;
-    const itemDcode = String(row?.match_item_dcode ?? row?.item_dcode ?? mrn?.item_dcode ?? "").trim() || null;
-    const itemCodeRaw = String(row?.match_item_code ?? mrn?.item_code ?? "").trim() || firstItemCodeFromRow(row);
-    const itemCode = normMatchKey(itemCodeRaw);
-    const rejectQty = Number(row?.total_qty ?? row?.qty);
-
-    const base = {
+  return rows.map((row) => {
+    if (row?.pending_source !== "awaiting_bill" || String(row?.bill_no || "").trim()) return row;
+    const bill = billByKey.get(billMatchKey(row, "rejection"));
+    return {
       ...row,
-      vendor_acc_code: vendorAccCode,
-      vendor_acc_name: vendorAccNameRaw,
-      match_item_code: itemCodeRaw || null,
-      match_item_dcode: itemDcode,
-      match_qty: Number.isFinite(rejectQty) ? rejectQty : null,
-      ...emptyMatch,
+      matched_bill_no: bill ? normalizeImsBillNo(bill) : null,
+      matched_bill_dt: bill ? normalizeImsBillDt(bill) : null,
+      matched_bill_status: bill ? String(bill.status ?? "").trim() || null : null,
+      matched_bill_acc_name: bill ? String(bill.acc_name ?? "").trim() || null : null,
+      bill_matched: Boolean(bill),
     };
-
-    if (!records.length || !vendorAccCode || (!itemDcode && !itemCode)) return base;
-    if (!Number.isFinite(rejectQty)) return base;
-
-    for (const rec of records) {
-      const billNo = normalizeImsBillNo(rec);
-      if (!billNo) continue;
-
-      const uidParts = invfnoteUidParts(rec);
-      const billAccCode = String(rec?.acc_code ?? uidParts.acc_code ?? "").trim() || null;
-      const billItemDcode = String(rec?.itemdcode ?? rec?.item_dcode ?? uidParts.item_dcode ?? "").trim() || null;
-      const billItemCode = normMatchKey(rec?.item_code ?? rec?.itemcode);
-      const billQty = invfnoteQty(rec);
-
-      // acc_code + item (code or dcode) + qty
-      if (String(vendorAccCode) !== String(billAccCode)) continue;
-      const itemOk =
-        (itemDcode && billItemDcode && String(itemDcode) === String(billItemDcode)) ||
-        (itemCode && billItemCode && itemCode === billItemCode);
-      if (!itemOk) continue;
-      if (!qtyEquals(rejectQty, billQty)) continue;
-
-      const muid = String(rec?.muid ?? "").trim() || null;
-      return {
-        ...base,
-        matched_bill_no: billNo,
-        matched_bill_dt: normalizeImsBillDt(rec),
-        matched_bill_status: String(rec?.status ?? "").trim() || null,
-        matched_bill_acc_name: String(rec?.acc_name ?? "").trim() || null,
-        matched_bill_acc_code: billAccCode,
-        matched_bill_item_code: String(rec?.item_code ?? rec?.itemcode ?? "").trim() || null,
-        matched_bill_muid: muid,
-        matched_bill_itqty: billQty,
-        bill_matched: true,
-      };
-    }
-
-    return base;
   });
 }
 
@@ -563,6 +493,10 @@ export const registerQcRejectionFromCheck = async (req, res) => {
     if (!resolved.length) {
       return res.status(400).json({ success: false, message: "No coils were found for this QC check." });
     }
+    for (const coil of resolved) {
+      const message = qcCheckCoilIneligibleMessage(coil, id);
+      if (message) return res.status(400).json({ success: false, message });
+    }
     const summary = buildOutEntryCoilSummary(resolved);
 
     const row = await insertQcRejection({
@@ -660,26 +594,8 @@ export const generateStoreOutFromQcCheck = async (req, res) => {
       return res.status(400).json({ success: false, message: "No coils were found for this QC check." });
     }
     for (const coil of resolved) {
-      const uid = coil.coil_no_uid;
-      const coilStatus = String(coil.status || "active").toLowerCase();
-      const qcFailHeld =
-        coilStatus === "rejected" &&
-        !coil.rm_uid &&
-        !coil.out_uid &&
-        (String(coil.qc_check_status || "").toLowerCase() === "failed" ||
-          Number(coil.qc_uid) === id);
-      if (coilStatus !== "active" && !qcFailHeld) {
-        return res.status(400).json({
-          success: false,
-          message: `Coil ${uid} is not available. Its current status is ${coilStatus}.`,
-        });
-      }
-      if (coil.out_uid) {
-        return res.status(400).json({
-          success: false,
-          message: `Coil ${uid} is already linked to Store Out #${coil.out_uid}.`,
-        });
-      }
+      const message = qcCheckCoilIneligibleMessage(coil, id);
+      if (message) return res.status(400).json({ success: false, message });
     }
     const summary = buildOutEntryCoilSummary(resolved);
 
@@ -767,10 +683,23 @@ export const generateStoreOutFromInProcessRequest = async (req, res) => {
     if (ipr.approved !== true) {
       return res.status(400).json({ success: false, message: "Authorize the in-process rejection before generating Store Out." });
     }
+    if (ipr.downstream === IPR_DOWNSTREAM.PENDING_STORE_IN) {
+      return res.status(400).json({
+        success: false,
+        message: "Shop-floor coils of this rejection are still in Store In Pending. Receive them in Store In first.",
+      });
+    }
     if (ipr.downstream !== IPR_DOWNSTREAM.PENDING_STORE_OUT) {
       return res.status(400).json({
         success: false,
         message: "This in-process rejection is not pending Store Out (it may already be processed).",
+      });
+    }
+    const existingRegister = await findActiveRejectionByIprUid(id);
+    if (existingRegister) {
+      return res.status(400).json({
+        success: false,
+        message: `This in-process rejection is already on rejection register #${existingRegister.qc_reject_uid}.`,
       });
     }
 
@@ -805,7 +734,10 @@ export const generateStoreOutFromInProcessRequest = async (req, res) => {
       if (status !== "active") {
         return res.status(400).json({
           success: false,
-          message: `Coil ${uid} is not available for rejection store-out. Its current status is ${status}.`,
+          message:
+            status === "out"
+              ? `Coil ${uid} is still on the shop floor. Receive it from Store In Pending first.`
+              : `Coil ${uid} is not available for rejection store-out. Its current status is ${status}.`,
         });
       }
       resolved.push(coil);
@@ -1090,10 +1022,15 @@ export const updateQcRejectionBill = async (req, res) => {
         ? null
         : String(req.body.bill_no).trim() || null;
 
-    const bill_dt =
+    // bill_dt omitted (Register bill bar) → keep saved date if bill unchanged, else take it from IMS.
+    const billDtProvided = req.body?.bill_dt !== undefined;
+    let bill_dt =
       req.body?.bill_dt === null || req.body?.bill_dt === undefined || req.body?.bill_dt === ""
         ? null
         : String(req.body.bill_dt).trim() || null;
+    if (!billDtProvided && bill_no) {
+      bill_dt = bill_no === previous ? existing.bill_dt ?? null : await lookupImsBillDt(bill_no);
+    }
 
     const isUpdate = Boolean(previous);
     const isClear = previous && !bill_no;
@@ -1112,12 +1049,17 @@ export const updateQcRejectionBill = async (req, res) => {
       return res.status(editBlocked.status).json({ success: false, message: editBlocked.message });
     }
 
-    if (previous === bill_no && previousDt === bill_dt) {
+    if (previous === bill_no && (!billDtProvided || previousDt === bill_dt)) {
       return res.json({
         success: true,
         data: existing,
         message: "No change",
       });
+    }
+
+    if (bill_no && bill_no !== previous) {
+      const notAllowed = await billNotAllowedMessage(req, existing, bill_no);
+      if (notAllowed) return res.status(400).json({ success: false, message: notAllowed });
     }
 
     const user = auditUserName(req);
@@ -1177,84 +1119,65 @@ function normalizeImsBillDt(record) {
   return d.toISOString().slice(0, 10);
 }
 
-function invfnoteItemCode(rec = {}) {
-  return String(rec?.item_code ?? rec?.itemcode ?? "").trim() || null;
+/** Bill date of the first bill no (comma list) from IMS invfnote salecat=2; null when not found. */
+async function lookupImsBillDt(billNos) {
+  const first = String(billNos || "").split(",").map((s) => s.trim()).find(Boolean);
+  if (!first) return null;
+  try {
+    const bill = (await loadRejectionBills()).find((b) => normalizeImsBillNo(b) === first);
+    return bill ? normalizeImsBillDt(bill) : null;
+  } catch {
+    return null;
+  }
 }
 
-/** Live bills from IMS invfnote — only salecat=2. Optional filter: acc_code + item_code / item_dcode. */
+/**
+ * Bill dropdown options — FE sends only qc_reject_uid.
+ * Super admin: all bills. Normal user: bills whose BILL_MATCH_FIELDS equal the rejection's.
+ */
 export const getQcRejectionBillNumbersViews = async (req, res) => {
   try {
     const search = String(req.body?.search ?? "").trim().toLowerCase();
     const page = Math.max(1, Number(req.body?.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.body?.limit) || 50));
-    const filterAcc = String(req.body?.acc_code ?? "").trim() || null;
-    const filterItemCode = normMatchKey(req.body?.item_code);
-    const filterItemDcode = String(req.body?.item_dcode ?? req.body?.itemdcode ?? "").trim() || null;
 
-    const records = await fetchFromIMS("invfnote");
-    const seen = new Set();
-    const rows = [];
-
-    for (const rec of records || []) {
-      if (invfnoteSaleCat(rec) !== "2") continue;
-
-      const uidParts = invfnoteUidParts(rec);
-      const acc_code = String(rec?.acc_code ?? uidParts.acc_code ?? "").trim() || null;
-      const item_dcode = String(rec?.itemdcode ?? rec?.item_dcode ?? uidParts.item_dcode ?? "").trim() || null;
-      const item_code = invfnoteItemCode(rec);
-
-      if (filterAcc && String(filterAcc) !== String(acc_code)) continue;
-      if (filterItemDcode || filterItemCode) {
-        const dOk = filterItemDcode && item_dcode && String(filterItemDcode) === String(item_dcode);
-        const cOk = filterItemCode && item_code && filterItemCode === normMatchKey(item_code);
-        if (!dOk && !cOk) continue;
-      }
-
-      const billNo = normalizeImsBillNo(rec);
-      if (!billNo || seen.has(billNo)) continue;
-      seen.add(billNo);
-      const bill_dt = normalizeImsBillDt(rec);
-      const acc_name = String(rec?.acc_name ?? "").trim() || null;
-      const status = String(rec?.status ?? "").trim() || null;
-      if (
-        search &&
-        ![billNo, acc_name, item_code, bill_dt, status, acc_code]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase()
-          .includes(search)
-      ) {
-        continue;
-      }
-      rows.push({
-        id: billNo,
-        bill_no: billNo,
-        billno: billNo,
-        bill_dt,
-        billdt: bill_dt,
-        acc_code,
-        acc_name,
-        item_code,
-        item_dcode,
-        itemdcode: item_dcode,
-        muid: String(rec?.muid ?? "").trim() || null,
-        item_desc: String(rec?.item_desc ?? rec?.itemdesc ?? "").trim() || null,
-        itqty: invfnoteQty(rec),
-        status,
-        is_green: String(status || "").toLowerCase() === "green",
-        salecat: "2",
-      });
+    let matchKey = null;
+    if (!isSuperAdminReq(req)) {
+      const rejectId = parsePositiveIntId(req.body?.qc_reject_uid);
+      const rejection = rejectId ? await findQcRejection(rejectId) : null;
+      matchKey = rejection ? billMatchKey(rejection, "rejection") : null;
+      if (!matchKey) return res.json({ success: true, data: [], total: 0 });
     }
 
-    rows.sort((a, b) =>
-      String(a.bill_no).localeCompare(String(b.bill_no), undefined, { sensitivity: "base" })
-    );
+    const seen = new Set();
+    const rows = [];
+    for (const b of await loadRejectionBills()) {
+      const bill_no = normalizeImsBillNo(b);
+      if (seen.has(bill_no) || (matchKey && billMatchKey(b, "bill") !== matchKey)) continue;
+      seen.add(bill_no);
 
-    const total = rows.length;
+      const bill_dt = normalizeImsBillDt(b);
+      const acc_name = String(b.acc_name ?? "").trim() || null;
+      const item_code = String(b.item_code ?? b.itemcode ?? "").trim() || null;
+      const qty = Number.isFinite(Number(b.itqty)) ? Number(b.itqty) : null;
+      const status = String(b.status ?? "").trim() || null;
+      // Dropdown sub-line: Supplier · Item · Qty · Bill date
+      const option_sub_label = [
+        acc_name,
+        item_code,
+        qty != null ? `Qty ${qty.toLocaleString("en-IN")}` : null,
+        bill_dt ? bill_dt.split("-").reverse().join("-") : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      if (search && !`${bill_no} ${option_sub_label} ${status ?? ""}`.toLowerCase().includes(search)) continue;
+
+      rows.push({ id: bill_no, bill_no, bill_dt, option_sub_label, acc_name, item_code, itqty: qty, status, is_green: isGreenBill(b) });
+    }
+    rows.sort((a, b) => a.bill_no.localeCompare(b.bill_no, undefined, { sensitivity: "base" }));
+
     const start = (page - 1) * limit;
-    const data = rows.slice(start, start + limit);
-
-    return res.json({ success: true, data, total });
+    return res.json({ success: true, data: rows.slice(start, start + limit), total: rows.length });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -1297,6 +1220,8 @@ export const completeQcRejectionBill = async (req, res) => {
     if (!bill_dt) {
       return res.status(400).json({ success: false, message: "Bill date is required." });
     }
+    const notAllowed = await billNotAllowedMessage(req, existing, bill_no);
+    if (notAllowed) return res.status(400).json({ success: false, message: notAllowed });
 
     const remarks =
       req.body?.remarks === undefined && req.body?.remark === undefined

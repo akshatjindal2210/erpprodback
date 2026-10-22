@@ -174,6 +174,10 @@ export const findOutEntries = async (options = {}) => {
             jc.macname,
             vendor_mrn.acc_code AS acc_code,
             vendor_mrn.acc_name AS acc_name,
+            rej.reason AS rejection_reason,
+            rej.ipr_uid AS rejection_ipr_uid,
+            rej_src.pjobcardno AS rejection_pjobcardno,
+            rej_src.macname AS rejection_macname,
             o.created_by AS created_by_name,
             o.approved_by AS approved_by_name,
             o.updated_by AS updated_by_name
@@ -181,6 +185,14 @@ export const findOutEntries = async (options = {}) => {
      ${OUT_ENTRY_JC_JOIN}
      LEFT JOIN ${REJECTION} rej ON rej.qc_reject_uid = o.qc_reject_uid AND rej.is_deleted = false
      LEFT JOIN ${MRN} vendor_mrn ON vendor_mrn.uid = NULLIF(TRIM(split_part(COALESCE(o.mrn_uids, rej.mrn_uids, ''), '|', 1)), '')
+     -- RM Rejection from an in-process request: job card / machine of the shop-floor coil line.
+     LEFT JOIN LATERAL (
+       SELECT NULLIF(TRIM(e->>'pjobcardno'), '') AS pjobcardno, NULLIF(TRIM(e->>'macname'), '') AS macname
+       FROM ${T.IN_PROCESS_REQUEST} ipr
+       CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(ipr.coils) = 'array' THEN ipr.coils ELSE '[]'::jsonb END) e
+       WHERE ipr.ipr_uid = rej.ipr_uid AND NULLIF(TRIM(e->>'pjobcardno'), '') IS NOT NULL
+       LIMIT 1
+     ) rej_src ON true
      ${where}
      ORDER BY o.out_uid DESC
      LIMIT $${i++} OFFSET $${i}`,
@@ -1080,6 +1092,20 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
       WHERE COALESCE(o.approved, false) = false
         AND TRIM(s.coil_no_uid) <> ''
     ),
+    -- Coils already stored out per (issue, job card) — aggregated once, not per job-card row.
+    out_counts AS (
+      SELECT
+        o.issue_uid,
+        UPPER(TRIM(COALESCE(o.pjobcardno, ''))) AS jc_key,
+        COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int AS out_coil_count
+      FROM ${TABLE} o
+      INNER JOIN ${SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
+      WHERE o.is_deleted = false
+        AND COALESCE(o.approved, false) = true
+        AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
+      GROUP BY o.issue_uid, UPPER(TRIM(COALESCE(o.pjobcardno, '')))
+    ),
+    -- Joins pre-aggregated out_counts (no per-row subquery). Plain CTE — works on any Postgres version.
     jc_fulfillment AS (
       SELECT
         jc.issue_uid,
@@ -1098,18 +1124,12 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
             CASE WHEN jsonb_typeof(jc.coils) = 'array' THEN jc.coils ELSE '[]'::jsonb END
           ) AS e(elem)
         ), 0)::int AS assigned_coil_count,
-        (
-          SELECT COUNT(DISTINCT LOWER(TRIM(s.coil_no_uid)))::int
-          FROM ${TABLE} o
-          INNER JOIN ${SCANNED} s ON s.out_uid = o.out_uid AND TRIM(s.coil_no_uid) <> ''
-          WHERE o.is_deleted = false
-            AND COALESCE(o.approved, false) = true
-            AND o.issue_uid = jc.issue_uid
-            AND UPPER(TRIM(COALESCE(o.pjobcardno, ''))) = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
-            AND LOWER(COALESCE(o.entry_type, 'store_out')) = 'job_card'
-        ) AS out_coil_count
+        COALESCE(MAX(oc.out_coil_count), 0)::int AS out_coil_count
       FROM ${ISSUE_REQUEST} r
       INNER JOIN ${ISSUE_REQUEST_JC} jc ON jc.issue_uid = r.issue_uid AND jc.is_deleted = false
+      LEFT JOIN out_counts oc
+        ON oc.issue_uid = jc.issue_uid
+       AND oc.jc_key = UPPER(TRIM(COALESCE(jc.pjobcardno, '')))
       WHERE r.is_deleted = false AND r.approved = true
       GROUP BY jc.issue_uid, jc.pjobcardno, jc.coils
     ),
@@ -1214,17 +1234,21 @@ export const findPendingStoreOutByJobCard = async (options = {}) => {
       ) > 0
     )`;
 
-  const countRes = await dbQuery(`${baseCte} SELECT COUNT(*)::int AS count FROM pending`, values);
-  const total = Number(countRes[0]?.count || 0);
-
-  const rows = await dbQuery(
+  // One run of the heavy CTE: total comes from the window count (separate COUNT only for an empty later page).
+  const rawRows = await dbQuery(
     `${baseCte}
-     SELECT *
+     SELECT *, COUNT(*) OVER()::int AS _total
      FROM pending
      ORDER BY approved_at DESC NULLS LAST, issue_uid DESC, pjobcardno ASC
      LIMIT $${i++} OFFSET $${i}`,
     [...values, safeLimit, offset]
   );
+  let total = Number(rawRows[0]?._total || 0);
+  if (!rawRows.length && offset > 0) {
+    const countRes = await dbQuery(`${baseCte} SELECT COUNT(*)::int AS count FROM pending`, values);
+    total = Number(countRes[0]?.count || 0);
+  }
+  const rows = rawRows.map(({ _total, ...row }) => row);
 
   return {
     data: rows,
@@ -1479,6 +1503,10 @@ export const findPendingRejectionStoreOut = async (options = {}) => {
        o.total_qty AS qty,
        o.total_qty,
        ${OUT_SCANNED_COIL_COUNT_SQL} AS coil_count,
+       GREATEST(
+         COALESCE(r.coil_count, 0),
+         (SELECT COUNT(*)::int FROM ${COIL} rc WHERE rc.rm_uid = r.qc_reject_uid)
+       ) AS pending_coil_count,
        o.scan_complete,
        o.remarks,
        r.remarks AS rejection_remarks,

@@ -10,6 +10,10 @@ import {
   AUTO_STORE_IN_FROM_CONSUME_PREFIX,
   autoConsumeFromStoreInRemarks,
   parseConsumeIprUidFromAutoStoreInRemarks,
+  autoStoreInFromRejectionRemarks,
+  parseRejectionIprUidFromAutoStoreInRemarks,
+  findAutoStoreInsForRejection,
+  findOpenRejectionForCoil,
   normalizeCoils,
   normalizeProposedCoils,
   normalizeRequestType,
@@ -116,6 +120,8 @@ async function attachQcChecksToIprRejection(data) {
 const trimOrNull = (v) => {
   if (v == null) return null;
   const s = String(v).trim();
+  // FE sends multipart FormData — append(key, null) arrives as the string "null".
+  if (s === "null" || s === "undefined") return null;
   return s || null;
 };
 
@@ -477,9 +483,16 @@ const isConsumeBalancePending = (row) =>
   row.approved === true &&
   row.downstream === IPR_DOWNSTREAM.PENDING_STORE_IN;
 
-/** Manual store-in or consume balance on the same row — eligible for Store In receive. */
+/** Approved rejection whose shop-floor coils still wait in Store In Pending (same row). */
+const isRejectionAwaitingStoreIn = (row) =>
+  Boolean(row) &&
+  normalizeRequestType(row.request_type) === IPR_REQUEST_TYPE.REJECTION &&
+  row.approved === true &&
+  row.downstream === IPR_DOWNSTREAM.PENDING_STORE_IN;
+
+/** Manual store-in, consume balance, or rejection shop-floor coils on the same row — eligible for Store In receive. */
 const isPendingStoreInReceivable = (row) =>
-  isApprovedStoreInPending(row) || isConsumeBalancePending(row);
+  isApprovedStoreInPending(row) || isConsumeBalancePending(row) || isRejectionAwaitingStoreIn(row);
 
 const isApprovedStoreInDone = (row) =>
   Boolean(row) &&
@@ -492,11 +505,13 @@ const isApprovedConsume = (row) =>
   normalizeRequestType(row.request_type) === IPR_REQUEST_TYPE.CONSUME &&
   row.approved === true;
 
+/** Approved rejection holding coils — waiting for Store In receive or for RM Rejection Store Out. */
 const isApprovedRejectionPending = (row) =>
   Boolean(row) &&
   normalizeRequestType(row.request_type) === IPR_REQUEST_TYPE.REJECTION &&
   row.approved === true &&
-  row.downstream === IPR_DOWNSTREAM.PENDING_STORE_OUT;
+  (row.downstream === IPR_DOWNSTREAM.PENDING_STORE_OUT ||
+    row.downstream === IPR_DOWNSTREAM.PENDING_STORE_IN);
 
 const coilKeys = (coils = []) =>
   [...new Set(coils.map((c) => String(c?.coil_no_uid || "").trim().toLowerCase()).filter(Boolean))].sort();
@@ -596,7 +611,23 @@ async function assertCoilsConsumable(coils = [], iprUid = null) {
       throw Object.assign(new Error(`Coil ${c.coil_no_uid} was not found.`), { status: 400 });
     }
     const status = String(coil.status || "active").toLowerCase();
-    if (isIssuedToShopFloor(coil)) continue;
+    if (isIssuedToShopFloor(coil)) {
+      // Rejected coil waiting for Store In receive — must come back to store, not be consumed.
+      const pending = await findPendingStoreInForCoil(c.coil_no_uid);
+      const rejectionId =
+        normalizeRequestType(pending?.request_type) === IPR_REQUEST_TYPE.REJECTION && pending?.ipr_uid
+          ? pending.ipr_uid
+          : parseRejectionIprUidFromAutoStoreInRemarks(pending?.remarks);
+      if (rejectionId) {
+        throw Object.assign(
+          new Error(
+            `Coil ${c.coil_no_uid} is rejected (IPR #${rejectionId}) and queued in Store In Pending (IPR #${pending.ipr_uid}). Receive it in Store In; it cannot be consumed.`
+          ),
+          { status: 400 }
+        );
+      }
+      continue;
+    }
     if (status === "consumed" && iprUid && Number(coil.ipr_uid) === Number(iprUid)) continue;
     throw Object.assign(
       new Error(
@@ -711,8 +742,18 @@ async function reconcileCoilsForStoreInReceive(coils = [], storeInIprUid, user, 
 async function assertCoilsRejectable(coils = [], iprUid = null) {
   for (const c of coils) {
     const uid = String(c.coil_no_uid || "").trim();
+    const openRejection = await findOpenRejectionForCoil(uid, iprUid);
+    if (openRejection?.ipr_uid) {
+      throw Object.assign(
+        new Error(`Coil ${uid} is already on in-process rejection IPR #${openRejection.ipr_uid}.`),
+        { status: 400 }
+      );
+    }
+
     const pendingStoreIn = await findPendingStoreInForCoil(uid);
-    if (pendingStoreIn?.ipr_uid) {
+    // This rejection's own shop-floor store-in (re-approve / coil edit) — not a conflict.
+    const ownStoreIn = iprUid && (Number(pendingStoreIn?.ipr_uid) === Number(iprUid) || pendingStoreIn?.remarks === autoStoreInFromRejectionRemarks(iprUid));
+    if (pendingStoreIn?.ipr_uid && !ownStoreIn) {
       throw Object.assign(
         new Error(
           `Coil ${uid} is queued in Store In Pending (IPR #${pendingStoreIn.ipr_uid}). Receive or cancel that store-in before rejecting this coil.`
@@ -1272,9 +1313,44 @@ async function releaseStoreInReturn(row, user, req) {
   return restored.length;
 }
 
-/** Approving an in-process rejection holds coils until RM Rejection → Store Out. */
+/** Rejection coils still out on the shop floor (not yet received on this row). */
+async function findRejectionShopFloorCoils(row) {
+  const out = [];
+  for (const c of normalizeCoils(row?.coils)) {
+    const coil = await findCoilByUid(c.coil_no_uid);
+    if (isIssuedToShopFloor(coil)) out.push({ line: c, coil });
+  }
+  return out;
+}
+
+/**
+ * Rejection stage on the same row: shop-floor coils left → Store In Pending, else RM Rejection Pending.
+ * Replaces the old auto store-in child row (AUTO_FROM_REJECTION).
+ */
+async function syncRejectionStage(iprUid, user) {
+  const data = await findInProcessRequest(iprUid);
+  if (!data || normalizeRequestType(data.request_type) !== IPR_REQUEST_TYPE.REJECTION || data.approved !== true) {
+    return data;
+  }
+  const waiting = await findRejectionShopFloorCoils(data);
+  const stage = waiting.length ? IPR_DOWNSTREAM.PENDING_STORE_IN : IPR_DOWNSTREAM.PENDING_STORE_OUT;
+  if (data.downstream === stage) return data;
+  await updateInProcessRequest(iprUid, { downstream: stage, updated_by: user, updated_at: new Date() });
+  return findInProcessRequest(iprUid);
+}
+
+/**
+ * Approving an in-process rejection holds coils until RM Rejection → Store Out.
+ * Store coils are held now; shop-floor coils wait on this same row in Store In Pending and are held on receive.
+ */
 async function holdCoilsForRejection(row, user, req) {
-  const uids = (row.coils || []).map((c) => c.coil_no_uid).filter(Boolean);
+  const uids = [];
+  for (const c of row.coils || []) {
+    const uid = String(c?.coil_no_uid || "").trim();
+    if (!uid) continue;
+    const coil = await findCoilByUid(uid);
+    if (!isIssuedToShopFloor(coil)) uids.push(uid);
+  }
   const held = await markCoilsInProcessRejectionPending(row.ipr_uid, uids, user);
   if (held.length !== uids.length) {
     throw Object.assign(
@@ -1284,6 +1360,7 @@ async function holdCoilsForRejection(row, user, req) {
       { status: 400 }
     );
   }
+  await syncRejectionStage(row.ipr_uid, user);
   if (!held.length) return 0;
   logCoilTransactionSafe({
     transaction_type: COIL_TX_TYPES.QC_REJECT,
@@ -1303,8 +1380,137 @@ async function holdCoilsForRejection(row, user, req) {
   return held.length;
 }
 
+/** Store In Pending view of a rejection row — only its shop-floor coils, full qty (no consume split). */
+async function toRejectionStoreInView(row) {
+  if (!isRejectionAwaitingStoreIn(row)) return row;
+  const waiting = await findRejectionShopFloorCoils(row);
+  const coils = waiting.map(({ line, coil }) => {
+    const qty = Number(coil.qty) || 0;
+    return { ...line, qty, original_qty: qty, remaining_qty: qty, consumed_qty: 0, out_uid: coil.out_uid ?? line.out_uid ?? null };
+  });
+  const totalQty = coils.reduce((s, c) => s + c.qty, 0);
+  return {
+    ...row,
+    coils,
+    coil_count: coils.length,
+    total_qty: totalQty,
+    balance_qty: totalQty,
+    coil_label: coils.length === 1 ? coils[0].coil_no_uid : `${coils.length} coils`,
+  };
+}
+
+/**
+ * Store In receive on the rejection row itself — shop-floor coils come back in full qty
+ * (no consume split) and are held for this rejection; then the row moves to RM Rejection Pending.
+ */
+async function receiveRejectionShopFloorCoils(row, user, req, onlyUids = null) {
+  const allWaiting = await findRejectionShopFloorCoils(row);
+  if (!allWaiting.length) {
+    // Coils left the shop floor another way (e.g. store-out reverted) — hold what is in store and move on.
+    await holdCoilsForRejection(row, user, req);
+    return findInProcessRequest(row.ipr_uid);
+  }
+  const pick = onlyUids?.length ? new Set(onlyUids.map((u) => String(u).trim().toLowerCase())) : null;
+  const waiting = allWaiting.filter(({ line }) => !pick || pick.has(String(line.coil_no_uid).toLowerCase()));
+  if (!waiting.length) {
+    throw Object.assign(new Error("No shop-floor coils are waiting to be received on this rejection."), { status: 400 });
+  }
+
+  const uids = waiting.map(({ line }) => line.coil_no_uid);
+  const held = await markCoilsInProcessRejectionPending(row.ipr_uid, uids, user, { unassign: true });
+  if (held.length !== uids.length) {
+    throw Object.assign(
+      new Error(`Could not receive ${uids.length - held.length} of ${uids.length} coil(s). Refresh and try again.`),
+      { status: 400 }
+    );
+  }
+
+  logCoilTransactionSafe({
+    transaction_type: COIL_TX_TYPES.QC_REJECT,
+    source_module: MODULE,
+    source_id: String(row.ipr_uid),
+    user_name: user,
+    user_id: req.user?.id,
+    rows: held,
+    details: {
+      ipr_uid: row.ipr_uid,
+      coil_count: held.length,
+      pending_store_out: true,
+      from_store_in: true,
+    },
+  });
+  log(req, "rejection_store_in_receive", String(row.ipr_uid), {
+    ipr_uid: row.ipr_uid,
+    coil_count: held.length,
+    coil_no_uids: held.map((c) => c.coil_no_uid),
+    note: "Shop-floor coils received on the rejection row — held for RM Rejection Store Out",
+  }, row);
+
+  return syncRejectionStage(row.ipr_uid, user);
+}
+
+/** Legacy — Store In receive of an old auto store-in child row (AUTO_FROM_REJECTION) → hold for that rejection. */
+async function holdReceivedCoilsForRejection(storeInRow, returned = [], user, req) {
+  const rejectionId = parseRejectionIprUidFromAutoStoreInRemarks(storeInRow?.remarks);
+  if (!rejectionId || !returned.length) return 0;
+  const rejection = await findInProcessRequest(rejectionId);
+  if (!isApprovedRejectionPending(rejection)) return 0;
+
+  const uids = returned.map((c) => c?.coil_no_uid).filter(Boolean);
+  const held = await markCoilsInProcessRejectionPending(rejectionId, uids, user);
+  if (!held.length) return 0;
+  logCoilTransactionSafe({
+    transaction_type: COIL_TX_TYPES.QC_REJECT,
+    source_module: MODULE,
+    source_id: String(rejectionId),
+    user_name: user,
+    user_id: req.user?.id,
+    rows: held,
+    details: {
+      ipr_uid: rejectionId,
+      store_in_ipr_uid: storeInRow.ipr_uid,
+      coil_count: held.length,
+      pending_store_out: true,
+      from_store_in: true,
+    },
+  });
+  log(req, "rejection_hold_after_store_in", String(rejectionId), {
+    ipr_uid: rejectionId,
+    store_in_ipr_uid: storeInRow.ipr_uid,
+    coil_count: held.length,
+    coil_no_uids: held.map((c) => c.coil_no_uid),
+    note: "Received from shop floor — held for RM Rejection Store Out",
+  }, rejection);
+  return held.length;
+}
+
+/** Cancel not-yet-received auto store-ins of a rejection; returns UIDs already received. */
+async function cancelAutoStoreInsForRejection(rejectionIprUid, user, req) {
+  const received = new Set();
+  for (const storeIn of await findAutoStoreInsForRejection(rejectionIprUid)) {
+    if (storeIn.downstream === IPR_DOWNSTREAM.PENDING_STORE_IN) {
+      await softDeleteInProcessRequest(storeIn.ipr_uid, user);
+      log(req, "auto_store_in_cancelled", String(storeIn.ipr_uid), {
+        ipr_uid: storeIn.ipr_uid,
+        source_rejection_ipr_uid: Number(rejectionIprUid),
+        coil_count: storeIn.coils?.length ?? 0,
+        coil_no_uids: (storeIn.coils || []).map((c) => c?.coil_no_uid).filter(Boolean),
+        note: "Rejection unapproved / deleted / coils changed — coils stay on shop floor",
+      }, storeIn);
+      continue;
+    }
+    for (const c of storeIn.coils || []) {
+      const uid = String(c?.coil_no_uid || "").trim().toLowerCase();
+      if (uid) received.add(uid);
+    }
+  }
+  return received;
+}
+
 /** Un-approve / delete / coil change before store-out — restore held coils. */
 async function releaseRejectedCoils(row, user, req) {
+  // Shop-floor coils (snapshot out_uid / JC on the line) go back to the shop floor, even if received on this row.
+  const receivedUids = await cancelAutoStoreInsForRejection(row.ipr_uid, user, req);
   const restored = await revertCoilsInProcessRejection(row.ipr_uid, user);
   if (!restored.length) return 0;
 
@@ -1318,21 +1524,19 @@ async function releaseRejectedCoils(row, user, req) {
   for (const coil of restored) {
     const uid = String(coil?.coil_no_uid || "").trim();
     if (!uid) continue;
+    // Already received back from shop floor — stays in Unassigned Area.
+    if (receivedUids.has(uid.toLowerCase())) continue;
     const line = lineByUid.get(uid.toLowerCase());
     const pending = await findPendingStoreInForCoil(uid);
-    const hist = await findLatestOutUidForCoil(uid);
     const hintOut = line?.out_uid != null ? Number(line.out_uid) : NaN;
-    const resolvedOut =
-      Number.isFinite(hintOut) && hintOut > 0
-        ? hintOut
-        : hist?.out_uid != null
-          ? Number(hist.out_uid)
-          : null;
+    const lineOut = Number.isFinite(hintOut) && hintOut > 0 ? hintOut : null;
+    // Only coils that were on the shop floor when rejected (snapshot OUT / JC on the line) go back there —
+    // a store coil with an old, already-returned store-out in its history stays in store.
     const fromShopFloor =
-      Boolean(pending?.ipr_uid) ||
-      Boolean(resolvedOut) ||
-      Boolean(String(line?.pjobcardno || "").trim());
+      Boolean(pending?.ipr_uid) || Boolean(lineOut) || Boolean(String(line?.pjobcardno || "").trim());
     if (!fromShopFloor) continue;
+    const histOut = lineOut ? null : (await findLatestOutUidForCoil(uid))?.out_uid;
+    const resolvedOut = lineOut ?? (histOut != null ? Number(histOut) : null);
     shopFloorUids.push(uid);
     if (resolvedOut) outUidByCoil[uid] = resolvedOut;
   }
@@ -1449,6 +1653,7 @@ export const getPendingStoreIn = async (req, res) => {
       page: 1,
       limit: 1000,
     });
+    result.data = await Promise.all((result.data || []).map(toRejectionStoreInView));
     result.data = await enrichIprWithMachineLabels(result.data);
     return res.json({ success: true, data: result.data, total: result.total });
   } catch (err) {
@@ -1476,7 +1681,7 @@ export const getPendingStoreInById = async (req, res) => {
         message: "Reassign balance stays on shop floor — this request is not in the Unassigned receive queue.",
       });
     }
-    const [data] = await enrichIprWithMachineLabels([existing]);
+    const [data] = await enrichIprWithMachineLabels([await toRejectionStoreInView(existing)]);
     return res.json({ success: true, data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -1550,6 +1755,28 @@ export const completeStoreInCtrl = async (req, res) => {
     }
 
     const user = auditUserName(req);
+
+    // Rejection row: receive its shop-floor coils in full and hold them — qty / consume edits do not apply.
+    if (isRejectionAwaitingStoreIn(existing)) {
+      const onlyUids = Array.isArray(req.body?.coils)
+        ? req.body.coils.map((c) => String(c?.coil_no_uid || "").trim()).filter(Boolean)
+        : null;
+      let data;
+      try {
+        data = await receiveRejectionShopFloorCoils(existing, user, req, onlyUids);
+      } catch (e) {
+        return res.status(e.status || 400).json({ success: false, message: e.message });
+      }
+      const doneReceiving = data?.downstream === IPR_DOWNSTREAM.PENDING_STORE_OUT;
+      return res.json({
+        success: true,
+        data,
+        message: doneReceiving
+          ? "Rejected coil(s) received and held. This rejection is now in RM Rejection Pending."
+          : "Rejected coil(s) received and held. Remaining shop-floor coils are still in Store In Pending.",
+      });
+    }
+
     const isConsumeBalance = isConsumeBalancePending(existing);
     let applyRow = existing;
 
@@ -1588,7 +1815,8 @@ export const completeStoreInCtrl = async (req, res) => {
     if (isConsumeBalance) {
       await applyConsumeBalanceReceive(applyRow, user, req);
     } else {
-      await applyStoreInReturn(applyRow, user, req);
+      const { returned } = await applyStoreInReturn(applyRow, user, req);
+      await holdReceivedCoilsForRejection(applyRow, returned, user, req);
     }
     await updateInProcessRequest(id, {
       downstream: IPR_DOWNSTREAM.STORE_IN_DONE,
@@ -1691,17 +1919,19 @@ export const createInProcessRequest = async (req, res) => {
       }
     }
 
+    // Same coil must not get a second in-process rejection (approved or pending save).
+    if (isRejection) {
+      try {
+        await assertCoilsRejectable(fields.coils);
+      } catch (e) {
+        return res.status(e.status || 400).json({ success: false, message: e.message });
+      }
+    }
+
     if (incomingApproved === true) {
       if (isConsume) {
         try {
           await assertCoilsConsumable(fields.coils);
-        } catch (e) {
-          return res.status(e.status || 400).json({ success: false, message: e.message });
-        }
-      }
-      if (isRejection) {
-        try {
-          await assertCoilsRejectable(fields.coils);
         } catch (e) {
           return res.status(e.status || 400).json({ success: false, message: e.message });
         }
@@ -1728,6 +1958,7 @@ export const createInProcessRequest = async (req, res) => {
       data = await finalizeApprovedConsumeDownstream(row.ipr_uid, user, req);
     } else if (isApprovedRejectionPending(data)) {
       await holdCoilsForRejection(data, user, req);
+      data = await findInProcessRequest(row.ipr_uid);
     }
 
     const messages = {
@@ -1741,9 +1972,11 @@ export const createInProcessRequest = async (req, res) => {
               : ""
           }.`
         : "Consume request created successfully.",
-      [IPR_REQUEST_TYPE.REJECTION]: isApprovedRejectionPending(data)
-        ? "In-process rejection created and queued in RM Rejection Pending."
-        : "In-process rejection created successfully.",
+      [IPR_REQUEST_TYPE.REJECTION]: isRejectionAwaitingStoreIn(data)
+        ? "In-process rejection created. Shop-floor coils are queued in Store In Pending on this request — receive them first."
+        : isApprovedRejectionPending(data)
+          ? "In-process rejection created and queued in RM Rejection Pending."
+          : "In-process rejection created successfully.",
       [IPR_REQUEST_TYPE.TRANSFER]: "Coil transfer request created successfully (placeholder).",
     };
 
@@ -1913,7 +2146,9 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     //     return res.status(e.status || 400).json({ success: false, message: e.message });
     //   }
     // }
-    if (willRejectPending && (!wasRejectionPending || coilsChanged)) {
+    const isPendingRejectionEdit =
+      fields.request_type === IPR_REQUEST_TYPE.REJECTION && updateFields.approved !== true && coilsChanged;
+    if ((willRejectPending && (!wasRejectionPending || coilsChanged)) || isPendingRejectionEdit) {
       try {
         await assertCoilsRejectable(fields.coils, id);
       } catch (e) {
@@ -1955,6 +2190,9 @@ export const updateInProcessRequestCtrl = async (req, res) => {
     if (willRejectPending && (!wasRejectionPending || coilsChanged)) {
       await holdCoilsForRejection(data, user, req);
       data = await findInProcessRequest(id);
+    } else if (willRejectPending) {
+      // Re-save without coil change: resolveDownstream reset the stage — restore Store In Pending if coils still on floor.
+      data = await syncRejectionStage(id, user);
     }
 
     const approvedMessages = {
@@ -1968,7 +2206,9 @@ export const updateInProcessRequestCtrl = async (req, res) => {
           ? ` — balance queued in Store In Pending on this request`
           : ""
       }.`,
-      [IPR_REQUEST_TYPE.REJECTION]: "In-process rejection approved and queued in RM Rejection Pending.",
+      [IPR_REQUEST_TYPE.REJECTION]: isRejectionAwaitingStoreIn(data)
+        ? "In-process rejection approved. Shop-floor coils are queued in Store In Pending on this request — receive them first."
+        : "In-process rejection approved and queued in RM Rejection Pending.",
       [IPR_REQUEST_TYPE.TRANSFER]: "Coil transfer request updated successfully (placeholder).",
     };
 

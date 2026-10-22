@@ -5,7 +5,7 @@ import { COIL_TX_TYPES } from "../../../../lib/constants/coilTransactionTypes.js
 import { getBoxNoUidPrefix } from "../../../../../core/configuration/models/appConfig.model.js";
 import { parseStoredCoilQtys, roundSaQty, QTY_EPS } from "../stockAdjustmentQty.js";
 import { isSaAddLikeEntryType } from "../stockAdjustmentEntryTypes.js";
-import { isCoilAvailableForSaMinus } from "../../../../lib/utils/saMinusInventory.js";
+import { isCoilAvailableForSaMinus, isIssuedToShopFloor, isSaMinusWriteOff } from "../../../../lib/utils/saMinusInventory.js";
 import { ensureMrnForStockAdjustment } from "../ensureMrnForStockAdjustment.js";
 
 export function parseRemovedCoilUids(raw) {
@@ -311,36 +311,66 @@ export async function applyStockAdjustmentOnApprove({ adjustment, userName, user
   throw Object.assign(new Error(`Unknown adjustment type: ${entryType}.`), { statusCode: 400 });
 }
 
-/** Block edit/resync when SA Add coils are stored in or no longer active. */
-export async function assertSaAddCoilsUnusedForEdit(adjustmentId) {
+/** Block edit/delete when SA Add coils are stored in or no longer active. */
+async function assertSaAddCoilsUnused(adjustmentId, action = "edit") {
   const adjId = Number(adjustmentId);
   if (!Number.isFinite(adjId) || adjId <= 0) return;
   const coils = await findCoilsBySaId(adjId, "stock_in");
   const stored = (coils || []).filter((c) => c?.location_id != null || c?.in_uid != null);
   if (stored.length) {
-    throw Object.assign(
-      new Error(
-        `Cannot edit — ${stored.length} coil(s) already stored in. Revert store-in first or delete the adjustment.`
-      ),
-      { statusCode: 400 }
-    );
+    const msg = action === "delete" ? "Cannot delete — coil stored in." : "Cannot edit — revert store-in first.";
+    throw Object.assign(new Error(msg), { statusCode: 400 });
   }
   const inUse = (coils || []).filter((c) => {
     const status = String(c?.status || "active").toLowerCase();
     return status !== "active";
   });
   if (!inUse.length) return;
-  const sample = inUse
-    .slice(0, 3)
-    .map((c) => String(c.coil_no_uid || c.coil_uid || "").trim())
-    .filter(Boolean)
-    .join(", ");
-  throw Object.assign(
-    new Error(
-      `Cannot edit — ${inUse.length} coil(s) already used (issued/consumed)${sample ? `: ${sample}` : ""}${inUse.length > 3 ? "…" : ""}.`
-    ),
-    { statusCode: 400 }
-  );
+  const msg = action === "delete" ? "Cannot delete — coil not active." : "Cannot edit — coil not active.";
+  throw Object.assign(new Error(msg), { statusCode: 400 });
+}
+
+export async function assertSaAddCoilsUnusedForEdit(adjustmentId) {
+  return assertSaAddCoilsUnused(adjustmentId, "edit");
+}
+
+/** Block delete when coil status / location blocks safe revert (not by SA authorized flag). */
+export async function assertStockAdjustmentDeletable(adjustment) {
+  if (!adjustment) return;
+  const adjId = Number(adjustment.adjustment_id);
+  if (!Number.isFinite(adjId) || adjId <= 0) return;
+  const entryType = String(adjustment.entry_type || "").toLowerCase();
+
+  if (isSaAddLikeEntryType(entryType)) {
+    const coils = await findCoilsBySaId(adjId, "stock_in");
+    if (!coils?.length) return;
+    await assertSaAddCoilsUnused(adjId, "delete");
+    return;
+  }
+
+  if (entryType !== "minus") return;
+
+  const linked = await findCoilsBySaId(adjId, "stock_out");
+  let rows = linked?.length ? linked : [];
+  if (!rows.length) {
+    const uids = parseRemovedCoilUids(adjustment.removed_coil_uids);
+    for (const uid of uids) {
+      const coil = await findCoilByUid(uid);
+      if (coil) rows.push(coil);
+    }
+  }
+
+  const bad = (rows || []).filter((c) => {
+    if (isIssuedToShopFloor(c)) return true;
+    if (c.ipr_uid != null && String(c.ipr_uid).trim() !== "") return true;
+    if (c.sa_id != null && Number(c.sa_id) !== adjId) return true;
+    const issued = c.out_uid != null && String(c.out_uid).trim() !== "";
+    if (issued && !isSaMinusWriteOff(c)) return true;
+    return false;
+  });
+
+  if (!bad.length) return;
+  throw Object.assign(new Error("Cannot delete — coil in use."), { statusCode: 400 });
 }
 
 /** Undo inventory when an approved adjustment is edited or deleted. */

@@ -14,6 +14,7 @@ const locPicker = [
   "lm.total_capacity",
   "(COALESCE((SELECT COUNT(*)::int FROM ims_box_table b WHERE b.location_id = lm.location_id AND b.is_deleted = false AND (b.out_uid IS NULL OR NULLIF(TRIM(b.out_uid::text), '') IS NULL) AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')), 0) + COALESCE((SELECT COUNT(*)::int FROM rmstore_coil_table rc WHERE rc.location_id = lm.location_id AND COALESCE(rc.status, 'active') IN ('active', 'rejected')), 0)) AS occupied_capacity",
   "GREATEST(COALESCE(lm.total_capacity, 0) - (COALESCE((SELECT COUNT(*)::int FROM ims_box_table b WHERE b.location_id = lm.location_id AND b.is_deleted = false AND (b.out_uid IS NULL OR NULLIF(TRIM(b.out_uid::text), '') IS NULL) AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')), 0) + COALESCE((SELECT COUNT(*)::int FROM rmstore_coil_table rc WHERE rc.location_id = lm.location_id AND COALESCE(rc.status, 'active') IN ('active', 'rejected')), 0)), 0) AS available_capacity",
+  "(SELECT COUNT(*)::int FROM rmstore_coil_table rc WHERE rc.location_id = lm.location_id AND COALESCE(rc.status, 'active') IN ('active', 'rejected')) AS location_coil_count",
 ];
 const locModal = [
   ...locPicker,
@@ -99,9 +100,23 @@ function fieldsForQcCheck(mod, act) {
 
 function fieldsForIssueRequest(mod, act) {
   if (mod == null || act == null) return null;
-  if (mod === "rm_rejection" && (act === VIEW || isForm(act))) {
+  if ((mod === "rm_rejection" || mod === "rm_in_process_request") && (act === VIEW || isForm(act))) {
     return [];
   }
+  return null;
+}
+
+function fieldsForMrn(mod, act) {
+  if (mod == null || act == null) return null;
+  const allowed = ["rm_in_process_request", "rm_stock_adjustment"];
+  if (allowed.includes(mod) && (act === VIEW || isForm(act))) return [];
+  return null;
+}
+
+function fieldsForRmRejection(mod, act) {
+  if (mod == null || act == null) return null;
+  const allowed = ["rm_out_entry"];
+  if (allowed.includes(mod) && (act === VIEW || isForm(act))) return [];
   return null;
 }
 
@@ -133,6 +148,8 @@ const BY_HELPER = {
   issueRequest: fieldsForIssueRequest,
   inProcessRequest: fieldsForinProcessRequest,
   spec: fieldsForSpec,
+  mrn: fieldsForMrn,
+  rmRejection: fieldsForRmRejection,
 };
 
 function resolveHelperFields(helper, { permission_module, permission_action } = {}) {

@@ -86,11 +86,15 @@ function mergeAttachments(existing = [], uploaded = [], removeIds = []) {
   return [...kept, ...uploaded];
 }
 
-/** 409 message when another active machine already has this name or number, else null. */
+/** Store macname / number as CAPS (simple). */
+const caps = (v) => String(v ?? "").trim().toUpperCase();
+
+/** 409 message when another active machine already has this macname or number, else null. */
 async function duplicateMessage(fields, excludeId = null) {
-  for (const field of ["name", "number"]) {
+  for (const field of ["macname", "number"]) {
     if (fields[field] !== undefined && (await findMachineDuplicate(field, fields[field], excludeId))) {
-      return `Machine ${field} "${fields[field]}" already exists`;
+      const label = field === "macname" ? "name" : field;
+      return `Machine ${label} "${fields[field]}" already exists`;
     }
   }
   return null;
@@ -179,8 +183,8 @@ export const getMachine = async (req, res) => {
 
 export const createMachine = async (req, res) => {
   try {
-    const name = String(req.body?.name ?? "").trim();
-    const number = String(req.body?.number ?? "").trim();
+    const macname = caps(req.body?.macname ?? req.body?.name);
+    const number = caps(req.body?.number);
     const process_id = parsePositiveIntId(req.body?.process_id);
     const speed = normalizeSpeed(req.body?.speed);
     const duration = parseSeconds(req.body, "duration");
@@ -192,16 +196,16 @@ export const createMachine = async (req, res) => {
     await stampRmstoreUploadedFiles(req);
     const attachments = mapUploadedFiles(req);
 
-    if (!name) return res.status(400).json({ success: false, message: "name required" });
+    if (!macname) return res.status(400).json({ success: false, message: "name required" });
     if (!number) return res.status(400).json({ success: false, message: "number required" });
     if (!process_id) return res.status(400).json({ success: false, message: "process required" });
 
     await assertApprovedProcess(process_id);
-    const dup = await duplicateMessage({ name, number });
+    const dup = await duplicateMessage({ macname, number });
     if (dup) return res.status(409).json({ success: false, message: dup });
 
     const row = await insertMachine({
-      name,
+      macname,
       number,
       process_id,
       speed,
@@ -235,7 +239,7 @@ export const createMachine = async (req, res) => {
 
     const data = await findMachine({ id: row.id });
     logger.info(`[eng_machine_master] create user=${req?.user?.id} id=${row.id} number=${number}`);
-    await log(req, "create", row.id, { name, number, process_id, attachments: attachments.length }, data);
+    await log(req, "create", row.id, { macname, number, process_id, attachments: attachments.length }, data);
 
     return res.status(201).json({
       success: true,
@@ -245,7 +249,7 @@ export const createMachine = async (req, res) => {
   } catch (err) {
     logger.error(`[eng_machine_master] create error user=${req?.user?.id}: ${err?.message || err}`);
     if (err?.code === "23505") {
-      return res.status(409).json({ success: false, message: `Machine ${/name/.test(err.constraint || "") ? "name" : "number"} already exists` });
+      return res.status(409).json({ success: false, message: `Machine ${/macname|name/.test(err.constraint || "") ? "name" : "number"} already exists` });
     }
     return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
@@ -272,7 +276,9 @@ export const updateMachine = async (req, res) => {
     }
 
     const input = {
-      name: req.body?.name,
+      macname: req.body?.macname !== undefined || req.body?.name !== undefined
+        ? (req.body?.macname ?? req.body?.name)
+        : undefined,
       number: req.body?.number,
       process_id: req.body?.process_id !== undefined ? parsePositiveIntId(req.body.process_id) : undefined,
       speed: req.body?.speed !== undefined ? normalizeSpeed(req.body.speed) : undefined,
@@ -287,8 +293,8 @@ export const updateMachine = async (req, res) => {
       existing,
       input,
       rules: [
-        { field: "name", normalize: (v) => String(v ?? "").trim() },
-        { field: "number", normalize: (v) => String(v ?? "").trim() },
+        { field: "macname", normalize: caps },
+        { field: "number", normalize: caps },
         { field: "process_id", normalize: (v) => Number(v) },
         { field: "speed", normalize: (v) => normalizeSpeed(v) },
         { field: "duration", normalize: (v) => Math.round(Number(v)) },
@@ -312,7 +318,7 @@ export const updateMachine = async (req, res) => {
 
     const fields = { ...preparedFields };
 
-    if (fields.name !== undefined && !fields.name) {
+    if (fields.macname !== undefined && !fields.macname) {
       return res.status(400).json({ success: false, message: "name required" });
     }
     if (fields.number !== undefined && !fields.number) {
@@ -321,10 +327,10 @@ export const updateMachine = async (req, res) => {
     if (fields.process_id !== undefined) {
       await assertApprovedProcess(fields.process_id);
     }
-    // Only a name / number that actually changed is checked (old duplicates must not block other edits)
-    const same = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
+    // Only a macname / number that actually changed is checked (old duplicates must not block other edits)
+    const same = (a, b) => caps(a) === caps(b);
     const dup = await duplicateMessage({
-      name: same(fields.name, existing.name) ? undefined : fields.name,
+      macname: same(fields.macname, existing.macname) ? undefined : fields.macname,
       number: same(fields.number, existing.number) ? undefined : fields.number,
     }, id);
     if (dup) return res.status(409).json({ success: false, message: dup });

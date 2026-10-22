@@ -5,6 +5,7 @@ import { previewCoilSticker, renderSingleCoilSticker, renderBulkCoilStickers, re
 import { authenticate } from "../../../lib/middleware/auth.js";
 import { accessControl, accessControlAny } from "../../../../core/lib/middleware/accessControl.js";
 import { docUpload } from "../../../../../lib/documents/index.js";
+import { helperAccess } from "../../../lib/config/views/helperViews.js";
 
 const router = express.Router();
 export const MODULE = "rm_mrn_portal";
@@ -24,6 +25,10 @@ router.post("/delete", authenticate, accessControl(MODULE, "delete"), deleteGene
 
 router.post("/detail", authenticate, accessControl(MODULE, ["view", "add", "authorize"]), getMrnDetail);
 router.post("/coils", authenticate, accessControl(MODULE, ["view", "add"]), getMrnCoils);
+
+router.post("/helper", authenticate, helperAccess("mrn"), getMrnDetail);
+router.post("/list-helper", authenticate, helperAccess("mrn"), getMrnList);
+router.post("/coils-helper", authenticate, helperAccess("mrn"), getMrnCoils);
 
 /** Generate stickers — JSON body only (no files). */
 router.post("/generate-stickers", authenticate, accessControl(MODULE, "add"), generateMrnStickers);

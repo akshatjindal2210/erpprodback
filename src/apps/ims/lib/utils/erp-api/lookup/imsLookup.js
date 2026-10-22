@@ -37,6 +37,7 @@ export function buildImsItemMap(items = []) {
       item_code: row.Item_Code ?? row.item_code ?? null,
       item_desc: row.ItemDesc ?? row.itemdesc ?? row.item_desc ?? null,
       weight: row.weight ?? row.Weight ?? null,
+      gweight: row.gweight ?? row.Gweight ?? row.GWeight ?? row.g_weight ?? null,
       grpname: row.Grpname ?? row.grpname ?? row.GrpName ?? row.group_name ?? null,
       primitemdcode: canonicalCode(row.PrimItemdcode ?? row.primitemdcode ?? row.PrimItemDcode) || null,
       primitem_code: row.primitem_code ?? row.Primitem_code ?? row.PrimItem_Code ?? row.PrimItem_code ?? null,

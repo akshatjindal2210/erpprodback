@@ -14,6 +14,7 @@ router.post("/get", authenticate, accessControl(M, "view"), primeProcess.get);
 router.post("/create", authenticate, accessControl(M, "add"), primeProcess.save);
 router.post("/update", authenticate, accessControl(M, "edit"), primeProcess.save);
 router.post("/delete", authenticate, accessControl(M, "delete"), primeProcess.remove);
+router.post("/approve", authenticate, accessControl(M, "authorize"), primeProcess.approve);
 
 /** Prime item dropdown — IMS `prdprimitem`; RM dropdown — IMS RM items. */
 router.post("/production-items/helper", authenticate, helperAccess("productionItems"), getProductionItemsViews);

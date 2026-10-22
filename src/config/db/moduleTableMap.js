@@ -69,10 +69,11 @@ export const OTHER_TABLE_TO_MODULE = {
   hrms_loan: "hrms_loan",
   hrms_deduction: "hrms_deduction",
   prod_job_card: "production_job_card",
+  // Tooling approval now on prod_job_card (legacy prod_shortage dropped)
   prod_shortage: "production_tooling",
-  prod_tooling: "production_tooling", // legacy → prod_shortage
-  prod_shortage_tooling: "production_tooling", // legacy → prod_shortage
-  prod_prime_tooling: "production_tooling", // legacy → prod_shortage
+  prod_tooling: "production_tooling",
+  prod_shortage_tooling: "production_tooling",
+  prod_prime_tooling: "production_tooling",
 };
 
 /** Used by dashboard SQL helpers and notifications: physical table to module name. */
@@ -135,7 +136,7 @@ export const MODULE_PRIMARY_TABLE = {
   hrms_loan: "hrms_loan",
   hrms_deduction: "hrms_deduction",
   production_job_card: "prod_job_card",
-  production_tooling: "prod_shortage",
+  production_tooling: "prod_job_card",
 };
 
 const ALL_TABLES = new Set([
