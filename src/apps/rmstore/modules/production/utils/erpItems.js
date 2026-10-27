@@ -60,7 +60,7 @@ async function enrichPrdRunJcFromProdJobCards(erpRows = []) {
   if (!byNo.size) return erpRows;
 
   const cards = await dbQuery(
-    `SELECT pjobcardno, itemdcode, shortage_ids, process_plan
+    `SELECT pjobcardno, itemdcode, docno, process_plan
      FROM ${PRODUCTION_TABLES.JOB_CARD}
      WHERE is_deleted = false
        AND UPPER(TRIM(pjobcardno)) = ANY($1::text[])`,
@@ -68,15 +68,20 @@ async function enrichPrdRunJcFromProdJobCards(erpRows = []) {
   );
   if (!cards.length) return erpRows;
 
-  const allIds = [...new Set(cards.flatMap((c) => c.shortage_ids || []).map(Number).filter(Boolean))];
-  const lines = allIds.length
+  const docnos = [...new Set(cards.map((c) => Number(c.docno)).filter(Boolean))];
+  const lines = docnos.length
     ? await dbQuery(
-        `SELECT id, itemdcode, qty FROM ${IMS_TABLES.SHORTAGE}
-         WHERE id = ANY($1::int[]) AND is_deleted = false`,
-        [allIds]
+        `SELECT docno, itemdcode, qty FROM ${IMS_TABLES.SHORTAGE}
+         WHERE docno = ANY($1::int[]) AND COALESCE(is_deleted, false) = false`,
+        [docnos]
       )
     : [];
-  const bySid = new Map(lines.map((r) => [Number(r.id), r]));
+  const linesByDoc = new Map();
+  for (const r of lines) {
+    const d = Number(r.docno);
+    if (!linesByDoc.has(d)) linesByDoc.set(d, []);
+    linesByDoc.get(d).push(r);
+  }
   const { itemMap } = await getImsMapsSafe();
   const gweightOf = (dcode) => {
     const n = Number(itemMap.get(canonicalCode(dcode))?.gweight);
@@ -89,9 +94,7 @@ async function enrichPrdRunJcFromProdJobCards(erpRows = []) {
     if (!erp) continue;
 
     let planqty = 0;
-    for (const sid of c.shortage_ids || []) {
-      const line = bySid.get(Number(sid));
-      if (!line) continue;
+    for (const line of linesByDoc.get(Number(c.docno)) || []) {
       planqty += Number(line.qty) || 0;
     }
     const rm_weight = issueQtyKg(gweightOf(c.itemdcode), planqty) || 0;

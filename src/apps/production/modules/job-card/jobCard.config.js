@@ -1,14 +1,11 @@
 /**
  * Job Card No — the ONE place to change it.
- *   pjobcardno = JC_PREFIX + docno padded to JC_PAD digits   e.g. "JC-" + 000001 → JC-000001
- *   JC_START   = first docno (set it after the last number of the old system so numbering continues)
+ *   pjobcardno = formatPJobCardNo(type, jobcardno)   e.g. JC-14130 · 2C-14129 (ERP jobcardno)
+ *   docno        = internal PK; JC_START = first docno when migrating old numbering
  */
 export const JC_PREFIX = "JC-";
 export const JC_PAD = 6;
 export const JC_START = 1;
-
-/** docno 25 → "JC-000025" (stored as pjobcardno) */
-export const jobCardNo = (docno) => `${JC_PREFIX}${String(docno).padStart(JC_PAD, "0")}`;
 
 /**
  * prod_job_card.type — add more as needed; default is JC.
@@ -20,6 +17,14 @@ export const JOB_CARD_TYPE_KEY = {
   [JOB_CARD_TYPE.TWO_C]: "2c",
 };
 export const JOB_CARD_TYPE_DEFAULT = JOB_CARD_TYPE.JC;
+
+/** ERP mjcnew pjobcardno — e.g. JC-14211, 2C-14129. */
+export function formatPJobCardNo(type, jobcardno) {
+  const n = Number(jobcardno);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (Number(type) === JOB_CARD_TYPE.TWO_C) return `2C-${n}`;
+  return `JC-${n}`;
+}
 
 /**
  * Required Qty (KG) — Maintain Job Card + RM Store.
@@ -63,3 +68,21 @@ export function issueQtyKg(gweight, qty) {
  * Change only this value. Used in jobCardProductionTime.js.
  */
 export const MULTI_JC_SPLIT_TIME = true;
+
+/**
+ * Production shifts — ONE place on the backend (keep frontend jobCard.config.js in sync).
+ *
+ *   SHIFTS_PER_DAY = 2 or 3  → board / calendar columns (S1…Sn)
+ *   SHIFT_HOURS    = 8       → hours per shift (est. production time + board Qty · hours)
+ *
+ * Change only these two numbers.
+ */
+export const SHIFTS_PER_DAY = 3;
+export const SHIFT_HOURS = 8;
+
+/** Valid schedule_shift ids: 1…SHIFTS_PER_DAY */
+export const SHIFT_IDS = Array.from({ length: SHIFTS_PER_DAY }, (_, i) => i + 1);
+
+export function isValidShift(n) {
+  return SHIFT_IDS.includes(Number(n));
+}

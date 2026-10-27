@@ -10,9 +10,13 @@ import { findQcChecks, findQcCheck, findQcCheckItems } from "../../qc-check/mode
 import { findMrnByUid } from "../../mrn/models/mrn.model.js";
 import { findAdjustmentById } from "../../stock-adjustment/models/stockAdjustment.model.js";
 import { findInProcessRequest, IPR_REQUEST_TYPE, normalizeRequestType } from "../../in-process-request/models/inProcessRequest.model.js";
+import { enrichQcItemsWithDocuments } from "../../../../../lib/documents/index.js";
 import { buildCoilDetailRows, formatHumanDateTime } from "./coilFinderReportSchema.js";
 
 export { formatHumanDateTime };
+
+/** Same mod_type used when QC uploads are persisted to the central documents table. */
+const QC_CHECK_MODULE = "rm_qc_check";
 
 function fileNameFromPath(p) {
   const parts = String(p || "").split(/[/\\]/);
@@ -120,6 +124,17 @@ function normalizeQcCheck(row, items) {
   };
 }
 
+/**
+ * Restore `document_note` (public path) from the documents table.
+ * Persist clears document_note and keeps only document_id — without this, Coil Finder
+ * shows "Missing" and print reports omit QC uploads even when files exist.
+ */
+async function withQcDocuments(qcCheckUid, items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return list;
+  return enrichQcItemsWithDocuments(QC_CHECK_MODULE, qcCheckUid, list);
+}
+
 async function loadQcChecks(coil) {
   const uid = String(coil.coil_no_uid || "").trim();
   const map = new Map();
@@ -130,23 +145,29 @@ async function loadQcChecks(coil) {
     limit: 50,
   });
 
-  for (const row of data || []) {
-    if (row?.qc_check_uid == null) continue;
-    const id = Number(row.qc_check_uid);
-    // findQcChecks already returns items + inspection methods — no N+1 re-fetch.
-    const items = (Array.isArray(row.items) ? row.items : []).map((it, idx) => ({
-      ...it,
-      qc_check_uid: id,
-      sno: it?.sno ?? idx + 1,
-    })).sort((a, b) => Number(a.sno || 0) - Number(b.sno || 0));
-    map.set(id, normalizeQcCheck(row, items));
-  }
+  const listRows = (data || []).filter((row) => row?.qc_check_uid != null);
+  await Promise.all(
+    listRows.map(async (row) => {
+      const id = Number(row.qc_check_uid);
+      // findQcChecks already returns items + inspection methods — no N+1 re-fetch.
+      const rawItems = (Array.isArray(row.items) ? row.items : []).map((it, idx) => ({
+        ...it,
+        qc_check_uid: id,
+        sno: it?.sno ?? idx + 1,
+      })).sort((a, b) => Number(a.sno || 0) - Number(b.sno || 0));
+      const items = await withQcDocuments(id, rawItems);
+      map.set(id, normalizeQcCheck(row, items));
+    })
+  );
 
   // Always load linked QC if missing from the list (edge: orphaned link).
   const linked = coil.qc_uid != null ? Number(coil.qc_uid) : null;
   if (linked && Number.isFinite(linked) && !map.has(linked)) {
     const [row, items] = await Promise.all([findQcCheck(linked), findQcCheckItems(linked)]);
-    if (row) map.set(linked, normalizeQcCheck(row, items));
+    if (row) {
+      const enriched = await withQcDocuments(linked, items);
+      map.set(linked, normalizeQcCheck(row, enriched));
+    }
   }
 
   return [...map.values()].sort((a, b) => Number(a.qc_check_uid) - Number(b.qc_check_uid));

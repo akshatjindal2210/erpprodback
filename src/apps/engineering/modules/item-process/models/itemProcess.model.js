@@ -38,9 +38,11 @@ const idsOf = (list, key) => uniqNums((list || []).map((x) => x?.[key] ?? x?.id 
  * New field? add it here, e.g.  cycle_time: Number(p.cycle_time) || null,
  */
 function toLine(p, proc) {
+  // Process Master "Machine" (inhouse) OFF → no machines (same idea as rm_wire OFF → no RM).
+  const machines = proc.inhouse ? idsOf(p.machines, "machine_id") : [];
   return {
     process: Number(p.process_id),
-    machines: idsOf(p.machines, "machine_id"),
+    machines,
     rm: proc.rm_wire ? idsOf(p.rm_items, "rm_item_dcode") : [], // order = priority
   };
 }
@@ -54,7 +56,7 @@ function fromLine(line, index, m) {
   const flags = flagsOf(proc); // every Process Master flag: true / false exactly as set there
   return {
     process_id: Number(line.process),
-    process_name: proc?.name || `Process ${line.process}`,
+    process_name: proc?.procname || `Process ${line.process}`,
     process_order: index + 1,
     flags,
     ...flags,
@@ -62,13 +64,12 @@ function fromLine(line, index, m) {
       .map((id) => m.macById.get(Number(id)))
       .filter(Boolean)
       .map((mac) => ({
-        machine_id: Number(mac.id),
-        machine_label: `${mac.number} — ${mac.macname}`,
-        name: mac.macname,
+        machine_id: Number(mac.maccode),
+        machine_label: `${mac.macno} — ${mac.macname}`,
         macname: mac.macname,
-        number: mac.number,
-        speed: mac.speed ?? null,
-        duration: Number(mac.duration) || 0,
+        macno: mac.macno,
+        cavity: mac.cavity ?? null,
+        maccycletime: Number(mac.maccycletime) || 0,
         setup_time: Number(mac.setup_time) || 0,
       })),
     rm_items: flags.rm_wire ? (line.rm || []).map((d) => ({ rm_item_dcode: Number(d) })) : [],
@@ -79,15 +80,18 @@ function fromLine(line, index, m) {
 async function loadMasters(lines, { activeOnly = false } = {}) {
   const active = activeOnly ? " AND is_deleted = false" : "";
   const [procs, machines] = await Promise.all([
-    dbQuery(`SELECT id, name, ${PROCESS_FLAGS.join(", ")} FROM ${E.PROCESS_MASTER} WHERE id = ANY($1::int[])${active}`, [uniqNums(lines.map((l) => l.process))]),
     dbQuery(
-      `SELECT id, macname, number, process_id, speed, duration, setup_time FROM ${E.MACHINE_MASTER} WHERE id = ANY($1::int[])${active}`,
+      `SELECT proccode, procname, ${PROCESS_FLAGS.join(", ")} FROM ${E.PROCESS_MASTER} WHERE proccode = ANY($1::int[])${active}`,
+      [uniqNums(lines.map((l) => l.process))]
+    ),
+    dbQuery(
+      `SELECT maccode, macname, macno, macproccode, cavity, maccycletime, setup_time FROM ${E.MACHINE_MASTER} WHERE maccode = ANY($1::int[])${active}`,
       [uniqNums(lines.flatMap((l) => l.machines || []))]
     ),
   ]);
   return {
-    procById: new Map(procs.map((p) => [Number(p.id), p])),
-    macById: new Map(machines.map((mac) => [Number(mac.id), mac])),
+    procById: new Map(procs.map((p) => [Number(p.proccode), p])),
+    macById: new Map(machines.map((mac) => [Number(mac.maccode), mac])),
   };
 }
 
@@ -114,7 +118,7 @@ async function buildStages(processJson, type) {
 
   const processIds = formProcesses.map((p) => Number(p.process_id));
   const dup = processIds.find((id, i) => processIds.indexOf(id) !== i);
-  if (dup) throw httpError(400, `${m.procById.get(dup)?.name || `Process ${dup}`} is added more than once.`);
+  if (dup) throw httpError(400, `${m.procById.get(dup)?.procname || `Process ${dup}`} is added more than once.`);
 
   // Prime plan → only processes with "prime" ON; finish plan → only "fg" ON (Process Master)
   const isPrime = type === PROCESS_TYPE.PRIME;
@@ -125,15 +129,20 @@ async function buildStages(processJson, type) {
     processes: list.map((p) => {
       const proc = m.procById.get(Number(p.process_id));
       if (!proc) throw httpError(400, `Process ${p.process_id} not found in Process Master.`);
-      if (!proc[needFlag]) throw httpError(400, `${proc.name} is not a ${isPrime ? "Prime" : "finish"} process.`);
+      if (!proc[needFlag]) throw httpError(400, `${proc.procname} is not a ${isPrime ? "Prime" : "finish"} process.`);
 
       const line = toLine(p, proc);
       const where = `(Stage ${sIdx + 1})`;
-      if (!line.machines.length) throw httpError(400, `Select at least one machine for ${proc.name} ${where}.`);
-      for (const id of line.machines) {
-        const mac = m.macById.get(id);
-        if (!mac) throw httpError(400, `Machine ${id} not found in Machine Master.`);
-        if (Number(mac.process_id) !== Number(proc.id)) throw httpError(400, `Machine ${mac.macname} is not a ${proc.name} machine ${where}.`);
+      // Machine (inhouse) ON → at least one machine; OFF → empty machines allowed (FG / Prime only).
+      if (proc.inhouse) {
+        if (!line.machines.length) throw httpError(400, `Select at least one machine for ${proc.procname} ${where}.`);
+        for (const id of line.machines) {
+          const mac = m.macById.get(id);
+          if (!mac) throw httpError(400, `Machine ${id} not found in Machine Master.`);
+          if (Number(mac.macproccode) !== Number(proc.proccode)) {
+            throw httpError(400, `Machine ${mac.macname} is not a ${proc.procname} machine ${where}.`);
+          }
+        }
       }
       return line;
     }),

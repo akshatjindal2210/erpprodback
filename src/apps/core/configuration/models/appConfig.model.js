@@ -5,6 +5,7 @@ import { CORE_APP_CONFIG_KEYS } from "../app.config.js";
 import { IMS_APP_CONFIG_KEYS, IMS_LIST_VIEW_SPAN } from "../../../ims/lib/config/app.config.js";
 import { RMSTORE_APP_CONFIG_KEYS } from "../../../rmstore/lib/config/app.config.js";
 import { HRMS_APP_CONFIG_KEYS, HRMS_OVERTIME_BUFFER } from "../../../hrms/lib/config/app.config.js";
+import { PRODUCTION_APP_CONFIG_KEYS } from "../../../production/lib/config/app.config.js";
 
 /*
   Post-deploy settings (`ims_app_config` table). Read at runtime from DB.
@@ -18,6 +19,7 @@ export const APP_CONFIG_KEYS = {
   ...IMS_APP_CONFIG_KEYS,
   ...RMSTORE_APP_CONFIG_KEYS,
   ...HRMS_APP_CONFIG_KEYS,
+  ...PRODUCTION_APP_CONFIG_KEYS,
 };
 
 const COMPANY_INFO_DEFAULTS = Object.freeze({
@@ -166,6 +168,16 @@ export async function getShortageQtyPercentage() {
  * Allowed extra dispatch % over schedule balance for Forwarding Note.
  * Example: balance 1000, 10% => max allowed 1100.
  */
+/** When true, Maintain Job Card cannot save a process plan until tooling is Yes. */
+export async function getProductionMaintainJobcardToolingRequired() {
+  try {
+    const raw = await getAppConfigValue(PRODUCTION_APP_CONFIG_KEYS.MAINTAIN_JOBCARD_TOOLING_REQUIRED);
+    return String(raw ?? "").trim().toLowerCase() === "true";
+  } catch {
+    return false;
+  }
+}
+
 export async function getForwardingShortageQtyPercentage() {
   try {
     const raw = await getAppConfigValue(APP_CONFIG_KEYS.FORWARDING_SHORTAGE_QTY_PERCENTAGE);

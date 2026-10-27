@@ -1,5 +1,6 @@
 import dbQuery from "../../../../config/db/db.js";
 import { MST_TABLES as M } from "../../../../config/db/dbTables.js";
+import { normalizeConditions, normalizeConditionLogic } from "./notificationConditions.js";
 
 const TABLE = M.NOTIFICATION_TEMPLATES;
 
@@ -11,10 +12,21 @@ export const AUDIENCE_KEYS = ["departments", "designations", "attributes", "role
 const ALLOWED_SORT_FIELDS = ["id", "module_id", "name", "is_active", "created_at", "updated_at"];
 const ALLOWED_UPDATE_FIELDS = [
   "module_id", "name", "subject", "message", "trigger_events", "recipient_type", "recipient_refs",
-  "audience", "pwa_enabled", "email_enabled", "send_via", "is_active", "updated_by", "updated_at",
+  "audience", "conditions", "condition_logic", "pwa_enabled", "email_enabled", "send_via",
+  "is_active", "updated_by", "updated_at",
 ];
 const ARRAY_FIELDS = new Set(["trigger_events", "recipient_refs"]);
-const JSON_FIELDS = new Set(["audience"]);
+const JSON_FIELDS = new Set(["audience", "conditions"]);
+
+function mapTemplateRow(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    audience: effectiveAudience(row),
+    conditions: normalizeConditions(row.conditions),
+    condition_logic: normalizeConditionLogic(row.condition_logic),
+  };
+}
 
 const NT_FROM = `
   FROM ${TABLE} nt
@@ -174,7 +186,7 @@ export const findNotificationTemplates = async ({
   );
 
   return {
-    data: data.map((row) => ({ ...row, audience: effectiveAudience(row) })),
+    data: data.map(mapTemplateRow),
     total_count: totalCount,
     current_page: safePage,
     last_page: Math.ceil(totalCount / safeLimit) || 1,
@@ -186,18 +198,17 @@ export const findNotificationTemplate = async (id) => {
     `${NT_SELECT} ${NT_FROM} WHERE nt.is_deleted = false AND nt.id = $1 LIMIT 1`,
     [id]
   );
-  if (!row) return null;
-  return { ...row, audience: effectiveAudience(row) };
+  return mapTemplateRow(row);
 };
 
 /**
- * SOP-style uniqueness: one live template per module + trigger event.
+ * Uniqueness: one live template per module + name (multiple triggers / templates per module allowed for rules).
  * `excludeId` skips the row being updated.
  */
-export const findConflictingTemplate = async (module_id, trigger_events = [], excludeId = null) => {
-  const events = Array.isArray(trigger_events) ? trigger_events.filter(Boolean) : [];
-  if (!module_id || !events.length) return null;
-  const values = [module_id, events];
+export const findConflictingTemplate = async (module_id, name, excludeId = null) => {
+  const nm = String(name || "").trim();
+  if (!module_id || !nm) return null;
+  const values = [module_id, nm];
   let excludeSql = "";
   if (excludeId != null) {
     values.push(excludeId);
@@ -208,7 +219,7 @@ export const findConflictingTemplate = async (module_id, trigger_events = [], ex
      FROM ${TABLE} nt
      WHERE nt.is_deleted = false
        AND nt.module_id = $1
-       AND nt.trigger_events && $2::text[]
+       AND LOWER(nt.name) = LOWER($2)
        ${excludeSql}
      ORDER BY nt.id ASC
      LIMIT 1`,
@@ -228,7 +239,7 @@ export const findActiveTemplatesByModuleId = async (moduleId) => {
      WHERE nt.module_id = $1 AND nt.is_active = true AND nt.is_deleted = false
      ORDER BY nt.id ASC`,
     [id]
-  ).then((rows) => rows.map((row) => ({ ...row, audience: effectiveAudience(row) })));
+  ).then((rows) => rows.map(mapTemplateRow));
 };
 
 export const insertNotificationTemplate = async ({
@@ -240,6 +251,8 @@ export const insertNotificationTemplate = async ({
   recipient_type,
   recipient_refs,
   audience,
+  conditions = [],
+  condition_logic = "AND",
   pwa_enabled = true,
   email_enabled = false,
   send_via = "none",
@@ -248,17 +261,21 @@ export const insertNotificationTemplate = async ({
 }) => {
   const aud = normalizeAudience(audience);
   const legacy = legacyFromAudience(aud);
+  const conds = normalizeConditions(conditions);
+  const logic = normalizeConditionLogic(condition_logic);
   const [row] = await dbQuery(
     `INSERT INTO ${TABLE}
       (module_id, name, subject, message, trigger_events, recipient_type, recipient_refs,
-       audience, pwa_enabled, email_enabled, send_via, is_active, created_by)
-     VALUES ($1, $2, $3, $4, $5::text[], $6, $7::text[], $8::jsonb, $9, $10, $11, $12, $13)
+       audience, conditions, condition_logic, pwa_enabled, email_enabled, send_via, is_active, created_by)
+     VALUES ($1, $2, $3, $4, $5::text[], $6, $7::text[], $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15)
      RETURNING *`,
     [
       module_id, name, subject ?? null, message, trigger_events,
       recipient_type ?? legacy.recipient_type,
       (recipient_refs ?? legacy.recipient_refs).map(String),
       JSON.stringify(aud),
+      JSON.stringify(conds),
+      logic,
       !!pwa_enabled, !!email_enabled, send_via, !!is_active, created_by,
     ]
   );
@@ -279,10 +296,18 @@ export const updateNotificationTemplate = async (id, fields = {}) => {
     return `${key} = $${idx}`;
   });
 
-  // Serialize audience object for jsonb
+  // Serialize audience / conditions for jsonb
   const audIdx = keys.indexOf("audience");
   if (audIdx >= 0 && values[audIdx] != null && typeof values[audIdx] === "object") {
     values[audIdx] = JSON.stringify(normalizeAudience(values[audIdx]));
+  }
+  const condIdx = keys.indexOf("conditions");
+  if (condIdx >= 0) {
+    values[condIdx] = JSON.stringify(normalizeConditions(values[condIdx]));
+  }
+  const logicIdx = keys.indexOf("condition_logic");
+  if (logicIdx >= 0) {
+    values[logicIdx] = normalizeConditionLogic(values[logicIdx]);
   }
 
   const [row] = await dbQuery(

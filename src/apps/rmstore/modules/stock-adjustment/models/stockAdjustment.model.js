@@ -1,6 +1,6 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
-import { attachTcRmtcRows } from "../../../../../lib/documents/index.js";
+import { attachTcRmtcRows, deactivateModuleDocuments } from "../../../../../lib/documents/index.js";
 import { MODULE as SA_MODULE } from "../routes/stockAdjustment.routes.js";
 
 import { SA_ADD_LIKE_ENTRY_TYPES_SQL } from "../utils/stockAdjustmentEntryTypes.js";
@@ -184,6 +184,10 @@ export async function updateAdjustment(fields = {}, filters = {}) {
 }
 
 export async function softDeleteAdjustment(id, userName) {
+  const adjustmentId = Number(id);
+  if (Number.isFinite(adjustmentId) && adjustmentId > 0) {
+    await deactivateModuleDocuments(SA_MODULE, adjustmentId);
+  }
   return updateAdjustment(
     {
       is_deleted: true,
@@ -192,7 +196,7 @@ export async function softDeleteAdjustment(id, userName) {
       updated_by: userName ?? null,
       updated_at: new Date(),
     },
-    { adjustment_id: Number(id) }
+    { adjustment_id: adjustmentId }
   );
 }
 

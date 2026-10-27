@@ -43,7 +43,6 @@ async function loadToolingList(surface) {
   const cards = toolingRows.map((r) => ({
     docno: r.docno,
     itemdcode: r.item_dcode,
-    shortage_ids: r.shortage_ids || [],
   }));
   const qtyByDoc = await loadQtyItemsByShortageIds(cards);
 

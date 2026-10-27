@@ -11,6 +11,7 @@ import { mapMulterFilesWithRemarks, syncAttachmentList } from "../../../../../li
 import { stampRmstoreUploadedFiles } from "../../../../rmstore/lib/utils/stampRmstoreUploadedFiles.js";
 import { resolveMachineQrPayload } from "../../../../core/lib/utils/qr/publicQrUrl.js";
 import logger from "../../../../core/lib/utils/logging/logger.js";
+import { assertErpSync, nextErpMasterCode } from "../../../../core/lib/services/erpSync.js";
 
 const MODULE = "eng_machine_master";
 const CFG = getCrudModuleConfig(MODULE);
@@ -19,7 +20,7 @@ const ENTITY = MODULE;
 const log = (req, action, entity_id, details, record = null, existing = null) => logActivity(req, { action, entity: ENTITY, entity_id, details, record, existing }).catch(() => {});
 
 /** Time fields stored in seconds. FE sends `<field>_value` + `<field>_unit` (sec / min / hour); API may send `<field>` in seconds. */
-const TIME_FIELDS = { duration: 60, setup_time: 0 }; // field → default seconds
+const TIME_FIELDS = { maccycletime: 60, setup_time: 0 }; // field → default seconds
 const UNIT_SECONDS = { sec: 1, min: 60, hour: 3600 };
 const UNIT_ALIAS = { mins: "min", minute: "min", minutes: "min", hours: "hour", hr: "hour", hrs: "hour" };
 
@@ -73,8 +74,8 @@ function mapUploadedFiles(req) {
   }));
 }
 
-/** Store speed exactly as typed (no 10 → 10.0000). */
-function normalizeSpeed(raw) {
+/** Store cavity exactly as typed (no 10 → 10.0000). */
+function normalizeCavity(raw) {
   if (raw === undefined || raw === null || raw === "") return null;
   const s = String(raw).trim();
   return s || null;
@@ -86,12 +87,12 @@ function mergeAttachments(existing = [], uploaded = [], removeIds = []) {
   return [...kept, ...uploaded];
 }
 
-/** Store macname / number as CAPS (simple). */
+/** Store macname / macno as CAPS (simple). */
 const caps = (v) => String(v ?? "").trim().toUpperCase();
 
-/** 409 message when another active machine already has this macname or number, else null. */
+/** 409 message when another active machine already has this macname or macno, else null. */
 async function duplicateMessage(fields, excludeId = null) {
-  for (const field of ["macname", "number"]) {
+  for (const field of ["macname", "macno"]) {
     if (fields[field] !== undefined && (await findMachineDuplicate(field, fields[field], excludeId))) {
       const label = field === "macname" ? "name" : field;
       return `Machine ${label} "${fields[field]}" already exists`;
@@ -100,8 +101,8 @@ async function duplicateMessage(fields, excludeId = null) {
   return null;
 }
 
-async function assertApprovedProcess(process_id) {
-  const process = await findProcess(process_id);
+async function assertApprovedProcess(macproccode) {
+  const process = await findProcess(macproccode);
   if (!process) {
     const err = new Error("Process not found");
     err.statusCode = 400;
@@ -140,24 +141,24 @@ export const listMachines = async (req, res) => {
   }
 };
 
-/** Machine dropdown (helper) — approved machines, optional `filters.process_id`; `id` resolves one row. */
+/** Machine dropdown (helper) — approved machines, optional `filters.macproccode`; `maccode` resolves one row. */
 export const listMachineViews = async (req, res) => {
   try {
     const body = req.body || {};
-    const toView = (r) => ({ id: r.id, name: r.name, number: r.number, process_id: r.process_id, label: `${r.number} — ${r.name}` });
+    const toView = (r) => ({ maccode: r.maccode, macname: r.macname, macno: r.macno, macproccode: r.macproccode, label: `${r.macno} — ${r.macname}` });
 
-    const byId = parsePositiveIntId(body.id);
+    const byId = parsePositiveIntId(body.maccode ?? body.id);
     if (byId) {
-      const row = await findMachine({ id: byId });
+      const row = await findMachine({ maccode: byId });
       return res.json({ success: true, data: row ? [toView(row)] : [], total: row ? 1 : 0 });
     }
 
     const { page, limit, search, filters } = extractListParams(body);
-    const safeFilters = sanitizeFilters(filters || {}, ["process_id"]);
+    const safeFilters = sanitizeFilters(filters || {}, ["macproccode"]);
     const result = await findMachines({
       filters: { ...safeFilters, approved: true },
       search: sanitizeSearch(search),
-      sort: { by: "id", order: "ASC" },
+      sort: { by: "maccode", order: "ASC" },
       page: page || 1,
       limit: limit || 50,
     });
@@ -170,9 +171,9 @@ export const listMachineViews = async (req, res) => {
 
 export const getMachine = async (req, res) => {
   try {
-    const id = parsePositiveIntId(req.body?.id);
-    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
-    const data = await findMachine({ id });
+    const maccode = parsePositiveIntId(req.body?.maccode ?? req.body?.id);
+    if (!maccode) return res.status(400).json({ success: false, message: "Valid ID required" });
+    const data = await findMachine({ maccode });
     if (!data) return res.status(404).json({ success: false, message: "Not found" });
     return res.json({ success: true, data: { ...data, attachments: normalizeAttachments(data.attachments) } });
   } catch (err) {
@@ -184,10 +185,10 @@ export const getMachine = async (req, res) => {
 export const createMachine = async (req, res) => {
   try {
     const macname = caps(req.body?.macname ?? req.body?.name);
-    const number = caps(req.body?.number);
-    const process_id = parsePositiveIntId(req.body?.process_id);
-    const speed = normalizeSpeed(req.body?.speed);
-    const duration = parseSeconds(req.body, "duration");
+    const macno = caps(req.body?.macno ?? req.body?.number);
+    const macproccode = parsePositiveIntId(req.body?.macproccode ?? req.body?.process_id);
+    const cavity = normalizeCavity(req.body?.cavity ?? req.body?.speed);
+    const maccycletime = parseSeconds(req.body, "maccycletime");
     const setup_time = parseSeconds(req.body, "setup_time");
     const make = req.body?.make != null ? String(req.body.make).trim() : null;
     const model = req.body?.model != null ? String(req.body.model).trim() : null;
@@ -197,19 +198,32 @@ export const createMachine = async (req, res) => {
     const attachments = mapUploadedFiles(req);
 
     if (!macname) return res.status(400).json({ success: false, message: "name required" });
-    if (!number) return res.status(400).json({ success: false, message: "number required" });
-    if (!process_id) return res.status(400).json({ success: false, message: "process required" });
+    if (!macno) return res.status(400).json({ success: false, message: "number required" });
+    if (!macproccode) return res.status(400).json({ success: false, message: "process required" });
 
-    await assertApprovedProcess(process_id);
-    const dup = await duplicateMessage({ macname, number });
+    await assertApprovedProcess(macproccode);
+    const dup = await duplicateMessage({ macname, macno });
     if (dup) return res.status(409).json({ success: false, message: dup });
 
+    const maccode = await nextErpMasterCode("mstmac");
+    if (!maccode) {
+      return res.status(502).json({ success: false, message: "Could not assign machine code for ERP." });
+    }
+    await assertErpSync("add", { 
+      maccode, 
+      macname, 
+      macno,
+      cavity: Number.isFinite(Number(cavity)) ? Number(cavity) : cavity,
+      maccycletime: Number(maccycletime),
+      macproccode: Number(macproccode),
+    }, "mstmac");
     const row = await insertMachine({
+      maccode,
       macname,
-      number,
-      process_id,
-      speed,
-      duration,
+      macno,
+      macproccode,
+      cavity,
+      maccycletime,
       setup_time,
       make: make || null,
       model: model || null,
@@ -218,7 +232,7 @@ export const createMachine = async (req, res) => {
     });
 
     if (attachments.length) {
-      await syncAttachmentList(MODULE, row.id, attachments, req);
+      await syncAttachmentList(MODULE, row.maccode, attachments, req);
     }
 
     if (normalizedApproved === true) {
@@ -234,17 +248,18 @@ export const createMachine = async (req, res) => {
         auditAsName: true,
         approvalTimestamp: row?.created_at || new Date(),
       });
-      await updateMachines(approvalFields, { id: row.id });
+      await updateMachines(approvalFields, { maccode: row.maccode });
     }
 
-    const data = await findMachine({ id: row.id });
-    logger.info(`[eng_machine_master] create user=${req?.user?.id} id=${row.id} number=${number}`);
-    await log(req, "create", row.id, { macname, number, process_id, attachments: attachments.length }, data);
+    const data = await findMachine({ maccode: row.maccode });
+    logger.info(`[eng_machine_master] create user=${req?.user?.id} maccode=${row.maccode} macno=${macno}`);
+    await log(req, "create", row.maccode, { macname, macno, macproccode, attachments: attachments.length }, data);
 
     return res.status(201).json({
       success: true,
       data: { ...data, attachments: normalizeAttachments(data?.attachments) },
       message: "Machine created successfully",
+      erpSynced: true,
     });
   } catch (err) {
     logger.error(`[eng_machine_master] create error user=${req?.user?.id}: ${err?.message || err}`);
@@ -257,11 +272,11 @@ export const createMachine = async (req, res) => {
 
 export const updateMachine = async (req, res) => {
   try {
-    const id = parsePositiveIntId(req.body?.id);
+    const maccode = parsePositiveIntId(req.body?.maccode ?? req.body?.id);
     const normalizedApproved = normalizeApprovedInput(normalizeApprovedBody(req.body?.approved));
-    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
+    if (!maccode) return res.status(400).json({ success: false, message: "Valid ID required" });
 
-    const existing = await findMachine({ id });
+    const existing = await findMachine({ maccode });
     if (!existing) return res.status(404).json({ success: false, message: "Not found" });
 
     if (req.user.type !== "super_admin" && req.permission && req.permission.can_edit_days > 0) {
@@ -279,10 +294,14 @@ export const updateMachine = async (req, res) => {
       macname: req.body?.macname !== undefined || req.body?.name !== undefined
         ? (req.body?.macname ?? req.body?.name)
         : undefined,
-      number: req.body?.number,
-      process_id: req.body?.process_id !== undefined ? parsePositiveIntId(req.body.process_id) : undefined,
-      speed: req.body?.speed !== undefined ? normalizeSpeed(req.body.speed) : undefined,
-      duration: hasTimeInput(req.body, "duration") ? parseSeconds(req.body, "duration") : undefined,
+      macno: req.body?.macno ?? req.body?.number,
+      macproccode: req.body?.macproccode !== undefined || req.body?.process_id !== undefined
+        ? parsePositiveIntId(req.body?.macproccode ?? req.body?.process_id)
+        : undefined,
+      cavity: req.body?.cavity !== undefined || req.body?.speed !== undefined
+        ? normalizeCavity(req.body?.cavity ?? req.body?.speed)
+        : undefined,
+      maccycletime: hasTimeInput(req.body, "maccycletime") ? parseSeconds(req.body, "maccycletime") : undefined,
       setup_time: hasTimeInput(req.body, "setup_time") ? parseSeconds(req.body, "setup_time") : undefined,
       make: req.body?.make,
       model: req.body?.model,
@@ -294,10 +313,10 @@ export const updateMachine = async (req, res) => {
       input,
       rules: [
         { field: "macname", normalize: caps },
-        { field: "number", normalize: caps },
-        { field: "process_id", normalize: (v) => Number(v) },
-        { field: "speed", normalize: (v) => normalizeSpeed(v) },
-        { field: "duration", normalize: (v) => Math.round(Number(v)) },
+        { field: "macno", normalize: caps },
+        { field: "macproccode", normalize: (v) => Number(v) },
+        { field: "cavity", normalize: (v) => normalizeCavity(v) },
+        { field: "maccycletime", normalize: (v) => Math.round(Number(v)) },
         { field: "setup_time", normalize: (v) => Math.round(Number(v)) },
         { field: "make", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
         { field: "model", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
@@ -321,18 +340,18 @@ export const updateMachine = async (req, res) => {
     if (fields.macname !== undefined && !fields.macname) {
       return res.status(400).json({ success: false, message: "name required" });
     }
-    if (fields.number !== undefined && !fields.number) {
+    if (fields.macno !== undefined && !fields.macno) {
       return res.status(400).json({ success: false, message: "number required" });
     }
-    if (fields.process_id !== undefined) {
-      await assertApprovedProcess(fields.process_id);
+    if (fields.macproccode !== undefined) {
+      await assertApprovedProcess(fields.macproccode);
     }
-    // Only a macname / number that actually changed is checked (old duplicates must not block other edits)
+    // Only a macname / macno that actually changed is checked (old duplicates must not block other edits)
     const same = (a, b) => caps(a) === caps(b);
     const dup = await duplicateMessage({
       macname: same(fields.macname, existing.macname) ? undefined : fields.macname,
-      number: same(fields.number, existing.number) ? undefined : fields.number,
-    }, id);
+      macno: same(fields.macno, existing.macno) ? undefined : fields.macno,
+    }, maccode);
     if (dup) return res.status(409).json({ success: false, message: dup });
 
     applyApprovalUpdateFields({
@@ -344,22 +363,33 @@ export const updateMachine = async (req, res) => {
       auditAsName: true,
     });
 
+    const erpRow = { ...existing, ...fields };
+    await assertErpSync("update", {
+      maccode: Number(maccode),
+      macname: erpRow.macname,
+      macno: erpRow.macno,
+      cavity: Number.isFinite(Number(erpRow.cavity)) ? Number(erpRow.cavity) : erpRow.cavity,
+      maccycletime: Number(erpRow.maccycletime),
+      macproccode: Number(erpRow.macproccode),
+    }, "mstmac");
+
     if (Object.keys(fields).length) {
-      await updateMachines(fields, { id });
+      await updateMachines(fields, { maccode });
     }
 
     if (hasAttachmentChanges) {
-      await syncAttachmentList(MODULE, id, nextAttachments, req);
+      await syncAttachmentList(MODULE, maccode, nextAttachments, req);
     }
 
-    const data = await findMachine({ id });
-    logger.info(`[eng_machine_master] update user=${req?.user?.id} id=${id} approved=${normalizedApproved}`);
-    await log(req, "update", id, { updated_fields: fields, removeIds, uploaded: uploaded.length }, data, existing);
+    const data = await findMachine({ maccode });
+    logger.info(`[eng_machine_master] update user=${req?.user?.id} maccode=${maccode} approved=${normalizedApproved}`);
+    await log(req, "update", maccode, { updated_fields: fields, removeIds, uploaded: uploaded.length }, data, existing);
 
     return res.json({
       success: true,
       data: { ...data, attachments: normalizeAttachments(data?.attachments) },
       message: "Machine updated successfully",
+      erpSynced: true,
     });
   } catch (err) {
     logger.error(`[eng_machine_master] update error user=${req?.user?.id}: ${err?.message || err}`);
@@ -372,17 +402,19 @@ export const updateMachine = async (req, res) => {
 
 export const deleteMachine = async (req, res) => {
   try {
-    const id = parsePositiveIntId(req.body?.id);
-    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
+    const maccode = parsePositiveIntId(req.body?.maccode ?? req.body?.id);
+    if (!maccode) return res.status(400).json({ success: false, message: "Valid ID required" });
 
-    const existing = await findMachine({ id });
+    const existing = await findMachine({ maccode });
     if (!existing) return res.status(404).json({ success: false, message: "Not found" });
 
-    await deleteMachines({ id }, { deleted_by: auditUserName(req) });
-    logger.info(`[eng_machine_master] delete user=${req?.user?.id} id=${id}`);
-    await log(req, "delete", id, { number: existing.number }, existing);
+    const macname = existing.macname;
+    await assertErpSync("delete", { maccode: Number(maccode), macname }, "mstmac");
+    await deleteMachines({ maccode });
+    logger.info(`[eng_machine_master] delete user=${req?.user?.id} maccode=${maccode}`);
+    await log(req, "delete", maccode, { macno: existing.macno }, existing);
 
-    return res.json({ success: true, message: "Machine deleted successfully" });
+    return res.json({ success: true, message: "Machine deleted successfully", erpSynced: true });
   } catch (err) {
     logger.error(`[eng_machine_master] delete error user=${req?.user?.id}: ${err?.message || err}`);
     return res.status(500).json({ success: false, message: err.message });
@@ -392,25 +424,25 @@ export const deleteMachine = async (req, res) => {
 /** QR payload for print/download — public URL when base configured, else plain machine number. */
 export const getMachineQr = async (req, res) => {
   try {
-    const id = parsePositiveIntId(req.body?.id);
-    if (!id) return res.status(400).json({ success: false, message: "Valid ID required" });
+    const maccode = parsePositiveIntId(req.body?.maccode ?? req.body?.id);
+    if (!maccode) return res.status(400).json({ success: false, message: "Valid ID required" });
 
-    const data = await findMachine({ id });
+    const data = await findMachine({ maccode });
     if (!data) return res.status(404).json({ success: false, message: "Not found" });
     if (!data.approved) {
       return res.status(400).json({ success: false, message: "Authorize machine before printing QR" });
     }
 
-    const number = String(data.number || "").trim();
-    if (!number) return res.status(400).json({ success: false, message: "Machine number is missing" });
+    const macno = String(data.macno || "").trim();
+    if (!macno) return res.status(400).json({ success: false, message: "Machine number is missing" });
 
-    const qr_value = await resolveMachineQrPayload({ number });
+    const qr_value = await resolveMachineQrPayload({ number: macno });
     return res.json({
       success: true,
       data: {
-        id: data.id,
-        number,
-        name: data.name,
+        maccode: data.maccode,
+        macno,
+        macname: data.macname,
         process_name: data.process_name,
         make: data.make,
         model: data.model,

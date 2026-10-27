@@ -1,7 +1,7 @@
 /**
  * Prime Item helpers — used by Shortage → Prime Item tab and Maintain Job Card.
  *
- * ims_shortage.is_approved:  NULL = Pending | TRUE = Approved | FALSE = Rejected
+ * ims_shortage.is_accepted: NULL = Pending | TRUE = Accepted | FALSE = Rejected
  *
  * Prime item is NOT stored in the DB. It comes from the IMS item master (item → primitemdcode),
  * so the flow is:
@@ -19,60 +19,65 @@ import { rmItemMap } from "../../../../rmstore/modules/production/utils/erpItems
 import { RMSTORE_TABLES as R } from "../../../../../config/db/dbTables.js";
 import { issueQtyKg } from "../../job-card/jobCard.config.js";
 
-export { shortageFullyApprovedSql };
-
 /* ───────────────────────── Status ───────────────────────── */
 
-export const PRIME_STATUSES = ["pending", "approved", "rejected"];
+export const PRIME_STATUSES = ["pending", "accepted", "rejected"];
 
 const STATUS_SQL = {
-  pending: "is_approved IS NULL",
-  approved: "is_approved = true",
-  rejected: "is_approved = false",
+  pending: "is_accepted IS NULL",
+  accepted: "is_accepted = true",
+  rejected: "is_accepted = false",
 };
 
-/** "pending" → "s.is_approved IS NULL". Pass alias "" for UPDATE statements. */
+/** "pending" → "s.is_accepted IS NULL". Pass alias "" for UPDATE statements. */
 export function primeStatusSql(status, alias = "s") {
-  const sql = STATUS_SQL[status] || STATUS_SQL.pending;
+  const key = status === "approved" ? "accepted" : status;
+  const sql = STATUS_SQL[key] || STATUS_SQL.pending;
   return alias ? `${alias}.${sql}` : sql;
 }
 
-/** Row's status name from is_approved: NULL → "pending", true → "approved", false → "rejected". */
+/** Row status from is_accepted: NULL → pending, true → accepted, false → rejected. */
 export function primeStatusOf(row) {
-  if (row?.is_approved === true) return "approved";
-  if (row?.is_approved === false) return "rejected";
+  if (row?.is_accepted === true) return "accepted";
+  if (row?.is_accepted === false) return "rejected";
   return "pending";
 }
 
 /* ───────────────────────── Scope ───────────────────────── */
 
-/**
- * Shortage id reserved on a fully shortage-approved job card (drafts without approve do not count).
- * Used by create/assert so the same card can still be updated.
- */
-export function usedInJobCardSql(alias = "s", type = JOB_CARD_TYPE.JC) {
+/** Shortage on an authorized job card (ims_shortage.docno = jc.docno). */
+export function shortageOnAuthorizedJobCardSql(alias = "s", type = JOB_CARD_TYPE.JC) {
   return `EXISTS (
     SELECT 1 FROM ${PRODUCTION_TABLES.JOB_CARD} jc
-    WHERE jc.is_deleted = false
-      AND jc.type = ${Number(type)}
-      AND ${shortageFullyApprovedSql("jc")}
-      AND ${alias}.id = ANY(jc.shortage_ids)
+    WHERE jc.is_deleted = false AND jc.type = ${Number(type)} AND jc.approved = true
+      AND ${alias}.docno = jc.docno
   )`;
 }
 
-/**
- * Fully assigned = shortage approved (via join) AND process plan saved (New done).
- * Pending Shortage list keeps approved-but-unplanned rows so user can click New (normal, not gray).
- */
-export function plannedInJobCardSql(alias = "s", type = JOB_CARD_TYPE.JC) {
-  return `EXISTS (
-    SELECT 1 FROM ${PRODUCTION_TABLES.JOB_CARD} jc
-    WHERE jc.is_deleted = false
-      AND jc.type = ${Number(type)}
-      AND ${shortageFullyApprovedSql("jc")}
-      AND jsonb_array_length(COALESCE(jc.process_plan, '[]'::jsonb)) > 0
-      AND ${alias}.id = ANY(jc.shortage_ids)
-  )`;
+/** Latest open JC per prime → job_card_no on pending group (Register authorize step removed). */
+export async function attachOpenJobCardNo(groups = [], type = JOB_CARD_TYPE.JC) {
+  const primes = [...new Set(groups.map((g) => Number(g.prime_key || g.id)).filter(Boolean))];
+  if (!primes.length) return;
+  const rows = await dbQuery(
+    `SELECT DISTINCT ON (jc.itemdcode) jc.itemdcode, jc.docno, jc.pjobcardno, jc.process_plan, jc.jobcardno
+     FROM ${PRODUCTION_TABLES.JOB_CARD} jc
+     WHERE jc.is_deleted = false AND jc.type = $1 AND jc.itemdcode = ANY($2::int[])
+       AND EXISTS (
+         SELECT 1 FROM ${IMS_TABLES.SHORTAGE} s
+         WHERE s.docno = jc.docno AND s.is_accepted = true AND COALESCE(s.is_deleted, false) = false
+       )
+     ORDER BY jc.itemdcode, jc.docno DESC`,
+    [Number(type), primes]
+  );
+  const byPrime = new Map((rows || []).map((r) => [Number(r.itemdcode), r]));
+  for (const g of groups) {
+    const jc = byPrime.get(Number(g.prime_key || g.id));
+    if (!jc) continue;
+    if (jc.pjobcardno) g.job_card_no = jc.pjobcardno;
+    g.docno = jc.docno;
+    const plan = jc.process_plan;
+    g.jc_has_plan = Array.isArray(plan) ? plan.length > 0 : Boolean(plan && typeof plan === "object" && Object.keys(plan).length);
+  }
 }
 
 /** JS check: row belongs to Production (same rule as the SQL in loadProductionShortages). */
@@ -89,7 +94,7 @@ export function isProductionScopeRow(row) {
  * Production shortage rows + IMS details.
  * `where` = extra SQL conditions, e.g. [primeStatusSql("pending")].
  *
- * Each returned row has: id, itemdcode, qty, type, month, is_approved, approval_remark, ...
+ * Each returned row has: id, itemdcode, qty, type, month, is_accepted, accepted_remark, ...
  *   + from IMS: item_code, item_desc, primitemdcode, primitem_code, primitemdesc, gweight
  *   + weight_kg = Issue Qty = (gweight × qty) + 10%
  */
@@ -103,7 +108,7 @@ export async function loadProductionShortages(where = []) {
   ];
 
   const rows = await dbQuery(
-    `SELECT s.id, s.itemdcode, s.itemcode, s.grpname, s.type, s.qty, s.month, s.remarks, s.approved, s.is_approved, s.approval_remark, s.created_by, s.created_at
+    `SELECT s.id, s.itemdcode, s.itemcode, s.grpname, s.type, s.qty, s.month, s.remarks, s.approved, s.is_accepted, s.accepted_remark, s.created_by, s.created_at
      FROM ${IMS_TABLES.SHORTAGE} s
      WHERE ${conditions.join(" AND ")}
      ORDER BY s.id DESC`,
@@ -191,8 +196,8 @@ function fillGroupTotals(group) {
   group.item_codes = group.items.map((it) => it.item_code).filter(Boolean);
 
   // All entries are approved / rejected together, so normally there is one remark.
-  const remarks = children.map((c) => String(c.approval_remark ?? "").trim()).filter(Boolean);
-  group.approval_remark = [...new Set(remarks)].join(" | ") || null;
+  const remarks = children.map((c) => String(c.accepted_remark ?? "").trim()).filter(Boolean);
+  group.accepted_remark = [...new Set(remarks)].join(" | ") || null;
 }
 
 /** Same item's entries added together → [{ item_code: "HN013", qty: 10000, weight_kg, ... }]. Prime item first. */
@@ -263,7 +268,7 @@ export function slimShortageChild(row) {
     weight_kg: row.weight_kg ?? null,
     item_weight: row.item_weight ?? null,
     remarks: row.remarks ?? null,
-    approval_remark: row.approval_remark ?? null,
+    accepted_remark: row.accepted_remark ?? null,
     created_by: row.created_by ?? null,
     created_at: row.created_at ?? null,
   });
@@ -275,7 +280,7 @@ export function slimPrimeGroup(group, { id, status } = {}) {
     ...slimPrimeTotals(group),
     id: id ?? group.id,
     entry_count: group.entry_count ?? 0,
-    approval_remark: group.approval_remark ?? null,
+    accepted_remark: group.accepted_remark ?? null,
     item_codes: group.item_codes ?? [],
     items: (group.items ?? []).map((it) =>
       compact({
@@ -295,7 +300,8 @@ export function slimPrimeGroup(group, { id, status } = {}) {
 export async function loadPrimeItemChildren(primeKey, status) {
   const key = canonicalCode(primeKey);
   if (!key) return [];
-  let rows = await loadProductionShortages(status && PRIME_STATUSES.includes(status) ? [primeStatusSql(status)] : []);
+  const statusKey = status === "approved" ? "accepted" : status;
+  let rows = await loadProductionShortages(statusKey && PRIME_STATUSES.includes(statusKey) ? [primeStatusSql(statusKey)] : []);
   rows = rows.filter((r) => primeKeyOf(r) === key);
   return rows.map(slimShortageChild);
 }
@@ -303,7 +309,7 @@ export async function loadPrimeItemChildren(primeKey, status) {
 /** Maintain Job Card pending — Tooling-sized row + ids for create. */
 export function slimJobCardPendingGroup(group) {
   const children = group.children ?? [];
-  const allApproved = children.length > 0 && children.every((c) => c.is_approved === true);
+  const allAccepted = children.length > 0 && children.every((c) => c.is_accepted === true);
   return compact({
     ...slimPrimeTotals(group),
     id: String(group.prime_key),
@@ -311,7 +317,10 @@ export function slimJobCardPendingGroup(group) {
     items: group.items ?? [],
     shortage_ids: children.map((c) => c.id),
     gweight: group.gweight ?? null,
-    status: allApproved ? "approved" : "pending",
+    status: allAccepted ? "accepted" : "pending",
+    job_card_no: group.job_card_no ?? null,
+    docno: group.docno ?? null,
+    jc_has_plan: group.jc_has_plan ?? false,
   });
 }
 

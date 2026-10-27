@@ -9,13 +9,48 @@
  */
 import path from "path";
 import { saveDocuments, replaceDocument, removeDocument, updateDocumentRemark, listActiveDocuments } from "./documents.service.js";
-import { findActiveByUuid, updateRegisterJson } from "./documents.model.js";
+import { findActiveByUuid, findActiveByRefs, updateRegisterJson } from "./documents.model.js";
 import { slotOf } from "./documents.config.js";
 import { normDocPath, uploadDocName, uuidFromFileName, toModRef, fullDocPublicPath, isUuidExtFile } from "./documents.utils.js";
 import { docFileName } from "./documents.config.js";
 import { serializeReceivingFile } from "../../apps/ims/modules/invoice-receiving/utils/buildInvReceivingUploadFilter.js";
 
 const cleanRemark = (v) => (v == null ? null : String(v).trim() || null);
+
+/**
+ * Soft-deactivate every active document for one module record (`documents.status = false`
+ * + clear module file columns). Call **before** soft/hard deleting the parent row.
+ * Also picks up orphan `documents` rows still active when the module column is already empty.
+ * @returns {Promise<number>} rows deactivated
+ */
+export async function deactivateModuleDocuments(MODULE, ref) {
+  const key = toModRef(ref);
+  if (!MODULE || !key) {
+    if (ref != null && String(ref).trim() !== "") {
+      console.warn(`[documents] ${MODULE}: skip deactivate — empty mod_ref`);
+    }
+    return 0;
+  }
+
+  const fromModule = (await listActiveDocuments(MODULE, [key])).get(key) ?? [];
+  const seen = new Set(fromModule.map((d) => String(d.uuid).toLowerCase()));
+  const orphans = (await findActiveByRefs(MODULE, [key])).filter(
+    (d) => !seen.has(String(d.uuid).toLowerCase())
+  );
+  const all = [...fromModule, ...orphans];
+  let n = 0;
+  for (const d of all) {
+    try {
+      const ok = await removeDocument(d.uuid);
+      if (ok) n += 1;
+      else console.warn(`[documents] ${MODULE}:${key} deactivate skipped (already inactive) — ${d.uuid}`);
+    } catch (err) {
+      console.error(`[documents] ${MODULE}:${key} deactivate failed — ${d.uuid}: ${err?.message || err}`);
+      throw err;
+    }
+  }
+  return n;
+}
 
 /** Bound API for one module (`MODULE` = documents.mod_type). */
 export function moduleDocuments(MODULE) {
@@ -27,9 +62,7 @@ export function moduleDocuments(MODULE) {
     removeFile: removeDocument,
     listActive,
     listActiveMany: (refs, opts) => listActiveDocuments(MODULE, refs, opts),
-    removeAllActive: async (ref) => {
-      for (const d of await listActive(ref)) await removeDocument(d.uuid);
-    },
+    removeAllActive: (ref) => deactivateModuleDocuments(MODULE, ref),
   };
 }
 

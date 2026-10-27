@@ -1,10 +1,12 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { deactivateModuleDocuments } from "../../../../../lib/documents/index.js";
 import { COIL_QC_JOIN, COIL_QC_NOT_FINAL_COND } from "../../../lib/utils/coilQcStatusSql.js";
 import { qcPendingMrnCoilSql } from "../../../lib/utils/mrnPortalCoilSql.js";
 import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
 
 const TABLE = T.QC_CHECK;
+const QC_DOCS_MODULE = "rm_qc_check";
 
 const QC_MRN_JOIN = `LEFT JOIN ${T.MRN} m ON m.uid = q.mrn_uid`;
 
@@ -762,6 +764,14 @@ export const updateQcCheck = async (qc_check_uid, fields = {}) => {
 export const softDeleteQcChecksByCoilNoUids = async (coil_no_uids = [], deleted_by = null) => {
   const uids = (coil_no_uids || []).map((u) => String(u || "").trim()).filter(Boolean);
   if (!uids.length) return 0;
+  const existing = await dbQuery(
+    `SELECT qc_check_uid FROM ${TABLE}
+     WHERE coil_no_uid = ANY($1::text[]) AND is_deleted = false`,
+    [uids]
+  );
+  for (const r of existing || []) {
+    await deactivateModuleDocuments(QC_DOCS_MODULE, r.qc_check_uid);
+  }
   const rows = await dbQuery(
     `UPDATE ${TABLE}
      SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_by = $2, updated_at = NOW()
@@ -775,6 +785,13 @@ export const softDeleteQcChecksByCoilNoUids = async (coil_no_uids = [], deleted_
 export const softDeleteQcChecksByMrn = async (mrn_uid, deleted_by = null) => {
   const uid = String(mrn_uid || "").trim();
   if (!uid) return 0;
+  const existing = await dbQuery(
+    `SELECT qc_check_uid FROM ${TABLE} WHERE mrn_uid = $1 AND is_deleted = false`,
+    [uid]
+  );
+  for (const r of existing || []) {
+    await deactivateModuleDocuments(QC_DOCS_MODULE, r.qc_check_uid);
+  }
   const rows = await dbQuery(
     `UPDATE ${TABLE}
      SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_by = $2, updated_at = NOW()
@@ -789,6 +806,11 @@ export const softDeleteQcChecksByMrn = async (mrn_uid, deleted_by = null) => {
 export const hardDeleteQcChecksByMrn = async (mrn_uid) => {
   const uid = String(mrn_uid || "").trim();
   if (!uid) return 0;
+  // Deactivate documents while QC rows (and doc_files) still exist.
+  const existing = await dbQuery(`SELECT qc_check_uid FROM ${TABLE} WHERE mrn_uid = $1`, [uid]);
+  for (const r of existing || []) {
+    await deactivateModuleDocuments(QC_DOCS_MODULE, r.qc_check_uid);
+  }
   const rows = await dbQuery(
     `DELETE FROM ${TABLE}
      WHERE mrn_uid = $1
@@ -802,6 +824,7 @@ export const hardDeleteQcChecksByMrn = async (mrn_uid) => {
 export const softDeleteQcCheck = async (qc_check_uid, deleted_by = null) => {
   const id = Number(qc_check_uid);
   if (!Number.isFinite(id)) return null;
+  await deactivateModuleDocuments(QC_DOCS_MODULE, id);
   const [row] = await dbQuery(
     `UPDATE ${TABLE}
      SET is_deleted = true, deleted_at = NOW(), deleted_by = $2, updated_by = $2, updated_at = NOW()

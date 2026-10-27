@@ -1,27 +1,27 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { ENGINEERING_TABLES as T } from "../../../../../config/db/dbTables.js";
-import { attachmentsFromDocuments } from "../../../../../lib/documents/index.js";
+import { attachmentsFromDocuments, deactivateModuleDocuments } from "../../../../../lib/documents/index.js";
 
 const MACHINE_MODULE = "eng_machine_master";
 
-const ALLOWED_FILTER_FIELDS = ["id", "process_id", "number", "approved", "from_date", "to_date"];
+const ALLOWED_FILTER_FIELDS = ["maccode", "macproccode", "macno", "approved", "from_date", "to_date"];
 const ALLOWED_SORT_FIELDS = [
-  "id", "macname", "number", "process_id", "speed", "duration", "setup_time",
+  "maccode", "macname", "macno", "macproccode", "cavity", "maccycletime", "setup_time",
   "approved", "created_at", "updated_at",
 ];
 const ALLOWED_UPDATE_FIELDS = [
-  "macname", "number", "process_id", "speed", "duration", "setup_time", "make", "model", "remark",
+  "macname", "macno", "macproccode", "cavity", "maccycletime", "setup_time", "make", "model", "remark",
   "approved", "approved_by", "approved_at", "updated_by", "updated_at",
 ];
 
 const JOINS = `
-  LEFT JOIN ${T.PROCESS_MASTER} pm ON pm.id = mm.process_id AND pm.is_deleted = false
+  LEFT JOIN ${T.PROCESS_MASTER} pm ON pm.proccode = mm.macproccode AND pm.is_deleted = false
 `;
 
 const DEFAULT_FIELDS = [
-  "mm.id", "mm.macname", "mm.macname AS name", "mm.number", "mm.process_id",
-  "mm.speed", "mm.duration", "mm.setup_time", "mm.make", "mm.model", "mm.remark",
-  "pm.name AS process_name", "pm.depth AS process_depth",
+  "mm.maccode", "mm.macname", "mm.macno", "mm.macproccode",
+  "mm.cavity", "mm.maccycletime", "mm.setup_time", "mm.make", "mm.model", "mm.remark",
+  `pm.procname AS process_name`, "pm.depth AS process_depth",
   "mm.approved", "mm.approved_by", "mm.approved_at",
   "mm.created_by", "mm.created_at", "mm.updated_by", "mm.updated_at",
   "mm.deleted_by", "mm.deleted_at",
@@ -65,14 +65,14 @@ export const findMachines = async (options = {}) => {
   if (search) {
     values.push(`%${search}%`);
     conditions.push(
-      `(mm.macname ILIKE $${i} OR mm.number ILIKE $${i} OR COALESCE(mm.make,'') ILIKE $${i} OR COALESCE(mm.model,'') ILIKE $${i} OR COALESCE(pm.name,'') ILIKE $${i})`
+      `(mm.macname ILIKE $${i} OR mm.macno ILIKE $${i} OR COALESCE(mm.make,'') ILIKE $${i} OR COALESCE(mm.model,'') ILIKE $${i} OR COALESCE(pm.procname,'') ILIKE $${i})`
     );
     i += 1;
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const selectFields = fields.length ? fields : DEFAULT_FIELDS;
-  const sortKey = ALLOWED_SORT_FIELDS.includes(sort.by) ? sort.by : "id";
+  const sortKey = ALLOWED_SORT_FIELDS.includes(sort.by) ? sort.by : "maccode";
   const sortDir = String(sort.order || "DESC").toUpperCase() === "ASC" ? "ASC" : "DESC";
 
   const countRes = await dbQuery(
@@ -88,33 +88,34 @@ export const findMachines = async (options = {}) => {
      FROM ${T.MACHINE_MASTER} mm
      ${JOINS}
      ${where}
-     ORDER BY mm.${sortKey} ${sortDir}, mm.id DESC
+     ORDER BY mm.${sortKey} ${sortDir}, mm.maccode DESC
      LIMIT $${i++} OFFSET $${i++}`,
     values
   );
   return { data: rows, total };
 };
 
-export const findMachine = async ({ id }) => {
+export const findMachine = async ({ maccode, id }) => {
+  const code = maccode ?? id;
   const [row] = await dbQuery(
     `SELECT ${DEFAULT_FIELDS.join(", ")}
      FROM ${T.MACHINE_MASTER} mm
      ${JOINS}
-     WHERE mm.id = $1 AND mm.is_deleted = false
+     WHERE mm.maccode = $1 AND mm.is_deleted = false
      LIMIT 1`,
-    [id]
+    [code]
   );
   if (!row) return null;
-  const attachments = await attachmentsFromDocuments(MACHINE_MODULE, row.id, [], "machine");
+  const attachments = await attachmentsFromDocuments(MACHINE_MODULE, row.maccode, [], "machine");
   return { ...row, attachments };
 };
 
-/** Another active machine with the same `macname` or `number` (values stored CAPS), other than `excludeId`. */
+/** Another active machine with the same `macname` or `macno` (values stored CAPS), other than `excludeId`. */
 export const findMachineDuplicate = async (field, value, excludeId = null) => {
-  if (!["macname", "number"].includes(field)) return null;
+  if (!["macname", "macno"].includes(field)) return null;
   const [row] = await dbQuery(
-    `SELECT id FROM ${T.MACHINE_MASTER}
-     WHERE is_deleted = false AND ${field} = $1 AND id IS DISTINCT FROM $2::int
+    `SELECT maccode FROM ${T.MACHINE_MASTER}
+     WHERE is_deleted = false AND ${field} = $1 AND maccode IS DISTINCT FROM $2::int
      LIMIT 1`,
     [String(value ?? "").trim().toUpperCase(), excludeId]
   );
@@ -160,7 +161,8 @@ export const updateMachines = async (fields, where) => {
   return row || null;
 };
 
-export const deleteMachines = async (where, audit = {}) => {
+/** Hard delete — row removed from DB. */
+export const deleteMachines = async (where) => {
   const values = [];
   let i = 1;
   const whereParts = [];
@@ -168,12 +170,12 @@ export const deleteMachines = async (where, audit = {}) => {
     whereParts.push(`${key} = $${i++}`);
     values.push(val);
   }
-  values.push(audit.deleted_by ?? null);
+  if (where?.maccode != null) {
+    await deactivateModuleDocuments(MACHINE_MODULE, where.maccode);
+  }
+  if (!whereParts.length) return null;
   const [row] = await dbQuery(
-    `UPDATE ${T.MACHINE_MASTER}
-     SET is_deleted = true, deleted_by = $${i++}, deleted_at = NOW()
-     WHERE ${whereParts.join(" AND ")} AND is_deleted = false
-     RETURNING *`,
+    `DELETE FROM ${T.MACHINE_MASTER} WHERE ${whereParts.join(" AND ")} RETURNING *`,
     values
   );
   return row || null;

@@ -1,10 +1,11 @@
 import dbQuery from "../../../lib/shared/db.js";
 import { MST_TABLES as M } from "../../../../../config/db/dbTables.js";
-import { attachmentsFromDocuments, moduleDocuments } from "../../../../../lib/documents/index.js";
+import { attachmentsFromDocuments, deactivateModuleDocuments, moduleDocuments } from "../../../../../lib/documents/index.js";
 import { parseClAttachments } from "../helpers/form/clTaskForm.helper.js";
 import { getISTDateString, getISTTimeHM } from "../helpers/time/clTaskTime.helper.js";
 
 const CL_MASTER_DOCS = "cl_task_master";
+const CL_FILL_DOCS = "cl_task_fill";
 
 /** Documents rows → CL attachment meta (`file_path` …) for API / spawn. */
 function clMetaFromDoc(r) {
@@ -490,6 +491,7 @@ const ClTask = {
   },
 
   async deleteMaster(id) {
+    await deactivateModuleDocuments(CL_MASTER_DOCS, id);
     return dbQuery(`DELETE FROM ${MASTER_TABLE} WHERE cl_task_id = ?`, [id]);
   },
 
@@ -1053,6 +1055,7 @@ const ClTask = {
   },
 
   async deleteInstance(id) {
+    await deactivateModuleDocuments(CL_FILL_DOCS, id);
     return dbQuery(`DELETE FROM ${INSTANCE_TABLE} WHERE instance_id = ?`, [id]);
   },
 

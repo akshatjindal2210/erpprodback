@@ -1,5 +1,5 @@
 import dbQuery from "../../../../../config/db/db.js";
-import { attachPathListRow, attachPathListRows } from "../../../../../lib/documents/index.js";
+import { attachPathListRow, attachPathListRows, deactivateModuleDocuments } from "../../../../../lib/documents/index.js";
 import { MODULE as IPR_MODULE } from "../routes/inProcessRequest.routes.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
@@ -1490,6 +1490,8 @@ export const findInProcessRejectionsPendingRejection = async (options = {}) => {
 export const softDeleteInProcessRequest = async (ipr_uid, deleted_by = null) => {
   const id = Number(ipr_uid);
   if (!Number.isFinite(id)) return;
+  // Parent soft-delete must also deactivate linked documents (status = false).
+  await deactivateModuleDocuments(IPR_MODULE, id);
   await dbQuery(
     `UPDATE ${TABLE}
      SET is_deleted = true, deleted_at = NOW(), deleted_by = $2

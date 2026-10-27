@@ -7,9 +7,9 @@ import { syncProcessDepth } from "../../../../modules/process-master/models/proc
 export async function createProcessMasterTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.PROCESS_MASTER} (
-      id            SERIAL PRIMARY KEY,
-      name          VARCHAR(200) NOT NULL,
-      parent_id     INTEGER REFERENCES ${T.PROCESS_MASTER}(id),
+      proccode      SERIAL PRIMARY KEY,
+      procname      VARCHAR(200) NOT NULL,
+      parent_id     INTEGER REFERENCES ${T.PROCESS_MASTER}(proccode),
       depth         INTEGER NOT NULL DEFAULT 0,
       stage         VARCHAR(10) NOT NULL DEFAULT 'MID',
       pattern       TEXT,
@@ -32,9 +32,15 @@ export async function createProcessMasterTable() {
     );
   `);
 
-  // Existing (older) table: multi_mc → multi_jc (data kept), `type` removed, one-START / one-END rule removed.
+  // Existing DBs — rename to current names (idempotent)
   await applyTablePatches(dbQuery, T.PROCESS_MASTER, {
-    renameColumns: [{ from: "multi_mc", to: "multi_jc" }],
+    renameColumns: [
+      { from: "id", to: "proccode" },
+      { from: "name", to: "procname" },
+      { from: "ProcCode", to: "proccode" },
+      { from: "ProcName", to: "procname" },
+      { from: "multi_mc", to: "multi_jc" },
+    ],
     dropColumns: ["type"],
     indexes: [
       `DROP INDEX IF EXISTS eng_process_stage_start_unique_active`,
@@ -59,9 +65,7 @@ export async function createProcessMasterTable() {
       `CREATE INDEX IF NOT EXISTS eng_process_parent_idx ON ${T.PROCESS_MASTER} (parent_id) WHERE is_deleted = false`,
     ],
   });
-  if (!hadDepth) await syncProcessDepth(); // depth just added → fill the level of existing rows (once)
+  if (!hadDepth) await syncProcessDepth();
 
-  // Process name unique under the same parent (masters: parent 0), case / spaces ignored.
-  // To remove this rule: replace the line below with  await dropIndexesIfExist(dbQuery, ["eng_process_name_unique_active"]);
-  await ensureUniqueIndex(dbQuery, T.PROCESS_MASTER, "eng_process_name_unique_active", "COALESCE(parent_id, 0), lower(trim(name))", "is_deleted = false");
+  await ensureUniqueIndex(dbQuery, T.PROCESS_MASTER, "eng_process_name_unique_active", `COALESCE(parent_id, 0), lower(trim(procname))`, "is_deleted = false");
 }

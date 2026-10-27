@@ -36,7 +36,7 @@ export const DOC_FILE_LINKS = {
   rm_qc_check: { table: R.QC_CHECK, key: "qc_check_uid", multi: "doc_files", folder: "uploads/rmstore/qc", exts: EXT.pdfImage },
   rm_in_process_request: { table: R.IN_PROCESS_REQUEST, key: "ipr_uid", multi: "doc_files", folder: "uploads/rmstore/ipr", exts: EXT.pdfImage },
   invoice_receiving: { table: I.GATE_ENTRY, key: "uid", multi: "doc_files", folder: "uploads/ims/invoice-receiving", exts: EXT.pdfImageWord },
-  eng_machine_master: { table: E.MACHINE_MASTER, key: "id", multi: "doc_files", folder: "uploads/eng/machine", exts: EXT.office },
+  eng_machine_master: { table: E.MACHINE_MASTER, key: "maccode", multi: "doc_files", folder: "uploads/eng/machine", exts: EXT.office },
   tasks: { table: TaskT.CHAT, key: "chat_id", multi: "doc_files", folder: "uploads/task_tasks/chat", exts: EXT.pdfImageWord },
   task_self_note: { table: TaskT.SELF_NOTES, key: "self_note_id", register: true, jsonCol: "attachments", folder: "uploads/task_tasks/self", exts: EXT.pdfImageWord },
   task_recurring_chat: { table: TaskT.RECURRING_TASK_CHAT, key: "chat_id", register: true, jsonCol: "attachments", folder: "uploads/task_recurring_tasks/chat", exts: EXT.pdfImageWord },

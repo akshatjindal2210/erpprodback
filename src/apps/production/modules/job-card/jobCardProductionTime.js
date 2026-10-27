@@ -10,17 +10,17 @@
  *   cycles  = ceil(qty / speed)
  *   run     = cycles × duration
  *   total   = setup + run
- *   shifts  = ceil(total / 8h)
+ *   shifts  = ceil(total / SHIFT_HOURS)  ← SHIFT_HOURS in jobCard.config.js (default 8)
  *
  * Multiple Job Card (multi_jc) — see MULTI_JC_SPLIT_TIME in jobCard.config.js:
  *   false = machine-wise (default): each machine = full qty (current)
  *   true  = half-half: setup / run / total / shifts ÷ machine count
  */
 import { findPrimeProcess } from "./models/jobCard.model.js";
-import { MULTI_JC_SPLIT_TIME } from "./jobCard.config.js";
+import { MULTI_JC_SPLIT_TIME, SHIFT_HOURS } from "./jobCard.config.js";
 import { buildAvailableCoilsForIssue } from "../../../rmstore/modules/issue-request/utils/stock/issueRequestCoilReserve.js";
 
-export const SHIFT_HOURS = 8;
+export { SHIFT_HOURS };
 const SHIFT_SECONDS = SHIFT_HOURS * 3600;
 
 const toShifts = (seconds) => (seconds > 0 ? Math.ceil(seconds / SHIFT_SECONDS) : 0);

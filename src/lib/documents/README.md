@@ -46,6 +46,7 @@ remarks      Stored in `documents.remark`; **Invoice Receiving** UI sends/shows 
 | Upload | new row | name added |
 | Replace | old row `status = false`, new row | name swapped |
 | Remove | row `status = false` | name removed (empty → `NULL`) |
+| **Parent delete** | all active rows for that `mod_ref` → `status = false` via `deactivateModuleDocuments(MODULE, ref)` / `moduleDocuments(MODULE).removeAllActive(ref)` **before** soft/hard delete | file columns cleared |
 
 Rows and physical files are never deleted.
 

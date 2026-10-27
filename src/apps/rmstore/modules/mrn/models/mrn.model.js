@@ -1,6 +1,6 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
-import { attachTcRmtcRow, attachTcRmtcRows } from "../../../../../lib/documents/index.js";
+import { attachTcRmtcRow, attachTcRmtcRows, deactivateModuleDocuments } from "../../../../../lib/documents/index.js";
 import { MODULE as MRN_MODULE } from "../routes/mrn.routes.js";
 
 const TABLE = T.MRN;
@@ -524,6 +524,8 @@ export const resetMrnStickerGenerated = async (uid) => {
 export const hardDeleteMrnByUid = async (uid) => {
   const key = String(uid || "").trim();
   if (!key) return false;
+  // Deactivate TC/RMTC documents while the MRN row (and slot columns) still exist.
+  await deactivateModuleDocuments(MRN_MODULE, key);
   const rows = await dbQuery(
     `DELETE FROM ${TABLE} WHERE uid = $1 RETURNING uid`,
     [key]

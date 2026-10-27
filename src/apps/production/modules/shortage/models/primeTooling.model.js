@@ -51,7 +51,7 @@ export async function attachTooling(groups = [], { withRemark = true } = {}) {
 
   for (const g of groups) {
     const row = byItem.get(Number(g.prime_key));
-    const shortageApproved = g.status === "approved";
+    const shortageApproved = g.status === "accepted";
     g.tooling = shortageApproved ? toolingOf(row?.approved) : null;
     if (withRemark && shortageApproved) {
       g.tooling_remark = row?.remark ?? null;

@@ -241,16 +241,16 @@ export const CRUD_MODULES = {
     searchFields: ["itemcode", "grpname", "type", "itemdcode"],
   },
   eng_process_master: {
-    idField: "id",
+    idField: "proccode",
     listFields: [],
-    filterFields: ["id", "parent_id", "stage", "depth", "approved", "from_date", "to_date"],
-    searchFields: ["name", "pattern", "stage"],
+    filterFields: ["proccode", "parent_id", "stage", "depth", "approved", "from_date", "to_date"],
+    searchFields: ["procname", "pattern", "stage"],
   },
   eng_machine_master: {
-    idField: "id",
+    idField: "maccode",
     listFields: [],
-    filterFields: ["id", "process_id", "number", "approved", "from_date", "to_date"],
-    searchFields: ["macname", "number", "make", "model"],
+    filterFields: ["maccode", "macproccode", "macno", "approved", "from_date", "to_date"],
+    searchFields: ["macname", "macno", "make", "model"],
   },
 };
 

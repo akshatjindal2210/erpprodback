@@ -15,6 +15,7 @@ import { createPushDeliveryLogTable } from "../tables/notifications/push_deliver
 import { createNotificationTemplatesTable } from "../tables/notifications/notification_templates.table.js";
 import { createNotificationLogsTable } from "../tables/notifications/notification_logs.table.js";
 import { createUserAppPreferencesTable } from "../tables/configuration/user_app_preferences.table.js";
+import { createShiftsTable } from "../tables/configuration/shifts.table.js";
 import { createCoreUpdatedAtTriggers } from "../tables/db/triggers.table.js";
 
 export const initCoreDB = async () => {
@@ -33,6 +34,7 @@ export const initCoreDB = async () => {
   await createPushDeliveryLogTable();
   await createNotificationTemplatesTable();
   await createNotificationLogsTable();
+  await createShiftsTable();
   // await createUserAppPreferencesTable();
   await createCoreUpdatedAtTriggers();
 

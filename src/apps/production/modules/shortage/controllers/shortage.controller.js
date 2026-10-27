@@ -11,31 +11,11 @@ import { getItemsMonthlyPackingUsedBatch } from "../../../../ims/lib/utils/inven
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { PRODUCTION_GROUP_NAME } from "../../../lib/config/groupFilter.js";
-import { ensureDraftJobCardForShortage } from "../../job-card/models/jobCard.model.js";
-
 const CFG = getCrudModuleConfig("shortage");
 const BULK_INSERT_CHUNK = 400;
 const MASTER_TYPE_QTY_KEYS = ["qty_ppc", "qty_additional"];
 
 const ENTITY = "production_shortage";
-
-/** After ims_shortage insert → draft prod_job_card (approval joined from shortage). */
-async function syncDraftJobCardFromShortageRow(row, user) {
-  if (!row?.id || !row?.itemdcode) return;
-  try {
-    const { itemMap } = await getImsMapsSafe();
-    const info = itemMap.get(canonicalCode(row.itemdcode)) || {};
-    const primeKey = Number(info.primitemdcode) || Number(row.itemdcode);
-    await ensureDraftJobCardForShortage({
-      primeKey,
-      shortageId: row.id,
-      user,
-    });
-  } catch (err) {
-    // Don't fail shortage create if draft JC sync fails — log via throw only in non-prod? keep soft.
-    console.error("[shortage] draft job card sync failed:", err?.message || err);
-  }
-}
 
 /* ─────────────────────────────  helpers  ───────────────────────────── */
 
@@ -402,7 +382,6 @@ export const createShortage = async (req, res) => {
     if (forced) prepared.grpname = forced;
 
     const row = await insertShortage(prepared);
-    await syncDraftJobCardFromShortageRow(row, prepared.created_by);
 
     await logActivity(req, {
       action: "create",
@@ -499,7 +478,6 @@ export async function createShortageRecordInternal(record, req) {
     const prepared = await applyShortageApproval(data, { mode: "create", req, existing: null, autoApprove: true });
 
     const row = await insertShortage(prepared);
-    await syncDraftJobCardFromShortageRow(row, prepared.created_by);
     const [enriched] = await enrichShortageRows([row]);
     return { success: true, data: enriched };
   } catch (err) {
@@ -767,10 +745,6 @@ export const bulkCreateShortages = async (req, res) => {
         count += chunk.length;
       }
     });
-
-    for (const row of insertedRows) {
-      await syncDraftJobCardFromShortageRow(row, user);
-    }
 
     return res.status(201).json({
       success: true,

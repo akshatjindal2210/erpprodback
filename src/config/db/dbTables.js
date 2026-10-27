@@ -49,6 +49,7 @@ export const DB_TABLES = {
     "mst_notification_templates",
     "mst_notification_logs",
     "mst_dashboard_configs",
+    "mst_shifts",
     // "mst_user_app_preferences",
   ],
 
@@ -126,7 +127,7 @@ export const DB_TABLES = {
 
   purchase: [],
   /** Production application tables. */
-  production: ["prod_job_card"],
+  production: ["prod_job_card", "prod_job_card_process_log"],
 
   /** Engineering application tables. */
   engineering: [

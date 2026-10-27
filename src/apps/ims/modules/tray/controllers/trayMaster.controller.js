@@ -8,6 +8,7 @@ import { auditUserName, normalizeApprovedInput } from "../../../../core/lib/util
 import { createTrayBatch, deleteTrayBatch as deleteTrayBatchRows, deleteTrayById, deleteTraysByIds, findTray, findTrayBatches, findTrays, updateTrayApprovalById, updateTrayBatch, updateTrayBatchStatus, updateTrayStatusById, updateTrayStatusByIds } from "../models/trayMaster.model.js";
 import { TRAY_TYPES, isValidTrayType, normalizeTrayType } from "../config/trayTypes.js";
 import { isValidTrayStatus, normalizeTrayStatus } from "../config/trayStatuses.js";
+import { resolveTrayQrPayload } from "../../../../core/lib/utils/qr/publicQrUrl.js";
 
 const CFG = getCrudModuleConfig("tray_master");
 
@@ -378,3 +379,42 @@ export const deleteTray = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
+/** Batch print payloads — `tray_code` + primary `id` in public URL (same pattern as box stickers). */
+export async function resolveTrayQrPayloads(req, res) {
+  try {
+    const traysIn = Array.isArray(req.body?.trays) ? req.body.trays : [];
+    const codesIn = Array.isArray(req.body?.codes) ? req.body.codes : [];
+    const rows = [];
+
+    for (const t of traysIn) {
+      const code = String(t?.code ?? t?.tray_code ?? "").trim().toUpperCase();
+      const idNum = Number(t?.id ?? t?.tray_id);
+      const id = Number.isFinite(idNum) && idNum > 0 ? idNum : null;
+      if (code || id) rows.push({ code: code || null, id });
+    }
+
+    if (!rows.length && codesIn.length) {
+      const codes = [...new Set(codesIn.map((v) => String(v ?? "").trim().toUpperCase()).filter(Boolean))];
+      for (const code of codes) {
+        const tray = await findTray({ code }, { fields: ["t.id", "t.code"] });
+        rows.push({ code: tray?.code ? String(tray.code).trim().toUpperCase() : code, id: tray?.id ?? null });
+      }
+    }
+
+    if (!rows.length) {
+      return res.status(400).json({ success: false, message: "At least one tray (id + code) is required." });
+    }
+
+    const entries = await Promise.all(
+      rows.map(async (row) => {
+        const key = row.code || String(row.id);
+        const payload = await resolveTrayQrPayload({ code: row.code || "", id: row.id });
+        return [key, payload];
+      })
+    );
+    return res.json({ success: true, data: { payloads: Object.fromEntries(entries) } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}

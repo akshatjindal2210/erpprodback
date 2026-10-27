@@ -4,6 +4,7 @@
 import dbQuery from "../../../../config/db/db.js";
 import { MST_TABLES as M } from "../../../../config/db/dbTables.js";
 import { findActiveTemplatesByModuleId, normalizeAudience, isAudienceDimActive, audienceHasAny, effectiveAudience } from "./notificationTemplate.model.js";
+import { evaluateTemplateConditions } from "./notificationConditions.js";
 import { insertNotificationLogsBatch } from "./notificationTemplateLog.model.js";
 import { auditUserName } from "../../lib/utils/auth/approval.js";
 import { saveInboxAlert } from "../inbox/inboxNotify.service.js";
@@ -629,6 +630,13 @@ export async function dispatchModuleEvent({
       const tplEvents = Array.isArray(tpl.trigger_events) ? tpl.trigger_events : [];
       const event = pickTemplateEvent(events, tplEvents);
       if (!event) continue;
+      // Optional conditions on template — empty = always send (backward compatible)
+      try {
+        if (!evaluateTemplateConditions(tpl, recordVars)) continue;
+      } catch (err) {
+        console.error(`[Module notify] template ${tpl.id} condition failed:`, err.message);
+        continue;
+      }
       matched = true;
       try {
         await deliverTemplate(tpl, event, { recordVars, recordId, actorName, sourceAction });
@@ -638,7 +646,7 @@ export async function dispatchModuleEvent({
     }
     if (!matched) {
       console.warn(
-        `[Module notify] Module "${moduleName}": no template trigger matched events [${events.join(", ")}]`
+        `[Module notify] Module "${moduleName}": no template trigger/condition matched events [${events.join(", ")}]`
       );
     }
   } catch (err) {

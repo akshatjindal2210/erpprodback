@@ -32,7 +32,7 @@ import {
   slimAttachmentsForStorage,
 } from "../models/inProcessRequest.model.js";
 import { toRmPublicUploadPath } from "../../../lib/middleware/upload.js";
-import { syncPathsFromList } from "../../../../../lib/documents/index.js";
+import { syncPathsFromList, enrichQcItemsWithDocuments } from "../../../../../lib/documents/index.js";
 import { MODULE as IPR_MODULE } from "../routes/inProcessRequest.routes.js";
 import { stampRmstoreUploadedFiles } from "../../../lib/utils/stampRmstoreUploadedFiles.js";
 import { extractListParams, sanitizeFilters } from "../../../../core/lib/utils/query/queryHelper.js";
@@ -55,6 +55,8 @@ import { findApprovedFgItemsForRmWire, findApprovedProductionRowsLite, findProdu
 import { enrichProductionRow, normalizeRmItems } from "../../production/utils/productionRmHelpers.js";
 
 const MODULE = "rm_in_process_request";
+/** Same mod_type used when QC uploads are persisted to the central documents table. */
+const QC_CHECK_MODULE = "rm_qc_check";
 const log = createRmstoreActivityLogger(MODULE);
 
 async function attachQcChecksToIprRejection(data) {
@@ -80,7 +82,9 @@ async function attachQcChecksToIprRejection(data) {
     if (!Number.isFinite(id) || id <= 0 || qcMap.has(id)) return;
     const row = await findQcCheck(id);
     if (!row) return;
-    const items = await findQcCheckItems(id);
+    // Persist clears document_note and keeps document_id — restore paths for rejection drawers.
+    const rawItems = await findQcCheckItems(id);
+    const items = await enrichQcItemsWithDocuments(QC_CHECK_MODULE, id, rawItems || []);
     qcMap.set(id, {
       ...row,
       items: (items || []).map((it) => ({

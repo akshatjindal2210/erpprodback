@@ -23,6 +23,7 @@ export async function createCoreUpdatedAtTriggers() {
     T.DESIGNATIONS,
     T.ATTRIBUTES,
     T.NOTIFICATION_TEMPLATES,
+    T.SHIFTS,
   ];
 
   for (const table of tables) {

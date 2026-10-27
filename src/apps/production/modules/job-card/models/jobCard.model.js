@@ -4,38 +4,57 @@ import { findPrimeIdsByItems, loadStages, PROCESS_TYPE } from "../../../../engin
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
 import { rmItemMap, labelStageRm } from "../../../../rmstore/modules/production/utils/erpItems.js";
 import { sqlDocDtText } from "../../../../ims/modules/box/utils/inventory/boxInventorySql.js";
-import { JC_START, jobCardNo, JOB_CARD_TYPE, JOB_CARD_TYPE_DEFAULT, JOB_CARD_TYPE_KEY } from "../jobCard.config.js";
+import { formatPJobCardNo, JC_START, JOB_CARD_TYPE, JOB_CARD_TYPE_DEFAULT, JOB_CARD_TYPE_KEY } from "../jobCard.config.js";
+import { JC_SERIES_CODE, nextJobcardno, resolveFyidForJobCard } from "../jobCardErp.js";
 
 /**
  * Maintain Job Card — DB layer (prod_job_card).
- * Stored here: type (jc=0 default | 2c=1 | …), shortage_ids (FK), remarks, tooling_*.
- * Joined from ims_shortage via shortage_ids: qty, items, shortage_approved, shortage_remark.
+ * Stored here: type (jc=0 default | 2c=1 | …), remarks, tooling_*.
+ * Shortage lines joined via ims_shortage.docno → prod_job_card.docno.
  */
 
 export const JOB_CARD_STATUSES = ["Pending", "Planning", "Running", "Hold", "Complete"];
 export { JOB_CARD_TYPE, JOB_CARD_TYPE_DEFAULT, JOB_CARD_TYPE_KEY };
 
-/** JC whose shortage_ids are all ims_shortage.is_approved = true (joined — not stored on JC). */
+/** Linked shortages (ims_shortage.docno) all is_accepted = true. */
 export function shortageFullyApprovedSql(jcAlias = "") {
-  const ids = jcAlias ? `${jcAlias}.shortage_ids` : "shortage_ids";
+  const doc = jcAlias ? `${jcAlias}.docno` : "docno";
   return `(
-    cardinality(${ids}) > 0
+    EXISTS (
+      SELECT 1 FROM ${IMS_TABLES.SHORTAGE} s
+      WHERE s.docno = ${doc} AND COALESCE(s.is_deleted, false) = false
+    )
     AND NOT EXISTS (
-      SELECT 1
-      FROM unnest(${ids}) AS sid(id)
-      LEFT JOIN ${IMS_TABLES.SHORTAGE} s ON s.id = sid.id AND COALESCE(s.is_deleted, false) = false
-      WHERE s.is_approved IS DISTINCT FROM true
+      SELECT 1 FROM ${IMS_TABLES.SHORTAGE} s
+      WHERE s.docno = ${doc} AND COALESCE(s.is_deleted, false) = false
+        AND s.is_accepted IS DISTINCT FROM true
     )
   )`;
 }
+
 const UPDATABLE = [
-  "pldt", "schedule_shift", "status", "remarks", "process_plan", "shortage_ids",
+  "jobcarddt", "schedule_shift", "status", "remarks", "process_plan", "planqty",
   "approved", "approved_by", "approved_at",
   "tooling_approved", "tooling_remark", "tooling_by", "tooling_at",
   "updated_by", "updated_at",
 ];
 
-const READ_COLS = `docno, pjobcardno, ${sqlDocDtText("pldt")} AS pldt, schedule_shift, type, itemdcode, shortage_ids, process_plan, status, remarks,
+const JSONB_COLS = new Set(["process_plan"]);
+
+/** Set ims_shortage.docno for shortage lines (optional: only rows with docno IS NULL). */
+async function linkShortageIdsToDocno(docno, shortageIds, { onlyWhenDocnoNull = true } = {}, client = null) {
+  const jcDocno = Number(docno);
+  const ids = [...new Set((shortageIds || []).map(Number).filter(Boolean))];
+  if (!jcDocno || !ids.length) return;
+  const nullFilter = onlyWhenDocnoNull ? " AND docno IS NULL" : "";
+  const sql = `UPDATE ${IMS_TABLES.SHORTAGE} SET docno = $1 WHERE id = ANY($2::int[]) AND COALESCE(is_deleted, false) = false${nullFilter}`;
+  const params = [jcDocno, ids];
+  if (client) await client.query(sql, params);
+  else await dbQuery(sql, params);
+}
+
+const READ_COLS = `docno, pjobcardno, ${sqlDocDtText("jobcarddt")} AS jobcarddt, schedule_shift, type, itemdcode, process_plan, status, remarks,
+              jobcardno, jcseriescode, fyid, planqty,
               approved, approved_by, approved_at,
               tooling_approved, tooling_remark, tooling_by, tooling_at,
               created_by, created_at, updated_by, updated_at`;
@@ -53,62 +72,106 @@ export async function findJobCard(docno) {
   return row ?? null;
 }
 
-/** Open draft = JC whose shortages are not all approved yet (still pending on shortage side). */
-export async function findOpenShortageDraft(primeKey, type = JOB_CARD_TYPE_DEFAULT) {
-  const [row] = await dbQuery(
-    `SELECT ${READ_COLS} FROM ${T.JOB_CARD}
-     WHERE itemdcode = $1 AND type = $2 AND is_deleted = false AND NOT ${shortageFullyApprovedSql()}
-     ORDER BY docno DESC LIMIT 1`,
-    [Number(primeKey), Number(type)]
-  );
-  return row ?? null;
-}
-
-export async function findJobCardByShortageIds(primeKey, shortageIds = [], type = JOB_CARD_TYPE_DEFAULT) {
+export async function findJobCardByShortageIds(shortageIds = []) {
   const ids = [...new Set((shortageIds || []).map(Number).filter(Boolean))];
   if (!ids.length) return null;
-  const [row] = await dbQuery(
-    `SELECT ${READ_COLS} FROM ${T.JOB_CARD}
-     WHERE itemdcode = $1 AND type = $2 AND is_deleted = false AND shortage_ids @> $3::int[]
-     ORDER BY docno DESC LIMIT 1`,
-    [Number(primeKey), Number(type), ids]
+
+  const shortages = await dbQuery(
+    `SELECT id, itemdcode, is_accepted, docno FROM ${IMS_TABLES.SHORTAGE}
+     WHERE id = ANY($1::int[]) AND COALESCE(is_deleted, false) = false`,
+    [ids]
   );
-  return row ?? null;
+  if (!shortages.length) return null;
+
+  let stubDocno = null;
+  for (const d of [...new Set(shortages.map((s) => Number(s.docno)).filter(Boolean))]) {
+    const jc = await findJobCard(d);
+    if (jc) stubDocno = d;
+    else {
+      await dbQuery(
+        `UPDATE ${IMS_TABLES.SHORTAGE} SET docno = NULL WHERE id = ANY($1::int[]) AND docno = $2`,
+        [ids, d]
+      );
+    }
+  }
+  if (stubDocno) {
+    await linkShortageIdsToDocno(stubDocno, ids);
+    return findJobCard(stubDocno);
+  }
+
+  if (!shortages.every((s) => s.is_accepted === true)) return null;
+
+  const { itemMap } = await getImsMapsSafe();
+  const primeOf = (d) => Number(itemMap.get(canonicalCode(d))?.primitemdcode) || Number(d);
+  const primeKeys = [...new Set(shortages.map((s) => primeOf(s.itemdcode)).filter(Boolean))];
+  if (primeKeys.length !== 1) return null;
+
+  const [stub] = await dbQuery(
+    `SELECT ${READ_COLS} FROM ${T.JOB_CARD}
+     WHERE is_deleted = false AND itemdcode = $1 AND approved IS DISTINCT FROM true AND jobcardno IS NULL
+     ORDER BY docno DESC LIMIT 1`,
+    [primeKeys[0]]
+  );
+  if (stub) {
+    await linkShortageIdsToDocno(stub.docno, ids);
+    return stub;
+  }
+
+  await applyShortageDecisionToJobCards({
+    primeKeys: [primeKeys[0]],
+    approved: true,
+    user: "system",
+    shortageIdsByPrime: new Map([[primeKeys[0], ids]]),
+  });
+  const [linked] = await dbQuery(
+    `SELECT docno FROM ${IMS_TABLES.SHORTAGE}
+     WHERE id = ANY($1::int[]) AND docno IS NOT NULL LIMIT 1`,
+    [ids]
+  );
+  return linked?.docno ? findJobCard(Number(linked.docno)) : null;
 }
 
 /**
- * Join shortage lines via shortage_ids → qty, items, shortage_approved, shortage_remark.
- * Returns Map docno → { items, qty, shortage_approved, shortage_remark }
+ * Shortage lines via ims_shortage.docno → qty, items, shortage_approved, shortage_remark.
+ * Returns Map docno → { items, qty, shortage_approved, shortage_remark, shortage_count }
  */
 export async function loadQtyItemsByShortageIds(cards = []) {
+  const empty = { items: [], qty: 0, shortage_approved: false, shortage_remark: null, shortage_count: 0 };
   const out = new Map();
-  const allIds = [...new Set(cards.flatMap((c) => c.shortage_ids || []).map(Number).filter(Boolean))];
-  if (!allIds.length) {
-    for (const c of cards) out.set(c.docno, { items: [], qty: 0, shortage_approved: false, shortage_remark: null });
+  const jcDocnos = [...new Set(cards.map((c) => Number(c.docno)).filter(Boolean))];
+  if (!jcDocnos.length) {
+    for (const c of cards) out.set(c.docno, { ...empty });
     return out;
   }
 
   const lines = await dbQuery(
-    `SELECT id, itemdcode, qty, is_approved, approval_remark
+    `SELECT id, itemdcode, qty, is_accepted, accepted_remark, docno
      FROM ${IMS_TABLES.SHORTAGE}
-     WHERE id = ANY($1::int[]) AND is_deleted = false`,
-    [allIds]
+     WHERE COALESCE(is_deleted, false) = false AND docno = ANY($1::int[])`,
+    [jcDocnos]
   );
   const byId = new Map(lines.map((r) => [Number(r.id), r]));
+  const idsByJc = new Map();
+  for (const r of lines) {
+    const d = Number(r.docno);
+    if (!d) continue;
+    if (!idsByJc.has(d)) idsByJc.set(d, []);
+    idsByJc.get(d).push(Number(r.id));
+  }
 
   for (const c of cards) {
-    const ids = (c.shortage_ids || []).map(Number).filter(Boolean);
+    const ids = idsByJc.get(Number(c.docno)) || [];
     const qtyByItem = new Map();
     const remarks = [];
     let allApproved = ids.length > 0;
 
     for (const sid of ids) {
       const row = byId.get(sid);
-      if (!row || row.is_approved !== true) allApproved = false;
+      if (!row || row.is_accepted !== true) allApproved = false;
       if (!row) continue;
       const dcode = Number(row.itemdcode);
       qtyByItem.set(dcode, (qtyByItem.get(dcode) || 0) + (Number(row.qty) || 0));
-      const r = String(row.approval_remark ?? "").trim();
+      const r = String(row.accepted_remark ?? "").trim();
       if (r) remarks.push(r);
     }
 
@@ -118,99 +181,155 @@ export async function loadQtyItemsByShortageIds(cards = []) {
       qty: items.reduce((s, it) => s + it.qty, 0),
       shortage_approved: allApproved,
       shortage_remark: [...new Set(remarks)].join(" | ") || null,
+      shortage_count: ids.length,
     });
   }
   return out;
 }
 
-export async function insertJobCard(client, {
-  itemdcode, shortage_ids, process_plan = [], remarks = null, created_by,
-  type = JOB_CARD_TYPE_DEFAULT,
-  status = "Pending",
-  approved = false, approved_by = null, approved_at = null,
-  tooling_approved = null, tooling_remark = null,
-  tooling_by = null, tooling_at = null,
-}) {
-  await client.query(`LOCK TABLE ${T.JOB_CARD} IN EXCLUSIVE MODE`);
-  const { rows } = await client.query(`SELECT GREATEST(COALESCE(MAX(docno), 0) + 1, $1::int) AS docno FROM ${T.JOB_CARD}`, [JC_START]);
-  const docno = Number(rows[0].docno);
-  const cardType = Number.isFinite(Number(type)) ? Number(type) : JOB_CARD_TYPE_DEFAULT;
-  const toolingDecided = tooling_approved === true || tooling_approved === false;
-
-  const out = await client.query(
-    `INSERT INTO ${T.JOB_CARD} (
-       docno, pjobcardno, type, itemdcode, shortage_ids, process_plan, status, remarks, created_by,
-       approved, approved_by, approved_at, tooling_approved, tooling_remark, tooling_by, tooling_at
-     )
-     VALUES ($1, $2, $3, $4, $5::int[], $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-     RETURNING ${READ_COLS}`,
-    [
-      docno, jobCardNo(docno), cardType, itemdcode, shortage_ids, JSON.stringify(process_plan ?? []), status, remarks, created_by,
-      approved === true, approved === true ? approved_by : null, approved === true ? approved_at : null,
-      toolingDecided ? tooling_approved === true : null,
-      tooling_remark ?? null,
-      toolingDecided ? (tooling_by ?? null) : null,
-      toolingDecided ? (tooling_at ?? null) : null,
-    ]
-  );
-  return out.rows[0];
+/** Sum shortage qty for planqty default. */
+export async function sumShortageQty(shortageIds = [], client = null) {
+  const ids = [...new Set((shortageIds || []).map(Number).filter(Boolean))];
+  if (!ids.length) return 0;
+  const sql = `SELECT COALESCE(SUM(qty), 0)::float AS q FROM ${IMS_TABLES.SHORTAGE}
+               WHERE id = ANY($1::int[]) AND COALESCE(is_deleted, false) = false`;
+  if (client) {
+    const { rows } = await client.query(sql, [ids]);
+    return Number(rows[0]?.q) || 0;
+  }
+  const [row] = await dbQuery(sql, [ids]);
+  return Number(row?.q) || 0;
 }
 
-export async function updateJobCard(docno, fields = {}) {
+/** First New save with plan — assign ERP jobcardno / fyid / pjobcardno. */
+export async function assignErpNumbersToJobCard(docno, { jobcarddt, fyid, jobcardnoOverride } = {}, client) {
+  const [row] = await client.query(
+    `SELECT docno, jobcardno, jcseriescode FROM ${T.JOB_CARD} WHERE docno = $1 AND is_deleted = false FOR UPDATE`,
+    [docno]
+  ).then((r) => r.rows);
+  if (!row || row.jobcardno != null) return null;
+
+  const dt = String(jobcarddt ?? "").trim().slice(0, 10) || new Date().toISOString().slice(0, 10);
+  const resolvedFy = await resolveFyidForJobCard(dt, fyid);
+  const seriesCode = Number(row.jcseriescode) || JC_SERIES_CODE;
+  let jobcardno;
+  if (jobcardnoOverride != null && jobcardnoOverride !== "") {
+    jobcardno = Number(jobcardnoOverride);
+  } else {
+    jobcardno = await nextJobcardno(seriesCode, resolvedFy, client);
+  }
+  const cardType = JOB_CARD_TYPE_DEFAULT;
+  const pjobcardno = formatPJobCardNo(cardType, jobcardno);
+  const out = await client.query(
+    `UPDATE ${T.JOB_CARD}
+     SET jobcardno = $2, fyid = $3, jcseriescode = $4, pjobcardno = $5, jobcarddt = $6::date
+     WHERE docno = $1 AND is_deleted = false
+     RETURNING ${READ_COLS}`,
+    [docno, jobcardno, resolvedFy, seriesCode, pjobcardno, dt]
+  );
+  return out.rows[0] ?? null;
+}
+
+/** `client` optional — pass transaction client when pairing with process log inserts. */
+export async function updateJobCard(docno, fields = {}, client = null) {
   const cols = Object.keys(fields).filter((k) => UPDATABLE.includes(k));
   if (!cols.length) return null;
-  const values = cols.map((k) => (k === "process_plan" ? JSON.stringify(fields[k] ?? []) : fields[k]));
-  const [row] = await dbQuery(
-    `UPDATE ${T.JOB_CARD}
-     SET ${cols.map((k, i) => `${k} = $${i + 2}${k === "process_plan" ? "::jsonb" : k === "shortage_ids" ? "::int[]" : ""}`).join(", ")}
+  const values = cols.map((k) => (JSONB_COLS.has(k) ? JSON.stringify(fields[k] ?? []) : fields[k]));
+  const sql = `UPDATE ${T.JOB_CARD}
+     SET ${cols.map((k, i) => `${k} = $${i + 2}${JSONB_COLS.has(k) ? "::jsonb" : ""}`).join(", ")}
      WHERE docno = $1 AND is_deleted = false
-     RETURNING ${READ_COLS}`,
-    [docno, ...values]
-  );
-  return row ?? null;
-}
-
-export async function softDeleteJobCard(docno, deletedBy) {
-  const [row] = await dbQuery(
-    `UPDATE ${T.JOB_CARD} SET is_deleted = true, deleted_by = $2, deleted_at = NOW()
-     WHERE docno = $1 AND is_deleted = false
-     RETURNING ${READ_COLS}`,
-    [docno, deletedBy ?? null]
-  );
-  return row ?? null;
-}
-
-/** Shortage create → draft JC (status Pending). Only shortage_ids stored; approval comes from shortage join. */
-export async function ensureDraftJobCardForShortage({ primeKey, shortageId, user, type = JOB_CARD_TYPE_DEFAULT }) {
-  const prime = Number(primeKey);
-  const sid = Number(shortageId);
-  if (!prime || !sid) return null;
-
-  const draft = await findOpenShortageDraft(prime, type);
-  if (draft) {
-    const ids = [...new Set([...(draft.shortage_ids || []), sid])];
-    return updateJobCard(draft.docno, {
-      shortage_ids: ids,
-      updated_by: user ?? null,
-      updated_at: new Date(),
-    });
+     RETURNING ${READ_COLS}`;
+  const params = [docno, ...values];
+  if (client) {
+    const out = await client.query(sql, params);
+    return out.rows[0] ?? null;
   }
+  const [row] = await dbQuery(sql, params);
+  return row ?? null;
+}
 
-  return withTransaction(async (client) =>
-    insertJobCard(client, {
-      type,
-      itemdcode: prime,
-      shortage_ids: [sid],
-      process_plan: [],
-      status: "Pending",
-      created_by: user ?? "system",
-    })
+/** Append process status rows — jobCardId = prod_job_card.docno (same transaction when client passed). */
+export async function insertProcessLogRows(jobCardId, rows = [], client = null) {
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && Number(r.process_id) > 0 && r.status);
+  if (!list.length) return 0;
+  const sql = `INSERT INTO ${T.JOB_CARD_PROCESS_LOG}
+         (job_card_id, process_id, machine_id, status, changed_by, changed_at, remark)
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6)`;
+  for (const row of list) {
+    const mid = Number(row.machine_id);
+    const params = [
+      Number(jobCardId),
+      Number(row.process_id),
+      Number.isFinite(mid) && mid > 0 ? mid : null,
+      String(row.status),
+      row.changed_by ? String(row.changed_by).slice(0, 100) : null,
+      row.remark ? String(row.remark).slice(0, 500) : null,
+    ];
+    if (client) await client.query(sql, params);
+    else await dbQuery(sql, params);
+  }
+  return list.length;
+}
+
+/** Process history for get-by-id (newest first). Process/machine names joined; changed_by is already a name. */
+export async function findProcessLogByJobCard(jobCardId) {
+  const docno = Number(jobCardId);
+  if (!docno) return [];
+  return dbQuery(
+    `SELECT l.id, l.job_card_id, l.process_id, l.machine_id, l.status, l.changed_by, l.changed_at, l.remark,
+            l.changed_by AS changed_by_name,
+            p.procname AS process_name,
+            m.macname AS machine_name
+     FROM ${T.JOB_CARD_PROCESS_LOG} l
+     LEFT JOIN ${E.PROCESS_MASTER} p ON p.proccode = l.process_id AND COALESCE(p.is_deleted, false) = false
+     LEFT JOIN ${E.MACHINE_MASTER} m ON m.maccode = l.machine_id AND COALESCE(m.is_deleted, false) = false
+     WHERE l.job_card_id = $1
+     ORDER BY l.changed_at DESC, l.id DESC`,
+    [docno]
   );
+}
+
+/** Linked shortage lines → pending again (is_accepted / accepted_remark / docno cleared). */
+async function resetShortageApprovalForJobCard(shortageIds, jcDocno, client = null) {
+  const ids = [...new Set((shortageIds || []).map(Number).filter(Boolean))];
+  const docno = Number(jcDocno) || 0;
+  if (!ids.length && !docno) return 0;
+  const run = client
+    ? (sql, params) => client.query(sql, params).then((r) => r.rows)
+    : (sql, params) => dbQuery(sql, params);
+  const rows = await run(
+    `UPDATE ${IMS_TABLES.SHORTAGE}
+     SET is_accepted = NULL, accepted_remark = NULL, docno = NULL
+     WHERE COALESCE(is_deleted, false) = false
+       AND (($1::int > 0 AND docno = $1) OR (cardinality($2::int[]) > 0 AND id = ANY($2::int[])))
+     RETURNING id`,
+    [docno, ids]
+  );
+  return rows.length;
+}
+
+/** Hard delete — reset linked shortages, process log, then job card row. */
+export async function hardDeleteJobCard(docno, client = null) {
+  const id = Number(docno);
+  if (!id) return null;
+  const run = client
+    ? (sql, params) => client.query(sql, params).then((r) => r.rows)
+    : (sql, params) => dbQuery(sql, params);
+
+  const [row] = await run(
+    `SELECT ${READ_COLS} FROM ${T.JOB_CARD} WHERE docno = $1 AND is_deleted = false`,
+    [id]
+  );
+  if (!row) return null;
+
+  await resetShortageApprovalForJobCard([], id, client);
+  await run(`DELETE FROM ${T.JOB_CARD_PROCESS_LOG} WHERE job_card_id = $1`, [id]);
+  await run(`DELETE FROM ${T.JOB_CARD} WHERE docno = $1`, [id]);
+  return row;
 }
 
 /**
- * Shortage approve → ensure JC exists with shortage_ids (approval itself is on ims_shortage).
- * Shortage reject → clear tooling on linked JCs (shortage_approved becomes false via join).
+ * Accept → stub JC (docno + planqty, no ERP no). Reject → clear docno + drop empty stubs.
  */
 export async function applyShortageDecisionToJobCards({
   primeKeys, approved, user, shortageIdsByPrime = null, type = JOB_CARD_TYPE_DEFAULT,
@@ -221,54 +340,80 @@ export async function applyShortageDecisionToJobCards({
 
   if (approved === true) {
     for (const key of keys) {
-      const existing = await dbQuery(
-        `SELECT docno, shortage_ids FROM ${T.JOB_CARD}
-         WHERE is_deleted = false AND type = $1 AND itemdcode = $2
-         ORDER BY docno DESC LIMIT 1`,
-        [cardType, key]
-      );
       const ids = shortageIdsByPrime?.get?.(key) || [];
-      if (existing.length) {
-        if (ids.length) {
-          const merged = [...new Set([...(existing[0].shortage_ids || []).map(Number), ...ids.map(Number)].filter(Boolean))];
-          await updateJobCard(existing[0].docno, {
-            shortage_ids: merged,
-            updated_by: user ?? null,
-            updated_at: new Date(),
-          });
+      if (!ids.length) continue;
+
+      let existingStubDocno = null;
+      const docRows = await dbQuery(
+        `SELECT DISTINCT docno FROM ${IMS_TABLES.SHORTAGE}
+         WHERE id = ANY($1::int[]) AND docno IS NOT NULL`,
+        [ids]
+      );
+      for (const r of docRows) {
+        const d = Number(r.docno);
+        if (await findJobCard(d)) existingStubDocno = d;
+        else {
+          await dbQuery(
+            `UPDATE ${IMS_TABLES.SHORTAGE} SET docno = NULL WHERE id = ANY($1::int[]) AND docno = $2`,
+            [ids, d]
+          );
         }
+      }
+      if (existingStubDocno) {
+        await linkShortageIdsToDocno(existingStubDocno, ids);
         continue;
       }
-      if (!ids.length) continue;
-      await withTransaction(async (client) =>
-        insertJobCard(client, {
-          type: cardType,
-          itemdcode: key,
-          shortage_ids: ids,
-          process_plan: [],
-          status: "Pending",
-          created_by: user ?? "system",
-        })
-      );
+
+      const planqty = await sumShortageQty(ids);
+      const who = user ?? "system";
+      await withTransaction(async (client) => {
+        await client.query(`LOCK TABLE ${T.JOB_CARD} IN EXCLUSIVE MODE`);
+        const { rows: dr } = await client.query(
+          `SELECT GREATEST(COALESCE(MAX(docno), 0) + 1, $1::int) AS docno FROM ${T.JOB_CARD}`,
+          [JC_START]
+        );
+        const jcDocno = Number(dr[0].docno);
+        await client.query(
+          `INSERT INTO ${T.JOB_CARD} (docno, pjobcardno, type, itemdcode, process_plan, status, created_by, planqty, jcseriescode)
+           VALUES ($1, NULL, $2, $3, '[]'::jsonb, 'Pending', $4, $5, $6)`,
+          [jcDocno, cardType, key, who, Number(planqty) || 0, JC_SERIES_CODE]
+        );
+        await linkShortageIdsToDocno(jcDocno, ids, { onlyWhenDocnoNull: false }, client);
+      });
     }
     return keys.length;
   }
 
-  const result = await dbQuery(
+  const shortageIds = [
+    ...new Set(keys.flatMap((k) => shortageIdsByPrime?.get?.(k) || []).map(Number).filter(Boolean)),
+  ];
+  let stubDocnos = [];
+  if (shortageIds.length) {
+    const cleared = await dbQuery(
+      `WITH u AS (
+         UPDATE ${IMS_TABLES.SHORTAGE} SET docno = NULL
+         WHERE id = ANY($1::int[]) AND COALESCE(is_deleted, false) = false
+         RETURNING docno
+       )
+       SELECT DISTINCT docno FROM u WHERE docno IS NOT NULL`,
+      [shortageIds]
+    );
+    stubDocnos = cleared.map((r) => Number(r.docno)).filter(Boolean);
+  }
+  if (stubDocnos.length) {
+    await dbQuery(
+      `DELETE FROM ${T.JOB_CARD} WHERE docno = ANY($1::int[]) AND jobcardno IS NULL AND is_deleted = false`,
+      [stubDocnos]
+    );
+  }
+  await dbQuery(
     `UPDATE ${T.JOB_CARD}
-     SET tooling_approved = NULL,
-         tooling_remark = NULL,
-         tooling_by = NULL,
-         tooling_at = NULL,
-         updated_by = $3,
-         updated_at = NOW()
-     WHERE is_deleted = false
-       AND type = $1
-       AND itemdcode = ANY($2::int[])
-     RETURNING docno`,
+     SET tooling_approved = NULL, tooling_remark = NULL, tooling_by = NULL, tooling_at = NULL,
+         updated_by = $3, updated_at = NOW()
+     WHERE is_deleted = false AND type = $1 AND itemdcode = ANY($2::int[])`,
     [cardType, keys, user ?? null]
   );
-  return result.length;
+  return keys.length;
 }
 
 export async function listJobCardsForTooling(register, type = JOB_CARD_TYPE_DEFAULT) {
@@ -281,8 +426,7 @@ export async function listJobCardsForTooling(register, type = JOB_CARD_TYPE_DEFA
     `SELECT DISTINCT ON (itemdcode)
         docno, pjobcardno, type, itemdcode AS item_dcode,
         tooling_approved AS approved, tooling_remark AS remark,
-        tooling_by, tooling_at,
-        shortage_ids
+        tooling_by, tooling_at
      FROM ${T.JOB_CARD}
      WHERE ${where}
      ORDER BY itemdcode, docno DESC`,

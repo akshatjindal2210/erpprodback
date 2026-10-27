@@ -68,3 +68,19 @@ export async function resolveMachineQrPayload(row = {}) {
   if (!number) return "";
   return withPublicBase({ machine_no: number }, number);
 }
+
+/** IMS tray label → `?tray_code=…&id=…` (public URL) or plain tray code / id. */
+export async function resolveTrayQrPayload(row = {}) {
+  const code = String(row?.code || row?.tray_code || "").trim().toUpperCase();
+  const idNum = Number(row?.id ?? row?.tray_id);
+  const id = Number.isFinite(idNum) && idNum > 0 ? String(idNum) : "";
+  const plain = code || id;
+  if (!plain) return "";
+  return withPublicBase(
+    {
+      ...(code ? { tray_code: code } : {}),
+      ...(id ? { id } : {}),
+    },
+    code || id
+  );
+}

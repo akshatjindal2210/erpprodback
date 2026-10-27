@@ -44,6 +44,8 @@ export async function createNotificationTemplatesTable() {
       patchCol("audience", "JSONB NOT NULL DEFAULT '{}'::jsonb"),
       patchCol("pwa_enabled", "BOOLEAN NOT NULL DEFAULT true"),
       patchCol("email_enabled", "BOOLEAN NOT NULL DEFAULT false"),
+      patchCol("conditions", "JSONB NOT NULL DEFAULT '[]'::jsonb"),
+      patchCol("condition_logic", "VARCHAR(3) NOT NULL DEFAULT 'AND'"),
     ],
     nullable: ["recipient_type"],
     indexes: [

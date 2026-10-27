@@ -2,6 +2,7 @@ import dbQuery from "../../../../config/db/db.js";
 import { MST_TABLES as M } from "../../../../config/db/dbTables.js";
 import { TRIGGER_EVENTS, RECIPIENT_TYPES, SEND_VIA_OPTIONS, findNotificationTemplates, findNotificationTemplate, findConflictingTemplate, insertNotificationTemplate, updateNotificationTemplate, 
   deleteNotificationTemplate, normalizeAudience, audienceHasAny, isAudienceDimActive, legacyFromAudience, audienceFromLegacy } from "./notificationTemplate.model.js";
+import { normalizeConditions, normalizeConditionLogic } from "./notificationConditions.js";
 import { findNotificationLogs } from "./notificationTemplateLog.model.js";
 import { findModule } from "../../identity/modules/models/module.model.js";
 import { ROLE_KEYS, invalidateTemplateCache, resolveRecipients, resolveAudience, normalizeRecipientRefs } from "./moduleNotify.service.js";
@@ -108,6 +109,14 @@ async function buildTemplateFields(body = {}, { partial = false, existing = null
     fields.recipient_refs = legacy.recipient_refs;
   }
 
+  // Optional field conditions (empty = always match)
+  if (!partial || has("conditions") || has("condition_logic")) {
+    fields.conditions = normalizeConditions(has("conditions") ? body.conditions : existing?.conditions);
+    fields.condition_logic = normalizeConditionLogic(
+      has("condition_logic") ? body.condition_logic : existing?.condition_logic
+    );
+  }
+
   if (has("pwa_enabled")) fields.pwa_enabled = !!body.pwa_enabled;
   if (has("email_enabled")) fields.email_enabled = !!body.email_enabled;
   if (has("send_via")) {
@@ -156,12 +165,9 @@ export const createNotificationTemplate = async (req, res) => {
     const { fields, error } = await buildTemplateFields(req.body);
     if (error) return badRequest(res, error);
 
-    const conflict = await findConflictingTemplate(fields.module_id, fields.trigger_events);
+    const conflict = await findConflictingTemplate(fields.module_id, fields.name);
     if (conflict) {
-      return badRequest(
-        res,
-        `A notification template already exists for this module and ${fields.trigger_events[0]} (same as SOP — one per permission)`
-      );
+      return badRequest(res, `A notification template named "${fields.name}" already exists for this module`);
     }
 
     const created = await insertNotificationTemplate({ ...fields, created_by: auditUserName(req) });
@@ -183,13 +189,10 @@ export const updateNotificationTemplateController = async (req, res) => {
     if (error) return badRequest(res, error);
 
     const module_id = fields.module_id ?? existing.module_id;
-    const trigger_events = fields.trigger_events ?? existing.trigger_events;
-    const conflict = await findConflictingTemplate(module_id, trigger_events, id);
+    const name = fields.name ?? existing.name;
+    const conflict = await findConflictingTemplate(module_id, name, id);
     if (conflict) {
-      return badRequest(
-        res,
-        `A notification template already exists for this module and ${Array.isArray(trigger_events) ? trigger_events[0] : trigger_events} (same as SOP — one per permission)`
-      );
+      return badRequest(res, `A notification template named "${name}" already exists for this module`);
     }
 
     const updated = await updateNotificationTemplate(id, {

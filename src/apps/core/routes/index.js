@@ -11,6 +11,7 @@ import activityLogRoutes from "../activity-logs/routes/activityLog.route.js";
 import inboxRoutes from "../notifications/inbox/inbox.route.js";
 import pushRoutes from "../notifications/push/push.route.js";
 import notificationTemplateRoutes from "../notifications/templates/notificationTemplate.routes.js";
+import shiftRoutes from "../configuration/shifts/routes/shift.route.js";
 // import userAppPreferenceRoutes from "../configuration/routes/userAppPreference.route.js";
 
 const router = Router();
@@ -25,6 +26,7 @@ router.use("/activity-logs", activityLogRoutes);
 router.use("/inbox", inboxRoutes);
 router.use("/push", pushRoutes);
 router.use("/notification-templates", notificationTemplateRoutes);
+router.use("/auth/shifts", shiftRoutes);
 // router.use("/user-preferences", userAppPreferenceRoutes);
 router.use("/training", trainingRoutes);
 router.use("/sop", sopRoutes);

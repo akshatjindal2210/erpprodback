@@ -172,7 +172,8 @@ async function sendToRow(row, notification = {}, meta = {}) {
   const err = lastErr || new Error("Push delivery failed");
   const status = err?.statusCode ?? err?.status;
   const errorDetail = status != null ? `${err.message} (HTTP ${status})` : err.message;
-  const staleSub = status === 404 || status === 410;
+  // 404/410 = gone; 403 = FCM/Mozilla reject (often VAPID mismatch / revoked) — drop so user can re-link
+  const staleSub = status === 404 || status === 410 || status === 403;
   if (staleSub) {
     await PushSubscription.removeByEndpoint(row.endpoint);
   }

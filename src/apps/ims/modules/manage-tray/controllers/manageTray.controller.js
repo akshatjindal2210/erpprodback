@@ -9,6 +9,7 @@ import { findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByAnySc
 import { expandStickerScanLookupCodes } from "../../box/utils/stickers/stickerScanParse.js";
 import { enrichRowsWithIMS } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { packingKey, findManageTrays, findManageTray, findManageTraySnapshot, findManageTrayLinks, findManageTrayLinkConflicts, replaceManageTrayLinks, clearManageTrayWork, receiveTray, reassignBoxTray, getManageTrayReportSummary, findManageTrayPoolLedger, saveManageTrayRegister, deleteManageTrayRegister } from "../models/manageTray.model.js";
+import { normalizeTrayScanCode } from "../../tray/utils/trayScanParse.js";
 
 const ENTITY = "manage_tray";
 const FILTER_FIELDS = ["id", "packing_number", "item_dcode", "approved", "from_date", "to_date"];
@@ -200,7 +201,7 @@ export async function scanManageTraySticker(req, res) {
 export async function scanManageTrayTray(req, res) {
   try {
     const pn = packingKey(req.body?.id ?? req.body?.packing_number);
-    const raw = req.body?.code != null ? String(req.body.code).trim().toUpperCase() : "";
+    const raw = normalizeTrayScanCode(req.body?.code);
     if (!pn || !raw) return res.status(400).json({ success: false, message: "Packing number and scan code are required." });
 
     const header = await findManageTray({ packing_number: pn });
@@ -256,7 +257,7 @@ export async function scanManageTrayTray(req, res) {
 
 export async function receiveManageTray(req, res) {
   try {
-    const raw = req.body?.code != null ? String(req.body.code).trim().toUpperCase() : "";
+    const raw = normalizeTrayScanCode(req.body?.code);
     if (!raw) return res.status(400).json({ success: false, message: "Tray code is required." });
 
     const preview = req.body?.preview === true || req.body?.preview === "true";
@@ -366,7 +367,7 @@ export async function scanReassignSticker(req, res) {
 
 export async function scanReassignTray(req, res) {
   try {
-    const raw = req.body?.code != null ? String(req.body.code).trim().toUpperCase() : "";
+    const raw = normalizeTrayScanCode(req.body?.code);
     const fromTrayId = parseInt(String(req.body?.from_tray_id ?? ""), 10);
     const boxNoUid = String(req.body?.box_no_uid ?? "").trim();
     if (!raw) return res.status(400).json({ success: false, message: "Tray code is required." });

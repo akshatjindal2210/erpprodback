@@ -5,6 +5,7 @@ import { IMS_TABLES as T } from "../../../../../../config/db/dbTables.js";
 /**
  * Shortage types are validated in shortage.config.js (SHORTAGE_TYPES), not via DB CHECK —
  * so new types can be added without a migration.
+ * Maintain JC columns (is_accepted, accepted_remark, docno): migrations/v5.2.0/shortageMaintainJcColumns.js
  */
 export async function createShortageTable() {
   await dbQuery(`
@@ -20,6 +21,9 @@ export async function createShortageTable() {
       approved        BOOLEAN DEFAULT false,
       approved_by     TEXT,
       approved_at     TIMESTAMP,
+      is_accepted     BOOLEAN,
+      accepted_remark TEXT,
+      docno           INTEGER,
       is_deleted      BOOLEAN DEFAULT false,
       deleted_by      TEXT,
       deleted_at      TIMESTAMP,
@@ -36,19 +40,16 @@ export async function createShortageTable() {
 
   await dbQuery(`ALTER TABLE ${T.SHORTAGE} DROP CONSTRAINT IF EXISTS ims_shortage_type_check`);
 
-  // Use shared schema helper (single step) for existing DBs.
-  // Prime-item approval (Production → Shortage → Prime Item) is separate from entry `approved`:
-  // is_approved NULL = Pending (all new + existing rows), TRUE = Approved, FALSE = Rejected.
-  // approval_remark = remark given on approve / reject (entry's own remark stays in `remarks`).
-  // Who/when go to the activity log; job-card link lives in prod_job_card.shortage_ids.
   await patchTableSchema(dbQuery, T.SHORTAGE, {
     columns: [
       patchCol("grpname", "VARCHAR(120)"),
-      patchCol("is_approved", "BOOLEAN NULL DEFAULT NULL"),
-      patchCol("approval_remark", "TEXT"),
+      patchCol("is_accepted", "BOOLEAN"),
+      patchCol("accepted_remark", "TEXT"),
+      patchCol("docno", "INTEGER"),
     ],
     indexes: [
-      `CREATE INDEX IF NOT EXISTS idx_shortage_is_approved ON ${T.SHORTAGE}(is_approved) WHERE is_deleted = false`,
+      `CREATE INDEX IF NOT EXISTS idx_shortage_is_accepted ON ${T.SHORTAGE}(is_accepted) WHERE is_deleted = false`,
+      `CREATE INDEX IF NOT EXISTS idx_shortage_docno ON ${T.SHORTAGE}(docno) WHERE is_deleted = false AND docno IS NOT NULL`,
     ],
   });
 }
