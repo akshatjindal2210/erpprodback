@@ -50,7 +50,17 @@ export function normalizeTrayScanCode(raw) {
     }
   }
 
-  if (/^https?:\/\//i.test(trimmed) || trimmed.includes("://")) return "";
+  if (/^https?:\/\//i.test(trimmed) || trimmed.includes("://") || /[?&]id=/i.test(trimmed)) {
+    const isBoxUrl =
+      /[?&]box_no_uid=/i.test(trimmed) || /[?&]fuid=/i.test(trimmed) || /[?&]coil_no_uid=/i.test(trimmed);
+    if (!isBoxUrl) {
+      const urlId = queryParam(trimmed, "id");
+      const urlCode = queryParam(trimmed, "tray_code") || queryParam(trimmed, "tray");
+      if (urlId && /^\d+$/.test(urlId)) return urlId;
+      if (urlCode) return normalizeTrayLookupCode(urlCode);
+    }
+    if (/^https?:\/\//i.test(trimmed) || trimmed.includes("://")) return "";
+  }
 
   const upper = trimmed.toUpperCase();
   if (TRAY_CODE_RE.test(upper)) return normalizeTrayLookupCode(upper);
