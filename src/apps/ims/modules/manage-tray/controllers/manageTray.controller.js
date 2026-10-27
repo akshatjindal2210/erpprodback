@@ -149,13 +149,11 @@ export async function scanManageTraySticker(req, res) {
 
     const expectedPacking = packingKey(header.packing_number);
     const lookupCodes = expandStickerScanLookupCodes(raw);
-    const [inHandRows, anyRows] = await Promise.all([
-      findInHandBoxesByScanCodes(lookupCodes),
-      findBoxesByScanCodesAny(lookupCodes),
-    ]);
+    const inHandRows = await findInHandBoxesByScanCodes(lookupCodes);
     const packingInHand = inHandRows.filter((r) => packingKey(r.packing_number) === expectedPacking);
     const row = matchBoxRowByAnyScanCodes(packingInHand, lookupCodes);
     if (!row?.box_no_uid) {
+      const anyRows = await findBoxesByScanCodesAny(lookupCodes);
       const packingAny = anyRows.filter((r) => packingKey(r.packing_number) === expectedPacking);
       const anyPackingRow = matchBoxRowByAnyScanCodes(packingAny, lookupCodes);
       if (anyPackingRow) {
@@ -335,12 +333,10 @@ export async function scanReassignSticker(req, res) {
     if (!raw) return res.status(400).json({ success: false, message: "Sticker code is required." });
 
     const lookupCodes = expandStickerScanLookupCodes(raw);
-    const [inHandRows, anyRows] = await Promise.all([
-      findInHandBoxesByScanCodes(lookupCodes),
-      findBoxesByScanCodesAny(lookupCodes),
-    ]);
+    const inHandRows = await findInHandBoxesByScanCodes(lookupCodes);
     const row = matchBoxRowByAnyScanCodes(inHandRows, lookupCodes);
     if (!row?.box_no_uid) {
+      const anyRows = await findBoxesByScanCodesAny(lookupCodes);
       const anyRow = matchBoxRowByAnyScanCodes(anyRows, lookupCodes);
       if (anyRow) return res.status(400).json({ success: false, message: stickerRejectMessage(anyRow, packingKey(anyRow.packing_number)) });
       return res.status(400).json({ success: false, message: "Sticker not found." });

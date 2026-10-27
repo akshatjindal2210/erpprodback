@@ -5,6 +5,17 @@ import { normalizeScanInput } from "../../box/utils/stickers/stickerScanParse.js
 
 const TRAY_CODE_RE = /^(FG|RM)\d+$/i;
 
+/** DB `code` after pad migration (FG001); old QR / laser may still send FG1. */
+export function normalizeTrayLookupCode(code) {
+  const c = String(code ?? "").trim().toUpperCase();
+  if (!c) return c;
+  const m = /^(FG|RM)(\d+)$/.exec(c);
+  if (!m) return c;
+  const n = parseInt(m[2], 10);
+  if (!Number.isFinite(n)) return c;
+  return `${m[1]}${String(n).padStart(3, "0")}`;
+}
+
 function queryParam(trimmed, name) {
   const m = trimmed.match(new RegExp(`[?&]${name}=([^&#\\s]+)`, "i"));
   if (!m?.[1]) return "";
@@ -25,7 +36,7 @@ export function normalizeTrayScanCode(raw) {
     const id = queryParam(trimmed, "id");
     if (id && /^\d+$/.test(id)) return id;
     const code = queryParam(trimmed, "tray_code") || queryParam(trimmed, "tray");
-    if (code) return code.toUpperCase();
+    if (code) return normalizeTrayLookupCode(code);
   }
 
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
@@ -33,7 +44,7 @@ export function normalizeTrayScanCode(raw) {
       const p = JSON.parse(trimmed);
       if (/^\d+$/.test(String(p?.id ?? "").trim())) return String(p.id).trim();
       if (/^\d+$/.test(String(p?.tray_id ?? "").trim())) return String(p.tray_id).trim();
-      if (p?.code != null && String(p.code).trim() !== "") return String(p.code).trim().toUpperCase();
+      if (p?.code != null && String(p.code).trim() !== "") return normalizeTrayLookupCode(p.code);
     } catch {
       /* continue */
     }
@@ -42,7 +53,7 @@ export function normalizeTrayScanCode(raw) {
   if (/^https?:\/\//i.test(trimmed) || trimmed.includes("://")) return "";
 
   const upper = trimmed.toUpperCase();
-  if (TRAY_CODE_RE.test(upper)) return upper;
+  if (TRAY_CODE_RE.test(upper)) return normalizeTrayLookupCode(upper);
   if (/^\d+$/.test(trimmed)) return trimmed;
   return "";
 }

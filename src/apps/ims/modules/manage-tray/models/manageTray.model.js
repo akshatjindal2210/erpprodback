@@ -68,15 +68,15 @@ function truthy(val) {
   return val === true || val === "true" || val === 1 || val === "1";
 }
 
-function packingListSql({ onlyInHand = false, extraWhere = "", includeTotal = false } = {}) {
-  return `
-    WITH tray_packings AS (
-      SELECT DISTINCT ${DOC} AS packing_number
-      FROM ${T.DAILYPROD} dp
-      ${TRAY_JOINS}
-      WHERE ${IS_TRAY}
-    ),
-    stickers AS (
+/** Pending / list — join boxes only for OEM-tray dailyprod packings (avoids full box-table scan). */
+function packingListSql({ onlyInHand = false, extraWhere = "", includeTotal = false, forSinglePacking = false, traySearchParam = null } = {}) {
+  const traySearchSql =
+    traySearchParam != null
+      ? `AND (${DOC} ILIKE $${traySearchParam} OR dp.item_code ILIKE $${traySearchParam} OR dp.acc_name ILIKE $${traySearchParam} OR dp.job_card_no ILIKE $${traySearchParam})`
+      : "";
+
+  const stickersCte = forSinglePacking
+    ? `stickers AS (
       SELECT
         ${PN("b")} AS packing_number,
         b.created_at,
@@ -86,20 +86,39 @@ function packingListSql({ onlyInHand = false, extraWhere = "", includeTotal = fa
         tl.updated_by AS linked_by,
         (${IN_HAND}) AS in_hand,
         (b.location_id IS NOT NULL OR b.out_uid IS NOT NULL) AS used,
-        (${CAT_IS_TRAY("box_cat.name")} AND ${TRAY_ENFORCE_BY_PACKING_DATE}) AS box_is_tray
+        true AS box_is_tray
       FROM ${T.BOX_TABLE} b
-      LEFT JOIN ${T.CATEGORY} box_cat ON box_cat.id = b.category_id
       LEFT JOIN ${T.TRAY_MASTER} tl ON tl.box_uid = b.box_uid
-      WHERE b.is_deleted = false
-        AND NULLIF(${PN("b")}, '') IS NOT NULL
-        AND (
-          (${CAT_IS_TRAY("box_cat.name")} AND ${TRAY_ENFORCE_BY_PACKING_DATE})
-          OR EXISTS (
-            SELECT 1 FROM tray_packings tp
-            WHERE tp.packing_number = ${PN("b")}
-          )
-        )
+      WHERE b.is_deleted = false AND ${PN("b")} = $1
+    ),`
+    : `tray_packings AS (
+      SELECT DISTINCT ${PN("b")} AS packing_number
+      FROM ${T.BOX_TABLE} b
+      INNER JOIN ${T.DAILYPROD} dp ON ${sqlDailyprodDocNoMatch("dp.doc_no", "b.packing_number")}
+      ${TRAY_JOINS}
+      WHERE b.is_deleted = false AND ${IS_TRAY}
+      ${traySearchSql}
     ),
+    stickers AS (
+      SELECT
+        tp.packing_number,
+        b.created_at,
+        b.created_by,
+        tl.id AS tray_id,
+        tl.updated_at AS linked_at,
+        tl.updated_by AS linked_by,
+        (${IN_HAND}) AS in_hand,
+        (b.location_id IS NOT NULL OR b.out_uid IS NOT NULL) AS used,
+        true AS box_is_tray
+      FROM tray_packings tp
+      INNER JOIN ${T.BOX_TABLE} b
+        ON b.is_deleted = false
+       AND ${PN("b")} = tp.packing_number
+      LEFT JOIN ${T.TRAY_MASTER} tl ON tl.box_uid = b.box_uid
+    ),`;
+
+  return `
+    WITH ${stickersCte}
     scanned AS (
       SELECT * FROM stickers
       ${onlyInHand ? "WHERE in_hand" : ""}
@@ -184,10 +203,17 @@ export async function getManageTrayPendingPackingNumbers(packingNumbers = []) {
 
 export async function findManageTrays(options = {}) {
   const { filters = {}, search, sort = {}, page = 1, limit = 100 } = options;
-  const values = [];
-  let i = 1;
   const registered = truthy(filters.approved);
   if (registered) return findRegisteredSnapshots({ ...options, permission: options.permission || {} });
+
+  const values = [];
+  let i = 1;
+  let traySearchParam = null;
+  if (search) {
+    values.push(`%${String(search).trim()}%`);
+    traySearchParam = i++;
+  }
+
   const packingWhere = [`(
     ba.open_count > 0
     OR (
@@ -218,17 +244,22 @@ export async function findManageTrays(options = {}) {
     }
   }
 
-  if (search) {
-    values.push(`%${String(search).trim()}%`);
-    packingWhere.push(`(${DOC} ILIKE $${i} OR dp.item_code ILIKE $${i} OR dp.acc_name ILIKE $${i} OR dp.job_card_no ILIKE $${i})`);
-    i++;
+  if (traySearchParam != null) {
+    packingWhere.push(
+      `(${DOC} ILIKE $${traySearchParam} OR dp.item_code ILIKE $${traySearchParam} OR dp.acc_name ILIKE $${traySearchParam} OR dp.job_card_no ILIKE $${traySearchParam})`
+    );
   }
 
   const { safePage, safeLimit, offset } = pageOf(page, limit);
   const sortExpr = SORT[sort.by] || "ba.created_at";
   const sortOrder = sort.order === "ASC" ? "ASC" : "DESC";
   const rows = await dbQuery(
-    `${packingListSql({ onlyInHand: !registered, extraWhere: `AND ${packingWhere.join(" AND ")}`, includeTotal: true })}
+    `${packingListSql({
+      onlyInHand: !registered,
+      extraWhere: `AND ${packingWhere.join(" AND ")}`,
+      includeTotal: true,
+      traySearchParam,
+    })}
      ORDER BY ${sortExpr} ${sortOrder} NULLS LAST
      LIMIT $${i++} OFFSET $${i++}`,
     [...values, safeLimit, offset]
@@ -246,11 +277,7 @@ export async function findManageTrays(options = {}) {
 export async function findManageTray(filters = {}) {
   const pn = packingKey(filters.packing_number ?? filters.id);
   if (!pn) return null;
-  const [row] = await dbQuery(
-    `${packingListSql({ extraWhere: `AND ${DOC} = $1` })}
-     LIMIT 1`,
-    [pn]
-  );
+  const [row] = await dbQuery(`${packingListSql({ forSinglePacking: true })} LIMIT 1`, [pn]);
   return row ?? null;
 }
 

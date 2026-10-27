@@ -3,6 +3,7 @@ import { IMS_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { normalizeTrayType } from "../config/trayTypes.js";
 import { isValidTrayStatus, normalizeTrayStatus, TRAY_HELD_SQL } from "../config/trayStatuses.js";
 import { TRAY_OCC_JOIN, TRAY_POOL_EXPR } from "../lib/trayOccupancySql.js";
+import { normalizeTrayLookupCode } from "../utils/trayScanParse.js";
 
 const ALLOWED_FILTER_FIELDS = ["id", "code", "type", "batch_id", "status", "approved", "from_date", "to_date"];
 const ALLOWED_SORT_FIELDS = ["id", "code", "type", "serial_number", "batch_id", "created_at"];
@@ -122,7 +123,8 @@ export async function findTrays(options = {}) {
     }
 
     if (key === "code" || key === "batch_id") {
-      values.push(String(val).trim());
+      const textVal = key === "code" ? normalizeTrayLookupCode(val) : String(val).trim();
+      values.push(textVal);
       conditions.push(`t.${key} = $${i++}::text`);
       continue;
     }
@@ -218,7 +220,8 @@ export async function findTray(filters = {}, options = {}) {
     }
 
     if (key === "code" || key === "batch_id") {
-      values.push(String(val).trim());
+      const textVal = key === "code" ? normalizeTrayLookupCode(val) : String(val).trim();
+      values.push(textVal);
       conditions.push(`t.${key} = $${i++}::text`);
       continue;
     }
@@ -459,7 +462,7 @@ async function applyBatchRemark(client, batchId, remark, actor = null, { stampUp
 async function getMaxSerialForType(client, type) {
   const normalizedType = normalizeTrayType(type);
   const { rows } = await client.query(
-    `SELECT COALESCE(MAX(serial_number), 0)::int AS max_serial
+    `SELECT COALESCE(MAX(serial_number::int), 0)::int AS max_serial
      FROM ${T.TRAY_MASTER}
      WHERE UPPER(TRIM(COALESCE(type, ''))) = $1`,
     [normalizedType],
