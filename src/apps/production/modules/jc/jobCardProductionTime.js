@@ -149,6 +149,29 @@ export function calcJobCardProductionTime({ qty = 0, stages = [], process_plan =
   };
 }
 
+/** Board / plan line: shifts for one machine (not whole JC total). */
+export function shiftsForMachine(est, maccode, stageNo = null) {
+  if (!est?.valid || !Array.isArray(est.stages)) return null;
+  const mac = Number(maccode);
+  if (!Number.isFinite(mac) || mac <= 0) return null;
+  const stage = stageNo != null ? Number(stageNo) : null;
+  const pickFrom = (stages) => {
+    for (const st of stages) {
+      for (const m of st.machines || []) {
+        if (Number(m.machine_id) !== mac) continue;
+        const n = Number(m.shifts);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+    }
+    return null;
+  };
+  if (Number.isFinite(stage)) {
+    const hit = pickFrom(est.stages.filter((st) => Number(st.stage_no) === stage));
+    if (hit != null) return hit;
+  }
+  return pickFrom(est.stages);
+}
+
 /** Issuable store KG per stage (same pool as Issue Request) — attached onto estimate for UI view only. */
 async function withRmAvailable(estimate, process_plan = []) {
   const plan = Array.isArray(process_plan) ? process_plan : [];
