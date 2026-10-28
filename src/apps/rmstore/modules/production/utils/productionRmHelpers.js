@@ -1,3 +1,11 @@
+/** Collapse internal whitespace so "WIRE  HHB" and "WIRE HHB" match. */
+export function normalizeRmItemCodeKey(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+}
+
 /** Normalize rm_items from DB/API row (JSONB array or legacy flat fields). */
 export function normalizeRmItems(row) {
   if (!row) return [];

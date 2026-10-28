@@ -15,6 +15,7 @@ import { snapshotMetadataFromBoxUids, snapshotInwardMetadata } from "../../../li
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { getManageTrayPendingPackingNumbers } from "../../manage-tray/models/manageTray.model.js";
 import { findTray } from "../../tray/models/trayMaster.model.js";
+import { normalizeTrayScanCode } from "../../tray/utils/trayScanParse.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 
 const INWARD_CFG = getCrudModuleConfig("inventory_inwards");
@@ -510,16 +511,16 @@ export const batchScanInwardTray = async (req, res) => {
   try {
     const { location_id, code } = req.body;
     const lid = parseInt(String(location_id), 10);
-    const raw = code != null ? String(code).trim().toUpperCase() : "";
+    const key = normalizeTrayScanCode(code);
 
     if (!Number.isFinite(lid) || lid <= 0) {
       return res.status(400).json({ success: false, message: "Location is required." });
     }
-    if (!raw) {
+    if (!key) {
       return res.status(400).json({ success: false, message: "Tray code is required." });
     }
 
-    const trayFilter = /^\d+$/.test(raw) ? { id: parseInt(raw, 10) } : { code: raw };
+    const trayFilter = /^\d+$/.test(key) ? { id: parseInt(key, 10) } : { code: key };
     const tray = await findTray(trayFilter, {
       fields: ["t.id", "t.code", "t.type", "t.status", "t.approved", "t.pool_status"],
     });
@@ -584,7 +585,6 @@ export const batchScanInwardTray = async (req, res) => {
 };
 
 export const validateInwardBoxAtLocation = async (req, res) => {
-  console.time("API_Execution");
   try {
     const { location_id, box_no_uid } = req.body;
     const lid = parseInt(String(location_id), 10);
@@ -610,8 +610,6 @@ export const validateInwardBoxAtLocation = async (req, res) => {
     return res.json({ success: true, validation_enabled: true, ...result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
-  } finally {
-    console.timeEnd("API_Execution");
   }
 };
 

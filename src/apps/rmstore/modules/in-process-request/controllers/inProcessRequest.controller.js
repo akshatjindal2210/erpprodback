@@ -52,7 +52,7 @@ import { assertWithinEditDays } from "../../../../../platform/utils/auth/permiss
 import { enrichIprWithMachineLabels } from "../../inventory-inward/utils/enrichIprMachineLabels.js";
 import { filterPrdRunJcBySearch, loadMappedItems, loadMappedPrdRunJc, slicePage, toPrdRunJcPickerRow } from "../../production/utils/erpItems.js";
 import { findApprovedFgItemsForRmWire, findApprovedProductionRowsLite, findProductions } from "../../production/models/productionMaster.model.js";
-import { enrichProductionRow, normalizeRmItems } from "../../production/utils/productionRmHelpers.js";
+import { enrichProductionRow, normalizeRmItemCodeKey, normalizeRmItems } from "../../production/utils/productionRmHelpers.js";
 
 const MODULE = "rm_in_process_request";
 /** Same mod_type used when QC uploads are persisted to the central documents table. */
@@ -389,8 +389,8 @@ async function assertConsumeReassignRules(fields, user) {
       );
     }
 
-    const targetWireKey = toUpperTrim(targetWire);
-    const mappedCodeKeys = mappedCodes.map((c) => toUpperTrim(c));
+    const targetWireKey = normalizeRmItemCodeKey(targetWire);
+    const mappedCodeKeys = mappedCodes.map((c) => normalizeRmItemCodeKey(c));
     const firstMappedKey = mappedCodeKeys[0] || "";
     const isSuperAdmin = isSuperAdminUser(user);
     const canPickMapped = hasIssueRmMappedPermission(user);
@@ -2329,8 +2329,8 @@ function sameApprovedFgProduction(prodA, prodB) {
 }
 
 /** 1-based index of this RM wire in FG production rm_items (array order). */
-function rmWireSequenceInProduction(prodRow, rmCodeUpper, dcodeToCode, rmDcode = null) {
-  if (!prodRow || (!rmCodeUpper && rmDcode == null)) return null;
+function rmWireSequenceInProduction(prodRow, rmCodeKey, dcodeToCode, rmDcode = null) {
+  if (!prodRow || (!rmCodeKey && rmDcode == null)) return null;
   const rmDcodeNum = rmDcode != null && rmDcode !== "" ? Number(rmDcode) : NaN;
   const items = normalizeRmItems(prodRow);
   for (let i = 0; i < items.length; i++) {
@@ -2338,9 +2338,11 @@ function rmWireSequenceInProduction(prodRow, rmCodeUpper, dcodeToCode, rmDcode =
     if (Number.isFinite(rmDcodeNum) && rmDcodeNum > 0 && Number.isFinite(dc) && dc === rmDcodeNum) {
       return i + 1;
     }
-    let code = String(items[i]?.rm_item_code || "").trim().toUpperCase();
-    if (!code && Number.isFinite(dc) && dc > 0) code = dcodeToCode.get(dc) || "";
-    if (rmCodeUpper && code && code === rmCodeUpper) return i + 1;
+    let code = normalizeRmItemCodeKey(items[i]?.rm_item_code);
+    if (!code && Number.isFinite(dc) && dc > 0) {
+      code = normalizeRmItemCodeKey(dcodeToCode.get(dc) || "");
+    }
+    if (rmCodeKey && code && code === rmCodeKey) return i + 1;
   }
   return null;
 }
@@ -2368,10 +2370,22 @@ export const getReassignJobCards = async (req, res) => {
       item_code: rm_item_code,
       item_dcode: Number.isFinite(rm_item_dcode) && rm_item_dcode > 0 ? rm_item_dcode : undefined,
     });
+    // No approved FG maps this wire → empty list (do not fall through to all running JCs).
+    if (!fgItems.length) {
+      return res.json({
+        success: true,
+        data: [],
+        total: 0,
+        page,
+        limit,
+        message: "This wire is not mapped on any approved production item.",
+      });
+    }
+
     const allowedFgKeys = new Set();
     for (const fg of fgItems) addFgKeysToSet(allowedFgKeys, { itemdcode: fg.item_dcode, item_code: fg.item_code });
 
-    const rmCodeUpper = rm_item_code.toUpperCase();
+    const rmCodeKey = normalizeRmItemCodeKey(rm_item_code);
     const [prodRows, rmMaster, allJcs] = await Promise.all([
       findApprovedProductionRowsLite(),
       loadMappedItems("item", { type: "rm" }),
@@ -2379,14 +2393,17 @@ export const getReassignJobCards = async (req, res) => {
     ]);
     const dcodeToCode = new Map(
       (rmMaster || [])
-        .map((r) => [Number(r.itemdcode ?? r.item_dcode), String(r.item_code || "").trim().toUpperCase()])
+        .map((r) => [
+          Number(r.itemdcode ?? r.item_dcode),
+          normalizeRmItemCodeKey(r.item_code),
+        ])
         .filter(([d, c]) => Number.isFinite(d) && d > 0 && c)
     );
     const prodByFgKey = new Map();
     for (const p of prodRows || []) indexProductionByFgKey(prodByFgKey, p);
 
     let rows = allJcs.filter((j) => {
-      if (allowedFgKeys.size && !jcRowMatchesAllowedFg(allowedFgKeys, j)) return false;
+      if (!jcRowMatchesAllowedFg(allowedFgKeys, j)) return false;
       if (exclude_pjobcardno && toUpperTrim(j.pjobcardno) === toUpperTrim(exclude_pjobcardno)) {
         return false;
       }
@@ -2400,7 +2417,7 @@ export const getReassignJobCards = async (req, res) => {
         const prodRow = resolveProductionForJc(prodByFgKey, j);
         const seq = rmWireSequenceInProduction(
           prodRow,
-          rmCodeUpper,
+          rmCodeKey,
           dcodeToCode,
           Number.isFinite(rm_item_dcode) && rm_item_dcode > 0 ? rm_item_dcode : null
         );
@@ -2419,7 +2436,11 @@ export const getReassignJobCards = async (req, res) => {
       .sort((a, b) => (b.is_primary || 0) - (a.is_primary || 0));
 
     const paged = slicePage(rows, page, limit);
-    return res.json({ success: true, ...paged, page, limit });
+    const emptyHint =
+      (paged.data || []).length === 0
+        ? "No other job card available for this wire. Current job card is not listed."
+        : undefined;
+    return res.json({ success: true, ...paged, page, limit, message: emptyHint });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

@@ -47,6 +47,7 @@ const BOX_STORE_LIST_FIELDS = [
   "COALESCE(NULLIF(TRIM(sa.job_card_no::text), ''), NULLIF(TRIM(dp.job_card_no::text), '')) AS job_card_no",
   "COALESCE(sa.doc_dt, dp.doc_dt) AS doc_dt",
   "t.code AS tray_code",
+  "t.type AS tray_type",
 ];
 
 const BOX_AUDIT_RESPONSE_KEYS = new Set([
@@ -406,7 +407,6 @@ export const deleteBox = async (req, res) => {
 };
 
 export const getBoxesViews = async (req, res) => {
-  console.time("API_Execution");
   try {
     const { id, box_no_uid, box_uid, permission_module, permission_action } = req.body;
     const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, { sortBy: "box_uid", order: "DESC" });
@@ -503,8 +503,6 @@ export const getBoxesViews = async (req, res) => {
     return res.json({ success: true, ...rest, data: stripBoxRowsForClient(enriched || data) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
-  } finally {
-    console.timeEnd("API_Execution");
   }
 };
 

@@ -6,7 +6,7 @@
  */
 
 import dbQuery from "../../../../../../config/db/db.js";
-import { sqlBoxInHand, sqlBoxNotOnQcHold, sqlBoxPackingNumber, sqlDailyprodDocNoMatch, sqlDailyprodMatchOrder, sqlDocDtFromDailyprod, sqlDocDtText, boxSourceSql, sqlManageTrayPending } from "../../../box/utils/inventory/boxInventorySql.js";
+import { sqlBoxInHand, sqlBoxNotOnQcHold, sqlBoxPackingNumber, sqlDailyprodDocNoMatch, sqlDailyprodMatchOrder, sqlDocDtFromDailyprod, sqlDocDtText, boxSourceSql, sqlManageTrayPending, sqlPackingIsTray, sqlManageTrayRegistered } from "../../../box/utils/inventory/boxInventorySql.js";
 
 const TRIM = (expr) => `NULLIF(TRIM((${expr})::text), '')`;
 const DP_ITEM_CODE = TRIM("dp.item_code");
@@ -189,12 +189,19 @@ function applyBoxSourceFilter(conditions, source) {
   } else if (src === "QC HOLD") {
     conditions.push(`(b.sa_id IS NULL OR b.sa_entry_type IS DISTINCT FROM 'stock_in')`);
     conditions.push(`b.box_no_uid ~ '_QCH[0-9]+_'`);
-  } else if (src === "MANAGE TRAY") {
+  } else if (src === "TRAY PENDING" || src === "MANAGE TRAY") {
     conditions.push(sqlManageTrayPending("b"));
+  } else if (src === "TRAY LINKED") {
+    conditions.push(`(b.sa_id IS NULL OR b.sa_entry_type IS DISTINCT FROM 'stock_in')`);
+    conditions.push(`b.box_no_uid !~ '_QCH[0-9]+_'`);
+    conditions.push(`NOT ${sqlManageTrayPending("b")}`);
+    conditions.push(sqlPackingIsTray("b.packing_number"));
+    conditions.push(sqlManageTrayRegistered("b.packing_number"));
   } else if (src === "PACKING ENTRY") {
     conditions.push(`(b.sa_id IS NULL OR b.sa_entry_type IS DISTINCT FROM 'stock_in')`);
     conditions.push(`b.box_no_uid !~ '_QCH[0-9]+_'`);
     conditions.push(`NOT ${sqlManageTrayPending("b")}`);
+    conditions.push(`NOT ${sqlPackingIsTray("b.packing_number")}`);
   }
 }
 

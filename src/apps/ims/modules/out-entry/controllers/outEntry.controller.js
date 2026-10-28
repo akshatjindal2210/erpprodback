@@ -15,6 +15,7 @@ import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js"
 import { hasInventoryOutApprovePermission, hasInventoryOutPermission } from "../../../lib/utils/imsSpecialPermissions.js";
 import { findBoxesByNoUids, findSellableBoxesByTrayId } from "../../box/models/box.model.js";
 import { findTray } from "../../tray/models/trayMaster.model.js";
+import { normalizeTrayScanCode } from "../../tray/utils/trayScanParse.js";
 import { isBoxAvailableForOutEntryScan } from "../../box/utils/inventory/boxInventory.js";
 
 const OUT_CFG = getCrudModuleConfig("out_entry");
@@ -778,9 +779,9 @@ export const verifyBoxSticker = async (req, res) => {
 
 export const batchScanOutEntryTray = async (req, res) => {
   try {
-    const raw = String(req.body?.code || "").trim().toUpperCase();
-    if (!raw) return res.status(400).json({ success: false, message: "Tray code is required." });
-    const tray = await findTray(/^\d+$/.test(raw) ? { id: parseInt(raw, 10) } : { code: raw }, {
+    const key = normalizeTrayScanCode(req.body?.code);
+    if (!key) return res.status(400).json({ success: false, message: "Tray code is required." });
+    const tray = await findTray(/^\d+$/.test(key) ? { id: parseInt(key, 10) } : { code: key }, {
       fields: ["t.id", "t.code", "t.type", "t.status", "t.approved"],
     });
     if (!tray) return res.status(400).json({ success: false, message: "Tray not found." });

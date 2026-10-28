@@ -2,11 +2,7 @@
  * Tooling Yes/No after shortage approve — stored on prod_job_card
  * (tooling_approved NULL = pending; true/false = register Yes/No).
  */
-import {
-  listJobCardsForTooling,
-  resetJobCardToolingToPending,
-  saveJobCardTooling,
-} from "../../job-card/models/jobCard.model.js";
+import { listJobCardsForTooling, resetJobCardToolingToPending, saveJobCardTooling } from "../../jc/models/jobCard.model.js";
 
 export const toolingOf = (approved) => (approved === true ? "yes" : approved === false ? "no" : "pending");
 
@@ -42,7 +38,7 @@ export async function attachTooling(groups = [], { withRemark = true } = {}) {
     `SELECT DISTINCT ON (itemdcode)
         itemdcode AS prime_item_dcode, tooling_approved AS approved, tooling_remark AS remark,
         tooling_by, tooling_at
-     FROM ${T.JOB_CARD}
+     FROM ${T.JC}
      WHERE is_deleted = false AND itemdcode = ANY($1::int[])
      ORDER BY itemdcode, docno DESC`,
     [keys]

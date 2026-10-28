@@ -1,8 +1,8 @@
-import { createJobCardTable } from "../tables/job-card/job_card.table.js";
-import { createJobCardProcessLogTable } from "../tables/job-card/job_card_process_log.table.js";
+import { createJobCardTable } from "../tables/jc/jc.table.js";
+import { createProdPlanTable } from "../tables/plan/plan.table.js";
 
-/** Schema only — Production app tables (entry shortage lives in shared ims_shortage). */
+/** Schema only — prod_jc + prod_plan (structure in *.table.js). */
 export async function initProductionDB() {
   await createJobCardTable();
-  await createJobCardProcessLogTable();
+  await createProdPlanTable();
 }

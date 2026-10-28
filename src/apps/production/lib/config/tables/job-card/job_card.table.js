@@ -10,7 +10,7 @@ import { parseProcessPlan, statusMapFromInput, withPlanStatuses } from "../../..
  */
 export async function createJobCardTable() {
   await dbQuery(`
-    CREATE TABLE IF NOT EXISTS ${T.JOB_CARD} (
+    CREATE TABLE IF NOT EXISTS ${T.JC} (
       docno              INTEGER PRIMARY KEY,
       pjobcardno         VARCHAR(30) UNIQUE,
       jobcarddt          DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -41,7 +41,7 @@ export async function createJobCardTable() {
     );
   `);
 
-  await applyTablePatches(dbQuery, T.JOB_CARD, {
+  await applyTablePatches(dbQuery, T.JC, {
     renameColumns: [
       { from: "job_card_no", to: "pjobcardno" },
       { from: "job_date", to: "pldt" },
@@ -52,10 +52,10 @@ export async function createJobCardTable() {
   });
 
   // Pure rename — keep data (legacy pldt → jobcarddt)
-  await renameColumnIfExists(dbQuery, T.JOB_CARD, "pldt", "jobcarddt");
+  await renameColumnIfExists(dbQuery, T.JC, "pldt", "jobcarddt");
   await dropIndexesIfExist(dbQuery, ["prod_job_card_pldt_shift_idx"]);
 
-  await patchTableSchema(dbQuery, T.JOB_CARD, {
+  await patchTableSchema(dbQuery, T.JC, {
     columns: [
       patchCol("pjobcardno", "VARCHAR(30)"),
       patchCol("jobcarddt", "DATE NOT NULL DEFAULT CURRENT_DATE"),
@@ -86,28 +86,28 @@ export async function createJobCardTable() {
     ],
     nullable: ["pjobcardno"],
     indexes: [
-      `CREATE INDEX IF NOT EXISTS prod_job_card_prime_idx ON ${T.JOB_CARD} (itemdcode) WHERE is_deleted = false`,
-      `CREATE INDEX IF NOT EXISTS prod_job_card_tooling_approved_idx ON ${T.JOB_CARD} (tooling_approved) WHERE is_deleted = false`,
-      `CREATE INDEX IF NOT EXISTS prod_job_card_type_idx ON ${T.JOB_CARD} (type) WHERE is_deleted = false`,
-      `CREATE INDEX IF NOT EXISTS prod_job_card_jobcarddt_shift_idx ON ${T.JOB_CARD} (jobcarddt, schedule_shift) WHERE is_deleted = false`,
+      `CREATE INDEX IF NOT EXISTS prod_job_card_prime_idx ON ${T.JC} (itemdcode) WHERE is_deleted = false`,
+      `CREATE INDEX IF NOT EXISTS prod_job_card_tooling_approved_idx ON ${T.JC} (tooling_approved) WHERE is_deleted = false`,
+      `CREATE INDEX IF NOT EXISTS prod_job_card_type_idx ON ${T.JC} (type) WHERE is_deleted = false`,
+      `CREATE INDEX IF NOT EXISTS prod_job_card_jobcarddt_shift_idx ON ${T.JC} (jobcarddt, schedule_shift) WHERE is_deleted = false`,
     ],
   });
 
   await ensureUniqueIndex(
     dbQuery,
-    T.JOB_CARD,
+    T.JC,
     "prod_job_card_erp_no_uq",
     "jcseriescode, fyid, jobcardno",
     "jobcardno IS NOT NULL AND fyid IS NOT NULL"
   );
 
-  await applyTablePatches(dbQuery, T.JOB_CARD, {
+  await applyTablePatches(dbQuery, T.JC, {
     dropColumns: ["qty", "items", "shortage_approved", "shortage_remark", "shortage_ids"],
   });
   await dropIndexesIfExist(dbQuery, ["prod_job_card_shortage_ids_idx"]);
 
   await dbQuery(
-    `UPDATE ${T.JOB_CARD} SET pjobcardno = NULL
+    `UPDATE ${T.JC} SET pjobcardno = NULL
      WHERE jobcardno IS NULL AND pjobcardno LIKE 'DRA-%' AND COALESCE(is_deleted, false) = false`
   );
 
@@ -116,9 +116,9 @@ export async function createJobCardTable() {
 
 /** Merge legacy process_status into process_plan[].status, default pending, then drop column. */
 async function migrateProcessPlanStatuses() {
-  const hasLegacy = await columnExists(dbQuery, T.JOB_CARD, "process_status");
+  const hasLegacy = await columnExists(dbQuery, T.JC, "process_status");
   const cols = hasLegacy ? "docno, process_plan, process_status" : "docno, process_plan";
-  const rows = await dbQuery(`SELECT ${cols} FROM ${T.JOB_CARD}`);
+  const rows = await dbQuery(`SELECT ${cols} FROM ${T.JC}`);
 
   for (const row of rows) {
     const plan = parseProcessPlan(row.process_plan);
@@ -128,8 +128,8 @@ async function migrateProcessPlanStatuses() {
     const after = JSON.stringify(merged);
     // Rewrite when status keys were missing or legacy process_status was merged in
     if (JSON.stringify(row.process_plan ?? []) === after) continue;
-    await dbQuery(`UPDATE ${T.JOB_CARD} SET process_plan = $2::jsonb WHERE docno = $1`, [row.docno, after]);
+    await dbQuery(`UPDATE ${T.JC} SET process_plan = $2::jsonb WHERE docno = $1`, [row.docno, after]);
   }
 
-  if (hasLegacy) await dropColumnIfExists(dbQuery, T.JOB_CARD, "process_status");
+  if (hasLegacy) await dropColumnIfExists(dbQuery, T.JC, "process_status");
 }

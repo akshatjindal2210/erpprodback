@@ -7,7 +7,8 @@ import { IMS_TABLES } from "../../../../../config/db/dbTables.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
-import { assignErpNumbersToJobCard, checkPrimeAndFinish, findJobCard, findJobCardByShortageIds, findPrimeProcess, findProcessLogByJobCard, hardDeleteJobCard, insertProcessLogRows, updateJobCard } from "../models/jobCard.model.js";
+import { assignErpNumbersToJobCard, checkPrimeAndFinish, findJobCard, findJobCardByShortageIds, findPrimeProcess, hardDeleteJobCard, updateJobCard } from "../models/jobCard.model.js";
+import { syncPlanFromJobCard } from "../../plan/models/plan.model.js";
 import { calcJobCardProductionTime, estimateProductionForItem } from "../jobCardProductionTime.js";
 import { findPlans, PROCESS_TYPE } from "../../../../engineering/modules/item-process/models/itemProcess.model.js";
 import { attachOpenJobCardNo, attachRmWireFromPrimeProcess, attachRmWireFromProduction, groupByPrimeItem, loadProductionShortages, shortageOnAuthorizedJobCardSql, slimJobCardPendingGroup } from "../../shortage/utils/primeItemShortage.js";
@@ -15,7 +16,7 @@ import { attachTooling } from "../../shortage/models/primeTooling.model.js";
 import { formatPJobCardNo, JOB_CARD_TYPE_DEFAULT } from "../jobCard.config.js";
 import { ERP_ACC_CODE, JC_SERIES_CODE, nextJobcardno, resolveFyidForJobCard, syncJobCardErpAdd, syncJobCardErpDelete, syncJobCardErpUpdate } from "../jobCardErp.js";
 import { diffProcessPlan, parseProcessPlan, statusMapFromPicks, withPlanStatuses } from "../processPlanStatus.js";
-import { assertMaintainJobcardToolingIfRequired, assertUsable, buildProcessPlan, enrichJobCardDrawerRow, httpError, idList, isSuperAdminUser, loadRegisterList, logRowsFromDiff, parseApprovedFilter, parseIdList, parseJobcardnoOverride, remarkMapFromBody, toCardRows, toDocno } from "./jobCard.controller.helpers.js";
+import { assertMaintainJobcardToolingIfRequired, assertUsable, buildProcessPlan, enrichJobCardDrawerRow, httpError, idList, isSuperAdminUser, loadRegisterList, parseApprovedFilter, parseIdList, parseJobcardnoOverride, remarkMapFromBody, toCardRows, toDocno } from "./jobCard.controller.helpers.js";
 import { buildUpdateResponseMessage, prepareJobCardUpdate } from "./jobCard.updateFields.js";
 
 const ENTITY = "production_job_card";
@@ -61,7 +62,6 @@ export const getJobCardById = async (req, res) => {
     data.rm = rmGroup.rm;
     data.process_tooling = rmGroup.process_tooling;
     data.production_time = await estimateProductionForItem(row.itemdcode, data.qty, row.process_plan);
-    data.process_log = await findProcessLogByJobCard(docno);
     return res.json({ success: true, data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || "Failed to load job card." });
@@ -191,12 +191,13 @@ export const createJobCard = async (req, res) => {
         client
       );
 
-      const diffs = diffProcessPlan(existing.process_plan || [], processPlan);
-      await insertProcessLogRows(saved.docno, logRowsFromDiff(diffs, user, remarkByProcess), client);
       return { saved, erpSynced };
     });
 
     const { saved: card, erpSynced } = cardResult;
+    if (card?.approved === true && parseProcessPlan(card.process_plan).length) {
+      await syncPlanFromJobCard(card);
+    }
     await logActivity(req, { action: "update", entity: ENTITY, entity_id: card.docno, appType: "production", record: card });
     const [data] = await toCardRows([card]);
     const primeStages = await findPrimeProcess(primeKey);
@@ -250,11 +251,7 @@ export const updateJobCardById = async (req, res) => {
         erpSynced = true;
       }
 
-      // --- DB: prod_job_card + process log ---
       const row = Object.keys(fields).length ? await updateJobCard(docno, fields, client) : existing;
-      if (processDiffs.length) {
-        await insertProcessLogRows(docno, logRowsFromDiff(processDiffs, userName, remarkByProcess), client);
-      }
       return row;
     });
 

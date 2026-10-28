@@ -68,8 +68,9 @@ export const OTHER_TABLE_TO_MODULE = {
   hrms_leave: "hrms_leave",
   hrms_loan: "hrms_loan",
   hrms_deduction: "hrms_deduction",
-  prod_job_card: "production_job_card",
-  // Tooling approval now on prod_job_card (legacy prod_shortage dropped)
+  prod_jc: "production_job_card",
+  prod_plan: "production_planning",
+  // Tooling approval on prod_jc (legacy prod_shortage dropped)
   prod_shortage: "production_tooling",
   prod_tooling: "production_tooling",
   prod_shortage_tooling: "production_tooling",
@@ -135,8 +136,9 @@ export const MODULE_PRIMARY_TABLE = {
   hrms_leave: "hrms_leave",
   hrms_loan: "hrms_loan",
   hrms_deduction: "hrms_deduction",
-  production_job_card: "prod_job_card",
-  production_tooling: "prod_job_card",
+  production_job_card: "prod_jc",
+  production_planning: "prod_plan",
+  production_tooling: "prod_jc",
 };
 
 const ALL_TABLES = new Set([

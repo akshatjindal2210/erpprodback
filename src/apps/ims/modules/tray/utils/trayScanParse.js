@@ -39,6 +39,13 @@ export function normalizeTrayScanCode(raw) {
     if (code) return normalizeTrayLookupCode(code);
   }
 
+  if (!isBoxUrl) {
+    const genericCode = queryParam(trimmed, "code");
+    if (genericCode && TRAY_CODE_RE.test(String(genericCode).trim().toUpperCase())) {
+      return normalizeTrayLookupCode(genericCode);
+    }
+  }
+
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
     try {
       const p = JSON.parse(trimmed);

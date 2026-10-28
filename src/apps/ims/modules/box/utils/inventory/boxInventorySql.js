@@ -28,6 +28,16 @@ export function sqlPackingIsTray(packingExpr) {
   )`;
 }
 
+/** Approved Manage Tray register exists for this packing number. */
+export function sqlManageTrayRegistered(packingExpr) {
+  return `EXISTS (
+    SELECT 1 FROM ims_tray_manage m
+    WHERE m.is_deleted = false
+      AND m.approved = true
+      AND TRIM(m.data->>'packing_number') = TRIM(${packingExpr}::text)
+  )`;
+}
+
 /** Tray packing is blocked in Store In until it has an active register row. */
 export function sqlManageTrayPending(alias = "b") {
   return `(
@@ -35,21 +45,18 @@ export function sqlManageTrayPending(alias = "b") {
     AND (${alias}.sa_entry_type IS DISTINCT FROM 'stock_out')
     AND ${alias}.qc_hold_id IS NULL
     AND ${sqlPackingIsTray(`${alias}.packing_number`)}
-    AND NOT EXISTS (
-      SELECT 1 FROM ims_tray_manage m
-      WHERE m.is_deleted = false
-        AND m.approved = true
-        AND TRIM(m.data->>'packing_number') = TRIM(${alias}.packing_number::text)
-    )
+    AND NOT ${sqlManageTrayRegistered(`${alias}.packing_number`)}
   )`;
 }
 
-/** List/group SOURCE label — packing entry / SA stock_in / QC hold / manage tray. */
+/** List/group SOURCE label — where the box entered Store In pending from. */
 export function boxSourceSql(alias = "b") {
+  const pn = `${alias}.packing_number`;
   return `CASE
-    WHEN ${sqlManageTrayPending(alias)} THEN 'MANAGE TRAY'
+    WHEN ${sqlManageTrayPending(alias)} THEN 'TRAY PENDING'
     WHEN ${alias}.sa_id IS NOT NULL AND ${alias}.sa_entry_type = 'stock_in' THEN 'STOCK ADJUSTMENT'
     WHEN ${alias}.box_no_uid ~ '_QCH[0-9]+_' THEN 'QC HOLD'
+    WHEN ${sqlPackingIsTray(pn)} AND ${sqlManageTrayRegistered(pn)} THEN 'TRAY LINKED'
     ELSE 'PACKING ENTRY'
   END`;
 }

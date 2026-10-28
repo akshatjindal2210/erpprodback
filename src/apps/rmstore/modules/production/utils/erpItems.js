@@ -3,7 +3,7 @@ import { IMS_TABLES, PRODUCTION_TABLES } from "../../../../../config/db/dbTables
 import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
 import { enrichProductionRow, normalizeRmItems } from "./productionRmHelpers.js";
-import { issueQtyKg } from "../../../../production/modules/job-card/jobCard.config.js";
+import { issueQtyKg } from "../../../../production/modules/jc/jobCard.config.js";
 
 const MASTER_CACHE_MS = 2 * 60 * 1000; // 2 min
 const masterCache = { rm: { loadedAt: 0, data: null }, fg: { loadedAt: 0, data: null } };
@@ -61,7 +61,7 @@ async function enrichPrdRunJcFromProdJobCards(erpRows = []) {
 
   const cards = await dbQuery(
     `SELECT pjobcardno, itemdcode, docno, process_plan
-     FROM ${PRODUCTION_TABLES.JOB_CARD}
+     FROM ${PRODUCTION_TABLES.JC}
      WHERE is_deleted = false
        AND UPPER(TRIM(pjobcardno)) = ANY($1::text[])`,
     [[...byNo.keys()]]

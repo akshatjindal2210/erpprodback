@@ -7,8 +7,8 @@ import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
-import { issueQtyKg } from "../../job-card/jobCard.config.js";
-import { loadQtyItemsByShortageIds } from "../../job-card/models/jobCard.model.js";
+import { issueQtyKg } from "../../jc/jobCard.config.js";
+import { loadQtyItemsByShortageIds } from "../../jc/models/jobCard.model.js";
 import { listProdShortageTooling, resetToolingToPending, saveTooling, toolingOf } from "../../shortage/models/primeTooling.model.js";
 
 const ENTITY = "production_tooling";
@@ -93,16 +93,17 @@ export const getToolingList = async (req, res) => {
   }
 };
 
-/** POST /tooling/save — body { prime_key, tooling: true|false, remark } */
+/** POST /tooling/save — body { prime_key, tooling: true|false, remark? } — remark optional */
 export const saveToolingDecision = async (req, res) => {
   try {
     const { prime_key, tooling, remark } = req.body || {};
-    if (!prime_key || typeof tooling !== "boolean" || !String(remark || "").trim()) {
-      return res.status(400).json({ success: false, message: "prime_key, tooling (true / false) and remark are required." });
+    if (!prime_key || typeof tooling !== "boolean") {
+      return res.status(400).json({ success: false, message: "prime_key and tooling (true / false) are required." });
     }
 
+    const remarkText = String(remark || "").trim().slice(0, MAX_REMARK) || null;
     const user = auditUserName(req);
-    const saved = await saveTooling({ primeKey: prime_key, tooling, remark: String(remark).trim().slice(0, MAX_REMARK), user });
+    const saved = await saveTooling({ primeKey: prime_key, tooling, remark: remarkText, user });
     if (!saved) {
       return res.status(404).json({
         success: false,
@@ -115,8 +116,8 @@ export const saveToolingDecision = async (req, res) => {
       entity: ENTITY,
       entity_id: String(prime_key),
       appType: "production",
-      record: { prime_key, tooling: tooling ? "yes" : "no", remark, by: user, at: new Date() },
-      details: { prime_key, tooling: tooling ? "yes" : "no", remark },
+      record: { prime_key, tooling: tooling ? "yes" : "no", remark: remarkText, by: user, at: new Date() },
+      details: { prime_key, tooling: tooling ? "yes" : "no", remark: remarkText },
     });
 
     return res.json({ success: true, message: `Tooling: ${tooling ? "Yes" : "No"}.` });

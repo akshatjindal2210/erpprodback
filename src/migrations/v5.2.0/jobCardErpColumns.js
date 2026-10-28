@@ -7,7 +7,7 @@ import dbQuery from "../../config/db/db.js";
 import { PRODUCTION_TABLES as T } from "../../config/db/dbTables.js";
 import { dropColumnIfExists, dropIndexesIfExist, ensureUniqueIndex, renameColumnIfExists } from "../../config/db/ensureDbColumns.js";
 
-const TABLE = T.JOB_CARD;
+const TABLE = T.JC;
 
 export default async function up() {
   await renameColumnIfExists(dbQuery, TABLE, "pldt", "jobcarddt");

@@ -14,7 +14,7 @@ const FORM = ["add", "edit", "authorize"];
 const PICKER = [VIEW, ...FORM];
 
 /**
- * /job-card/register-helper · get-helper · update-helper
+ * /jc/register-helper · get-helper · update-helper
  * Who can load / soft-update job cards without needing production_job_card.
  *
  * page module              | allowed actions

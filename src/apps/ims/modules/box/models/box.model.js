@@ -2328,8 +2328,11 @@ const FIND_BOX_DETAILED_SELECT = `
         NULLIF(trim(sa_adj.item_dcode::text), '')
       )::text AS itemdcode,
       ps.unit,
-      NULL::text AS party_rate_cust_code
+      NULL::text AS party_rate_cust_code,
+      t.code AS tray_code,
+      t.type AS tray_type
     FROM ims_box_table b
+    LEFT JOIN ims_tray_master t ON t.box_uid = b.box_uid
     LEFT JOIN ims_out_entry io
       ON b.out_uid = io.out_uid
      AND io.is_deleted = false

@@ -26,7 +26,9 @@ export async function runVersionMigrations() {
       if (typeof mod.default === "function") await mod.default();
       console.log(`✅ [migration] ${ver}/${file}`);
     } catch (err) {
-      console.warn(`[migration] ${ver}/${file}:`, err?.message || err);
+      // Fail boot — otherwise CREATE IF NOT EXISTS can leave empty new tables beside un-renamed data.
+      console.error(`❌ [migration] ${ver}/${file}:`, err?.message || err);
+      throw err;
     }
   }
 }

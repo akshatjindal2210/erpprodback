@@ -27,17 +27,18 @@ export const initDB = async () => {
     await initRmStoreDB();
     await initHrmsDB();
     await initPurchaseDB();
-    await initProductionDB();
     await initEngineeringDB();
     await initDashboardDB();
-    
-    await runLegacyTableDrops();    // Drop legacy tables (if any)
 
     // 2. Global tables
     await createDocumentsTable(); // documents + module file columns (lib/documents/documents.config.js)
 
-    // 3. Migrations — auto jobs of the current version (migrations/v<package.json version>/*.js)
+    // 3. Migrations before prod_jc / prod_plan CREATE (renames prod_job_card → prod_jc, etc.)
     await runVersionMigrations();
+
+    await initProductionDB();
+
+    await runLegacyTableDrops(); // Drop legacy tables (if any)
 
     // 4. Sequences
     await syncSerialSequences();

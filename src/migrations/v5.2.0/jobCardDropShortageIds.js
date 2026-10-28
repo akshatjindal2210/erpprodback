@@ -5,5 +5,5 @@ import { dropColumnIfExists, dropIndexesIfExist } from "../../config/db/ensureDb
 
 export default async function up() {
   await dropIndexesIfExist(dbQuery, ["prod_job_card_shortage_ids_idx"]);
-  await dropColumnIfExists(dbQuery, T.JOB_CARD, "shortage_ids");
+  await dropColumnIfExists(dbQuery, T.JC, "shortage_ids");
 }

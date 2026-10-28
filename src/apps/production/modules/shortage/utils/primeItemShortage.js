@@ -14,10 +14,10 @@ import { canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLooku
 import { SHORTAGE_LIST_TYPES, fromDateSql } from "../shortage.config.js";
 import { PRODUCTION_GROUP_NAME } from "../../../lib/config/groupFilter.js";
 import { enrichShortageRows } from "../controllers/shortage.controller.js";
-import { loadPrimeProcesses, shortageFullyApprovedSql, JOB_CARD_TYPE } from "../../job-card/models/jobCard.model.js";
+import { loadPrimeProcesses, shortageFullyApprovedSql, JOB_CARD_TYPE } from "../../jc/models/jobCard.model.js";
 import { rmItemMap } from "../../../../rmstore/modules/production/utils/erpItems.js";
 import { RMSTORE_TABLES as R } from "../../../../../config/db/dbTables.js";
-import { issueQtyKg } from "../../job-card/jobCard.config.js";
+import { issueQtyKg } from "../../jc/jobCard.config.js";
 
 /* ───────────────────────── Status ───────────────────────── */
 
@@ -48,7 +48,7 @@ export function primeStatusOf(row) {
 /** Shortage on an authorized job card (ims_shortage.docno = jc.docno). */
 export function shortageOnAuthorizedJobCardSql(alias = "s", type = JOB_CARD_TYPE.JC) {
   return `EXISTS (
-    SELECT 1 FROM ${PRODUCTION_TABLES.JOB_CARD} jc
+    SELECT 1 FROM ${PRODUCTION_TABLES.JC} jc
     WHERE jc.is_deleted = false AND jc.type = ${Number(type)} AND jc.approved = true
       AND ${alias}.docno = jc.docno
   )`;
@@ -60,7 +60,7 @@ export async function attachOpenJobCardNo(groups = [], type = JOB_CARD_TYPE.JC) 
   if (!primes.length) return;
   const rows = await dbQuery(
     `SELECT DISTINCT ON (jc.itemdcode) jc.itemdcode, jc.docno, jc.pjobcardno, jc.process_plan, jc.jobcardno
-     FROM ${PRODUCTION_TABLES.JOB_CARD} jc
+     FROM ${PRODUCTION_TABLES.JC} jc
      WHERE jc.is_deleted = false AND jc.type = $1 AND jc.itemdcode = ANY($2::int[])
        AND EXISTS (
          SELECT 1 FROM ${IMS_TABLES.SHORTAGE} s
@@ -324,6 +324,11 @@ export function slimJobCardPendingGroup(group) {
   });
 }
 
+/** True when any prime-process step has tooling ON (same rule as `process_tooling` on list rows). */
+export function primeProcessRequiresTooling(stages = []) {
+  return (stages || []).some((s) => (s.processes || []).some((p) => p.tooling === true));
+}
+
 /**
  * Prime Process Master flags for Job Card list: `rm`, `process_tooling` (any step with rm_wire / tooling ON).
  * Optional `wireList` fills process RM codes (legacy); Job Card drawer RM uses Production attach instead.
@@ -359,7 +364,7 @@ export async function attachRmWireFromPrimeProcess(groups = [], { wireList = fal
 
     const processes = stageList.flatMap((s) => s.processes || []);
     g.rm = processes.some((p) => p.rm_wire === true);
-    g.process_tooling = processes.some((p) => p.tooling === true);
+    g.process_tooling = primeProcessRequiresTooling(stageList);
     if (!wireList) continue;
 
     let items = processes

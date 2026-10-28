@@ -64,11 +64,11 @@ export async function findAllJobCards({ approved, type = JOB_CARD_TYPE_DEFAULT }
   const where = ["is_deleted = false", "type = $1", shortageFullyApprovedSql()];
   const values = [Number(type)];
   if (approved === true || approved === false) where.push(`approved = $${values.push(approved)}`);
-  return dbQuery(`SELECT ${READ_COLS} FROM ${T.JOB_CARD} WHERE ${where.join(" AND ")} ORDER BY docno DESC`, values);
+  return dbQuery(`SELECT ${READ_COLS} FROM ${T.JC} WHERE ${where.join(" AND ")} ORDER BY docno DESC`, values);
 }
 
 export async function findJobCard(docno) {
-  const [row] = await dbQuery(`SELECT ${READ_COLS} FROM ${T.JOB_CARD} WHERE docno = $1 AND is_deleted = false`, [docno]);
+  const [row] = await dbQuery(`SELECT ${READ_COLS} FROM ${T.JC} WHERE docno = $1 AND is_deleted = false`, [docno]);
   return row ?? null;
 }
 
@@ -107,7 +107,7 @@ export async function findJobCardByShortageIds(shortageIds = []) {
   if (primeKeys.length !== 1) return null;
 
   const [stub] = await dbQuery(
-    `SELECT ${READ_COLS} FROM ${T.JOB_CARD}
+    `SELECT ${READ_COLS} FROM ${T.JC}
      WHERE is_deleted = false AND itemdcode = $1 AND approved IS DISTINCT FROM true AND jobcardno IS NULL
      ORDER BY docno DESC LIMIT 1`,
     [primeKeys[0]]
@@ -204,7 +204,7 @@ export async function sumShortageQty(shortageIds = [], client = null) {
 /** First New save with plan — assign ERP jobcardno / fyid / pjobcardno. */
 export async function assignErpNumbersToJobCard(docno, { jobcarddt, fyid, jobcardnoOverride } = {}, client) {
   const [row] = await client.query(
-    `SELECT docno, jobcardno, jcseriescode FROM ${T.JOB_CARD} WHERE docno = $1 AND is_deleted = false FOR UPDATE`,
+    `SELECT docno, jobcardno, jcseriescode FROM ${T.JC} WHERE docno = $1 AND is_deleted = false FOR UPDATE`,
     [docno]
   ).then((r) => r.rows);
   if (!row || row.jobcardno != null) return null;
@@ -221,7 +221,7 @@ export async function assignErpNumbersToJobCard(docno, { jobcarddt, fyid, jobcar
   const cardType = JOB_CARD_TYPE_DEFAULT;
   const pjobcardno = formatPJobCardNo(cardType, jobcardno);
   const out = await client.query(
-    `UPDATE ${T.JOB_CARD}
+    `UPDATE ${T.JC}
      SET jobcardno = $2, fyid = $3, jcseriescode = $4, pjobcardno = $5, jobcarddt = $6::date
      WHERE docno = $1 AND is_deleted = false
      RETURNING ${READ_COLS}`,
@@ -235,7 +235,7 @@ export async function updateJobCard(docno, fields = {}, client = null) {
   const cols = Object.keys(fields).filter((k) => UPDATABLE.includes(k));
   if (!cols.length) return null;
   const values = cols.map((k) => (JSONB_COLS.has(k) ? JSON.stringify(fields[k] ?? []) : fields[k]));
-  const sql = `UPDATE ${T.JOB_CARD}
+  const sql = `UPDATE ${T.JC}
      SET ${cols.map((k, i) => `${k} = $${i + 2}${JSONB_COLS.has(k) ? "::jsonb" : ""}`).join(", ")}
      WHERE docno = $1 AND is_deleted = false
      RETURNING ${READ_COLS}`;
@@ -246,47 +246,6 @@ export async function updateJobCard(docno, fields = {}, client = null) {
   }
   const [row] = await dbQuery(sql, params);
   return row ?? null;
-}
-
-/** Append process status rows — jobCardId = prod_job_card.docno (same transaction when client passed). */
-export async function insertProcessLogRows(jobCardId, rows = [], client = null) {
-  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && Number(r.process_id) > 0 && r.status);
-  if (!list.length) return 0;
-  const sql = `INSERT INTO ${T.JOB_CARD_PROCESS_LOG}
-         (job_card_id, process_id, machine_id, status, changed_by, changed_at, remark)
-       VALUES ($1, $2, $3, $4, $5, NOW(), $6)`;
-  for (const row of list) {
-    const mid = Number(row.machine_id);
-    const params = [
-      Number(jobCardId),
-      Number(row.process_id),
-      Number.isFinite(mid) && mid > 0 ? mid : null,
-      String(row.status),
-      row.changed_by ? String(row.changed_by).slice(0, 100) : null,
-      row.remark ? String(row.remark).slice(0, 500) : null,
-    ];
-    if (client) await client.query(sql, params);
-    else await dbQuery(sql, params);
-  }
-  return list.length;
-}
-
-/** Process history for get-by-id (newest first). Process/machine names joined; changed_by is already a name. */
-export async function findProcessLogByJobCard(jobCardId) {
-  const docno = Number(jobCardId);
-  if (!docno) return [];
-  return dbQuery(
-    `SELECT l.id, l.job_card_id, l.process_id, l.machine_id, l.status, l.changed_by, l.changed_at, l.remark,
-            l.changed_by AS changed_by_name,
-            p.procname AS process_name,
-            m.macname AS machine_name
-     FROM ${T.JOB_CARD_PROCESS_LOG} l
-     LEFT JOIN ${E.PROCESS_MASTER} p ON p.proccode = l.process_id AND COALESCE(p.is_deleted, false) = false
-     LEFT JOIN ${E.MACHINE_MASTER} m ON m.maccode = l.machine_id AND COALESCE(m.is_deleted, false) = false
-     WHERE l.job_card_id = $1
-     ORDER BY l.changed_at DESC, l.id DESC`,
-    [docno]
-  );
 }
 
 /** Linked shortage lines → pending again (is_accepted / accepted_remark / docno cleared). */
@@ -308,7 +267,7 @@ async function resetShortageApprovalForJobCard(shortageIds, jcDocno, client = nu
   return rows.length;
 }
 
-/** Hard delete — reset linked shortages, process log, then job card row. */
+/** Hard delete — reset linked shortages, then job card row (prod_plan cascades). */
 export async function hardDeleteJobCard(docno, client = null) {
   const id = Number(docno);
   if (!id) return null;
@@ -317,14 +276,13 @@ export async function hardDeleteJobCard(docno, client = null) {
     : (sql, params) => dbQuery(sql, params);
 
   const [row] = await run(
-    `SELECT ${READ_COLS} FROM ${T.JOB_CARD} WHERE docno = $1 AND is_deleted = false`,
+    `SELECT ${READ_COLS} FROM ${T.JC} WHERE docno = $1 AND is_deleted = false`,
     [id]
   );
   if (!row) return null;
 
   await resetShortageApprovalForJobCard([], id, client);
-  await run(`DELETE FROM ${T.JOB_CARD_PROCESS_LOG} WHERE job_card_id = $1`, [id]);
-  await run(`DELETE FROM ${T.JOB_CARD} WHERE docno = $1`, [id]);
+  await run(`DELETE FROM ${T.JC} WHERE docno = $1`, [id]);
   return row;
 }
 
@@ -367,14 +325,14 @@ export async function applyShortageDecisionToJobCards({
       const planqty = await sumShortageQty(ids);
       const who = user ?? "system";
       await withTransaction(async (client) => {
-        await client.query(`LOCK TABLE ${T.JOB_CARD} IN EXCLUSIVE MODE`);
+        await client.query(`LOCK TABLE ${T.JC} IN EXCLUSIVE MODE`);
         const { rows: dr } = await client.query(
-          `SELECT GREATEST(COALESCE(MAX(docno), 0) + 1, $1::int) AS docno FROM ${T.JOB_CARD}`,
+          `SELECT GREATEST(COALESCE(MAX(docno), 0) + 1, $1::int) AS docno FROM ${T.JC}`,
           [JC_START]
         );
         const jcDocno = Number(dr[0].docno);
         await client.query(
-          `INSERT INTO ${T.JOB_CARD} (docno, pjobcardno, type, itemdcode, process_plan, status, created_by, planqty, jcseriescode)
+          `INSERT INTO ${T.JC} (docno, pjobcardno, type, itemdcode, process_plan, status, created_by, planqty, jcseriescode)
            VALUES ($1, NULL, $2, $3, '[]'::jsonb, 'Pending', $4, $5, $6)`,
           [jcDocno, cardType, key, who, Number(planqty) || 0, JC_SERIES_CODE]
         );
@@ -402,12 +360,12 @@ export async function applyShortageDecisionToJobCards({
   }
   if (stubDocnos.length) {
     await dbQuery(
-      `DELETE FROM ${T.JOB_CARD} WHERE docno = ANY($1::int[]) AND jobcardno IS NULL AND is_deleted = false`,
+      `DELETE FROM ${T.JC} WHERE docno = ANY($1::int[]) AND jobcardno IS NULL AND is_deleted = false`,
       [stubDocnos]
     );
   }
   await dbQuery(
-    `UPDATE ${T.JOB_CARD}
+    `UPDATE ${T.JC}
      SET tooling_approved = NULL, tooling_remark = NULL, tooling_by = NULL, tooling_at = NULL,
          updated_by = $3, updated_at = NOW()
      WHERE is_deleted = false AND type = $1 AND itemdcode = ANY($2::int[])`,
@@ -427,7 +385,7 @@ export async function listJobCardsForTooling(register, type = JOB_CARD_TYPE_DEFA
         docno, pjobcardno, type, itemdcode AS item_dcode,
         tooling_approved AS approved, tooling_remark AS remark,
         tooling_by, tooling_at
-     FROM ${T.JOB_CARD}
+     FROM ${T.JC}
      WHERE ${where}
      ORDER BY itemdcode, docno DESC`,
     [Number(type)]
@@ -436,7 +394,7 @@ export async function listJobCardsForTooling(register, type = JOB_CARD_TYPE_DEFA
 
 export async function saveJobCardTooling({ primeKey, tooling, remark, user, type = JOB_CARD_TYPE_DEFAULT }) {
   const [row] = await dbQuery(
-    `UPDATE ${T.JOB_CARD}
+    `UPDATE ${T.JC}
      SET tooling_approved = $2,
          tooling_remark = $3,
          tooling_by = $4,
@@ -444,7 +402,7 @@ export async function saveJobCardTooling({ primeKey, tooling, remark, user, type
          updated_by = $4,
          updated_at = NOW()
      WHERE docno = (
-       SELECT docno FROM ${T.JOB_CARD}
+       SELECT docno FROM ${T.JC}
        WHERE itemdcode = $1 AND type = $5 AND is_deleted = false AND ${shortageFullyApprovedSql()}
        ORDER BY docno DESC LIMIT 1
      )
@@ -456,7 +414,7 @@ export async function saveJobCardTooling({ primeKey, tooling, remark, user, type
 
 export async function resetJobCardToolingToPending({ primeKey, user, type = JOB_CARD_TYPE_DEFAULT }) {
   const [row] = await dbQuery(
-    `UPDATE ${T.JOB_CARD}
+    `UPDATE ${T.JC}
      SET tooling_approved = NULL,
          tooling_remark = NULL,
          tooling_by = NULL,
@@ -464,7 +422,7 @@ export async function resetJobCardToolingToPending({ primeKey, user, type = JOB_
          updated_by = $2,
          updated_at = NOW()
      WHERE docno = (
-       SELECT docno FROM ${T.JOB_CARD}
+       SELECT docno FROM ${T.JC}
        WHERE itemdcode = $1 AND type = $3 AND is_deleted = false AND tooling_approved IS NOT NULL
        ORDER BY docno DESC LIMIT 1
      )

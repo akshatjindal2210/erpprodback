@@ -22,7 +22,7 @@ import {
 
 } from "../utils/primeItemShortage.js";
 
-import { applyShortageDecisionToJobCards } from "../../job-card/models/jobCard.model.js";
+import { applyShortageDecisionToJobCards } from "../../jc/models/jobCard.model.js";
 
 
 
@@ -196,23 +196,33 @@ async function applyPrimeDecision(req, res, { from, to, action, verb, remarkRequ
 
       );
 
-      return (out.rows || []).map((r) => r.id);
+      const changed = (out.rows || []).map((r) => r.id);
+
+      if (changed.length) {
+
+        await applyShortageDecisionToJobCards({
+
+          primeKeys,
+
+          approved: to,
+
+          user,
+
+          shortageIdsByPrime: shortageIdsByPrime(rows, changed),
+
+          client,
+
+        });
+
+      }
+
+      return changed;
 
     });
 
 
 
     const skipped = ids.length - updatedIds.length;
-
-    if (updatedIds.length) {
-
-      await applyShortageDecisionToJobCards({
-
-        primeKeys, approved: to, user, shortageIdsByPrime: shortageIdsByPrime(rows, updatedIds),
-
-      });
-
-    }
 
 
 

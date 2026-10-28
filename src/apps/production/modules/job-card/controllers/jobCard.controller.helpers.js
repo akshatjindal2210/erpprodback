@@ -258,25 +258,6 @@ export function remarkMapFromBody(raw) {
   return map;
 }
 
-export function logRowsFromDiff(diffs, userName, remarkByKey = new Map()) {
-  const who = userName ? String(userName).slice(0, 100) : null;
-  return diffs.map((d) => {
-    const mid = Number(d.machine_id);
-    const key = `${Number(d.process_id)}:${Number.isFinite(mid) && mid > 0 ? mid : 0}`;
-    return {
-      process_id: d.process_id,
-      machine_id: Number.isFinite(mid) && mid > 0 ? mid : null,
-      status: d.status,
-      changed_by: who,
-      remark:
-        remarkByKey.get(key) ||
-        remarkByKey.get(Number(d.process_id)) ||
-        remarkByKey.get(String(d.process_id)) ||
-        null,
-    };
-  });
-}
-
 export async function loadRegisterList(approvedFilter) {
   let data = await toCardRows(await findAllJobCards({ approved: approvedFilter }));
   if (approvedFilter === true) data = await attachEstShifts(data);

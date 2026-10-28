@@ -162,7 +162,7 @@ export const findProductionFgForRmWire = async ({ item_code, item_dcode } = {}) 
 
 /** All distinct approved FG items whose production mapping includes this RM wire. */
 export async function findApprovedFgItemsForRmWire({ item_code, item_dcode } = {}) {
-  const code = item_code ? String(item_code).trim() : "";
+  const code = item_code ? String(item_code).trim().replace(/\s+/g, " ") : "";
   const dcodeNum = item_dcode != null && item_dcode !== "" ? Number(item_dcode) : NaN;
   const dcode = Number.isFinite(dcodeNum) && dcodeNum > 0 ? dcodeNum : null;
   if (!code && dcode == null) return [];
@@ -171,8 +171,11 @@ export async function findApprovedFgItemsForRmWire({ item_code, item_dcode } = {
   let i = 1;
   const rmMatch = [];
   if (code) {
-    rmMatch.push(`UPPER(TRIM(COALESCE(elem->>'rm_item_code', ''))) = UPPER(TRIM($${i++}::text))`);
-    values.push(code);
+    // Collapse internal spaces so coil vs production master codes still match.
+    rmMatch.push(
+      `regexp_replace(UPPER(TRIM(COALESCE(elem->>'rm_item_code', ''))), '\\s+', ' ', 'g') = $${i++}::text`
+    );
+    values.push(code.toUpperCase());
   }
   if (dcode != null) {
     rmMatch.push(`NULLIF(TRIM(COALESCE(elem->>'rm_item_dcode', '')), '')::bigint = $${i++}::bigint`);
