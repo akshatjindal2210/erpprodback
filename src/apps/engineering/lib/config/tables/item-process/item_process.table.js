@@ -1,6 +1,6 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { ENGINEERING_TABLES as T } from "../../../../../../config/db/dbTables.js";
-import { ensureColumns } from "../../../../../../config/db/ensureDbColumns.js";
+import { dropColumnIfExists, ensureColumns } from "../../../../../../config/db/ensureDbColumns.js";
 
 /**
  * Item process — Prime / FG process plan of an item (one row = one plan). Engineering only — no Item RM (rmstore) link.
@@ -11,7 +11,7 @@ import { ensureColumns } from "../../../../../../config/db/ensureDbColumns.js";
  *
  *   process = ids only (names come live from Process / Machine Master, RM codes from IMS).
  *             JSON (not JSONB) so keys keep their order:
- *     { "type": "prime",
+ *     { "type": "prime", "connecting": 12,
  *       "stages": [ { "stage": 1, "processes": [ { "process": 1, "machines": [1, 2], "rm": [1451] } ] } ] }
  *     { "type": "fg",
  *       "stages": [ { "stage": 1, "processes": [ { "process": 12, "machines": [20], "rm": [] } ] } ] }
@@ -22,7 +22,7 @@ export async function createItemProcessTable() {
       id          SERIAL PRIMARY KEY,
       type        SMALLINT NOT NULL,      -- 1 prime · 2 fg
       item_dcode  INTEGER NOT NULL,       -- the item of this plan (prime or fg)
-      process     JSON NOT NULL,          -- { type: "prime" | "fg", stages }
+      process     JSON NOT NULL,          -- { type, stages, connecting? }
       is_deleted  BOOLEAN DEFAULT false,
       deleted_by  TEXT,
       deleted_at  TIMESTAMP,
@@ -39,6 +39,7 @@ export async function createItemProcessTable() {
       ON ${T.ITEM_PROCESS} (type, item_dcode) WHERE is_deleted = false;     -- one active plan per (type, item)
   `);
 
+  await dropColumnIfExists(dbQuery, T.ITEM_PROCESS, "connecting_process_id");
   await ensureColumns(dbQuery, T.ITEM_PROCESS, [
     { name: "is_approved", addSql: "is_approved BOOLEAN NOT NULL DEFAULT false" },
     { name: "approved_by", addSql: "approved_by TEXT" },

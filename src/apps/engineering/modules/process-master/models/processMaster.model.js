@@ -11,7 +11,7 @@ const TABLE = T.PROCESS_MASTER;
 /**
  * Boolean process options — single list. New flag: add name here + DB column in process_master.table.js.
  */
-export const PROCESS_FLAGS = ["multi_jc", "rm_wire", "tooling", "fg", "prime", "rework", "inhouse", "jobwork"];
+export const PROCESS_FLAGS = ["multi_jc", "rm_wire", "tooling", "fg", "prime", "rework", "inhouse", "jobwork", "connectivity"];
 
 /** Row → { multi_jc: true, rm_wire: false, … } — exactly as set in Process Master. */
 export const flagsOf = (row) => Object.fromEntries(PROCESS_FLAGS.map((f) => [f, row?.[f] === true]));
@@ -32,14 +32,13 @@ const FILTERS = {
 const SORTS = ["proccode", "procname", "id", "name", "stage", "depth", "parent_id", "approved", "created_at", "updated_at"];
 const SORT_COL = { proccode: "proccode", procname: "procname", id: "proccode", name: "procname" };
 const UPDATABLE = [
-  "procname", "parent_id", "depth", "stage", "pattern",
+  "procname", "parent_id", "depth", "stage", "deptname",
   ...PROCESS_FLAGS,
   "approved", "approved_by", "approved_at", "updated_by", "updated_at",
 ];
 
 const DEFAULT_FIELDS = [
-  "pm.proccode", "pm.procname", "pm.depth", "pm.parent_id", "pm.stage",
-  "pm.pattern",
+  "pm.proccode", "pm.procname", "pm.depth", "pm.parent_id", "pm.stage", "pm.deptname",
   ...PROCESS_FLAGS.map((f) => `pm.${f}`),
   "parent.procname AS parent_name",
   "pm.approved", "pm.approved_by", "pm.approved_at",
@@ -96,10 +95,7 @@ export async function findProcesses({ filters = {}, search, sort = {}, page = 1,
     add(next, FILTERS[key]);
   }
   if (search) {
-    add(
-      `%${search}%`,
-      (i) => `(pm.procname ILIKE $${i} OR parent.procname ILIKE $${i} OR COALESCE(pm.pattern, '') ILIKE $${i})`
-    );
+    add(`%${search}%`, (i) => `(pm.procname ILIKE $${i} OR parent.procname ILIKE $${i} OR COALESCE(pm.deptname, '') ILIKE $${i})`);
   }
   if (excludeIds.length) add(excludeIds, (i) => `pm.proccode <> ALL($${i}::int[])`);
 

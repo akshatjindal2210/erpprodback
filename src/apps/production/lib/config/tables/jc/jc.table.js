@@ -8,7 +8,6 @@ export async function createJobCardTable() {
       docno              INTEGER PRIMARY KEY,
       pjobcardno         VARCHAR(30) UNIQUE,
       jobcarddt          DATE NOT NULL DEFAULT CURRENT_DATE,
-      schedule_shift     SMALLINT NOT NULL DEFAULT 1,
       type               SMALLINT NOT NULL DEFAULT 0,
       itemdcode          INTEGER NOT NULL,
       process_plan       JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -36,7 +35,7 @@ export async function createJobCardTable() {
     CREATE INDEX IF NOT EXISTS prod_jc_prime_idx ON ${T.JC} (itemdcode) WHERE is_deleted = false;
     CREATE INDEX IF NOT EXISTS prod_jc_tooling_approved_idx ON ${T.JC} (tooling_approved) WHERE is_deleted = false;
     CREATE INDEX IF NOT EXISTS prod_jc_type_idx ON ${T.JC} (type) WHERE is_deleted = false;
-    CREATE INDEX IF NOT EXISTS prod_jc_jobcarddt_shift_idx ON ${T.JC} (jobcarddt, schedule_shift) WHERE is_deleted = false;
+    CREATE INDEX IF NOT EXISTS prod_jc_jobcarddt_idx ON ${T.JC} (jobcarddt) WHERE is_deleted = false;
     CREATE UNIQUE INDEX IF NOT EXISTS prod_jc_erp_no_uq
       ON ${T.JC} (jcseriescode, fyid, jobcardno)
       WHERE jobcardno IS NOT NULL AND fyid IS NOT NULL;

@@ -70,19 +70,17 @@ export function issueQtyKg(gweight, qty) {
 export const MULTI_JC_SPLIT_TIME = true;
 
 /**
- * Production shifts — ONE place on the backend (keep frontend jobCard.config.js in sync).
+ * Production time only (keep frontend jobCard.config.js in sync).
+ * Shift count / codes come from Settings → Shifts (getShiftsPerDay).
  *
- *   SHIFTS_PER_DAY = 2 or 3  → board / calendar columns (S1…Sn)
- *   SHIFT_HOURS    = 8       → hours per shift (est. production time + board Qty · hours)
- *
- * Change only these two numbers.
+ *   SHIFT_HOURS = 8  → hours per shift (est. production time)
  */
-export const SHIFTS_PER_DAY = 3;
 export const SHIFT_HOURS = 8;
 
-/** Valid schedule_shift ids: 1…SHIFTS_PER_DAY */
-export const SHIFT_IDS = Array.from({ length: SHIFTS_PER_DAY }, (_, i) => i + 1);
-
-export function isValidShift(n) {
-  return SHIFT_IDS.includes(Number(n));
+/** Valid shift index: 1…shiftsPerDay (Settings). If max omitted, any n >= 1. */
+export function isValidShift(n, shiftsPerDay) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || !Number.isInteger(v) || v < 1) return false;
+  if (shiftsPerDay == null || shiftsPerDay === "") return true;
+  return v <= Math.max(1, Number(shiftsPerDay) || 1);
 }

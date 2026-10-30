@@ -70,6 +70,7 @@ export const OTHER_TABLE_TO_MODULE = {
   hrms_deduction: "hrms_deduction",
   prod_jc: "production_job_card",
   prod_plan: "production_planning",
+  prod_plan_manpower: "production_planning",
   // Tooling approval on prod_jc (legacy prod_shortage dropped)
   prod_shortage: "production_tooling",
   prod_tooling: "production_tooling",

@@ -127,7 +127,7 @@ export const DB_TABLES = {
 
   purchase: [],
   /** Production application tables. */
-  production: ["prod_jc", "prod_plan"],
+  production: ["prod_jc", "prod_plan", "prod_plan_manpower"],
 
   /** Engineering application tables. */
   engineering: [

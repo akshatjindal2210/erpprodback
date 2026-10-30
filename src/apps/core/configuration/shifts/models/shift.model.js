@@ -3,9 +3,18 @@ import { MST_TABLES } from "../../../../../config/db/dbTables.js";
 
 const TABLE = MST_TABLES.SHIFTS;
 
-const ALLOWED_SELECT_FIELDS = ["id", "code", "start_time", "end_time", "is_active", "created_at", "updated_at"];
+const ALLOWED_SELECT_FIELDS = [
+  "id",
+  "code",
+  "start_time",
+  "end_time",
+  "lunch",
+  "is_active",
+  "created_at",
+  "updated_at",
+];
 const ALLOWED_FILTER_FIELDS = ["id", "code", "is_active", "from_date", "to_date"];
-const ALLOWED_UPDATE_FIELDS = ["code", "start_time", "end_time", "is_active", "updated_at"];
+const ALLOWED_UPDATE_FIELDS = ["code", "start_time", "end_time", "lunch", "is_active", "updated_at"];
 const ALLOWED_SORT_FIELDS = ["id", "code", "start_time", "end_time", "is_active", "created_at"];
 
 const assertField = (key, whitelist, context = "field") => {
@@ -25,7 +34,8 @@ export const findShifts = async (options = {}) => {
   const values = [];
   let i = 1;
 
-  const mappedSelect = fields.length > 0 ? fields.filter((f) => ALLOWED_SELECT_FIELDS.includes(f)).map((f) => `s.${f}`) : ["s.*"];
+  const mappedSelect =
+    fields.length > 0 ? fields.filter((f) => ALLOWED_SELECT_FIELDS.includes(f)).map((f) => `s.${f}`) : ["s.*"];
   const safeFields = mappedSelect.join(", ");
 
   const conditions = ["TRUE"];
@@ -62,10 +72,7 @@ export const findShifts = async (options = {}) => {
   const offset = (safePage - 1) * safeLimit;
 
   const countValues = [...values];
-  const [{ count }] = await dbQuery(
-    `SELECT COUNT(*) AS count FROM ${TABLE} s ${whereClause}`,
-    countValues
-  );
+  const [{ count }] = await dbQuery(`SELECT COUNT(*) AS count FROM ${TABLE} s ${whereClause}`, countValues);
 
   values.push(safeLimit, offset);
   const rows = await dbQuery(
@@ -93,20 +100,17 @@ export const findShift = async (filters = {}) => {
   const conditions = keys.map((k, idx) => `s.${k} = $${idx + 1}`).join(" AND ");
   const values = Object.values(filters);
 
-  const [row] = await dbQuery(
-    `SELECT s.* FROM ${TABLE} s WHERE ${conditions} LIMIT 1`,
-    values
-  );
+  const [row] = await dbQuery(`SELECT s.* FROM ${TABLE} s WHERE ${conditions} LIMIT 1`, values);
   return row ?? null;
 };
 
 export const insertShift = async (data = {}) => {
-  const { code, start_time, end_time, is_active = true } = data;
+  const { code, start_time, end_time, lunch = false, is_active = true } = data;
   const [row] = await dbQuery(
-    `INSERT INTO ${TABLE} (code, start_time, end_time, is_active)
-     VALUES ($1, $2::time, $3::time, $4)
+    `INSERT INTO ${TABLE} (code, start_time, end_time, lunch, is_active)
+     VALUES ($1, $2::time, $3::time, $4, $5)
      RETURNING *`,
-    [code, start_time, end_time, !!is_active]
+    [code, start_time, end_time, !!lunch, !!is_active]
   );
   return row;
 };
@@ -128,10 +132,7 @@ export const updateShift = async (fields = {}, filters = {}) => {
   const whereClause = filterKeys.map((k, idx) => `${k} = $${fieldKeys.length + idx + 1}`).join(" AND ");
   const values = [...Object.values(fields), ...Object.values(filters)];
 
-  return await dbQuery(
-    `UPDATE ${TABLE} SET ${setClause} WHERE ${whereClause} RETURNING *`,
-    values
-  );
+  return await dbQuery(`UPDATE ${TABLE} SET ${setClause} WHERE ${whereClause} RETURNING *`, values);
 };
 
 export const deleteShift = async (filters = {}) => {

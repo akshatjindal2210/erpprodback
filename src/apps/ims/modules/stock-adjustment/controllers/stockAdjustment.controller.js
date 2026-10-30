@@ -19,19 +19,9 @@ import { enrichStockAdjustmentListRows } from "../utils/list/stockAdjustmentList
 import { buildMinusRemovedBoxIdsJson, parseRemovedBoxIdsJson, buildAddPendingMetaJson, parseAddPendingMeta } from "../utils/minus/minusRemovedBoxPayload.js";
 import { buildQtyUpdatePayload, parseQtyUpdatePayload } from "../utils/update/stockAdjustmentUpdatePayload.js";
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
+import { equalUidLists } from "../../../lib/stickerUidHelpers.js";
 
 const STOCK_CFG = getCrudModuleConfig("stock_adjustment");
-
-const equalUidLists = (left = [], right = []) => {
-  const norm = (arr) => [...arr].map((u) => String(u).trim()).filter(Boolean).sort();
-  const a = norm(left);
-  const b = norm(right);
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-};
 
 /** Minus / box removal — add, edit, authorize, or delete on stock_adjustment (not delete-only). */
 function canUserRemoveInventoryBoxes(req) {

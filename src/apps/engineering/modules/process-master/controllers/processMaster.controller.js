@@ -12,6 +12,7 @@ import { assertWithinEditDays } from "../../../../core/lib/utils/auth/permission
 import { parsePositiveIntId } from "../../../../core/lib/utils/query/parseId.js";
 import logger from "../../../../core/lib/utils/logging/logger.js";
 import { assertErpSync, nextErpMasterCode } from "../../../../core/lib/services/erpSync.js";
+import { fetchEmpMaster } from "../../../../hrms/lib/erpApi.js";
 
 const ENTITY = "eng_process_master";
 const CFG = getCrudModuleConfig(ENTITY);
@@ -28,16 +29,10 @@ const toStage = (v) => {
 const toBool = (v) => v === true || v === "true" || v === 1 || v === "1";
 const toName = (v) => String(v ?? "").trim();
 
-/** Empty → null; otherwise must be a valid regular expression. */
-function toPattern(v) {
+/** Empty → null; otherwise HRMS employee department name (ERP deptname). */
+function toDeptname(v) {
   if (v == null || String(v).trim() === "") return null;
-  const text = String(v).trim();
-  try {
-    new RegExp(text); // eslint-disable-line no-new
-    return text;
-  } catch {
-    throw Object.assign(new Error("Invalid pattern — must be a valid regular expression"), { statusCode: 400 });
-  }
+  return String(v).trim();
 }
 
 const parentIdOf = (body) => (body?.parent_id == null || body.parent_id === "" ? null : parsePositiveIntId(body.parent_id));
@@ -77,10 +72,15 @@ const handle = (name, fn) => async (req, res) => {
   }
 };
 
+const withConnectivityQuery = (filters, query) => {
+  if (query?.connectivity == null || query.connectivity === "") return filters || {};
+  return { ...(filters || {}), connectivity: query.connectivity };
+};
+
 export const listProcesses = handle("list", async (req, res) => {
   const { page, limit, sortBy, order, search, filters } = extractListParams(req.body || {});
   const data = await findProcesses({
-    filters: sanitizeFilters(filters, CFG?.filterFields || []),
+    filters: sanitizeFilters(withConnectivityQuery(filters, req.query), CFG?.filterFields || []),
     search: sanitizeSearch(search),
     sort: { by: sortBy, order },
     page,
@@ -109,7 +109,7 @@ export const createProcess = handle("create", async (req, res) => {
     parent_id,
     depth,
     stage: toStage(body.stage),
-    pattern: toPattern(body.pattern),
+    deptname: toDeptname(body.deptname ?? body.pattern),
     created_by: auditUserName(req),
   };
   for (const f of PROCESS_FLAGS) fields[f] = toBool(body[f]);
@@ -149,7 +149,9 @@ export const updateProcess = handle("update", async (req, res) => {
   const input = {
     procname: body.procname ?? body.name,
     stage: body.stage,
-    pattern: body.pattern !== undefined ? toPattern(body.pattern) : undefined,
+    deptname: body.deptname !== undefined || body.pattern !== undefined
+      ? toDeptname(body.deptname ?? body.pattern)
+      : undefined,
   };
   for (const f of PROCESS_FLAGS) input[f] = body[f];
 
@@ -159,7 +161,7 @@ export const updateProcess = handle("update", async (req, res) => {
     rules: [
       { field: "procname", normalize: toName },
       { field: "stage", normalize: toStage },
-      { field: "pattern", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
+      { field: "deptname", normalize: toDeptname },
       ...PROCESS_FLAGS.map((field) => ({ field, normalize: toBool })),
     ],
   });
@@ -232,7 +234,7 @@ export const deleteProcess = handle("delete", async (req, res) => {
 export const listProcessViews = handle("helper", async (req, res) => {
   const body = req.body || {};
   const { page, limit, search, filters } = extractListParams(body);
-  const safeFilters = sanitizeFilters(filters || {}, HELPER_FILTER_KEYS);
+  const safeFilters = sanitizeFilters(withConnectivityQuery(filters, req.query), HELPER_FILTER_KEYS);
 
   const byCode = parsePositiveIntId(body.proccode ?? body.id ?? safeFilters.proccode ?? safeFilters.id);
   if (byCode) {
@@ -250,4 +252,49 @@ export const listProcessViews = handle("helper", async (req, res) => {
     excludeIds: excludeId ? subtreeIds(await loadTree(), excludeId) : [],
   });
   return res.json({ success: true, data: data.map(toOption), total });
+});
+
+/** Distinct ERP employee departments for Process Master deptname picker (no HRMS route changes). */
+function distinctDepartments(employees, search) {
+  const byName = new Map();
+  for (const r of employees) {
+    const deptname = String(r.deptname ?? "").trim();
+    if (!deptname) continue;
+    const key = deptname.toLowerCase();
+    if (byName.has(key)) continue;
+    byName.set(key, { id: deptname, deptcode: r.deptcode ?? null, deptname, label: deptname });
+  }
+  let list = [...byName.values()].sort((a, b) =>
+    a.deptname.localeCompare(b.deptname, undefined, { sensitivity: "base" })
+  );
+  const q = String(search ?? "").trim().toLowerCase();
+  if (q) {
+    list = list.filter((d) => d.deptname.toLowerCase().includes(q) || String(d.deptcode ?? "").toLowerCase().includes(q));
+  }
+  return list;
+}
+
+export const listProcessDepartments = handle("departments", async (req, res) => {
+  const body = req.body || {};
+  const lookup = String(body.id ?? body.deptname ?? "").trim();
+  const employees = await fetchEmpMaster({});
+  const all = distinctDepartments(employees);
+
+  if (lookup) {
+    const hit = all.find((d) => d.deptname.toLowerCase() === lookup.toLowerCase()) || { id: lookup, deptname: lookup, deptcode: null, label: lookup };
+    return res.json({ success: true, data: hit });
+  }
+
+  const { page, limit, search } = extractListParams(body);
+  const p = Math.max(1, Number(page) || 1);
+  const n = Math.min(100, Math.max(1, Number(limit) || 50));
+  const filtered = distinctDepartments(employees, search);
+  const start = (p - 1) * n;
+  return res.json({
+    success: true,
+    data: filtered.slice(start, start + n),
+    total: filtered.length,
+    page: p,
+    limit: n,
+  });
 });

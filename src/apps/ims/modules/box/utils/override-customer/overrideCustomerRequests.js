@@ -10,17 +10,7 @@ import { isBoxEligibleForOverrideCustomer, overrideCustomerScanRejectMessage } f
 import { logOverrideCustomerBatch } from "../transactions/logBoxTransaction.js";
 import { logActivity } from "../../../../../core/lib/utils/activity/logActivity.js";
 import { applyApprovalUpdateFields, normalizeApprovedInput, auditUserName } from "../../../../../core/lib/utils/auth/approval.js";
-
-const equalUidLists = (left = [], right = []) => {
-  const norm = (arr) => [...(arr || [])].map((u) => String(u).trim()).filter(Boolean).sort();
-  const a = norm(left);
-  const b = norm(right);
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-};
+import { equalUidLists } from "../../../../lib/stickerUidHelpers.js";
 
 export const OVERRIDE_ACTIVITY_ENTITY = "change_override_customer";
 

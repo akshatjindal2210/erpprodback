@@ -109,6 +109,7 @@ export const MODULES = {
     { name: "production_job_card", label: "Maintain Job Card" },
     { name: "production_planning", label: "Production Planning" },
     { name: "production_entry", label: "Production Entry" },
+    { name: "production_manpower", label: "Manpower" },
     { name: "production_tooling", label: "Tooling" },
     { name: "production_activity_logs", label: "Activity Logs" },
   ],
@@ -198,5 +199,6 @@ export const SEED_MODULES = [
   { name: "production_job_card",          label: "Maintain Job Card",               sort_order: 62,       app_type: "production" },
   { name: "production_planning",          label: "Production Planning",              sort_order: 63,       app_type: "production" },
   { name: "production_entry",             label: "Production Entry",                 sort_order: 64,       app_type: "production" },
-  { name: "production_tooling",           label: "Tooling",                         sort_order: 65,       app_type: "production" },
+  { name: "production_manpower",          label: "Manpower",                         sort_order: 65,       app_type: "production" },
+  { name: "production_tooling",           label: "Tooling",                         sort_order: 66,       app_type: "production" },
 ];

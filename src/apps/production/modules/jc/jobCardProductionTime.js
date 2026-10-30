@@ -25,10 +25,29 @@ const SHIFT_SECONDS = SHIFT_HOURS * 3600;
 
 const toShifts = (seconds) => (seconds > 0 ? Math.ceil(seconds / SHIFT_SECONDS) : 0);
 
+/** Machine Master rates — cavity (pcs/cycle), duration (sec/cycle). */
+export function parseMachineRates(mac = {}) {
+  const cavityRaw = parseFloat(String(mac.cavity ?? mac.speed ?? "").replace(/,/g, ""));
+  const cavity = Number.isFinite(cavityRaw) && cavityRaw > 0 ? cavityRaw : 1;
+  const duration = Math.max(0, Number(mac.maccycletime ?? mac.duration) || 0);
+  return { cavity, duration };
+}
+
+/**
+ * Slot hours → required / expected qty for that machine.
+ * cycles = floor(hours × 3600 / duration); qty = cycles × cavity.
+ */
+export function qtyFromSlotHours(mac, hours) {
+  const { cavity, duration } = parseMachineRates(mac);
+  const hrs = Math.max(0, Number(hours) || 0);
+  if (!(duration > 0) || !(hrs > 0)) return 0;
+  const cycles = Math.floor((hrs * 3600) / duration);
+  return Math.round(cycles * cavity);
+}
+
 /** One machine making `qty` pcs → { setup, run, total, shifts } in seconds. */
 function machineTime(mac, qty) {
-  const cavity = parseFloat(String(mac.cavity ?? mac.speed ?? "").replace(/,/g, "")) || 1;
-  const duration = Math.max(0, +mac.maccycletime || +mac.duration || 0);
+  const { cavity, duration } = parseMachineRates(mac);
   const setup_seconds = Math.max(0, +mac.setup_time || 0);
 
   const cycles = qty > 0 ? Math.ceil(qty / cavity) : 0;
@@ -149,27 +168,69 @@ export function calcJobCardProductionTime({ qty = 0, stages = [], process_plan =
   };
 }
 
-/** Board / plan line: shifts for one machine (not whole JC total). */
-export function shiftsForMachine(est, maccode, stageNo = null) {
-  if (!est?.valid || !Array.isArray(est.stages)) return null;
-  const mac = Number(maccode);
-  if (!Number.isFinite(mac) || mac <= 0) return null;
+/** One machine row from JC estimate (plan line maccode + stage). No maccode → first machine on stage. */
+export function machineEstForPlan(est, maccode, stageNo = null) {
+  if (!est?.valid || !est.stages?.length) return null;
+  const mac = Number(maccode) || 0;
   const stage = stageNo != null ? Number(stageNo) : null;
-  const pickFrom = (stages) => {
-    for (const st of stages) {
-      for (const m of st.machines || []) {
-        if (Number(m.machine_id) !== mac) continue;
-        const n = Number(m.shifts);
-        if (Number.isFinite(n) && n > 0) return n;
-      }
-    }
-    return null;
-  };
-  if (Number.isFinite(stage)) {
-    const hit = pickFrom(est.stages.filter((st) => Number(st.stage_no) === stage));
-    if (hit != null) return hit;
+  const pool = [];
+  for (const st of est.stages) {
+    if (stage != null && Number(st.stage_no) !== stage) continue;
+    pool.push(...(st.machines || []));
   }
-  return pickFrom(est.stages);
+  if (!pool.length) return null;
+  const hit = mac ? pool.find((m) => Number(m.machine_id) === mac) : pool[0];
+  if (!hit) return null;
+
+  const setup_seconds = Number(hit.setup_seconds) || 0;
+  const run_seconds = Number(hit.run_seconds) || 0;
+  const sec = setup_seconds + run_seconds;
+  return {
+    shifts: Number(hit.shifts) > 0 ? Number(hit.shifts) : sec > 0 ? toShifts(sec) : null,
+    setup_seconds,
+    run_seconds,
+    qty: Number(hit.qty) > 0 ? Math.round(Number(hit.qty)) : null,
+  };
+}
+
+function emptyPlanLine(plan_qty, est_error = null) {
+  return {
+    plan_qty,
+    line_qty: plan_qty,
+    multi_jc_split: false,
+    est_shifts: null,
+    est_setup_seconds: null,
+    est_run_seconds: null,
+    est_hours: null,
+    est_error,
+  };
+}
+
+/** Board / plan API — one prod_plan row (same math as Maintain JC). */
+export function planLineEstimate(est, maccode, stageNo, jcQty) {
+  const plan_qty = Math.max(0, Number(jcQty) || 0);
+  if (!est?.valid) return emptyPlanLine(plan_qty, est?.plan_error || "No estimate");
+
+  const m = machineEstForPlan(est, maccode, stageNo);
+  if (!m) {
+    const mac = Number(maccode) || 0;
+    return emptyPlanLine(plan_qty, mac ? `Machine ${mac} not on JC plan (stage ${stageNo ?? "?"})` : null);
+  }
+
+  const st = est.stages.find((s) => Number(s.stage_no) === Number(stageNo));
+  const line_qty = m.qty ?? plan_qty;
+  const sec = m.setup_seconds + m.run_seconds;
+
+  return {
+    plan_qty,
+    line_qty,
+    multi_jc_split: Boolean(st?.multi_jc_split) && line_qty < plan_qty,
+    est_shifts: m.shifts,
+    est_setup_seconds: m.setup_seconds || null,
+    est_run_seconds: m.run_seconds || null,
+    est_hours: sec > 0 ? Math.round((sec / 3600) * 10) / 10 : null,
+    est_error: null,
+  };
 }
 
 /** Issuable store KG per stage (same pool as Issue Request) — attached onto estimate for UI view only. */

@@ -1,9 +1,9 @@
 import dbQuery from "../../../../../config/db/db.js";
 import { PRODUCTION_TABLES as T, ENGINEERING_TABLES as E } from "../../../../../config/db/dbTables.js";
-import { machineStatusRows, parseProcessPlan, PROCESS_STATUS_VALUES } from "../../jc/processPlanStatus.js";
-import { calcJobCardProductionTime, shiftsForMachine } from "../../jc/jobCardProductionTime.js";
+import { machineStatusRows, parseProcessPlan, PROCESS_STATUS, PROCESS_STATUS_VALUES } from "../../jc/processPlanStatus.js";
+import { calcJobCardProductionTime, machineEstForPlan } from "../../jc/jobCardProductionTime.js";
 import { findPrimeProcess } from "../../jc/models/jobCard.model.js";
-import { SHIFTS_PER_DAY } from "../../jc/jobCard.config.js";
+import { getShiftsPerDay } from "./planManpower.model.js";
 
 const JOIN = `
   LEFT JOIN ${E.PROCESS_MASTER} pr ON pr.proccode = p.proccode AND COALESCE(pr.is_deleted, false) = false
@@ -11,9 +11,9 @@ const JOIN = `
 
 const LIST = `SELECT p.docno, p.pjobcardno, p.proccode, p.maccode, p.stage_no, p.status,
   p.plan_start, p.plan_end, p.actual_start, p.actual_end,
-  pr.procname AS process_name, m.macname AS machine_name,
-  j.docno AS job_card_docno, j.itemdcode, j.planqty AS qty, j.schedule_shift AS plan_shift,
-  j.status AS card_status, j.process_plan
+  pr.procname AS process_name, pr.deptname AS process_deptname, m.macname AS machine_name,
+  j.docno AS job_card_docno, j.itemdcode, j.planqty AS qty,
+  j.jobcarddt, j.status AS card_status, j.process_plan
   FROM ${T.PLAN} p
   INNER JOIN ${T.JC} j ON j.pjobcardno = p.pjobcardno AND j.approved = true AND COALESCE(j.is_deleted, false) = false
   ${JOIN}`;
@@ -23,9 +23,10 @@ async function rows(sql, params, client) {
   return dbQuery(sql, params);
 }
 
-function planEnd(start, shift, shifts) {
+function planEnd(start, shift, shifts, shiftsPerDay = 1) {
   if (!start || !shifts) return start;
-  const off = Math.floor((Number(shift || 1) - 1 + Number(shifts) - 1) / Math.max(1, SHIFTS_PER_DAY));
+  const perDay = Math.max(1, Number(shiftsPerDay) || 1);
+  const off = Math.floor((Number(shift || 1) - 1 + Number(shifts) - 1) / perDay);
   const d = new Date(`${start}T12:00:00`);
   d.setDate(d.getDate() + off);
   return d.toISOString().slice(0, 10);
@@ -75,7 +76,8 @@ export async function syncPlanFromJobCard(card, client = null) {
   }
 
   const planStart = String(card.jobcarddt || "").slice(0, 10) || null;
-  const shift = Number(card.schedule_shift) || 1;
+  const shift = 1;
+  const shiftsPerDay = await getShiftsPerDay();
   let est = null;
   try {
     const stages = await findPrimeProcess(Number(card.itemdcode));
@@ -105,8 +107,8 @@ export async function syncPlanFromJobCard(card, client = null) {
     const stageNo = line.stage_no != null ? Number(line.stage_no) : null;
     const prev = byKey.get(key);
     // plan_end from this machine's shifts (PACK ≠ whole JC total)
-    const macShifts = shiftsForMachine(est, maccode, stageNo) ?? est?.shifts;
-    const planEndDate = planEnd(planStart, shift, macShifts);
+    const macShifts = machineEstForPlan(est, maccode, stageNo)?.shifts ?? est?.shifts;
+    const planEndDate = planEnd(planStart, shift, macShifts, shiftsPerDay);
 
     let actualStart = prev?.actual_start ?? null;
     let actualEnd = prev?.actual_end ?? null;
@@ -203,10 +205,81 @@ export async function updatePlanLine(docno, patch = {}) {
   return updated || null;
 }
 
-/** Planning Table → Delete one prod_plan line (board/calendar/table). */
+function removeMachineFromProcessPlan(plan, { stage_no, proccode, maccode }) {
+  const stage = Number(stage_no);
+  const proc = Number(proccode);
+  const mac = Number(maccode) || 0;
+  return parseProcessPlan(plan)
+    .map((st) => {
+      if (Number(st.stage_no) !== stage || Number(st.process_id) !== proc) return st;
+      const machines = (st.machines || []).filter((m) => Number(m.machine_id) !== mac);
+      if (!machines.length) return null;
+      return { ...st, machines, status: machines[0]?.status || PROCESS_STATUS.PENDING };
+    })
+    .filter(Boolean);
+}
+
+function setProcessPlanStagePending(plan, stageNo) {
+  const sn = Number(stageNo);
+  return parseProcessPlan(plan).map((st) => {
+    if (Number(st.stage_no) !== sn) return st;
+    const machines = (st.machines || []).map((m) => ({ ...m, status: PROCESS_STATUS.PENDING }));
+    return { ...st, machines, status: PROCESS_STATUS.PENDING };
+  });
+}
+
+/** Previous stage from JC process_plan (prod_plan row may already be missing). */
+function previousStageNo(deletedStage, processPlanRaw) {
+  const deleted = Number(deletedStage);
+  if (!Number.isFinite(deleted)) return null;
+  const nums = parseProcessPlan(processPlanRaw)
+    .map((s) => Number(s.stage_no))
+    .filter((n) => Number.isFinite(n) && n < deleted);
+  return nums.length ? Math.max(...nums) : null;
+}
+
+/** Complete line delete → JC plan patch + sync prod_plan so Board shows previous stage. */
+async function afterCompletePlanDelete(line, prevStageNo) {
+  const pjobcardno = String(line.pjobcardno || "").trim();
+  if (!pjobcardno) return null;
+
+  const [jc] = await rows(
+    `SELECT docno, pjobcardno, itemdcode, planqty, jobcarddt, approved, process_plan
+     FROM ${T.JC}
+     WHERE pjobcardno = $1 AND COALESCE(is_deleted, false) = false LIMIT 1`,
+    [pjobcardno]
+  );
+  if (!jc?.docno) return prevStageNo;
+
+  let plan = removeMachineFromProcessPlan(jc.process_plan, line);
+  if (prevStageNo != null) plan = setProcessPlanStagePending(plan, prevStageNo);
+  await rows(`UPDATE ${T.JC} SET process_plan = $2::jsonb WHERE docno = $1`, [jc.docno, JSON.stringify(plan)]);
+
+  await syncPlanFromJobCard({ ...jc, process_plan: plan });
+  return prevStageNo != null ? Number(prevStageNo) : null;
+}
+
+/** Planning Table → Delete one prod_plan line (manpower unchanged). Complete → JC previous stage pending on board. */
 export async function deletePlanLine(docno) {
   const line = await findPlanLine(docno);
   if (!line) return null;
+
+  const status = String(line.status || "pending").toLowerCase();
+  if (status === "running") {
+    const err = new Error("Cannot delete — status is Running. Hold or complete on Job Card Board first.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const deletedStage = Number(line.stage_no);
+  const prevStageNo = previousStageNo(deletedStage, line.process_plan);
+
   await rows(`DELETE FROM ${T.PLAN} WHERE docno = $1`, [Number(docno)]);
-  return line;
+
+  let reopened_stage = null;
+  if (status === "complete") {
+    reopened_stage = await afterCompletePlanDelete(line, prevStageNo);
+  }
+
+  return { ...line, reopened_stage };
 }

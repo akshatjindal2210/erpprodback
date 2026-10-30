@@ -1,6 +1,3 @@
-import { createGroupMasterControllers } from "../../../../ims/lib/utils/master/createGroupMasterControllers.js";
-import { PRODUCTION_GROUP_NAME } from "../../../lib/config/groupFilter.js";
+import { itemMasterHandlers } from "../../../../ims/lib/utils/master/itemMasterHandlers.js";
 
-export const { getItems, getItemById, getItemsViews } = createGroupMasterControllers({
-  groupName: PRODUCTION_GROUP_NAME,
-});
+export const { getItems, getItemById, getItemsViews } = itemMasterHandlers("prd");

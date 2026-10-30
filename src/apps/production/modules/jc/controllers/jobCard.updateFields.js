@@ -4,7 +4,6 @@
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { JOB_CARD_STATUSES, findPrimeProcess } from "../models/jobCard.model.js";
 import { diffProcessPlan, statusMapFromPicks, withPlanStatuses } from "../processPlanStatus.js";
-import { isValidShift, SHIFTS_PER_DAY } from "../jobCard.config.js";
 import { assertMaintainJobcardToolingIfRequired, buildProcessPlan, planKey, remarkMapFromBody } from "./jobCard.controller.helpers.js";
 
 export async function prepareJobCardUpdate(req, existing) {
@@ -51,17 +50,6 @@ export async function prepareJobCardUpdate(req, existing) {
       planqtyChanged = true;
       hasBusinessChanges = true;
       softOpsChange = false;
-    }
-  }
-
-  if (req.body.schedule_shift !== undefined) {
-    const shift = Number(req.body.schedule_shift);
-    if (!isValidShift(shift)) {
-      return { error: { status: 400, message: `schedule_shift must be 1–${SHIFTS_PER_DAY}.` } };
-    }
-    if (shift !== Number(existing.schedule_shift || 1)) {
-      fields.schedule_shift = shift;
-      softOpsChange = true;
     }
   }
 
@@ -139,10 +127,10 @@ export async function prepareJobCardUpdate(req, existing) {
 
 export function buildUpdateResponseMessage({ softOpsChange, hasBusinessChanges, fields, processDiffs }) {
   if (softOpsChange && !hasBusinessChanges) {
-    if (fields.status && !fields.jobcarddt && fields.schedule_shift == null && !processDiffs.length) {
+    if (fields.status && !fields.jobcarddt && !processDiffs.length) {
       return `Job card status → ${fields.status}.`;
     }
-    if (processDiffs.length && !fields.jobcarddt && fields.schedule_shift == null && !fields.status) {
+    if (processDiffs.length && !fields.jobcarddt && !fields.status) {
       return "Process status updated.";
     }
     return "Job card schedule updated.";

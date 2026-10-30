@@ -54,7 +54,7 @@ export function shortageOnAuthorizedJobCardSql(alias = "s", type = JOB_CARD_TYPE
   )`;
 }
 
-/** Latest open JC per prime → job_card_no on pending group (Register authorize step removed). */
+/** Latest JC per prime → sets job_card_no from pjobcardno (Pending hides when set). */
 export async function attachOpenJobCardNo(groups = [], type = JOB_CARD_TYPE.JC) {
   const primes = [...new Set(groups.map((g) => Number(g.prime_key || g.id)).filter(Boolean))];
   if (!primes.length) return;
@@ -73,7 +73,11 @@ export async function attachOpenJobCardNo(groups = [], type = JOB_CARD_TYPE.JC) 
   for (const g of groups) {
     const jc = byPrime.get(Number(g.prime_key || g.id));
     if (!jc) continue;
-    if (jc.pjobcardno) g.job_card_no = jc.pjobcardno;
+    const no = String(jc.pjobcardno || "").trim();
+    if (no) {
+      g.job_card_no = no;
+      g.pjobcardno = no;
+    }
     g.docno = jc.docno;
     const plan = jc.process_plan;
     g.jc_has_plan = Array.isArray(plan) ? plan.length > 0 : Boolean(plan && typeof plan === "object" && Object.keys(plan).length);

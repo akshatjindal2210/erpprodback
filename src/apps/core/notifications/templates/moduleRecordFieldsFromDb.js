@@ -1,4 +1,5 @@
 import dbQuery from "../../../../config/db/db.js";
+import { MST_TABLES as M } from "../../../../config/db/dbTables.js";
 import { resolvePrimaryTableForModule } from "../../../../config/db/moduleTableMap.js";
 
 const COLUMN_CACHE_TTL_MS = 5 * 60_000;
@@ -49,4 +50,43 @@ export async function recordVariableHintsByModules(modules = []) {
   }
 
   return out;
+}
+
+const SAFE_COL = /^[a-z_][a-z0-9_]*$/i;
+const SAFE_TABLE = /^[a-z_][a-z0-9_]*$/i;
+
+/** Master-table fields used in conditions (DISTINCT from DB column). */
+const VIRTUAL_DISTINCT = {
+  department: { table: M.DEPARTMENTS, column: "name" },
+  designation: { table: M.DESIGNATIONS, column: "name" },
+  department_id: { table: M.DEPARTMENTS, column: "id" },
+};
+
+async function distinctColumnText(table, column) {
+  if (!SAFE_TABLE.test(table) || !SAFE_COL.test(column)) return [];
+  const rows = await dbQuery(
+    `SELECT DISTINCT ${column}::text AS v FROM ${table} WHERE ${column} IS NOT NULL ORDER BY 1 LIMIT 100`
+  );
+  return rows.map((r) => r.v).filter((v) => v != null && String(v).trim() !== "");
+}
+
+/** DISTINCT values already stored in the module primary table column (whitelist). */
+export async function distinctValuesForModuleField({ moduleName, appType, field }) {
+  const fieldKey = String(field || "").trim();
+  if (!fieldKey || !SAFE_COL.test(fieldKey)) return [];
+
+  const virt = VIRTUAL_DISTINCT[fieldKey];
+  if (virt) {
+    const col = String(virt.column || "").trim();
+    if (!SAFE_COL.test(col)) return [];
+    return distinctColumnText(virt.table, col);
+  }
+
+  const table = resolvePrimaryTableForModule(moduleName, appType);
+  if (!table) return [];
+
+  const cols = await getTableColumns(table);
+  if (!cols.includes(fieldKey)) return [];
+
+  return distinctColumnText(table, fieldKey);
 }

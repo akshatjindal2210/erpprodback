@@ -113,6 +113,7 @@ const PRODUCTION_MODULE_ROUTES = {
   production_job_card: `${PRODUCTION}/job-card`,
   production_planning: `${PRODUCTION}/production-planning/board`,
   production_entry: `${PRODUCTION}/production-entry`,
+  production_manpower: `${PRODUCTION}/manpower`,
   production_tooling: `${PRODUCTION}/tooling`,
   production_activity_logs: `${PRODUCTION}/logs`,
 };
@@ -140,6 +141,7 @@ const MODULE_ROUTE_ALIASES = {
   production_job_card: "production_job_card",
   production_planning: "production_planning",
   production_entry: "production_entry",
+  production_manpower: "production_manpower",
   production_tooling: "production_tooling",
   hrms_employee: "hrms_employee",
   employees: "hrms_employee",

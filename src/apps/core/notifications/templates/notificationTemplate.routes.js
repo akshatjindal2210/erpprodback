@@ -1,5 +1,5 @@
 import express from "express";
-import { getNotificationTemplates, getNotificationTemplateById, createNotificationTemplate, updateNotificationTemplateController, toggleNotificationTemplate, deleteNotificationTemplateController, getNotificationTemplateLogs, getNotificationTemplateOptions, previewNotificationRecipients } from "./notificationTemplate.controller.js";
+import { getNotificationTemplates, getNotificationTemplateById, createNotificationTemplate, updateNotificationTemplateController, toggleNotificationTemplate, deleteNotificationTemplateController, getNotificationTemplateLogs, getNotificationTemplateOptions, previewNotificationRecipients, getNotificationFieldValues, cloneNotificationTemplate } from "./notificationTemplate.controller.js";
 import { authenticate } from "../../lib/middleware/auth.js";
 import { accessControl } from "../../lib/middleware/accessControl.js";
 
@@ -14,6 +14,8 @@ router.post("/list", accessControl(PERM, "view"), getNotificationTemplates);
 router.post("/get", accessControl(PERM, "view"), getNotificationTemplateById);
 router.post("/options", accessControl(PERM, "view"), getNotificationTemplateOptions);
 router.post("/recipients-preview", accessControl(PERM, "view"), previewNotificationRecipients);
+router.post("/field-values", accessControl(PERM, "view"), getNotificationFieldValues);
+router.post("/clone", accessControl(PERM, "add"), cloneNotificationTemplate);
 router.post("/logs", accessControl(PERM, "view"), getNotificationTemplateLogs);
 router.post("/create", accessControl(PERM, "add"), createNotificationTemplate);
 router.post("/update", accessControl(PERM, "edit"), updateNotificationTemplateController);

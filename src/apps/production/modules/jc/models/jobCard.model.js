@@ -33,7 +33,7 @@ export function shortageFullyApprovedSql(jcAlias = "") {
 }
 
 const UPDATABLE = [
-  "jobcarddt", "schedule_shift", "status", "remarks", "process_plan", "planqty",
+  "jobcarddt", "status", "remarks", "process_plan", "planqty",
   "approved", "approved_by", "approved_at",
   "tooling_approved", "tooling_remark", "tooling_by", "tooling_at",
   "updated_by", "updated_at",
@@ -53,7 +53,7 @@ async function linkShortageIdsToDocno(docno, shortageIds, { onlyWhenDocnoNull = 
   else await dbQuery(sql, params);
 }
 
-const READ_COLS = `docno, pjobcardno, ${sqlDocDtText("jobcarddt")} AS jobcarddt, schedule_shift, type, itemdcode, process_plan, status, remarks,
+const READ_COLS = `docno, pjobcardno, ${sqlDocDtText("jobcarddt")} AS jobcarddt, type, itemdcode, process_plan, status, remarks,
               jobcardno, jcseriescode, fyid, planqty,
               approved, approved_by, approved_at,
               tooling_approved, tooling_remark, tooling_by, tooling_at,

@@ -96,8 +96,11 @@ async function loadMasters(lines, { activeOnly = false } = {}) {
 }
 
 /** The `process` JSON stored on a row. Item is the row's item_dcode column. */
-function buildProcessJson({ type, stages }) {
-  return { type: PROCESS_TYPE_KEY[type], stages };
+function buildProcessJson({ type, stages, connecting }) {
+  const out = { type: PROCESS_TYPE_KEY[type], stages };
+  const id = Number(connecting);
+  if (id > 0) out.connecting = id;
+  return out;
 }
 
 /**
@@ -198,14 +201,26 @@ export async function loadStages(ids = []) {
   if (!planIds.length) return result;
 
   const rows = await dbQuery(`SELECT id, process, created_by, created_at, updated_by, updated_at FROM ${IP} WHERE id = ANY($1::int[])`, [planIds]);
-  const m = await loadMasters(rows.flatMap((r) => (r.process?.stages || []).flatMap((st) => st.processes || [])));
+  const m = await loadMasters(rows.flatMap((r) => [
+    ...(r.process?.stages || []).flatMap((st) => st.processes || []),
+    ...(Number(r.process?.connecting) > 0 ? [{ process: Number(r.process.connecting), machines: [] }] : []),
+  ]));
 
   for (const r of rows) {
     const stages = (r.process?.stages || []).map((st) => ({
       stage_no: Number(st.stage),
       processes: (st.processes || []).map((line, i) => fromLine(line, i, m)),
     }));
-    result.set(Number(r.id), { stages, created_by: r.created_by, created_at: r.created_at, updated_by: r.updated_by, updated_at: r.updated_at });
+    const connecting = Number(r.process?.connecting) || null;
+    result.set(Number(r.id), {
+      stages,
+      connecting_process_id: connecting,
+      connecting_process_name: connecting ? (m.procById.get(connecting)?.procname || null) : null,
+      created_by: r.created_by,
+      created_at: r.created_at,
+      updated_by: r.updated_by,
+      updated_at: r.updated_at,
+    });
   }
   return result;
 }
@@ -252,7 +267,11 @@ export async function savePrime({ item_dcode, processJson, user }) {
     throw httpError(400, "This is a finish item — save its process in Finish Process Master.");
   }
   const stages = await buildStages(processJson, PROCESS_TYPE.PRIME);
-  const process = buildProcessJson({ type: PROCESS_TYPE.PRIME, stages });
+  const connecting = Number(processJson?.connecting_process_id);
+  if (!connecting) throw httpError(400, "Select a connecting stage.");
+  const connectingProc = (await loadMasters([{ process: connecting, machines: [] }], { activeOnly: true })).procById.get(connecting);
+  if (!connectingProc?.connectivity) throw httpError(400, "Select a connecting stage.");
+  const process = buildProcessJson({ type: PROCESS_TYPE.PRIME, stages, connecting });
   return withTransaction((client) => upsertPlan(client, { type: PROCESS_TYPE.PRIME, item_dcode: itemDcode, process, user }));
 }
 

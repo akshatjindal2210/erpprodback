@@ -17,6 +17,7 @@ import { findBoxesByNoUids, findSellableBoxesByTrayId } from "../../box/models/b
 import { findTray } from "../../tray/models/trayMaster.model.js";
 import { normalizeTrayScanCode } from "../../tray/utils/trayScanParse.js";
 import { isBoxAvailableForOutEntryScan } from "../../box/utils/inventory/boxInventory.js";
+import { equalUidLists } from "../../../lib/stickerUidHelpers.js";
 
 const OUT_CFG = getCrudModuleConfig("out_entry");
 
@@ -28,17 +29,6 @@ function requireOutUid(res, raw) {
   }
   return out_uid;
 }
-
-const equalUidLists = (left = [], right = []) => {
-  const norm = (arr) => [...arr].map((u) => String(u).trim()).filter(Boolean).sort();
-  const a = norm(left);
-  const b = norm(right);
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-};
 
 export const getOutEntries = async (req, res) => {
   try {

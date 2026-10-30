@@ -1,7 +1,7 @@
 import { fetchImsDataRaw } from "../../../lib/services/ims.service.js";
 import { toImsIrPublicUploadPath } from "../../../lib/middleware/upload.js";
 import { clearGateInvoiceReceiving, findGateByBillNo, findMatchedOutGateRows, findUnmatchedOutGateRows, saveGateInvoiceReceiving } from "../../gate-entry/models/gateEntry.model.js";
-import { formatIstDateTime, GATE_PENDING_MIN_BILL_DT, resolveGateImsBilldtFilter } from "../../gate-entry/utils/imsBillDateFilter.js";
+import { GATE_PENDING_MIN_BILL_DT, resolveGateImsBilldtFilter } from "../../gate-entry/utils/imsBillDateFilter.js";
 import { applyTimestamp, UPLOAD_TIMESTAMP_TYPES } from "../../../../rmstore/lib/utils/applyUploadTimestamp.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { buildGateReceivingPayload, isErpNullString, parseExistingPathsFromBody, parseReceivingMeta } from "../utils/buildInvReceivingUploadFilter.js";
@@ -11,10 +11,7 @@ const MODULE = "invoice_receiving";
 const irDocuments = moduleDocuments(MODULE);
 const MODE_PERM = { add: "can_add", edit: "can_edit", approve: "can_authorize" };
 
-/** Only bill_dt — uploaded_at / approved_at are already IST `DD-MM-YYYY HH:mm` in meta; re-formatting breaks dates. */
-const DATE_KEYS = ["billdt"];
-
-/** Map gate row → Invoice Receiving list/drawer shape (no ERP). */
+/** Map gate row → Invoice Receiving list/drawer shape (no ERP). billdt as stored — same as Gate Entry. */
 async function mapGateToIrRow(gate, accName = null, docRows = null) {
   if (!gate || typeof gate !== "object") return gate;
   const meta = parseReceivingMeta(gate.receiving_meta);
@@ -43,9 +40,6 @@ async function mapGateToIrRow(gate, accName = null, docRows = null) {
     }
   }
 
-  for (const k of DATE_KEYS) {
-    if (out[k] != null && out[k] !== "") out[k] = formatIstDateTime(out[k]);
-  }
   return out;
 }
 

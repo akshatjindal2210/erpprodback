@@ -6,7 +6,7 @@ import { normalizeConditions, normalizeConditionLogic } from "./notificationCond
 import { findNotificationLogs } from "./notificationTemplateLog.model.js";
 import { findModule } from "../../identity/modules/models/module.model.js";
 import { ROLE_KEYS, invalidateTemplateCache, resolveRecipients, resolveAudience, normalizeRecipientRefs } from "./moduleNotify.service.js";
-import { recordVariableHintsByModules } from "./moduleRecordFieldsFromDb.js";
+import { recordVariableHintsByModules, distinctValuesForModuleField } from "./moduleRecordFieldsFromDb.js";
 import { extractListParams } from "../../lib/utils/query/queryHelper.js";
 import { auditUserName } from "../../lib/utils/auth/approval.js";
 
@@ -286,6 +286,68 @@ export const getNotificationTemplateOptions = async (req, res) => {
 };
 
 /** Preview how many users an audience (or legacy single rule) currently resolves to. */
+export const getNotificationFieldValues = async (req, res) => {
+  try {
+    const module_id = parseInt(req.body?.module_id, 10);
+    const field = String(req.body?.field ?? "").trim();
+    if (!Number.isFinite(module_id)) return badRequest(res, "Module is required");
+    if (!field) return badRequest(res, "Field is required");
+
+    const mod = await findModule({ id: module_id });
+    if (!mod) return badRequest(res, "Module not found");
+
+    const values = await distinctValuesForModuleField({
+      moduleName: mod.name,
+      appType: mod.app_type,
+      field,
+    });
+    res.json({ success: true, data: values });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const cloneNotificationTemplate = async (req, res) => {
+  try {
+    const id = req.body?.id;
+    const existing = await findNotificationTemplate(id);
+    if (!existing) return res.status(404).json({ success: false, message: "Template not found" });
+
+    const suffix = " (Copy)";
+    let name = String(existing.name || "").trim();
+    if (!name.endsWith(suffix)) name = `${name}${suffix}`;
+    if (name.length > 150) name = name.slice(0, 150);
+
+    const conflict = await findConflictingTemplate(existing.module_id, name);
+    if (conflict) {
+      return badRequest(res, `A template named "${name}" already exists for this module — rename the original or delete the copy`);
+    }
+
+    const created = await insertNotificationTemplate({
+      module_id: existing.module_id,
+      name,
+      subject: existing.subject,
+      message: existing.message,
+      trigger_events: existing.trigger_events,
+      audience: existing.audience,
+      recipient_type: existing.recipient_type,
+      recipient_refs: existing.recipient_refs,
+      conditions: existing.conditions,
+      condition_logic: existing.condition_logic,
+      pwa_enabled: existing.pwa_enabled,
+      email_enabled: existing.email_enabled,
+      send_via: existing.send_via,
+      is_active: existing.is_active,
+      created_by: auditUserName(req),
+    });
+    invalidateTemplateCache();
+    const row = await findNotificationTemplate(created.id);
+    res.json({ success: true, message: "Template cloned", data: row });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const previewNotificationRecipients = async (req, res) => {
   try {
     const { audience, recipient_type, recipient_refs } = req.body || {};
