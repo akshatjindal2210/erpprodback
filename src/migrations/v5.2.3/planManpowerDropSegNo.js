@@ -1,9 +1,11 @@
-/** prod_plan_manpower — drop seg_no; row id + (mac, date, shift) is enough. */
+/** prod_plan_manpower — drop seg_no (skip if table not created yet; initDB creates table after migrations). */
 import dbQuery from "../../config/db/db.js";
 import { PRODUCTION_TABLES as T } from "../../config/db/dbTables.js";
-import { dropColumnIfExists, dropIndexesIfExist } from "../../config/db/ensureDbColumns.js";
+import { dropColumnIfExists, dropIndexesIfExist, tableExists } from "../../config/db/ensureDbColumns.js";
 
 export default async function up() {
+  if (!(await tableExists(dbQuery, T.PLAN_MANPOWER))) return;
+
   await dropIndexesIfExist(dbQuery, ["prod_plan_manpower_uq"]);
   await dropColumnIfExists(dbQuery, T.PLAN_MANPOWER, "seg_no");
   await dbQuery(
