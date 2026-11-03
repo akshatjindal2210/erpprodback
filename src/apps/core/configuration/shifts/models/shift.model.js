@@ -9,12 +9,23 @@ const ALLOWED_SELECT_FIELDS = [
   "start_time",
   "end_time",
   "lunch",
+  "setting_allow",
+  "active_days",
   "is_active",
   "created_at",
   "updated_at",
 ];
 const ALLOWED_FILTER_FIELDS = ["id", "code", "is_active", "from_date", "to_date"];
-const ALLOWED_UPDATE_FIELDS = ["code", "start_time", "end_time", "lunch", "is_active", "updated_at"];
+const ALLOWED_UPDATE_FIELDS = [
+  "code",
+  "start_time",
+  "end_time",
+  "lunch",
+  "setting_allow",
+  "active_days",
+  "is_active",
+  "updated_at",
+];
 const ALLOWED_SORT_FIELDS = ["id", "code", "start_time", "end_time", "is_active", "created_at"];
 
 const assertField = (key, whitelist, context = "field") => {
@@ -105,12 +116,20 @@ export const findShift = async (filters = {}) => {
 };
 
 export const insertShift = async (data = {}) => {
-  const { code, start_time, end_time, lunch = false, is_active = true } = data;
+  const {
+    code,
+    start_time,
+    end_time,
+    lunch = false,
+    setting_allow = false,
+    is_active = true,
+    active_days = [1, 2, 3, 4, 5, 6, 7],
+  } = data;
   const [row] = await dbQuery(
-    `INSERT INTO ${TABLE} (code, start_time, end_time, lunch, is_active)
-     VALUES ($1, $2::time, $3::time, $4, $5)
+    `INSERT INTO ${TABLE} (code, start_time, end_time, lunch, setting_allow, is_active, active_days)
+     VALUES ($1, $2::time, $3::time, $4, $5, $6, $7::smallint[])
      RETURNING *`,
-    [code, start_time, end_time, !!lunch, !!is_active]
+    [code, start_time, end_time, !!lunch, !!setting_allow, !!is_active, active_days]
   );
   return row;
 };
@@ -126,6 +145,7 @@ export const updateShift = async (fields = {}, filters = {}) => {
 
   const setParts = fieldKeys.map((k, idx) => {
     if (k === "start_time" || k === "end_time") return `${k} = $${idx + 1}::time`;
+    if (k === "active_days") return `${k} = $${idx + 1}::smallint[]`;
     return `${k} = $${idx + 1}`;
   });
   const setClause = setParts.join(", ");

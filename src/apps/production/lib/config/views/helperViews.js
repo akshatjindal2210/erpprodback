@@ -21,10 +21,12 @@ const PICKER = [VIEW, ...FORM];
  * -------------------------|---------------------------
  * production_planning      | view, edit   (Job Card Board / Calendar)
  * production_job_card      | view, add, edit, authorize  (Maintain JC, if called via helper)
+ * production_entry         | view, add, edit, authorize  (Production Entry form)
  */
 const JOB_CARD_HELPER = {
   production_planning: [VIEW, "edit"],
   production_job_card: PICKER,
+  production_entry: PICKER,
 };
 
 /** [] = allowed (access-only helpers). null = deny. */

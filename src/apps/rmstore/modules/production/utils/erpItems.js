@@ -1,5 +1,5 @@
 import dbQuery from "../../../../../config/db/db.js";
-import { IMS_TABLES, PRODUCTION_TABLES } from "../../../../../config/db/dbTables.js";
+import { ENGINEERING_TABLES, IMS_TABLES, PRODUCTION_TABLES } from "../../../../../config/db/dbTables.js";
 import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
 import { enrichProductionRow, normalizeRmItems } from "./productionRmHelpers.js";
@@ -47,7 +47,7 @@ export async function loadMappedItems(reqData, filter) {
 /**
  * Overlay Maintain Job Card (prod_job_card) onto ERP prdrunjc rows — simple:
  *   Required Qty (rm_weight) = (prime gweight × planqty) + extra %
- *   RM wire + macname from process_plan
+ *   RM wire + macname from prod_plan
  */
 async function enrichPrdRunJcFromProdJobCards(erpRows = []) {
   if (!erpRows.length) return erpRows;
@@ -60,7 +60,7 @@ async function enrichPrdRunJcFromProdJobCards(erpRows = []) {
   if (!byNo.size) return erpRows;
 
   const cards = await dbQuery(
-    `SELECT pjobcardno, itemdcode, docno, process_plan
+    `SELECT pjobcardno, itemdcode, docno
      FROM ${PRODUCTION_TABLES.JC}
      WHERE is_deleted = false
        AND UPPER(TRIM(pjobcardno)) = ANY($1::text[])`,
@@ -82,11 +82,29 @@ async function enrichPrdRunJcFromProdJobCards(erpRows = []) {
     if (!linesByDoc.has(d)) linesByDoc.set(d, []);
     linesByDoc.get(d).push(r);
   }
+  const pjcList = cards.map((c) => String(c.pjobcardno || "").trim()).filter(Boolean);
   const { itemMap } = await getImsMapsSafe();
   const gweightOf = (dcode) => {
     const n = Number(itemMap.get(canonicalCode(dcode))?.gweight);
     return Number.isFinite(n) && n > 0 ? n : null;
   };
+
+  const planByJc = new Map();
+  if (pjcList.length) {
+    const rows = await dbQuery(
+      `SELECT p.pjobcardno, p.rm_items, m.macname AS machine_name
+       FROM ${PRODUCTION_TABLES.PLAN} p
+       LEFT JOIN ${ENGINEERING_TABLES.MACHINE_MASTER} m ON m.maccode = p.maccode AND COALESCE(m.is_deleted, false) = false
+       WHERE p.pjobcardno = ANY($1::text[])
+       ORDER BY p.stage_no NULLS LAST, p.docno`,
+      [pjcList]
+    );
+    for (const r of rows || []) {
+      const k = String(r.pjobcardno || "").trim().toUpperCase();
+      if (!planByJc.has(k)) planByJc.set(k, []);
+      planByJc.get(k).push(r);
+    }
+  }
 
   for (const c of cards) {
     const key = String(c.pjobcardno || "").trim().toUpperCase();
@@ -104,15 +122,14 @@ async function enrichPrdRunJcFromProdJobCards(erpRows = []) {
     let rm_item_dcode = null;
     let rm_item_code = null;
     let macname = erp.macname;
-    for (const step of Array.isArray(c.process_plan) ? c.process_plan : []) {
-      if (!rm_item_code && (step.rm_items || []).length) {
-        const rm = step.rm_items[0];
+    for (const step of planByJc.get(key) || []) {
+      const rms = Array.isArray(step.rm_items) ? step.rm_items : [];
+      if (!rm_item_code && rms.length) {
+        const rm = rms[0];
         rm_item_dcode = rm.rm_item_dcode ?? null;
         rm_item_code = rm.rm_item_code ? String(rm.rm_item_code).trim() : null;
       }
-      if (!macname && (step.machines || []).length) {
-        macname = step.machines[0].machine_name || null;
-      }
+      if (!macname && step.machine_name) macname = step.machine_name;
       if (rm_item_code && macname) break;
     }
 

@@ -193,8 +193,10 @@ export function machineEstForPlan(est, maccode, stageNo = null) {
   };
 }
 
-function emptyPlanLine(plan_qty, est_error = null) {
-  return {
+/** Board / plan API — one prod_plan row (same math as Maintain JC). */
+export function planLineEstimate(est, maccode, stageNo, jcQty) {
+  const plan_qty = Math.max(0, Number(jcQty) || 0);
+  const none = (est_error = null) => ({
     plan_qty,
     line_qty: plan_qty,
     multi_jc_split: false,
@@ -203,33 +205,26 @@ function emptyPlanLine(plan_qty, est_error = null) {
     est_run_seconds: null,
     est_hours: null,
     est_error,
-  };
-}
-
-/** Board / plan API — one prod_plan row (same math as Maintain JC). */
-export function planLineEstimate(est, maccode, stageNo, jcQty) {
-  const plan_qty = Math.max(0, Number(jcQty) || 0);
-  if (!est?.valid) return emptyPlanLine(plan_qty, est?.plan_error || "No estimate");
+  });
+  if (!est?.valid) return none(est?.plan_error || "No estimate");
 
   const m = machineEstForPlan(est, maccode, stageNo);
   if (!m) {
     const mac = Number(maccode) || 0;
-    return emptyPlanLine(plan_qty, mac ? `Machine ${mac} not on JC plan (stage ${stageNo ?? "?"})` : null);
+    return none(mac ? `Machine ${mac} not on JC plan (stage ${stageNo ?? "?"})` : null);
   }
 
   const st = est.stages.find((s) => Number(s.stage_no) === Number(stageNo));
   const line_qty = m.qty ?? plan_qty;
   const sec = m.setup_seconds + m.run_seconds;
-
   return {
-    plan_qty,
+    ...none(),
     line_qty,
     multi_jc_split: Boolean(st?.multi_jc_split) && line_qty < plan_qty,
     est_shifts: m.shifts,
     est_setup_seconds: m.setup_seconds || null,
     est_run_seconds: m.run_seconds || null,
     est_hours: sec > 0 ? Math.round((sec / 3600) * 10) / 10 : null,
-    est_error: null,
   };
 }
 

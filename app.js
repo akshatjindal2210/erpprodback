@@ -9,7 +9,7 @@ import { initDB } from "./src/config/db/initDB.js";
 import { seedCoreRootUser } from "./src/apps/core/lib/config/db/seed.js";
 import { seedImsData } from "./src/apps/ims/lib/config/db/seed.js";
 import logger from "./src/apps/core/lib/utils/logging/logger.js";
-import { initRecurringTasksCron, initClTasksCron, initTaskNotificationsCron, startDbBackupCron, startLogCleanupCron } from "./src/jobs/index.js";
+import { initRecurringTasksCron, initClTasksCron, initTaskNotificationsCron, initProdEntryCron, startDbBackupCron, startLogCleanupCron } from "./src/jobs/index.js";
 import { initSocket } from "./src/apps/core/lib/utils/realtime/socket.js";
 import { deliverUnreadInboxToSocket } from "./src/apps/task/manage/notifications/services/taskPwaPush.service.js";
 import { getImsMapsSafe } from "./src/apps/ims/lib/utils/erp-api/lookup/imsLookup.js";
@@ -62,6 +62,7 @@ async function startServer() {
     initRecurringTasksCron();
     initClTasksCron();
     initTaskNotificationsCron();
+    initProdEntryCron();
 
     server.listen(config.port, () => {
       logger.info(`Server running on port ${config.port} (API v${config.app_version})`);

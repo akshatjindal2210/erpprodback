@@ -7,8 +7,8 @@ import { IMS_TABLES } from "../../../../../config/db/dbTables.js";
 import { auditUserName } from "../../../../core/lib/utils/auth/approval.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
-import { assignErpNumbersToJobCard, checkPrimeAndFinish, findJobCard, findJobCardByShortageIds, findPrimeProcess, hardDeleteJobCard, updateJobCard } from "../models/jobCard.model.js";
-import { syncPlanFromJobCard } from "../../plan/models/plan.model.js";
+import { assignErpNumbersToJobCard, checkPrimeAndFinish, deleteSiblingOpenStubs, findJobCard, findJobCardByShortageIds, findPrimeProcess, hardDeleteJobCard, updateJobCard } from "../models/jobCard.model.js";
+import { jobCardHasPlan, saveJobCardPlan } from "../../plan/models/plan.model.js";
 import { listPlanningTableRows } from "../../plan/controllers/plan.controller.helpers.js";
 import { calcJobCardProductionTime, estimateProductionForItem } from "../jobCardProductionTime.js";
 import { findPlans, PROCESS_TYPE } from "../../../../engineering/modules/item-process/models/itemProcess.model.js";
@@ -16,9 +16,8 @@ import { attachOpenJobCardNo, attachRmWireFromPrimeProcess, attachRmWireFromProd
 import { attachTooling, toolingOf } from "../../shortage/models/primeTooling.model.js";
 import { formatPJobCardNo, JOB_CARD_TYPE_DEFAULT } from "../jobCard.config.js";
 import { ERP_ACC_CODE, JC_SERIES_CODE, nextJobcardno, resolveFyidForJobCard, syncJobCardErpAdd, syncJobCardErpDelete, syncJobCardErpUpdate } from "../jobCardErp.js";
-import { diffProcessPlan, parseProcessPlan, statusMapFromPicks, withPlanStatuses } from "../processPlanStatus.js";
-import { assertApproveRequiresProcessPlan, assertMaintainJobcardToolingIfRequired, assertUsable, buildProcessPlan, enrichJobCardDrawerRow, httpError, idList, isSuperAdminUser, loadRegisterList, parseApprovedFilter, parseIdList, parseJobcardnoOverride, remarkMapFromBody, toCardRows, toDocno } from "./jobCard.controller.helpers.js";
-import { buildUpdateResponseMessage, prepareJobCardUpdate } from "./jobCard.updateFields.js";
+import { statusMapFromPicks, stripPlanStatuses } from "../processPlanStatus.js";
+import { assertApproveRequiresProcessPlan, assertMaintainJobcardToolingIfRequired, assertUsable, buildProcessPlan, buildUpdateResponseMessage, enrichJobCardDrawerRow, httpError, idList, isSuperAdminUser, loadRegisterList, loadRegisterPickerList, parseApprovedFilter, parseIdList, parseJobcardnoOverride, prepareJobCardUpdate, toCardRows, toDocno } from "./jobCard.controller.helpers.js";
 
 const ENTITY = "production_job_card";
 const MAX_IDS = 1000;
@@ -34,7 +33,9 @@ const ERP_SAVE_FAIL = "ERP sync failed. Job card was not saved.";
 
 export const getJobCardRegister = async (req, res) => {
   try {
-    const data = await loadRegisterList(parseApprovedFilter(req.body?.approved));
+    const approved = parseApprovedFilter(req.body?.approved);
+    const simple = req.body?.simple === true || req.body?.simple === "true" || req.body?.picker === true;
+    const data = simple ? await loadRegisterPickerList(approved) : await loadRegisterList(approved);
     res.json({ success: true, data, total: data.length });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message || "Failed to load job card register." });
@@ -64,7 +65,7 @@ export const getJobCardById = async (req, res) => {
     data.rm = rmGroup.rm;
     data.process_tooling = rmGroup.process_tooling;
     data.tooling = toolingOf(row.tooling_approved);
-    data.production_time = await estimateProductionForItem(row.itemdcode, data.qty, row.process_plan);
+    data.production_time = await estimateProductionForItem(row.itemdcode, data.qty, data.process_plan || []);
     data.plan_rows = await listPlanningTableRows(docno);
     return res.json({ success: true, data });
   } catch (err) {
@@ -84,13 +85,9 @@ export const createJobCard = async (req, res) => {
     }
 
     const user = auditUserName(req) || "system";
-    const builtPlan = buildProcessPlan(await findPrimeProcess(primeKey), req.body?.process_plan);
+    const processPlan = stripPlanStatuses(buildProcessPlan(await findPrimeProcess(primeKey), req.body?.process_plan));
+    const statusOverrides = statusMapFromPicks(req.body?.process_plan);
     const existing = await findJobCardByShortageIds(ids);
-    const processPlan = withPlanStatuses(
-      builtPlan,
-      existing?.process_plan || [],
-      statusMapFromPicks(req.body?.process_plan)
-    );
     const approval =
       processPlan.length > 0
         ? { approved: true, approved_by: user, approved_at: new Date() }
@@ -137,7 +134,7 @@ export const createJobCard = async (req, res) => {
         planqtyOverride != null && planqtyOverride !== "" ? Number(planqtyOverride) : shortageTotal;
       if (!Number.isFinite(planqty) || planqty < 0) throw httpError(400, "planqty must be a valid number.");
 
-      const hadPlan = parseProcessPlan(existing.process_plan).length > 0;
+      const hadPlan = await jobCardHasPlan(existing.pjobcardno, client);
       const hasPlan = processPlan.length > 0;
       const prevQty = Number(existing.planqty);
 
@@ -179,11 +176,10 @@ export const createJobCard = async (req, res) => {
       //   erpSynced = true;
       // }
 
-      // --- DB: plan + qty save (prod_jc) + prod_plan sync (same TX) ---
+      // --- DB: prod_jc meta + prod_plan structure/status (same TX) ---
       const saved = await updateJobCard(
         existing.docno,
         {
-          process_plan: processPlan,
           status,
           remarks,
           planqty,
@@ -194,7 +190,8 @@ export const createJobCard = async (req, res) => {
         client
       );
       if (String(saved?.pjobcardno || "").trim()) {
-        await syncPlanFromJobCard(saved, client);
+        await saveJobCardPlan(saved, { client, planStages: processPlan, statusOverrides, by: user });
+        await deleteSiblingOpenStubs(saved.docno, saved.itemdcode, client);
       }
 
       return { saved, erpSynced };
@@ -228,19 +225,20 @@ export const updateJobCardById = async (req, res) => {
     if (prepared.error) {
       return res.status(prepared.error.status).json({ success: false, message: prepared.error.message });
     }
-    const { fields, hasBusinessChanges, softOpsChange, planqtyChanged, processDiffs, remarkByProcess, userName } = prepared;
+    const { fields, hasBusinessChanges, softOpsChange, planqtyChanged, processDiffs, statusOverrides, nextPlan, existingPlan } = prepared;
 
-    if (!Object.keys(fields).length && !processDiffs.length) {
+    if (!Object.keys(fields).length && !(statusOverrides?.size) && nextPlan === undefined) {
       const [data] = await toCardRows([existing]);
       return res.json({ success: true, message: "No changes.", data });
     }
 
-    const hadPlan = parseProcessPlan(existing.process_plan).length > 0;
+    const hadPlan = (existingPlan || []).length > 0 || (await jobCardHasPlan(existing.pjobcardno));
     let erpSynced = false;
 
     const updated = await withTransaction(async (client) => {
       let draft = Object.keys(fields).length ? { ...existing, ...fields } : existing;
-      const hasPlanNow = parseProcessPlan(draft.process_plan).length > 0;
+      const planNow = nextPlan !== undefined ? nextPlan : existingPlan || [];
+      const hasPlanNow = Array.isArray(planNow) && planNow.length > 0;
 
       if (hasPlanNow && existing.jobcardno == null) {
         const jobcarddt =
@@ -261,20 +259,24 @@ export const updateJobCardById = async (req, res) => {
       // --- ERP mjcnew (TEST: poora if/else comment = ERP nahi, sirf neeche DB save) ---
       // Keep in sync with create/delete — all three ON for Live, all three commented for Test.
       // if (hasPlanNow && !hadPlan) {
-      //   const ok = await syncJobCardErpAdd(draft, { acc_code: accCode });
+      //   const ok = await syncJobCardErpAdd({ ...draft, process_plan: planNow }, { acc_code: accCode });
       //   if (!ok) throw httpError(502, ERP_SAVE_FAIL);
       //   erpSynced = true;
       // } else if (planqtyChanged) {
-      //   const ok = await syncJobCardErpUpdate(draft);
+      //   const ok = await syncJobCardErpUpdate({ ...draft, process_plan: planNow });
       //   if (!ok) throw httpError(502, ERP_SAVE_FAIL);
       //   erpSynced = true;
       // }
 
-      // --- DB: prod_jc + prod_plan sync ---
-      // Prefer RETURNING row after UPDATE; if no field UPDATE, use draft (includes assignErpNumbers).
+      // --- DB: prod_jc meta + prod_plan structure/status ---
       const row = Object.keys(fields).length ? await updateJobCard(docno, fields, client) : draft;
       if (String(row?.pjobcardno || "").trim()) {
-        await syncPlanFromJobCard(row, client);
+        const by = auditUserName(req) || "System";
+        await saveJobCardPlan(
+          { ...row, updated_by: row.updated_by || by },
+          { client, planStages: nextPlan !== undefined ? nextPlan : null, statusOverrides, by }
+        );
+        await deleteSiblingOpenStubs(row.docno, row.itemdcode, client);
       }
       return row;
     });
@@ -295,7 +297,7 @@ export const approveJobCardById = async (req, res) => {
     if (!docno) return res.status(400).json({ success: false, message: "docno is required." });
     const existing = await findJobCard(docno);
     if (!existing) return res.status(404).json({ success: false, message: "Job card not found." });
-    assertApproveRequiresProcessPlan(parseProcessPlan(existing.process_plan));
+    assertApproveRequiresProcessPlan(await jobCardHasPlan(existing.pjobcardno));
     await assertMaintainJobcardToolingIfRequired(existing);
     req.body = { ...(req.body || {}), approved: true };
     return updateJobCardById(req, res);

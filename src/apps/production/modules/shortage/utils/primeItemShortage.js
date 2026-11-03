@@ -59,7 +59,10 @@ export async function attachOpenJobCardNo(groups = [], type = JOB_CARD_TYPE.JC) 
   const primes = [...new Set(groups.map((g) => Number(g.prime_key || g.id)).filter(Boolean))];
   if (!primes.length) return;
   const rows = await dbQuery(
-    `SELECT DISTINCT ON (jc.itemdcode) jc.itemdcode, jc.docno, jc.pjobcardno, jc.process_plan, jc.jobcardno
+    `SELECT DISTINCT ON (jc.itemdcode) jc.itemdcode, jc.docno, jc.pjobcardno, jc.jobcardno,
+            EXISTS (
+              SELECT 1 FROM ${PRODUCTION_TABLES.PLAN} p WHERE p.pjobcardno = jc.pjobcardno
+            ) AS jc_has_plan
      FROM ${PRODUCTION_TABLES.JC} jc
      WHERE jc.is_deleted = false AND jc.type = $1 AND jc.itemdcode = ANY($2::int[])
        AND EXISTS (
@@ -79,8 +82,7 @@ export async function attachOpenJobCardNo(groups = [], type = JOB_CARD_TYPE.JC) 
       g.pjobcardno = no;
     }
     g.docno = jc.docno;
-    const plan = jc.process_plan;
-    g.jc_has_plan = Array.isArray(plan) ? plan.length > 0 : Boolean(plan && typeof plan === "object" && Object.keys(plan).length);
+    g.jc_has_plan = Boolean(jc.jc_has_plan);
   }
 }
 

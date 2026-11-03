@@ -1,178 +1,183 @@
+/**
+ * prod_plan_manpower — operator on machine + date + shift.
+ * No hours column: calendar uses shift hours; cron writes prod_entry at shift end.
+ */
 import dbQuery from "../../../../../config/db/db.js";
 import { ENGINEERING_TABLES as E, MST_TABLES, PRODUCTION_TABLES as T } from "../../../../../config/db/dbTables.js";
-import { qtyFromSlotHours } from "../../jc/jobCardProductionTime.js";
-import { netShiftHours } from "../../../../core/lib/utils/shift/shiftHours.util.js";
+import { netShiftHours, isShiftActiveOnDate, normalizeActiveDays } from "../../../../core/lib/utils/shift/shiftHours.util.js";
 
-const PM = T.PLAN_MANPOWER;
+const TABLE = T.PLAN_MANPOWER;
 
-/** Calendar shifts — only fields UI uses. */
+export { isShiftActiveOnDate };
+
+/** Active shifts from settings (for calendar / board). */
 export async function listActiveShiftCodes() {
   const rows = await dbQuery(
-    `SELECT code, start_time, end_time, lunch
+    `SELECT code, start_time, end_time, lunch, setting_allow, active_days
      FROM ${MST_TABLES.SHIFTS}
      WHERE is_active = true
      ORDER BY start_time ASC, code ASC`
   );
-  return (rows || []).map((r, i) => {
-    const code = String(r.code || "").trim() || `S${i + 1}`;
-    const meta = netShiftHours(r.start_time, r.end_time, r.lunch);
-    const out = { id: i + 1, code, hours: meta.hours };
-    if (meta.overnight) out.overnight = true;
-    return out;
+
+  return (rows || []).map((row, index) => {
+    const hoursInfo = netShiftHours(row.start_time, row.end_time, row.lunch);
+    const shift = {
+      id: index + 1,
+      code: String(row.code || "").trim() || `S${index + 1}`,
+      hours: hoursInfo.hours,
+      start_time: String(row.start_time || "").slice(0, 8),
+      end_time: String(row.end_time || "").slice(0, 8),
+      setting_allow: !!row.setting_allow,
+      active_days: normalizeActiveDays(row.active_days),
+    };
+    if (hoursInfo.overnight) shift.overnight = true;
+    return shift;
   });
 }
 
 export async function getShiftsPerDay() {
-  const [row] = await dbQuery(`SELECT COUNT(*)::int AS count FROM ${MST_TABLES.SHIFTS} WHERE is_active = true`);
+  const [row] = await dbQuery(
+    `SELECT COUNT(*)::int AS count FROM ${MST_TABLES.SHIFTS} WHERE is_active = true`
+  );
   return Math.max(1, Number(row?.count) || 1);
 }
 
-const SEL = `id, maccode, plan_date, shift_no, emp_code, emp_name, hours`;
-
-/** Compact row: m d s i e n h q */
-function leanRow(r, macRates) {
-  const mac = Number(r.maccode ?? r.m);
-  const hrsRaw = r.hours ?? r.h ?? r.hours_used;
-  const h = hrsRaw != null && Number(hrsRaw) > 0 ? Math.round(Number(hrsRaw) * 100) / 100 : null;
-  const rates = macRates || { cavity: r.cavity, maccycletime: r.maccycletime };
-  const q = qtyFromSlotHours(rates, h);
+/** DB row → short API shape: m=mac, d=date, s=shift, i=id, e=emp, n=name */
+function toApiRow(row) {
   const out = {
-    m: mac,
-    d: String(r.plan_date ?? r.d ?? "").slice(0, 10),
-    s: Number(r.shift_no ?? r.s ?? r.shift),
-    i: Number(r.id ?? r.i),
-    e: String(r.emp_code ?? r.e ?? r.emp ?? "").trim(),
+    m: Number(row.maccode),
+    d: String(row.plan_date || "").slice(0, 10),
+    s: Number(row.shift_no),
+    i: Number(row.id),
+    e: String(row.emp_code || "").trim(),
   };
-  const n = String(r.emp_name ?? r.n ?? r.ename ?? "").trim();
-  if (n) out.n = n;
-  if (h != null) out.h = h;
-  if (q > 0) out.q = q;
+  const name = String(row.emp_name || "").trim();
+  if (name) out.n = name;
   return out;
 }
 
-async function ratesByMac(ids) {
-  const rates = new Map();
-  if (!ids?.length) return rates;
-  const macs = await dbQuery(
-    `SELECT maccode, cavity, maccycletime
+/** Machine cavity / cycle — used by prod_entry also. */
+export async function ratesByMac(maccodes) {
+  const map = new Map();
+  if (!maccodes?.length) return map;
+
+  const rows = await dbQuery(
+    `SELECT maccode, cavity, maccycletime, setup_time
      FROM ${E.MACHINE_MASTER}
      WHERE is_deleted = false AND maccode = ANY($1::int[])`,
-    [ids]
+    [maccodes]
   );
-  for (const m of macs || []) rates.set(Number(m.maccode), m);
-  return rates;
+  for (const row of rows || []) map.set(Number(row.maccode), row);
+  return map;
 }
 
+/** One cell: machine + date + shift. */
 export async function getShiftOp(maccode, planDate, shiftNo) {
   const rows = await dbQuery(
-    `SELECT ${SEL}
-     FROM ${PM}
+    `SELECT id, maccode, plan_date, shift_no, emp_code, emp_name
+     FROM ${TABLE}
      WHERE maccode = $1 AND plan_date = $2::date AND shift_no = $3
-     ORDER BY id ASC`,
+     ORDER BY id`,
     [Number(maccode), String(planDate).slice(0, 10), Number(shiftNo)]
   );
   if (!rows?.length) return null;
-  const rates = await ratesByMac([Number(maccode)]);
-  const segments = rows.map((r) => leanRow(r, rates.get(Number(maccode))));
-  return { segments };
+  return { segments: rows.map(toApiRow) };
 }
 
-/** Range list for calendar — machine/shift manpower only. */
+/** List operators in a date range (optional machine filter). */
 export async function listShiftOps({ from_date, to_date, maccode } = {}) {
   const params = [];
   const where = [];
+
   if (from_date) {
     params.push(String(from_date).slice(0, 10));
-    where.push(`s.plan_date >= $${params.length}::date`);
+    where.push(`plan_date >= $${params.length}::date`);
   }
   if (to_date) {
     params.push(String(to_date).slice(0, 10));
-    where.push(`s.plan_date <= $${params.length}::date`);
+    where.push(`plan_date <= $${params.length}::date`);
   }
-  if (maccode != null && Number(maccode) > 0) {
+  if (Number(maccode) > 0) {
     params.push(Number(maccode));
-    where.push(`s.maccode = $${params.length}`);
+    where.push(`maccode = $${params.length}`);
   }
-  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
   const rows = await dbQuery(
-    `SELECT s.id, s.maccode, s.plan_date, s.shift_no,
-            s.emp_code, s.emp_name, s.hours,
-            m.cavity, m.maccycletime
-     FROM ${PM} s
-     LEFT JOIN ${E.MACHINE_MASTER} m
-       ON m.maccode = s.maccode AND m.is_deleted = false
-     ${clause}
-     ORDER BY s.plan_date ASC, s.shift_no ASC, s.id ASC`,
+    `SELECT id, maccode, plan_date, shift_no, emp_code, emp_name
+     FROM ${TABLE}
+     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+     ORDER BY plan_date, shift_no, id`,
     params
   );
-  return (rows || []).map((r) => leanRow(r));
+  return (rows || []).map(toApiRow);
 }
 
-export async function appendShiftOpSegment({ maccode, plan_date, shift_no, emp_code, emp_name, hours_used }) {
-  const hrsN = Number(hours_used);
-  const hours = Number.isFinite(hrsN) && hrsN > 0 ? Math.round(hrsN * 100) / 100 : null;
-  const planDate = String(plan_date).slice(0, 10);
-  const shiftNo = Number(shift_no);
-  const mac = Number(maccode);
+/** Insert one operator on a cell. */
+export async function appendShiftOpSegment({ maccode, plan_date, shift_no, emp_code, emp_name, created_by } = {}) {
+  const user = String(created_by || "").trim() || "System";
+  const now = new Date();
 
   const [row] = await dbQuery(
-    `INSERT INTO ${PM} (maccode, plan_date, shift_no, emp_code, emp_name, hours)
-     VALUES ($1, $2::date, $3, $4, $5, $6)
-     RETURNING ${SEL}`,
-    [mac, planDate, shiftNo, String(emp_code || "").trim(), emp_name ? String(emp_name).trim() : null, hours]
+    `INSERT INTO ${TABLE}
+       (maccode, plan_date, shift_no, emp_code, emp_name, created_by, created_at, updated_by, updated_at)
+     VALUES ($1, $2::date, $3, $4, $5, $6, $7, $6, $7)
+     RETURNING id, maccode, plan_date, shift_no, emp_code, emp_name`,
+    [
+      Number(maccode),
+      String(plan_date).slice(0, 10),
+      Number(shift_no),
+      String(emp_code || "").trim(),
+      emp_name ? String(emp_name).trim() : null,
+      user,
+      now,
+    ]
   );
-  if (!row) return null;
-  const rates = await ratesByMac([mac]);
-  return leanRow(row, rates.get(mac));
+  return row ? toApiRow(row) : null;
 }
 
-export async function upsertShiftOp(args) {
-  return appendShiftOpSegment(args);
-}
-
-/** Delete one row by id, or whole cell when id omitted. */
+/** Delete by row id, or whole cell if id missing. */
 export async function deleteShiftOpSegments({ maccode, plan_date, shift_no, id } = {}) {
-  const mac = Number(maccode);
-  const planDate = String(plan_date || "").slice(0, 10);
-  const shiftNo = Number(shift_no);
-  if (!Number.isFinite(mac) || mac < 1 || !planDate || !Number.isFinite(shiftNo) || shiftNo < 1) {
-    return [];
-  }
   const rowId = Number(id);
-  if (Number.isFinite(rowId) && rowId >= 1) {
-    const rows = await dbQuery(`DELETE FROM ${PM} WHERE id = $1 RETURNING ${SEL}`, [rowId]);
-    return (rows || []).map((r) => leanRow(r));
+  let rows;
+
+  if (rowId >= 1) {
+    rows = await dbQuery(
+      `DELETE FROM ${TABLE} WHERE id = $1
+       RETURNING id, maccode, plan_date, shift_no, emp_code, emp_name`,
+      [rowId]
+    );
+  } else {
+    rows = await dbQuery(
+      `DELETE FROM ${TABLE}
+       WHERE maccode = $1 AND plan_date = $2::date AND shift_no = $3
+       RETURNING id, maccode, plan_date, shift_no, emp_code, emp_name`,
+      [Number(maccode), String(plan_date).slice(0, 10), Number(shift_no)]
+    );
   }
-  const rows = await dbQuery(
-    `DELETE FROM ${PM}
-     WHERE maccode = $1 AND plan_date = $2::date AND shift_no = $3
-     RETURNING ${SEL}`,
-    [mac, planDate, shiftNo]
-  );
-  return (rows || []).map((r) => leanRow(r));
+
+  return (rows || []).map(toApiRow);
 }
 
-/** Update emp / hours on one row. */
-export async function updateShiftOpSegment({ id, emp_code, emp_name, hours_used } = {}) {
+/** Change operator on one row. */
+export async function updateShiftOpSegment({ id, emp_code, emp_name, updated_by } = {}) {
   const rowId = Number(id);
-  if (!Number.isFinite(rowId) || rowId < 1) return null;
-  const hrsN = Number(hours_used);
-  const hours = Number.isFinite(hrsN) && hrsN > 0 ? Math.round(hrsN * 100) / 100 : null;
+  if (!(rowId >= 1)) return null;
+
   const [row] = await dbQuery(
-    `UPDATE ${PM}
+    `UPDATE ${TABLE}
      SET emp_code = COALESCE($2, emp_code),
          emp_name = COALESCE($3, emp_name),
-         hours = COALESCE($4, hours)
+         updated_by = $4,
+         updated_at = $5
      WHERE id = $1
-     RETURNING ${SEL}`,
+     RETURNING id, maccode, plan_date, shift_no, emp_code, emp_name`,
     [
       rowId,
       emp_code != null ? String(emp_code).trim() : null,
       emp_name != null ? String(emp_name).trim() : null,
-      hours,
+      String(updated_by || "").trim() || "System",
+      new Date(),
     ]
   );
-  if (!row) return null;
-  const rates = await ratesByMac([Number(row.maccode)]);
-  return leanRow(row, rates.get(Number(row.maccode)));
+  return row ? toApiRow(row) : null;
 }

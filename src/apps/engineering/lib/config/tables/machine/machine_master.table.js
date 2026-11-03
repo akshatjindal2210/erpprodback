@@ -15,6 +15,7 @@ export async function createMachineMasterTable() {
       make               VARCHAR(200),
       model              VARCHAR(200),
       remark             TEXT,
+      industry_4_0       TEXT NOT NULL DEFAULT '',
       approved           BOOLEAN DEFAULT false,
       approved_by        TEXT,
       approved_at        TIMESTAMP,
@@ -42,6 +43,7 @@ export async function createMachineMasterTable() {
 
   await ensureColumns(dbQuery, T.MACHINE_MASTER, [
     { name: "setup_time", addSql: "setup_time INTEGER NOT NULL DEFAULT 0" },
+    { name: "industry_4_0", addSql: "industry_4_0 TEXT NOT NULL DEFAULT ''" },
   ]);
 
   await dbQuery(`

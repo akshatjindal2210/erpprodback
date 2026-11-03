@@ -14,6 +14,7 @@ import shortageRoutes from "../modules/shortage/routes/shortage.route.js";
 import toolingRoutes from "../modules/tooling/routes/tooling.route.js";
 import jcRoutes from "../modules/jc/routes/jc.route.js";
 import planRoutes from "../modules/plan/routes/plan.route.js";
+import entryRoutes from "../modules/entry/routes/entry.route.js";
 
 const router = Router();
 
@@ -22,5 +23,6 @@ router.use("/shortage", shortageRoutes);
 router.use("/tooling", toolingRoutes);
 router.use("/jc", jcRoutes);
 router.use("/plan", planRoutes);
+router.use("/entry", entryRoutes);
 
 export default router;

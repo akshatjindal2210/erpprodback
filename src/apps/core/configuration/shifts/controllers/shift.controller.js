@@ -17,10 +17,27 @@ function parseTime(value) {
   return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}:00`;
 }
 
+function isSettingAllow(raw) {
+  return raw === true || raw === "true" || raw === 1 || raw === "1";
+}
+
 function enrichShift(row) {
   if (!row) return row;
   const { lunch, overnight, hours } = netShiftHours(row.start_time, row.end_time, row.lunch);
-  return { ...row, lunch, overnight, hours };
+  return { ...row, lunch, overnight, hours, setting_allow: !!row.setting_allow };
+}
+
+function parseActiveDays(raw) {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return null;
+  const days = [];
+  for (const d of raw) {
+    const n = Number(d);
+    if (!Number.isInteger(n) || n < 1 || n > 7) return null;
+    if (!days.includes(n)) days.push(n);
+  }
+  days.sort((a, b) => a - b);
+  return days.length ? days : null;
 }
 
 function normalizeCode(raw) {
@@ -82,12 +99,19 @@ export const createShift = async (req, res) => {
       return res.status(400).json({ success: false, message: "Times cannot be same" });
     }
 
+    const active_days = parseActiveDays(req.body.active_days);
+    if (req.body.active_days !== undefined && active_days === null) {
+      return res.status(400).json({ success: false, message: "active_days must be 1–7" });
+    }
+
     const shift = await insertShift({
       code,
       start_time,
       end_time,
       lunch: isShiftLunch(req.body.lunch),
+      setting_allow: isSettingAllow(req.body.setting_allow),
       is_active: req.body.is_active !== false && req.body.is_active !== "false",
+      ...(active_days ? { active_days } : {}),
     });
 
     res.status(201).json({ success: true, data: enrichShift(shift), message: "Created" });
@@ -99,7 +123,16 @@ export const createShift = async (req, res) => {
 
 export const updateShiftData = async (req, res) => {
   try {
-    const { id, code: codeRaw, start_time: startRaw, end_time: endRaw, lunch: lunchRaw, is_active } = req.body;
+    const {
+      id,
+      code: codeRaw,
+      start_time: startRaw,
+      end_time: endRaw,
+      lunch: lunchRaw,
+      setting_allow: settingAllowRaw,
+      is_active,
+      active_days: daysRaw,
+    } = req.body;
     if (!id) return res.status(400).json({ success: false, message: "ID required" });
 
     const existing = await findShift({ id });
@@ -122,6 +155,14 @@ export const updateShiftData = async (req, res) => {
       fields.end_time = end_time;
     }
     if (lunchRaw !== undefined) fields.lunch = isShiftLunch(lunchRaw);
+    if (settingAllowRaw !== undefined) fields.setting_allow = isSettingAllow(settingAllowRaw);
+    if (daysRaw !== undefined) {
+      const active_days = parseActiveDays(daysRaw);
+      if (active_days === null) {
+        return res.status(400).json({ success: false, message: "active_days must be 1–7" });
+      }
+      fields.active_days = active_days;
+    }
     if (is_active !== undefined) {
       fields.is_active = is_active === true || is_active === "true" || is_active === 1;
     }

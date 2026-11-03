@@ -43,12 +43,14 @@ const PROCESS_MASTER_HELPER = {
  * eng_finish_process_master| view, add, edit, authorize
  * production_job_card      | view, add, edit, authorize  (Maintain JC)
  * production_planning      | view, edit                  (Job Card Board / Calendar)
+ * production_entry         | view, add, edit, authorize  (Production Entry form)
  */
 const MACHINE_MASTER_HELPER = {
   eng_prime_item_master: PICKER,
   eng_finish_process_master: PICKER,
   production_job_card: PICKER,
   production_planning: PICKER,
+  production_entry: PICKER,
 };
 
 /** [] = allowed (access-only helpers; no SQL field lists yet). null = deny. */

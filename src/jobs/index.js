@@ -3,3 +3,4 @@ export { startLogCleanupCron, runLogCleanup } from "../logging/index.js";
 export { initRecurringTasksCron } from "./task/recurringTasks.cron.js";
 export { initClTasksCron } from "./task/clTasks.cron.js";
 export { initTaskNotificationsCron } from "./task/taskNotifications.cron.js";
+export { initProdEntryCron } from "./production/prodEntry.cron.js";

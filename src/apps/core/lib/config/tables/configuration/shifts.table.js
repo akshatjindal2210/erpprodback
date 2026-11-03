@@ -10,6 +10,9 @@ export async function createShiftsTable() {
       start_time  TIME NOT NULL,
       end_time    TIME NOT NULL,
       lunch       BOOLEAN NOT NULL DEFAULT false,
+      /** When true, machine setup time may be booked on this shift. */
+      setting_allow BOOLEAN NOT NULL DEFAULT false,
+      active_days SMALLINT[] NOT NULL DEFAULT '{1,2,3,4,5,6,7}',
       is_active   BOOLEAN NOT NULL DEFAULT true,
       created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -17,7 +20,11 @@ export async function createShiftsTable() {
   `);
 
   await patchTableSchema(dbQuery, T.SHIFTS, {
-    columns: [patchCol("lunch", "BOOLEAN NOT NULL DEFAULT false")],
+    columns: [
+      patchCol("lunch", "BOOLEAN NOT NULL DEFAULT false"),
+      patchCol("setting_allow", "BOOLEAN NOT NULL DEFAULT false"),
+      patchCol("active_days", "SMALLINT[] NOT NULL DEFAULT '{1,2,3,4,5,6,7}'"),
+    ],
     indexes: [
       `CREATE UNIQUE INDEX IF NOT EXISTS mst_shifts_code_lower_unique ON ${T.SHIFTS} (LOWER(TRIM(code)))`,
     ],

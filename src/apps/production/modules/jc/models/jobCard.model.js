@@ -33,13 +33,13 @@ export function shortageFullyApprovedSql(jcAlias = "") {
 }
 
 const UPDATABLE = [
-  "jobcarddt", "status", "remarks", "process_plan", "planqty",
+  "jobcarddt", "status", "remarks", "planqty",
   "approved", "approved_by", "approved_at",
   "tooling_approved", "tooling_remark", "tooling_by", "tooling_at",
   "updated_by", "updated_at",
 ];
 
-const JSONB_COLS = new Set(["process_plan"]);
+const JSONB_COLS = new Set();
 
 /** Set ims_shortage.docno for shortage lines (optional: only rows with docno IS NULL). */
 async function linkShortageIdsToDocno(docno, shortageIds, { onlyWhenDocnoNull = true } = {}, client = null) {
@@ -53,7 +53,7 @@ async function linkShortageIdsToDocno(docno, shortageIds, { onlyWhenDocnoNull = 
   else await dbQuery(sql, params);
 }
 
-const READ_COLS = `docno, pjobcardno, ${sqlDocDtText("jobcarddt")} AS jobcarddt, type, itemdcode, process_plan, status, remarks,
+const READ_COLS = `docno, pjobcardno, ${sqlDocDtText("jobcarddt")} AS jobcarddt, type, itemdcode, status, remarks,
               jobcardno, jcseriescode, fyid, planqty,
               approved, approved_by, approved_at,
               tooling_approved, tooling_remark, tooling_by, tooling_at,
@@ -205,10 +205,42 @@ export async function sumShortageQty(shortageIds = [], client = null) {
   return Number(row?.q) || 0;
 }
 
+/**
+ * Drop leftover Accept stubs for the same prime (blank Job Card No) and re-link shortages.
+ * Used after number assign and when saving an already-numbered card.
+ */
+export async function deleteSiblingOpenStubs(keepDocno, itemdcode, client = null) {
+  const keep = Number(keepDocno);
+  const item = Number(itemdcode);
+  if (!keep || !item) return 0;
+  const run = client
+    ? (sql, params) => client.query(sql, params).then((r) => r.rows)
+    : (sql, params) => dbQuery(sql, params);
+  const stubs = await run(
+    `SELECT docno FROM ${T.JC}
+     WHERE is_deleted = false
+       AND itemdcode = $1
+       AND docno <> $2
+       AND jobcardno IS NULL
+       AND COALESCE(TRIM(pjobcardno), '') = ''`,
+    [item, keep]
+  );
+  const ids = (stubs || []).map((r) => Number(r.docno)).filter(Boolean);
+  if (!ids.length) return 0;
+  await run(
+    `UPDATE ${IMS_TABLES.SHORTAGE}
+     SET docno = $1
+     WHERE docno = ANY($2::int[]) AND COALESCE(is_deleted, false) = false`,
+    [keep, ids]
+  );
+  await run(`DELETE FROM ${T.JC} WHERE docno = ANY($1::int[]) AND jobcardno IS NULL`, [ids]);
+  return ids.length;
+}
+
 /** First New save with plan — assign ERP jobcardno / fyid / pjobcardno. */
 export async function assignErpNumbersToJobCard(docno, { jobcarddt, fyid, jobcardnoOverride } = {}, client) {
   const [row] = await client.query(
-    `SELECT docno, jobcardno, jcseriescode FROM ${T.JC} WHERE docno = $1 AND is_deleted = false FOR UPDATE`,
+    `SELECT docno, jobcardno, jcseriescode, itemdcode FROM ${T.JC} WHERE docno = $1 AND is_deleted = false FOR UPDATE`,
     [docno]
   ).then((r) => r.rows);
   if (!row || row.jobcardno != null) return null;
@@ -231,7 +263,9 @@ export async function assignErpNumbersToJobCard(docno, { jobcarddt, fyid, jobcar
      RETURNING ${READ_COLS}`,
     [docno, jobcardno, resolvedFy, seriesCode, pjobcardno, dt]
   );
-  return out.rows[0] ?? null;
+  const assigned = out.rows[0] ?? null;
+  if (assigned) await deleteSiblingOpenStubs(assigned.docno, assigned.itemdcode ?? row.itemdcode, client);
+  return assigned;
 }
 
 /** `client` optional — pass transaction client when pairing with process log inserts. */
@@ -351,8 +385,8 @@ export async function applyShortageDecisionToJobCards({
         );
         const jcDocno = Number(dr[0].docno);
         await tx.query(
-          `INSERT INTO ${T.JC} (docno, pjobcardno, type, itemdcode, process_plan, status, created_by, planqty, jcseriescode)
-           VALUES ($1, NULL, $2, $3, '[]'::jsonb, 'Pending', $4, $5, $6)`,
+          `INSERT INTO ${T.JC} (docno, pjobcardno, type, itemdcode, status, created_by, planqty, jcseriescode)
+           VALUES ($1, NULL, $2, $3, 'Pending', $4, $5, $6)`,
           [jcDocno, cardType, key, who, Number(planqty) || 0, JC_SERIES_CODE]
         );
         await linkShortageIdsToDocno(jcDocno, ids, { onlyWhenDocnoNull: false }, tx);

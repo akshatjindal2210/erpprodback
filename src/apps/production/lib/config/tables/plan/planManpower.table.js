@@ -1,7 +1,7 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { PRODUCTION_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
-/** prod_plan_manpower — operator hours per machine + date + shift (JC from board FIFO). */
+/** prod_plan_manpower — drop & recreate manually if needed. Hours live from shift. */
 export async function createProdPlanManpowerTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.PLAN_MANPOWER} (
@@ -11,7 +11,10 @@ export async function createProdPlanManpowerTable() {
       shift_no   SMALLINT NOT NULL,
       emp_code   VARCHAR(200) NOT NULL,
       emp_name   VARCHAR(400),
-      hours      NUMERIC(6,2)
+      created_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_by TEXT,
+      updated_at TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS prod_plan_manpower_cell_idx
       ON ${T.PLAN_MANPOWER} (maccode, plan_date, shift_no);

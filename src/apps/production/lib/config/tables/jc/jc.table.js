@@ -1,7 +1,7 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { PRODUCTION_TABLES as T } from "../../../../../../config/db/dbTables.js";
 
-/** prod_jc — Maintain Job Card (one row per prime item; plan lines live in prod_plan). */
+/** prod_jc — Maintain Job Card (one row per prime item). Plan structure/status live in prod_plan. */
 export async function createJobCardTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.JC} (
@@ -10,7 +10,6 @@ export async function createJobCardTable() {
       jobcarddt          DATE NOT NULL DEFAULT CURRENT_DATE,
       type               SMALLINT NOT NULL DEFAULT 0,
       itemdcode          INTEGER NOT NULL,
-      process_plan       JSONB NOT NULL DEFAULT '[]'::jsonb,
       status             VARCHAR(20) NOT NULL DEFAULT 'Pending',
       remarks            TEXT,
       jobcardno          INTEGER,

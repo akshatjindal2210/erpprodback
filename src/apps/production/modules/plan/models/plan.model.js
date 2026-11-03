@@ -1,285 +1,630 @@
+/**
+ * prod_plan — one row = one process + machine on a job card.
+ *
+ * Main flow when JC is saved:
+ *   saveJobCardPlan → sync rows → apply SA status → stage-1 = planning
+ */
 import dbQuery from "../../../../../config/db/db.js";
 import { PRODUCTION_TABLES as T, ENGINEERING_TABLES as E } from "../../../../../config/db/dbTables.js";
-import { machineStatusRows, parseProcessPlan, PROCESS_STATUS, PROCESS_STATUS_VALUES } from "../../jc/processPlanStatus.js";
+import { buildProcessPlanFromPlanRows, machineStatusKey, parseProcessPlan, PROCESS_STATUS, PROCESS_STATUS_VALUES, stripPlanStatuses } from "../../jc/processPlanStatus.js";
 import { calcJobCardProductionTime, machineEstForPlan } from "../../jc/jobCardProductionTime.js";
 import { findPrimeProcess } from "../../jc/models/jobCard.model.js";
-import { getShiftsPerDay } from "./planManpower.model.js";
+import { createEntry } from "../../entry/models/entry.model.js";
+import { getShiftsPerDay, listActiveShiftCodes } from "./planManpower.model.js";
+
+/** Hold on board → one production entry for this machine / JC / current (or last) shift. */
+async function createEntryOnHold(line, user) {
+  const mac = Number(line?.maccode);
+  const jc = String(line?.pjobcardno || "").trim();
+  if (!(mac > 0) || !jc) return;
+
+  const today = new Date();
+  const ymd = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0"),
+  ].join("-");
+
+  const shifts = await listActiveShiftCodes();
+  const hm = `${String(today.getHours()).padStart(2, "0")}:${String(today.getMinutes()).padStart(2, "0")}`;
+  let shiftMeta =
+    shifts.find((s) => {
+      const start = String(s.start_time || "").slice(0, 5);
+      const end = String(s.end_time || "").slice(0, 5);
+      if (!start || !end) return false;
+      if (start <= end) return hm >= start && hm <= end;
+      return hm >= start || hm <= end;
+    }) || shifts[shifts.length - 1] || { id: 1 };
+
+  const [mp] = await dbQuery(
+    `SELECT emp_code, emp_name FROM ${T.PLAN_MANPOWER}
+     WHERE maccode = $1 AND plan_date = $2::date AND shift_no = $3
+     ORDER BY id LIMIT 1`,
+    [mac, ymd, Number(shiftMeta.id) || 1]
+  );
+
+  try {
+    await createEntry(
+      {
+        jc,
+        docdt: ymd,
+        shift: Number(shiftMeta.id) || 1,
+        machine: mac,
+        run_proc: line.proccode != null ? Number(line.proccode) : null,
+        operator_id: mp?.emp_code || null,
+        operator: mp?.emp_name || null,
+        start_time: shiftMeta.start_time || null,
+        end_time: shiftMeta.end_time || null,
+        hours: Number(shiftMeta.hours) > 0 ? Number(shiftMeta.hours) : null,
+      },
+      user || "System"
+    );
+  } catch {
+    /* duplicate cell / validation — hold status still saved */
+  }
+}
 
 const JOIN = `
   LEFT JOIN ${E.PROCESS_MASTER} pr ON pr.proccode = p.proccode AND COALESCE(pr.is_deleted, false) = false
   LEFT JOIN ${E.MACHINE_MASTER} m ON m.maccode = p.maccode AND COALESCE(m.is_deleted, false) = false`;
 
-const LIST = `SELECT p.docno, p.pjobcardno, p.proccode, p.maccode, p.stage_no, p.status,
-  p.plan_start, p.plan_end, p.actual_start, p.actual_end,
+const LIST_SQL = `SELECT p.docno, p.pjobcardno, p.proccode, p.maccode, p.stage_no, p.status, p.rm_items,
+  p.sys_start, p.sys_end, p.act_start, p.act_end, p.mp_start, p.mp_end,
+  p.created_by, p.created_by AS created_by_name, p.created_at,
+  p.updated_by, p.updated_by AS updated_by_name, p.updated_at,
   pr.procname AS process_name, pr.deptname AS process_deptname, m.macname AS machine_name,
   j.docno AS job_card_docno, j.itemdcode, j.planqty AS qty,
-  j.jobcarddt, j.status AS card_status, j.process_plan
+  j.jobcarddt, j.status AS card_status
   FROM ${T.PLAN} p
   INNER JOIN ${T.JC} j ON j.pjobcardno = p.pjobcardno AND j.approved = true AND COALESCE(j.is_deleted, false) = false
   ${JOIN}`;
 
-async function rows(sql, params, client) {
+/** Run query — uses transaction client if given. */
+async function runQuery(sql, params, client) {
   if (client) return (await client.query(sql, params)).rows;
   return dbQuery(sql, params);
 }
 
-function planEnd(start, shift, shifts, shiftsPerDay = 1) {
-  if (!start || !shifts) return start;
+function userName(value) {
+  return String(value || "").trim() || "System";
+}
+
+function toDate(value) {
+  const s = String(value || "").trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+/** sys_end / mp_end from start date + how many shifts needed. */
+function addShiftsToDate(startDate, shifts, shiftsPerDay = 1) {
+  if (!startDate || !shifts) return startDate;
   const perDay = Math.max(1, Number(shiftsPerDay) || 1);
-  const off = Math.floor((Number(shift || 1) - 1 + Number(shifts) - 1) / perDay);
-  const d = new Date(`${start}T12:00:00`);
-  d.setDate(d.getDate() + off);
+  const daysToAdd = Math.floor((Number(shifts) - 1) / perDay);
+  const d = new Date(`${startDate}T12:00:00`);
+  d.setDate(d.getDate() + daysToAdd);
   return d.toISOString().slice(0, 10);
 }
 
-/**
- * @param {number|null} jcDocno — when set, lines for one JC (Maintain Job Card history).
- * @param {{ from_date?: string, to_date?: string }} [filters] — plan_start range (Planning Table IMS style).
- */
+function getFirstStageNo(plan) {
+  const nums = parseProcessPlan(plan)
+    .map((s) => Number(s.stage_no))
+    .filter((n) => Number.isFinite(n));
+  return nums.length ? Math.min(...nums) : 1;
+}
+
+/** Build process_plan[] map for many job cards (for list / JC helpers). */
+export async function loadProcessPlanMapsByJobCards(pjobcardnos = [], client = null) {
+  const nos = [...new Set((pjobcardnos || []).map((n) => String(n || "").trim()).filter(Boolean))];
+  const result = new Map(nos.map((n) => [n, []]));
+  if (!nos.length) return result;
+
+  const rows = await runQuery(
+    `SELECT p.pjobcardno, p.proccode, p.maccode, p.stage_no, p.status, p.rm_items,
+            pr.procname AS process_name, m.macname AS machine_name
+     FROM ${T.PLAN} p ${JOIN}
+     WHERE p.pjobcardno = ANY($1::text[])
+     ORDER BY p.stage_no NULLS LAST, p.proccode, p.maccode`,
+    [nos],
+    client
+  );
+
+  const byJc = new Map();
+  for (const row of rows || []) {
+    const pjc = String(row.pjobcardno);
+    if (!byJc.has(pjc)) byJc.set(pjc, []);
+    byJc.get(pjc).push(row);
+  }
+  for (const [pjc, jcRows] of byJc) {
+    result.set(pjc, buildProcessPlanFromPlanRows(jcRows));
+  }
+  return result;
+}
+
+export async function jobCardHasPlan(pjobcardno, client = null) {
+  const pjc = String(pjobcardno || "").trim();
+  if (!pjc) return false;
+  const [row] = await runQuery(
+    `SELECT 1 AS ok FROM ${T.PLAN} WHERE pjobcardno = $1 LIMIT 1`,
+    [pjc],
+    client
+  );
+  return Boolean(row);
+}
+
+/** Attach process_plan array on each plan row. */
+async function attachProcessPlan(rows = []) {
+  const plans = await loadProcessPlanMapsByJobCards(rows.map((r) => r.pjobcardno));
+  return rows.map((r) => ({
+    ...r,
+    process_plan: plans.get(String(r.pjobcardno || "").trim()) || [],
+  }));
+}
+
+/** Board / table list. */
 export async function listPlanRows(jcDocno, filters = {}) {
   const where = [];
   const params = [];
 
-  const id = Number(jcDocno);
-  if (id) {
-    params.push(id);
+  const jcId = Number(jcDocno);
+  if (jcId) {
+    params.push(jcId);
     where.push(`j.docno = $${params.length}`);
   }
 
-  const from = String(filters?.from_date || "").slice(0, 10);
-  const to = String(filters?.to_date || "").slice(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(from)) {
-    params.push(from);
-    where.push(`p.plan_start IS NOT NULL AND p.plan_start::date >= $${params.length}::date`);
+  const fromDate = toDate(filters?.from_date);
+  const toDateVal = toDate(filters?.to_date);
+  // Effective plan date = manpower mp_* if set, else system sys_*.
+  const effStart = `COALESCE(p.mp_start, p.sys_start)`;
+  if (fromDate) {
+    params.push(fromDate);
+    where.push(`${effStart} IS NOT NULL AND ${effStart}::date >= $${params.length}::date`);
   }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(to)) {
-    params.push(to);
-    where.push(`p.plan_start IS NOT NULL AND p.plan_start::date <= $${params.length}::date`);
+  if (toDateVal) {
+    params.push(toDateVal);
+    where.push(`${effStart} IS NOT NULL AND ${effStart}::date <= $${params.length}::date`);
   }
 
-  const clause = where.length ? ` WHERE ${where.join(" AND ")}` : "";
-  return rows(
-    `${LIST}${clause} ORDER BY p.plan_start DESC NULLS LAST, p.pjobcardno DESC, p.stage_no, p.proccode`,
+  const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
+  const rows = await runQuery(
+    `${LIST_SQL}${whereSql}
+     ORDER BY p.maccode NULLS LAST, ${effStart} ASC NULLS LAST, p.pjobcardno ASC, p.stage_no, p.proccode`,
     params
+  );
+  return attachProcessPlan(rows);
+}
+
+/**
+ * Same-machine queue reorder via mp_start / mp_end (date order = board order).
+ * Permutes existing date windows onto the new drag order — no queue_no.
+ * Same-day ties get +1 day so top/bottom order sticks. Running → Hold first.
+ */
+export async function reorderMachinePlanQueue({ maccode, orderedDocnos = [], by = "System" } = {}) {
+  const mac = Number(maccode);
+  const ids = [...new Set((orderedDocnos || []).map(Number).filter((n) => n > 0))];
+  if (!(mac > 0)) {
+    const err = new Error("maccode is required.");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (ids.length < 2) {
+    const err = new Error("ordered_docnos needs at least 2 plan lines.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const rows = await runQuery(
+    `SELECT docno, pjobcardno, maccode, status, mp_start, mp_end, sys_start, sys_end
+     FROM ${T.PLAN}
+     WHERE maccode = $1 AND docno = ANY($2::int[])`,
+    [mac, ids]
+  );
+  if (rows.length !== ids.length) {
+    const err = new Error("Some plan lines are missing or not on this machine.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (rows.some((r) => String(r.status || "").toLowerCase() === PROCESS_STATUS.RUNNING)) {
+    const err = new Error("Hold the Running job first, then reorder.");
+    err.statusCode = 409;
+    throw err;
+  }
+
+  const addDays = (ymd, n) => {
+    const d = new Date(`${ymd}T12:00:00`);
+    d.setDate(d.getDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  // Effective window: mp_* if manpower planned, else sys_*.
+  const effStart = (r) => toDate(r.mp_start) || toDate(r.sys_start);
+  const effEnd = (r) => toDate(r.mp_end) || toDate(r.sys_end) || effStart(r);
+  const spanDays = (r) => {
+    const a = effStart(r);
+    const b = effEnd(r);
+    if (!a || !b || b < a) return 0;
+    return Math.round((new Date(`${b}T12:00:00`) - new Date(`${a}T12:00:00`)) / 86400000);
+  };
+
+  const windows = [...rows]
+    .sort((a, b) => {
+      const da = String(effStart(a) || "");
+      const db = String(effStart(b) || "");
+      if (da !== db) return da.localeCompare(db);
+      return Number(a.docno) - Number(b.docno);
+    })
+    .map((r) => ({
+      mp_start: effStart(r),
+      mp_end: effEnd(r),
+      span: spanDays(r),
+    }));
+
+  const now = new Date();
+  const user = userName(by);
+  const updated = [];
+  let prevStart = null;
+  for (let i = 0; i < ids.length; i += 1) {
+    const w = windows[i] || {};
+    let mp_start = w.mp_start || new Date().toISOString().slice(0, 10);
+    let mp_end = w.mp_end || mp_start;
+    const span = Number.isFinite(w.span) ? w.span : 0;
+    // Keep drag order when several cards share the same day.
+    if (prevStart && mp_start <= prevStart) {
+      mp_start = addDays(prevStart, 1);
+      mp_end = addDays(mp_start, span);
+    }
+    prevStart = mp_start;
+    const [row] = await runQuery(
+      `UPDATE ${T.PLAN}
+       SET mp_start = $2::date, mp_end = $3::date, updated_by = $4, updated_at = $5
+       WHERE docno = $1 AND maccode = $6
+       RETURNING docno, pjobcardno, maccode, status, mp_start, mp_end`,
+      [ids[i], mp_start, mp_end, user, now, mac]
+    );
+    if (row) updated.push(row);
+  }
+  return updated;
+}
+
+/**
+ * First stage of this JC: pending → planning.
+ * So Board can show Start on new job cards.
+ */
+export async function ensureStage1Planning(pjobcardno, by = "System", client = null) {
+  const pjc = String(pjobcardno || "").trim();
+  if (!pjc) return;
+
+  await runQuery(
+    `UPDATE ${T.PLAN} p
+     SET status = $2, updated_by = $3, updated_at = $4
+     WHERE p.pjobcardno = $1
+       AND LOWER(COALESCE(p.status, '')) = $5
+       AND (
+         p.stage_no = (
+           SELECT MIN(p2.stage_no) FROM ${T.PLAN} p2 WHERE p2.pjobcardno = p.pjobcardno
+         )
+         OR (
+           p.stage_no IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM ${T.PLAN} p2
+             WHERE p2.pjobcardno = p.pjobcardno AND p2.stage_no IS NOT NULL
+           )
+         )
+       )`,
+    [pjc, PROCESS_STATUS.PLANNING, userName(by), new Date(), PROCESS_STATUS.PENDING],
+    client
   );
 }
 
-export async function syncPlanFromJobCard(card, client = null) {
-  const pjobcardno = String(card?.pjobcardno || "").trim();
-  if (!pjobcardno) return;
+/** When a stage is fully complete → next stage pending becomes planning. */
+async function unlockNextStage(pjobcardno, doneStage, by, client = null) {
+  const pjc = String(pjobcardno || "").trim();
+  const stage = Number(doneStage);
+  if (!pjc || !Number.isFinite(stage)) return;
 
-  const plan = parseProcessPlan(card.process_plan);
-  // Unapprove or empty process_plan → drop board/calendar lines (list only shows approved JC).
-  if (!card.approved || !plan.length) {
-    await rows(`DELETE FROM ${T.PLAN} WHERE pjobcardno = $1`, [pjobcardno], client);
+  // All lines of this stage must be complete.
+  const sameStage = await runQuery(
+    `SELECT status FROM ${T.PLAN} WHERE pjobcardno = $1 AND stage_no = $2`,
+    [pjc, stage],
+    client
+  );
+  if (!sameStage?.length) return;
+  const allDone = sameStage.every(
+    (r) => String(r.status || "").toLowerCase() === PROCESS_STATUS.COMPLETE
+  );
+  if (!allDone) return;
+
+  const [next] = await runQuery(
+    `SELECT MIN(stage_no)::int AS stage_no FROM ${T.PLAN}
+     WHERE pjobcardno = $1 AND stage_no > $2`,
+    [pjc, stage],
+    client
+  );
+  const nextStage = Number(next?.stage_no);
+  if (!Number.isFinite(nextStage)) return;
+
+  await runQuery(
+    `UPDATE ${T.PLAN}
+     SET status = $3, updated_by = $5, updated_at = $6
+     WHERE pjobcardno = $1 AND stage_no = $2 AND LOWER(COALESCE(status, '')) = $4`,
+    [pjc, nextStage, PROCESS_STATUS.PLANNING, PROCESS_STATUS.PENDING, userName(by), new Date()],
+    client
+  );
+}
+
+/**
+ * Create / update plan rows from Maintain Job Card picks.
+ * - New stage-1 rows → status planning
+ * - Later stages → pending
+ * - Existing rows: keep status (only refresh stage / dates / rm)
+ */
+export async function syncPlanFromJobCard(card, client = null, planStages = null) {
+  const pjc = String(card?.pjobcardno || "").trim();
+  if (!pjc) return;
+
+  let plan;
+  if (planStages != null) {
+    plan = stripPlanStatuses(planStages);
+  } else {
+    const maps = await loadProcessPlanMapsByJobCards([pjc], client);
+    plan = stripPlanStatuses(maps.get(pjc) || []);
+  }
+
+  // No process plan → clear all plan lines for this JC.
+  if (!plan.length) {
+    await runQuery(`DELETE FROM ${T.PLAN} WHERE pjobcardno = $1`, [pjc], client);
     return;
   }
 
-  const planStart = String(card.jobcarddt || "").slice(0, 10) || null;
-  const shift = 1;
+  const now = new Date();
+  const startDate = toDate(card.jobcarddt);
   const shiftsPerDay = await getShiftsPerDay();
-  let est = null;
+  const stage1 = getFirstStageNo(plan);
+
+  // Optional time estimate (for sys_end).
+  let estimate = null;
   try {
     const stages = await findPrimeProcess(Number(card.itemdcode));
     if (stages?.length) {
-      est = calcJobCardProductionTime({ qty: Number(card.planqty) || 0, stages, process_plan: plan });
+      estimate = calcJobCardProductionTime({
+        qty: Number(card.planqty) || 0,
+        stages,
+        process_plan: plan,
+      });
     }
-  } catch (err) {
-    console.warn("[syncPlanFromJobCard] plan_end estimate failed:", err?.message || err);
+  } catch (_) {
+    // ignore estimate errors
   }
-  const now = new Date();
-  const keys = new Set();
 
-  // One SELECT for existing lines — avoid N+1 per machine row.
-  const existing = await rows(
-    `SELECT docno, proccode, maccode, actual_start, actual_end FROM ${T.PLAN} WHERE pjobcardno = $1`,
-    [pjobcardno],
+  const existing = await runQuery(
+    `SELECT docno, proccode, maccode FROM ${T.PLAN} WHERE pjobcardno = $1`,
+    [pjc],
     client
   );
-  const byKey = new Map(existing.map((ex) => [`${ex.proccode}:${Number(ex.maccode) || 0}`, ex]));
+  const existingByKey = new Map(
+    existing.map((row) => [`${row.proccode}:${Number(row.maccode) || 0}`, row])
+  );
+  const keepKeys = new Set();
 
-  for (const line of machineStatusRows(plan)) {
-    const proccode = Number(line.process_id);
-    const maccode = Number(line.machine_id) || null;
-    const key = `${proccode}:${maccode || 0}`;
-    keys.add(key);
-    const status = String(line.status || "pending").toLowerCase();
-    const stageNo = line.stage_no != null ? Number(line.stage_no) : null;
-    const prev = byKey.get(key);
-    // plan_end from this machine's shifts (PACK ≠ whole JC total)
-    const macShifts = machineEstForPlan(est, maccode, stageNo)?.shifts ?? est?.shifts;
-    const planEndDate = planEnd(planStart, shift, macShifts, shiftsPerDay);
+  for (const stage of parseProcessPlan(plan)) {
+    const proccode = Number(stage.process_id);
+    const stageNo =
+      stage.stage_no != null && Number.isFinite(Number(stage.stage_no))
+        ? Number(stage.stage_no)
+        : stage1;
+    const status = stageNo === stage1 ? PROCESS_STATUS.PLANNING : PROCESS_STATUS.PENDING;
+    const rmJson = JSON.stringify(stage.rm_items || []);
 
-    let actualStart = prev?.actual_start ?? null;
-    let actualEnd = prev?.actual_end ?? null;
-    if (status === "running" && !actualStart) actualStart = now;
-    if (status === "complete" && !actualEnd) actualEnd = now;
+    const machineIds = (stage.machines || []).length
+      ? stage.machines.map((m) => Number(m.machine_id) || null)
+      : [null];
 
-    if (prev) {
-      await rows(
-        `UPDATE ${T.PLAN} SET stage_no=$2, status=$3, plan_start=$4, plan_end=$5,
-         actual_start=$6, actual_end=$7 WHERE docno=$1`,
-        [prev.docno, stageNo, status, planStart, planEndDate, actualStart, actualEnd],
-        client
-      );
-    } else {
-      await rows(
-        `INSERT INTO ${T.PLAN}
-         (pjobcardno, proccode, maccode, stage_no, status, plan_start, plan_end, actual_start, actual_end)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [pjobcardno, proccode, maccode, stageNo, status, planStart, planEndDate, actualStart, actualEnd],
-        client
-      );
+    const shiftsNeed =
+      machineEstForPlan(estimate, machineIds[0], stageNo)?.shifts ?? estimate?.shifts;
+    const endDate = addShiftsToDate(startDate, shiftsNeed, shiftsPerDay);
+
+    for (const maccode of machineIds) {
+      const key = `${proccode}:${maccode || 0}`;
+      keepKeys.add(key);
+      const old = existingByKey.get(key);
+
+      if (old) {
+        // Keep status / act_* / mp_* — only refresh structure dates.
+        await runQuery(
+          `UPDATE ${T.PLAN}
+           SET stage_no = $2, sys_start = $3, sys_end = $4, rm_items = $5::jsonb,
+               updated_by = $6, updated_at = $7
+           WHERE docno = $1`,
+          [old.docno, stageNo, startDate, endDate, rmJson, "System", now],
+          client
+        );
+      } else {
+        await runQuery(
+          `INSERT INTO ${T.PLAN}
+             (pjobcardno, proccode, maccode, stage_no, status, rm_items,
+              sys_start, sys_end, mp_start, mp_end,
+              created_by, created_at, updated_by, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$7,$8,'System',$9,'System',$9)`,
+          [pjc, proccode, maccode, stageNo, status, rmJson, startDate, endDate, now],
+          client
+        );
+      }
     }
   }
 
-  for (const ex of existing) {
-    const k = `${ex.proccode}:${Number(ex.maccode) || 0}`;
-    if (!keys.has(k)) await rows(`DELETE FROM ${T.PLAN} WHERE docno = $1`, [ex.docno], client);
+  // Remove plan lines no longer in the JC picks.
+  for (const row of existing) {
+    const key = `${row.proccode}:${Number(row.maccode) || 0}`;
+    if (!keepKeys.has(key)) {
+      await runQuery(`DELETE FROM ${T.PLAN} WHERE docno = $1`, [row.docno], client);
+    }
   }
+}
+
+/** Super-admin can set machine status from JC screen. */
+export async function applyPlanStatusOverrides(pjobcardno, statusMap, client = null, by = "System") {
+  const pjc = String(pjobcardno || "").trim();
+  if (!pjc || !(statusMap instanceof Map) || !statusMap.size) return;
+
+  const rows = await runQuery(
+    `SELECT docno, proccode, maccode, status FROM ${T.PLAN} WHERE pjobcardno = $1`,
+    [pjc],
+    client
+  );
+  const now = new Date();
+  const user = userName(by);
+
+  for (const row of rows || []) {
+    const key = machineStatusKey(row.proccode, row.maccode);
+    if (!statusMap.has(key)) continue;
+
+    const nextStatus = String(statusMap.get(key) || "").toLowerCase();
+    if (!PROCESS_STATUS_VALUES.includes(nextStatus)) continue;
+    if (nextStatus === String(row.status || "").toLowerCase()) continue;
+
+    // Cast $2 as text everywhere — status is VARCHAR; bare $2 = 'running' deduces text vs varchar (42P08).
+    // Separate $3/$5 for act_* (timestamptz) vs updated_at (timestamp).
+    await runQuery(
+      `UPDATE ${T.PLAN}
+       SET status = $2::text,
+           act_start = CASE WHEN $2::text = 'running' AND act_start IS NULL THEN $3::timestamptz ELSE act_start END,
+           act_end   = CASE WHEN $2::text = 'complete' AND act_end IS NULL THEN $3::timestamptz ELSE act_end END,
+           updated_by = $4,
+           updated_at = $5
+       WHERE docno = $1`,
+      [row.docno, nextStatus, now, user, now],
+      client
+    );
+  }
+}
+
+/**
+ * Called from JC create + update.
+ * 1) sync plan rows
+ * 2) apply any SA status picks (often all "pending" from UI)
+ * 3) force stage-1 back to planning
+ */
+export async function saveJobCardPlan(card, { client = null, planStages = null, statusOverrides = null, by = "System" } = {}) {
+  const pjc = String(card?.pjobcardno || "").trim();
+  if (!pjc) return;
+
+  const user = userName(by);
+  await syncPlanFromJobCard(card, client, planStages);
+  await applyPlanStatusOverrides(pjc, statusOverrides, client, user);
+  await ensureStage1Planning(pjc, user, client);
 }
 
 export async function findPlanLine(docno) {
   const id = Number(docno);
   if (!id) return null;
-  const [row] = await rows(`${LIST} WHERE p.docno = $1`, [id]);
-  return row || null;
+  const [row] = await runQuery(`${LIST_SQL} WHERE p.docno = $1`, [id]);
+  if (!row) return null;
+  const [withPlan] = await attachProcessPlan([row]);
+  return withPlan;
 }
 
-function toDateOrNull(v) {
-  if (v == null || v === "") return null;
-  const s = String(v).trim().slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
-}
-
-function toStatusOrNull(v) {
-  if (v == null || v === "") return null;
-  const st = String(v).toLowerCase().trim();
-  return PROCESS_STATUS_VALUES.includes(st) ? st : null;
-}
-
-/**
- * Planning UI only — UPDATE prod_plan.
- * Does NOT write prod_jc (process/machine/stage live on JC at job-card save time).
- */
+/** Board: update dates / status / machine. */
 export async function updatePlanLine(docno, patch = {}) {
   const line = await findPlanLine(docno);
   if (!line) return null;
 
-  const plan_start = patch.plan_start !== undefined ? toDateOrNull(patch.plan_start) : line.plan_start;
-  const plan_end = patch.plan_end !== undefined ? toDateOrNull(patch.plan_end) : line.plan_end;
-  const status =
-    patch.status !== undefined
-      ? toStatusOrNull(patch.status)
-      : String(line.status || "pending").toLowerCase();
-  if (patch.status !== undefined && !status) {
-    const err = new Error("Invalid status.");
-    err.statusCode = 400;
-    throw err;
+  const oldStatus = String(line.status || PROCESS_STATUS.PENDING).toLowerCase();
+  let status = oldStatus;
+
+  if (patch.status !== undefined) {
+    const next = String(patch.status || "").toLowerCase().trim();
+    if (!PROCESS_STATUS_VALUES.includes(next)) {
+      const err = new Error("Invalid status.");
+      err.statusCode = 400;
+      throw err;
+    }
+    // Start only from Planning or Hold.
+    if (
+      next === PROCESS_STATUS.RUNNING &&
+      oldStatus !== PROCESS_STATUS.PLANNING &&
+      oldStatus !== PROCESS_STATUS.HOLD
+    ) {
+      const err = new Error("Start only when status is Planning (or Hold to resume).");
+      err.statusCode = 400;
+      throw err;
+    }
+    status = next;
   }
 
   let maccode = line.maccode;
   if (patch.maccode !== undefined) {
     if (patch.maccode === null || patch.maccode === "") maccode = null;
-    else {
-      const m = Number(patch.maccode);
-      maccode = Number.isFinite(m) && m > 0 ? m : line.maccode;
-    }
+    else if (Number(patch.maccode) > 0) maccode = Number(patch.maccode);
   }
 
+  const mpStart = patch.mp_start !== undefined ? toDate(patch.mp_start) : line.mp_start;
+  const mpEnd = patch.mp_end !== undefined ? toDate(patch.mp_end) : line.mp_end;
   const now = new Date();
-  let actual_start = line.actual_start;
-  let actual_end = line.actual_end;
-  // Start → stamp actual_start once; Complete → stamp actual_end once
-  if (status === "running" && !actual_start) actual_start = now;
-  if (status === "complete" && !actual_end) actual_end = now;
+  const user = userName(patch.updated_by || patch.by);
+  const setActStart = status === PROCESS_STATUS.RUNNING && !line.act_start ? now : null;
+  const setActEnd = status === PROCESS_STATUS.COMPLETE && !line.act_end ? now : null;
 
-  const [updated] = await rows(
+  const [updated] = await runQuery(
     `UPDATE ${T.PLAN}
-     SET plan_start = $2, plan_end = $3, status = $4, actual_start = $5, actual_end = $6, maccode = $7
+     SET mp_start = $2,
+         mp_end = $3,
+         status = $4,
+         maccode = $5,
+         act_start = COALESCE($6, act_start),
+         act_end = COALESCE($7, act_end),
+         updated_by = $8,
+         updated_at = $9
      WHERE docno = $1
-     RETURNING docno, pjobcardno, proccode, maccode, stage_no, status, plan_start, plan_end, actual_start, actual_end`,
-    [Number(docno), plan_start, plan_end, status, actual_start, actual_end, maccode]
+     RETURNING docno, pjobcardno, proccode, maccode, stage_no, status, rm_items,
+       sys_start, sys_end, act_start, act_end, mp_start, mp_end,
+       created_by, created_at, updated_by, updated_at`,
+    [Number(docno), mpStart, mpEnd, status, maccode, setActStart, setActEnd, user, now]
   );
+
+  // Completing a stage may unlock the next stage.
+  if (updated && status === PROCESS_STATUS.COMPLETE && oldStatus !== PROCESS_STATUS.COMPLETE) {
+    await unlockNextStage(updated.pjobcardno, updated.stage_no, user);
+  }
+
+  // Hold from Running → production entry (one step log).
+  if (updated && status === PROCESS_STATUS.HOLD && oldStatus === PROCESS_STATUS.RUNNING) {
+    await createEntryOnHold(updated, user);
+  }
 
   return updated || null;
 }
 
-function removeMachineFromProcessPlan(plan, { stage_no, proccode, maccode }) {
-  const stage = Number(stage_no);
-  const proc = Number(proccode);
-  const mac = Number(maccode) || 0;
-  return parseProcessPlan(plan)
-    .map((st) => {
-      if (Number(st.stage_no) !== stage || Number(st.process_id) !== proc) return st;
-      const machines = (st.machines || []).filter((m) => Number(m.machine_id) !== mac);
-      if (!machines.length) return null;
-      return { ...st, machines, status: machines[0]?.status || PROCESS_STATUS.PENDING };
-    })
-    .filter(Boolean);
-}
-
-function setProcessPlanStagePending(plan, stageNo) {
-  const sn = Number(stageNo);
-  return parseProcessPlan(plan).map((st) => {
-    if (Number(st.stage_no) !== sn) return st;
-    const machines = (st.machines || []).map((m) => ({ ...m, status: PROCESS_STATUS.PENDING }));
-    return { ...st, machines, status: PROCESS_STATUS.PENDING };
-  });
-}
-
-/** Previous stage from JC process_plan (prod_plan row may already be missing). */
-function previousStageNo(deletedStage, processPlanRaw) {
-  const deleted = Number(deletedStage);
-  if (!Number.isFinite(deleted)) return null;
-  const nums = parseProcessPlan(processPlanRaw)
-    .map((s) => Number(s.stage_no))
-    .filter((n) => Number.isFinite(n) && n < deleted);
-  return nums.length ? Math.max(...nums) : null;
-}
-
-/** Complete line delete → JC plan patch + sync prod_plan so Board shows previous stage. */
-async function afterCompletePlanDelete(line, prevStageNo) {
-  const pjobcardno = String(line.pjobcardno || "").trim();
-  if (!pjobcardno) return null;
-
-  const [jc] = await rows(
-    `SELECT docno, pjobcardno, itemdcode, planqty, jobcarddt, approved, process_plan
-     FROM ${T.JC}
-     WHERE pjobcardno = $1 AND COALESCE(is_deleted, false) = false LIMIT 1`,
-    [pjobcardno]
-  );
-  if (!jc?.docno) return prevStageNo;
-
-  let plan = removeMachineFromProcessPlan(jc.process_plan, line);
-  if (prevStageNo != null) plan = setProcessPlanStagePending(plan, prevStageNo);
-  await rows(`UPDATE ${T.JC} SET process_plan = $2::jsonb WHERE docno = $1`, [jc.docno, JSON.stringify(plan)]);
-
-  await syncPlanFromJobCard({ ...jc, process_plan: plan });
-  return prevStageNo != null ? Number(prevStageNo) : null;
-}
-
-/** Planning Table → Delete one prod_plan line (manpower unchanged). Complete → JC previous stage pending on board. */
-export async function deletePlanLine(docno) {
+/** Hard delete one plan line. */
+export async function deletePlanLine(docno, by = "System") {
   const line = await findPlanLine(docno);
   if (!line) return null;
 
-  const status = String(line.status || "pending").toLowerCase();
-  if (status === "running") {
+  const status = String(line.status || "").toLowerCase();
+  if (status === PROCESS_STATUS.RUNNING) {
     const err = new Error("Cannot delete — status is Running. Hold or complete on Job Card Board first.");
     err.statusCode = 400;
     throw err;
   }
 
   const deletedStage = Number(line.stage_no);
-  const prevStageNo = previousStageNo(deletedStage, line.process_plan);
+  const siblings = await runQuery(
+    `SELECT stage_no FROM ${T.PLAN} WHERE pjobcardno = $1 AND docno <> $2`,
+    [String(line.pjobcardno), Number(docno)]
+  );
+  const earlier = (siblings || [])
+    .map((s) => Number(s.stage_no))
+    .filter((n) => Number.isFinite(n) && n < deletedStage);
+  const prevStage = earlier.length ? Math.max(...earlier) : null;
 
-  await rows(`DELETE FROM ${T.PLAN} WHERE docno = $1`, [Number(docno)]);
+  await runQuery(`DELETE FROM ${T.PLAN} WHERE docno = $1`, [Number(docno)]);
 
-  let reopened_stage = null;
-  if (status === "complete") {
-    reopened_stage = await afterCompletePlanDelete(line, prevStageNo);
+  // If we deleted a complete stage line, reopen previous stage as planning.
+  if (status === PROCESS_STATUS.COMPLETE && prevStage != null) {
+    await runQuery(
+      `UPDATE ${T.PLAN}
+       SET status = $2, act_end = NULL, updated_by = $4, updated_at = $5
+       WHERE pjobcardno = $1 AND stage_no = $3`,
+      [String(line.pjobcardno), PROCESS_STATUS.PLANNING, prevStage, userName(by), new Date()]
+    );
   }
 
-  return { ...line, reopened_stage };
+  return { ...line, reopened_stage: prevStage };
 }

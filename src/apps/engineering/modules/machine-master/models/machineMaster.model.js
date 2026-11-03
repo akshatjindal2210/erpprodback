@@ -10,7 +10,7 @@ const ALLOWED_SORT_FIELDS = [
   "approved", "created_at", "updated_at",
 ];
 const ALLOWED_UPDATE_FIELDS = [
-  "macname", "macno", "macproccode", "cavity", "maccycletime", "setup_time", "make", "model", "remark",
+  "macname", "macno", "macproccode", "cavity", "maccycletime", "setup_time", "make", "model", "remark", "industry_4_0",
   "approved", "approved_by", "approved_at", "updated_by", "updated_at",
 ];
 
@@ -20,7 +20,7 @@ const JOINS = `
 
 const DEFAULT_FIELDS = [
   "mm.maccode", "mm.macname", "mm.macno", "mm.macproccode",
-  "mm.cavity", "mm.maccycletime", "mm.setup_time", "mm.make", "mm.model", "mm.remark",
+  "mm.cavity", "mm.maccycletime", "mm.setup_time", "mm.make", "mm.model", "mm.remark", "mm.industry_4_0",
   `pm.procname AS process_name`, "pm.depth AS process_depth",
   "mm.approved", "mm.approved_by", "mm.approved_at",
   "mm.created_by", "mm.created_at", "mm.updated_by", "mm.updated_at",

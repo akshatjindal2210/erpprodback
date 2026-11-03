@@ -1,9 +1,36 @@
 /**
- * Shift net hours — one formula for Settings API + Production calendar.
+ * Shift net hours + active_days helpers — Settings API + Production calendar.
  * Keep LUNCH_MIN in sync with frontend shiftTimeFormat.js (LUNCH_MIN).
+ * active_days: Mon=1 … Sun=7.
  */
 
 export const SHIFT_LUNCH_MINUTES = 30;
+export const ALL_ACTIVE_DAYS = [1, 2, 3, 4, 5, 6, 7];
+
+/** YYYY-MM-DD → 1–7 (Mon–Sun). Local noon avoids TZ edge. */
+export function ymdToActiveDay(ymd) {
+  const d = new Date(`${String(ymd || "").slice(0, 10)}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return null;
+  const js = d.getDay();
+  return js === 0 ? 7 : js;
+}
+
+/** Empty / missing → all days. */
+export function normalizeActiveDays(days) {
+  if (!Array.isArray(days) || !days.length) return [...ALL_ACTIVE_DAYS];
+  const out = [];
+  for (const x of days) {
+    const n = Number(x);
+    if (Number.isFinite(n) && n >= 1 && n <= 7 && !out.includes(n)) out.push(n);
+  }
+  return out.length ? out.sort((a, b) => a - b) : [...ALL_ACTIVE_DAYS];
+}
+
+export function isShiftActiveOnDate(shift, ymd) {
+  const day = ymdToActiveDay(ymd);
+  if (day == null) return true;
+  return normalizeActiveDays(shift?.active_days).includes(day);
+}
 
 export function isShiftLunch(v) {
   return v === true || v === 1 || v === "1" || v === "t";

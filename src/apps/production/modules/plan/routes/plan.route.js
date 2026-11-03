@@ -1,7 +1,7 @@
 import express from "express";
 import { authenticate } from "../../../../core/lib/middleware/auth.js";
 import { accessControl } from "../../../../core/lib/middleware/accessControl.js";
-import { deletePlanningLine, getPlanningEmployeesHelper, getPlanningLine, getPlanningShiftOp, getPlanningShifts, getPlanningTable, savePlanningShiftOp, updatePlanningShiftOp, deletePlanningShiftOp, 
+import { deletePlanningLine, getPlanningEmployeesHelper, getPlanningLine, getPlanningShiftOp, getPlanningShifts, getPlanningTable, reorderPlanningQueue, savePlanningShiftOp, updatePlanningShiftOp, deletePlanningShiftOp, 
   updatePlanningLine } from "../controllers/plan.controller.js";
 
 const router = express.Router();
@@ -11,6 +11,7 @@ const MOD = "production_planning";
 router.post("/table", authenticate, accessControl(MOD, "view"), getPlanningTable);
 router.post("/get", authenticate, accessControl(MOD, "view"), getPlanningLine);
 router.post("/update", authenticate, accessControl(MOD, "edit"), updatePlanningLine);
+router.post("/reorder", authenticate, accessControl(MOD, "edit"), reorderPlanningQueue);
 router.post("/delete", authenticate, accessControl(MOD, "delete"), deletePlanningLine);
 
 /** Calendar shifts (Settings) + machine/shift operator (light). */

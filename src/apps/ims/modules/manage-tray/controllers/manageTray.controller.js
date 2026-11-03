@@ -8,7 +8,7 @@ import { findTray } from "../../tray/models/trayMaster.model.js";
 import { findInHandBoxesByScanCodes, findBoxesByScanCodesAny, matchBoxRowByAnyScanCodes } from "../../box/models/box.model.js";
 import { expandStickerScanLookupCodes } from "../../box/utils/stickers/stickerScanParse.js";
 import { enrichRowsWithIMS } from "../../../lib/utils/erp-api/lookup/imsLookup.js";
-import { packingKey, findManageTrays, findManageTray, findManageTraySnapshot, findManageTrayLinks, findManageTrayLinkConflicts, replaceManageTrayLinks, clearManageTrayWork, receiveTray, reassignBoxTray, getManageTrayReportSummary, findManageTrayPoolLedger, saveManageTrayRegister, deleteManageTrayRegister } from "../models/manageTray.model.js";
+import { packingKey, findManageTrays, findManageTray, findManageTraySnapshot, findManageTrayLinks, findManageTrayLinkConflicts, replaceManageTrayLinks, clearManageTrayWork, receiveTray, reassignBoxTray, assignBoxTray, getManageTrayReportSummary, findManageTrayPoolLedger, saveManageTrayRegister, deleteManageTrayRegister } from "../models/manageTray.model.js";
 import { normalizeTrayScanCode } from "../../tray/utils/trayScanParse.js";
 
 const ENTITY = "manage_tray";
@@ -459,6 +459,125 @@ export async function saveReassignTray(req, res) {
       success: true,
       message: `Sticker moved to ${trayCode || trayId}.`,
       data: { ...row, tray_code: trayCode || null },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+export async function scanAssignSticker(req, res) {
+  try {
+    const raw = req.body?.code != null ? String(req.body.code).trim() : "";
+    if (!raw) return res.status(400).json({ success: false, message: "Sticker code is required." });
+
+    const lookupCodes = expandStickerScanLookupCodes(raw);
+    const inHandRows = await findInHandBoxesByScanCodes(lookupCodes);
+    const row = matchBoxRowByAnyScanCodes(inHandRows, lookupCodes);
+    if (!row?.box_no_uid) {
+      const anyRows = await findBoxesByScanCodesAny(lookupCodes);
+      const anyRow = matchBoxRowByAnyScanCodes(anyRows, lookupCodes);
+      if (anyRow) return res.status(400).json({ success: false, message: stickerRejectMessage(anyRow, packingKey(anyRow.packing_number)) });
+      return res.status(400).json({ success: false, message: "Sticker not found." });
+    }
+
+    const pn = packingKey(row.packing_number);
+    if (!pn) return res.status(400).json({ success: false, message: "Packing not found for this sticker." });
+
+    const header = await findManageTray({ packing_number: pn });
+    if (!header) return res.status(404).json({ success: false, message: "Packing not found." });
+    if (Number(header.used_count) > 0) {
+      return res.status(400).json({ success: false, message: "This packing is already in use. You cannot edit it." });
+    }
+
+    const uid = String(row.box_no_uid).trim();
+    if (row.tray_id != null && String(row.tray_id).trim() !== "") {
+      return res.status(400).json({ success: false, message: "This sticker is already linked to a tray. Use Reassign." });
+    }
+
+    const [conflict] = await findManageTrayLinkConflicts({ packingNumber: pn, boxNoUids: [uid] });
+    if (conflict) {
+      return res.status(400).json({
+        success: false,
+        message: `This sticker is already linked in packing ${conflict.packing_number}.`,
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        box_no_uid: uid,
+        box_uid: row.box_uid ?? null,
+        packing_number: pn,
+        qty: Number(row.qty) || 0,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+export async function saveAssignTray(req, res) {
+  try {
+    const boxNoUid = String(req.body?.box_no_uid ?? "").trim();
+    const trayId = parseInt(String(req.body?.tray_id ?? ""), 10);
+    const trayCode = String(req.body?.tray_code ?? "").trim();
+    const pn = packingKey(req.body?.packing_number ?? req.body?.id);
+    if (!boxNoUid || !Number.isFinite(trayId) || trayId <= 0) {
+      return res.status(400).json({ success: false, message: "Sticker and tray are required." });
+    }
+
+    const header = await findManageTray({ packing_number: pn });
+    if (pn && !header) return res.status(404).json({ success: false, message: "Packing not found." });
+    if (header && Number(header.used_count) > 0) {
+      return res.status(400).json({ success: false, message: "This packing is already in use. You cannot edit it." });
+    }
+
+    const tray = await findTray({ id: trayId }, { fields: ["t.id", "t.code", "t.status", "t.approved"] });
+    if (!tray) return res.status(400).json({ success: false, message: "Tray not found." });
+    if (String(tray.status || "").trim().toLowerCase() !== "active") {
+      return res.status(400).json({ success: false, message: "This tray is not active." });
+    }
+    if (tray.approved !== true) {
+      return res.status(400).json({ success: false, message: "This tray is not authorized." });
+    }
+
+    const [inUse] = await dbQuery(
+      `SELECT b.packing_number, b.box_no_uid
+       FROM ${T.TRAY_MASTER} t
+       JOIN ${T.BOX_TABLE} b ON b.box_uid = t.box_uid AND b.is_deleted = false
+       WHERE t.id = $1 LIMIT 1`,
+      [trayId]
+    );
+    if (inUse && String(inUse.box_no_uid || "").trim() !== boxNoUid) {
+      return res.status(400).json({
+        success: false,
+        message: `This tray is already linked in packing ${inUse.packing_number}.`,
+      });
+    }
+
+    const userName = auditUserName(req);
+    const row = await assignBoxTray({ boxNoUid, trayId, createdBy: userName });
+    const packing = packingKey(row.packing_number) || pn;
+    const live = packing ? await findManageTray({ packing_number: packing }) : null;
+    const required = Number(live?.box_count) || 0;
+    const linked = Number(live?.link_count) || 0;
+    if (live && required > 0 && linked >= required) {
+      await saveManageTrayRegister({ ...live, link_count: linked, box_count: required }, userName);
+    } else if (packing) {
+      await deleteManageTrayRegister(packing, userName);
+    }
+
+    await logActivity(req, {
+      action: "assign",
+      entity: ENTITY,
+      entity_id: boxNoUid,
+      details: { tray_id: trayId, tray_code: trayCode, packing_number: packing, linked, required },
+    });
+
+    return res.json({
+      success: true,
+      message: `Sticker assigned to ${trayCode || trayId}.`,
+      data: { ...row, tray_code: trayCode || null, link_count: linked, box_count: required },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

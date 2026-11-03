@@ -122,6 +122,16 @@ function normalizeApprovedBody(value) {
   return value;
 }
 
+/** Comma-separated labels, e.g. "one, two". */
+function normalizeIndustry40(raw) {
+  if (raw === undefined || raw === null) return "";
+  return String(raw)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(", ");
+}
+
 export const listMachines = async (req, res) => {
   try {
     const { page, limit, sortBy, order, search, filters } = extractListParams(req.body || {});
@@ -145,7 +155,15 @@ export const listMachines = async (req, res) => {
 export const listMachineViews = async (req, res) => {
   try {
     const body = req.body || {};
-    const toView = (r) => ({ maccode: r.maccode, macname: r.macname, macno: r.macno, macproccode: r.macproccode, label: `${r.macno} — ${r.macname}` });
+    const toView = (r) => ({
+      maccode: r.maccode,
+      macname: r.macname,
+      macno: r.macno,
+      macproccode: r.macproccode,
+      cavity: r.cavity ?? null,
+      maccycletime: r.maccycletime ?? null,
+      label: `${r.macno} — ${r.macname}`,
+    });
 
     const byId = parsePositiveIntId(body.maccode ?? body.id);
     if (byId) {
@@ -193,6 +211,7 @@ export const createMachine = async (req, res) => {
     const make = req.body?.make != null ? String(req.body.make).trim() : null;
     const model = req.body?.model != null ? String(req.body.model).trim() : null;
     const remark = req.body?.remark != null ? String(req.body.remark).trim() : null;
+    const industry_4_0 = normalizeIndustry40(req.body?.industry_4_0);
     const normalizedApproved = normalizeApprovedInput(normalizeApprovedBody(req.body?.approved));
     await stampRmstoreUploadedFiles(req);
     const attachments = mapUploadedFiles(req);
@@ -228,6 +247,7 @@ export const createMachine = async (req, res) => {
       make: make || null,
       model: model || null,
       remark: remark || null,
+      industry_4_0,
       created_by: auditUserName(req),
     });
 
@@ -306,6 +326,7 @@ export const updateMachine = async (req, res) => {
       make: req.body?.make,
       model: req.body?.model,
       remark: req.body?.remark,
+      industry_4_0: req.body?.industry_4_0 !== undefined ? normalizeIndustry40(req.body.industry_4_0) : undefined,
     };
 
     const { hasChanges: fieldChanges, fields: preparedFields } = prepareUpdateByRules({
@@ -321,6 +342,7 @@ export const updateMachine = async (req, res) => {
         { field: "make", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
         { field: "model", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
         { field: "remark", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
+        { field: "industry_4_0", normalize: (v) => normalizeIndustry40(v) },
       ],
     });
 

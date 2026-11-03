@@ -450,6 +450,49 @@ export async function reassignBoxTray({ boxNoUid, trayId, createdBy = null } = {
   });
 }
 
+/** First-time link: sticker must not already be on a tray. */
+export async function assignBoxTray({ boxNoUid, trayId, createdBy = null } = {}) {
+  const uid = String(boxNoUid ?? "").trim();
+  const id = parseInt(String(trayId), 10);
+  if (!uid) throw new Error("Sticker is required.");
+  if (!Number.isFinite(id) || id <= 0) throw new Error("Tray is required.");
+
+  return withTransaction(async (client) => {
+    const { rows: boxRows } = await client.query(
+      `SELECT box_uid, box_no_uid, packing_number, qty
+       FROM ${T.BOX_TABLE}
+       WHERE is_deleted = false AND TRIM(box_no_uid::text) = $1
+       LIMIT 1`,
+      [uid]
+    );
+    const box = boxRows[0];
+    if (!box?.box_uid) throw new Error("Sticker not found.");
+
+    const { rows: linked } = await client.query(
+      `SELECT id FROM ${T.TRAY_MASTER} WHERE box_uid = $1 LIMIT 1`,
+      [box.box_uid]
+    );
+    if (linked.length) throw new Error("This sticker is already on a tray. Use Reassign.");
+
+    const { rows: saved } = await client.query(
+      `UPDATE ${T.TRAY_MASTER}
+       SET box_uid = $1, updated_by = $3, updated_at = NOW()
+       WHERE id = $2
+       RETURNING id AS tray_id`,
+      [box.box_uid, id, createdBy]
+    );
+    if (!saved.length) throw new Error("Tray not found.");
+
+    return {
+      box_uid: box.box_uid,
+      box_no_uid: box.box_no_uid,
+      packing_number: box.packing_number,
+      tray_id: saved[0].tray_id,
+      qty: box.qty,
+    };
+  });
+}
+
 const DISPATCH_ACC = `CASE WHEN ${TRAY_POOL_EXPR} = 'with_customer' THEN fn.acc_code::text END`;
 let registerSeeded = false;
 

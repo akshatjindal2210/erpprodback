@@ -7,6 +7,19 @@ export function getCronDateString() {
   return new Intl.DateTimeFormat("en-CA", { timeZone: CRON_TZ }).format(new Date());
 }
 
+/** Current HH:MM in cron timezone (IST). */
+export function getCronTimeHm() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: CRON_TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const h = parts.find((p) => p.type === "hour")?.value ?? "00";
+  const m = parts.find((p) => p.type === "minute")?.value ?? "00";
+  return `${h}:${m}`;
+}
+
 /** Add calendar days to a YYYY-MM-DD string (UTC date math — timezone-safe for dates). */
 export function addCalendarDaysYmd(ymd, days) {
   const [y, m, d] = String(ymd).slice(0, 10).split("-").map(Number);
