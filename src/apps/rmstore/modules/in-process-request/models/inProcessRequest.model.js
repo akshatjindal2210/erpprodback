@@ -787,8 +787,8 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
   const originalSum = lines.reduce((s, c) => s + num(c.original_qty), 0);
   const remainingSum = lines.reduce((s, c) => s + num(c.remaining_qty), 0);
   const consumedSum = lines.reduce((s, c) => s + num(c.consumed_qty), 0);
+  const lineQtySum = lines.reduce((s, c) => s + num(c.qty), 0);
   const first = lines[0] || {};
-  const balance_qty = isConsume || isReturn ? remainingSum : 0;
   // Auto store-in of a rejection's shop-floor coils — received coils stay held for that rejection.
   const sourceRejectionIprUid = isReturn ? parseRejectionIprUidFromAutoStoreInRemarks(row.remarks) : null;
   const balance_status = isReject || sourceRejectionIprUid
@@ -815,7 +815,13 @@ export function summarizeRow(row, { coils, mode = "detail" } = {}) {
     ? originalSum
     : isReturn
       ? remainingSum
-      : lines.reduce((s, c) => s + num(c.qty), 0);
+      : lineQtySum;
+  // Rejected coils are not consumed — show their weight under Balance (same as leftover Balance rows).
+  const balance_qty = isConsume || isReturn
+    ? remainingSum
+    : isReject
+      ? total_qty
+      : 0;
   const consumed_qty = isReturn
     ? Math.max(0, originalSum - remainingSum)
     : isConsume

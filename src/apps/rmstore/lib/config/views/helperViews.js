@@ -47,7 +47,8 @@ function allowErpHelper(mod, act) {
       mod === "rm_store_location_master" ||
       mod === "rm_issue_request" ||
       mod === "rm_in_process_request" ||
-      mod === "rm_stock_adjustment") &&
+      mod === "rm_stock_adjustment" ||
+      mod === "production_job_card") &&
     (act === VIEW || isForm(act))
   ) {
     return [];

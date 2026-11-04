@@ -761,9 +761,15 @@ async function enrichCoilsFromMaster(coils = []) {
 }
 
 /**
- * Sum already-requested qty per job card across all saved issue requests.
- * @param {string[]} jobCardNos
- * @param {{ excludeIssueUid?: number|null }} options exclude the request being edited
+ * Issue Request — Issued / Pending / OVER (form + save).
+ *
+ * Table: rmstore_in_process_request (approved, is_deleted = false only)
+ *   reject_coil / reject_lot  → coils[].qty            (reject weight)
+ *   consume / return          → coils[].remaining_qty  (balance leftover)
+ * JC: coils[].pjobcardno → else out_uid → rmstore_out_entry.pjobcardno
+ * Skip: reassign lines, AUTO_FROM_* rows
+ *
+ * net issued = gross issue/store-out − (reject + balance)
  */
 export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid = null } = {}) => {
   const keys = [
@@ -774,15 +780,15 @@ export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid
   if (!keys.length) return [];
 
   const values = [keys];
-  let i = 2;
   let excludeClause = "";
   const exclude = Number(excludeIssueUid);
   if (Number.isFinite(exclude) && exclude > 0) {
     values.push(exclude);
-    excludeClause = `AND r.issue_uid <> $${i++}`;
+    excludeClause = `AND r.issue_uid <> $2`;
   }
 
-  return dbQuery(
+  // 1) Gross issued (issue request + store-out)
+  const grossRows = await dbQuery(
     `SELECT UPPER(TRIM(jc.pjobcardno)) AS pjobcardno,
             COALESCE(SUM((${JC_ISSUE_QTY_DISPLAY_SQL})), 0)::float8 AS issued_qty,
             COALESCE(SUM((${JC_ISSUE_QTY_DISPLAY_SQL})) FILTER (WHERE r.approved = true), 0)::float8 AS approved_qty,
@@ -797,6 +803,59 @@ export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid
      GROUP BY 1`,
     values
   );
+
+  // 2) Credit from IPR coils (reject + balance) — deleted IPR excluded
+  const jcKeys = [...new Set(keys.map(normalizeJobCardKey).filter(Boolean))];
+  const creditByJc = new Map();
+  if (jcKeys.length) {
+    const jcSql = `UPPER(REGEXP_REPLACE(TRIM(COALESCE(
+      NULLIF(TRIM(c->>'pjobcardno'), ''),
+      NULLIF(TRIM(c->>'source_pjobcardno'), ''),
+      NULLIF(TRIM(o.pjobcardno), ''),
+      ''
+    )), '^JC[[:space:]\\-]*', '', 'i'))`;
+
+    const lines = await dbQuery(
+      `SELECT ${jcSql} AS jc, ipr.type, ipr.remarks, c->>'reassign' AS reassign,
+              COALESCE((NULLIF(c->>'qty', ''))::float8, (NULLIF(c->>'original_qty', ''))::float8, 0) AS qty,
+              COALESCE((NULLIF(c->>'remaining_qty', ''))::float8, 0) AS remaining_qty
+       FROM ${IPR_TABLE} ipr
+       CROSS JOIN LATERAL jsonb_array_elements(
+         CASE WHEN jsonb_typeof(ipr.coils) = 'array' THEN ipr.coils ELSE '[]'::jsonb END
+       ) AS c
+       LEFT JOIN ${OUT_ENTRY} o
+         ON o.is_deleted = false AND o.out_uid = NULLIF(TRIM(c->>'out_uid'), '')::int
+       WHERE ipr.is_deleted = false
+         AND ipr.approved = true
+         AND ipr.type IN ('reject_coil', 'reject_lot', 'consume', 'return')
+         AND ${jcSql} = ANY($1::text[])`,
+      [jcKeys]
+    );
+
+    for (const line of lines || []) {
+      const jc = String(line.jc || "");
+      let add = 0;
+      // Reject → full coil qty
+      if (line.type === "reject_coil" || line.type === "reject_lot") {
+        add = Number(line.qty) || 0;
+      }
+      // Balance leftover → remaining_qty (not reassign / not AUTO_FROM_*)
+      else if ((line.type === "consume" || line.type === "return") && line.reassign !== "true" && !String(line.remarks || "").toUpperCase().startsWith("AUTO_FROM_")) {
+        add = Number(line.remaining_qty) || 0;
+      }
+      if (jc && add > 0) creditByJc.set(jc, (creditByJc.get(jc) || 0) + add);
+    }
+  }
+
+  // 3) Net
+  return (grossRows || []).map((r) => {
+    const credit = creditByJc.get(normalizeJobCardKey(r.pjobcardno)) || 0;
+    return {
+      ...r,
+      issued_qty: Math.max(0, (Number(r.issued_qty) || 0) - credit),
+      approved_qty: Math.max(0, (Number(r.approved_qty) || 0) - credit),
+    };
+  });
 };
 
 /**
