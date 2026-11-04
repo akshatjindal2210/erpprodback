@@ -64,6 +64,7 @@ export async function createProcessMasterTable() {
       patchCol("connectivity", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("inhouse", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("jobwork", "BOOLEAN NOT NULL DEFAULT false"),
+      patchCol("is_active", "BOOLEAN NOT NULL DEFAULT true"),
     ],
     indexes: [
       `CREATE INDEX IF NOT EXISTS eng_process_parent_idx ON ${T.PROCESS_MASTER} (parent_id) WHERE is_deleted = false`,

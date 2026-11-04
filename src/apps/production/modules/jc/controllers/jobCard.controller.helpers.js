@@ -164,16 +164,21 @@ export function buildProcessPlan(stages, picks) {
       throw httpError(400, `Stage ${stage.stage_no}: ${process.process_name} takes one machine.`);
     }
 
-    const rmIds = (Array.isArray(pick.rm_item_dcodes) ? pick.rm_item_dcodes : []).map(Number);
-    const rmItems = process.rm_items.filter((r) => rmIds.includes(r.rm_item_dcode));
-    if (process.rm_items.length && !rmItems.length) throw httpError(400, `Stage ${stage.stage_no}: select RM.`);
+    // One wire only (even if UI sent many).
+    const rmId = Number((Array.isArray(pick.rm_item_dcodes) ? pick.rm_item_dcodes : [])[0]);
+    const rm = Number.isFinite(rmId) && rmId > 0
+      ? process.rm_items.find((r) => Number(r.rm_item_dcode) === rmId)
+      : null;
+    if (process.rm_items.length && !rm) throw httpError(400, `Stage ${stage.stage_no}: select RM.`);
 
     return {
       stage_no: stage.stage_no,
       process_id: process.process_id,
       process_name: process.process_name,
       machines: machines.map((m) => ({ machine_id: m.machine_id, machine_name: m.macname || m.name })),
-      rm_items: rmItems.map((r) => ({ rm_item_dcode: r.rm_item_dcode, rm_item_code: r.rm_item_code })),
+      rm_items: rm
+        ? [{ itemdcode: Number(rm.rm_item_dcode), rm_item_dcode: Number(rm.rm_item_dcode), rm_item_code: rm.rm_item_code || null }]
+        : [],
     };
   });
 }
@@ -184,7 +189,7 @@ export const planKey = (plan = []) =>
       Number(s.stage_no),
       Number(s.process_id),
       (s.machines || []).map((m) => Number(m.machine_id)).sort((a, b) => a - b),
-      (s.rm_items || []).map((r) => Number(r.rm_item_dcode)),
+      (s.rm_items || []).slice(0, 1).map((r) => Number(r.itemdcode ?? r.rm_item_dcode)),
     ])
   );
 

@@ -249,10 +249,14 @@ export function buildCoilStickerPrintRow(coil = {}, mrn = {}, opts = {}) {
     { ...spec, ...coil },
     { ...spec, ...mrn },
   );
+  const printedAt = opts.printed_at ?? opts.created_at ?? new Date().toISOString();
+  const printedBy = first(opts.printed_by, opts.created_by, mapped.created_by);
   return {
     ...mapped,
-    created_by: first(opts.created_by, mapped.created_by),
-    created_at: opts.created_at ?? mapped.created_at ?? new Date(),
+    created_by: printedBy,
+    created_at: printedAt,
+    printed_by: printedBy,
+    printed_at: printedAt,
     condition_color: text(spec.condition_color ?? coil.condition_color ?? mrn.condition_color),
     grade_color: text(spec.grade_color ?? coil.grade_color ?? mrn.grade_color),
     ...(opts.isQc ? { is_qc: true, sticker_kind: "qc" } : {}),
@@ -517,8 +521,8 @@ async function buildCard(row) {
     mrnUid: esc(show(row.mrn_uid)),
     uid: uid || EMPTY,
     qrUrl,
-    createdBy: esc(show(row.created_by)),
-    timestamp: esc(fmtTs(row.created_at)),
+    createdBy: esc(show(row.printed_by || row.created_by)),
+    timestamp: esc(fmtTs(row.printed_at || Date.now())),
   });
 }
 
@@ -564,13 +568,15 @@ export async function buildStickerDocs(coils, mrn = {}, { isQc = false, createdB
   const list = Array.isArray(coils) ? coils : [coils];
   if (!list.length) throw new Error("No coils to print.");
 
+  const printedAt = new Date().toISOString();
   const spec = await resolveSpecStickerFields(list[0], mrn || {});
   const cards = [];
   for (const coil of list) {
     const row = buildCoilStickerPrintRow(coil, mrn || {}, {
       isQc,
       spec,
-      created_by: coil.created_by || createdBy,
+      created_by: createdBy || coil.created_by,
+      printed_at: printedAt,
     });
     cards.push(await buildCard(row));
   }

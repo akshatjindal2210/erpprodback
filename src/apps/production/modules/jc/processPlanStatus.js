@@ -39,13 +39,21 @@ function normalizeRmItems(raw) {
     }
   }
   if (!Array.isArray(list)) return [];
-  return list
-    .map((r) => {
-      const rm_item_dcode = Number(r?.rm_item_dcode);
-      if (!Number.isFinite(rm_item_dcode) || rm_item_dcode <= 0) return null;
-      return { rm_item_dcode, rm_item_code: r.rm_item_code ? String(r.rm_item_code).trim() : null };
-    })
-    .filter(Boolean);
+  // One wire per plan line — keep first only.
+  const out = [];
+  for (const r of list) {
+    const itemdcode = Number(r?.itemdcode ?? r?.rm_item_dcode);
+    if (!Number.isFinite(itemdcode) || itemdcode <= 0) continue;
+    const qty = Number(r?.qty);
+    out.push({
+      itemdcode,
+      rm_item_dcode: itemdcode,
+      rm_item_code: r.rm_item_code ? String(r.rm_item_code).trim() : null,
+      qty: Number.isFinite(qty) ? qty : null,
+    });
+    break;
+  }
+  return out;
 }
 
 /** Safe parse — null / bad JSON → []. */
@@ -134,6 +142,21 @@ export function stripPlanStatuses(plan = []) {
   }));
 }
 
+/** prod_plan.itemdcode + qty → process_plan rm_items shape (UI). */
+function rmItemsFromPlanRow(r) {
+  const itemdcode = Number(r?.rm_itemdcode ?? r?.itemdcode);
+  if (!Number.isFinite(itemdcode) || itemdcode <= 0) return [];
+  const qty = Number(r?.rm_qty ?? r?.qty);
+  return [
+    {
+      itemdcode,
+      rm_item_dcode: itemdcode,
+      rm_item_code: r.rm_item_code ? String(r.rm_item_code).trim() : null,
+      qty: Number.isFinite(qty) ? qty : null,
+    },
+  ];
+}
+
 /** Rebuild process_plan[] from prod_plan DB rows. */
 export function buildProcessPlanFromPlanRows(rows = []) {
   const byKey = new Map();
@@ -148,12 +171,12 @@ export function buildProcessPlanFromPlanRows(rows = []) {
         process_id,
         process_name: String(r.process_name || "").trim() || `Process ${process_id}`,
         machines: [],
-        rm_items: normalizeRmItems(r.rm_items),
+        rm_items: rmItemsFromPlanRow(r),
         status: normalizeStatus(r.status),
       });
     }
     const stage = byKey.get(key);
-    if (!stage.rm_items.length) stage.rm_items = normalizeRmItems(r.rm_items);
+    if (!stage.rm_items.length) stage.rm_items = rmItemsFromPlanRow(r);
     const mac = Number(r.maccode ?? r.machine_id);
     if (Number.isFinite(mac) && mac > 0) {
       stage.machines.push({

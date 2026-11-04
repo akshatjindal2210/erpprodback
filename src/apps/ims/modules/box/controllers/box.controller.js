@@ -1304,6 +1304,7 @@ export const previewSticker = async (req, res) => {
       acc_code: acc_code || null,
       acc_name: acc_name || null,
       doc_dt: doc_dt != null && doc_dt !== "" ? doc_dt : null,
+      created_by: auditUserName(req),
       created_at: new Date().toISOString(),
       job_no: job_card_no || null,
       unit: unit || "PCS",
@@ -1311,9 +1312,13 @@ export const previewSticker = async (req, res) => {
 
     const [enriched] = await enrichStickerRowsFromIMS([baseRow]);
     const [withCustCode] = await applyStickerCustCodeNarr([enriched], acc_code);
+    const dp = await findDailyProdByDocNo(doc_no);
     const card = await buildStickerCardHtml({
       ...withCustCode,
       acc_name: withCustCode?.acc_name || acc_name,
+      category_name: dp?.category_name || null,
+      printed_by: auditUserName(req),
+      printed_at: new Date().toISOString(),
     });
 
     const html = buildStickerPreviewDocument(card);
@@ -1532,18 +1537,20 @@ export const renderSingleSticker = async (req, res) => {
       hasClientStickerMeta ? { ...packingMeta, ...sticker_meta } : packingMeta,
       enrichedBox?.packing_number ?? sticker_meta?.packing_number ?? sticker_meta?.doc_no
     );
-    const card = await buildStickerCardHtml(printRow);
+    const printed_by = auditUserName(req);
+    const printed_at = new Date().toISOString();
+    const card = await buildStickerCardHtml({ ...printRow, printed_by, printed_at });
     const printPackingNo = resolveStickerPackingNumber(printRow, enrichedBox?.packing_number);
 
     await insertDownloadLog({
       box_uid,
       ...pickStickerLogFields(enrichedBox, box),
-      downloaded_by: auditUserName(req),
+      downloaded_by: printed_by,
       download_type: "single",
       download_source,
     });
 
-    await incrementDownloadCount(box_uid, auditUserName(req));
+    await incrementDownloadCount(box_uid, printed_by);
 
     const print_title = buildStickerPrintDocumentTitle(printPackingNo);
     res.json({
@@ -1613,6 +1620,8 @@ export const renderBulkStickers = async (req, res) => {
     const clientPackingCustomerLocked =
       sticker_meta?.acc_code != null && String(sticker_meta.acc_code).trim() !== "";
 
+    const printed_by = auditUserName(req);
+    const printed_at = new Date().toISOString();
     const cards = await Promise.all(
       enrichedBoxes.map(async (box, idx) => {
         const overridden = isBoxCustomerOverridden(box.override_cust, packingAcc);
@@ -1642,23 +1651,25 @@ export const renderBulkStickers = async (req, res) => {
               ? String(party_rate_cust_code).trim()
               : sharedPackingMeta.party_rate_cust_code,
         };
-        return buildStickerCardHtml(
-          mergeStickerPrintRow(
+        return buildStickerCardHtml({
+          ...mergeStickerPrintRow(
             { ...box, box_no: idx + 1, total_boxes: totalBoxes },
             perBoxMeta,
             packingNo
-          )
-        );
+          ),
+          printed_by,
+          printed_at,
+        });
       })
     );
 
-    await incrementDownloadCountBulk(uids, auditUserName(req));
+    await incrementDownloadCountBulk(uids, printed_by);
 
     await insertDownloadLog({
       ...pickStickerLogFields(custRow),
       packing_number: packingNo,
       box_uid: null,
-      downloaded_by: auditUserName(req),
+      downloaded_by: printed_by,
       download_type: "bulk_pack",
       sticker_count: totalBoxes,
       download_source,

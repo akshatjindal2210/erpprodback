@@ -539,16 +539,13 @@ export async function enrichPendingShopFloorDisplay(rows = []) {
     const prodMeta = dKey ? prodByJc.get(dKey) : null;
     const baseMeta = displayJc && jcKey(displayJc) === jcKey(issue?.pjobcardno) ? issue : null;
     const irForMerge = targetJc ? irJcMeta : irJcMeta || baseMeta || issue;
-    /** FG/mac from prdrunjc master; RM from IR when that JC was issued. */
+    /** FG/mac from JC; RM stays on coil row.item_code (do not overwrite from latest IR). */
     const meta = mergePendingJcDisplayMeta(prodMeta, irForMerge);
 
     const enriched = {
       ...row,
       fg_item_code: meta?.fg_item_code || row.fg_item_code || null,
       fg_item_desc: meta?.fg_item_desc ?? row.fg_item_desc ?? null,
-      ...(meta?.rm_item_code
-        ? { pending_rm_item_code: meta.rm_item_code, pending_rm_item_desc: meta.rm_item_desc ?? null }
-        : {}),
       ...(meta?.macname && displayJc ? { pending_jc_macname: meta.macname } : {}),
       ...(last?.target_jc || targetJc
         ? {

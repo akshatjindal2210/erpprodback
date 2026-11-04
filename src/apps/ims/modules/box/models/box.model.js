@@ -535,7 +535,7 @@ export const findDailyProdStickerRow = async (doc_no) => {
 export const findDailyProdByDocNo = async (doc_no) => {
   if (doc_no == null || String(doc_no).trim() === "") return null;
   const [row] = await dbQuery(
-    `SELECT dp.acc_code, dp.job_card_no, dp.item_dcode AS itemdcode, ${sqlDocDtText("dp.doc_dt")} AS doc_dt
+    `SELECT dp.acc_code, dp.job_card_no, dp.item_dcode AS itemdcode, ${sqlDocDtText("dp.doc_dt")} AS doc_dt, dp.category_name
      FROM ims_dailyprod dp
      WHERE dp.doc_no = $1::integer
      LIMIT 1`,

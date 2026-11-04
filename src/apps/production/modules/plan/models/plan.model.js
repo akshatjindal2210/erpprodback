@@ -11,6 +11,31 @@ import { calcJobCardProductionTime, machineEstForPlan } from "../../jc/jobCardPr
 import { findPrimeProcess } from "../../jc/models/jobCard.model.js";
 import { createEntry } from "../../entry/models/entry.model.js";
 import { getShiftsPerDay, listActiveShiftCodes } from "./planManpower.model.js";
+import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
+import { issueQtyKg } from "../../jc/jobCard.config.js";
+
+/** RM required KG for the JC (same formula as Maintain Job Card "RM Required"). */
+async function rmQtyKgForCard(card) {
+  const qty = Number(card?.planqty);
+  if (!Number.isFinite(qty) || qty < 0) return null;
+  try {
+    const { itemMap } = await getImsMapsSafe();
+    const w = Number(itemMap.get(canonicalCode(card?.itemdcode))?.gweight);
+    return issueQtyKg(Number.isFinite(w) && w > 0 ? w : null, qty);
+  } catch {
+    return null;
+  }
+}
+
+/** One RM wire for the plan row → `{ itemdcode, qty }`. */
+function rmCols(stageRm, rmQty) {
+  const r = (stageRm || [])[0];
+  const itemdcode = Number(r?.itemdcode ?? r?.rm_item_dcode);
+  return {
+    itemdcode: Number.isFinite(itemdcode) && itemdcode > 0 ? itemdcode : null,
+    qty: rmQty != null && Number.isFinite(Number(rmQty)) ? Number(rmQty) : null,
+  };
+}
 
 /** Hold on board → one production entry for this machine / JC / current (or last) shift. */
 async function createEntryOnHold(line, user) {
@@ -68,7 +93,8 @@ const JOIN = `
   LEFT JOIN ${E.PROCESS_MASTER} pr ON pr.proccode = p.proccode AND COALESCE(pr.is_deleted, false) = false
   LEFT JOIN ${E.MACHINE_MASTER} m ON m.maccode = p.maccode AND COALESCE(m.is_deleted, false) = false`;
 
-const LIST_SQL = `SELECT p.docno, p.pjobcardno, p.proccode, p.maccode, p.stage_no, p.status, p.rm_items,
+const LIST_SQL = `SELECT p.docno, p.pjobcardno, p.proccode, p.maccode, p.stage_no, p.status,
+  p.itemdcode AS rm_itemdcode, p.qty AS rm_qty,
   p.sys_start, p.sys_end, p.act_start, p.act_end, p.mp_start, p.mp_end,
   p.created_by, p.created_by AS created_by_name, p.created_at,
   p.updated_by, p.updated_by AS updated_by_name, p.updated_at,
@@ -104,6 +130,109 @@ function addShiftsToDate(startDate, shifts, shiftsPerDay = 1) {
   return d.toISOString().slice(0, 10);
 }
 
+function addCalendarDays(ymd, n) {
+  if (!ymd) return null;
+  const d = new Date(`${ymd}T12:00:00`);
+  d.setDate(d.getDate() + (Number(n) || 0));
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Set sys_start / sys_end by stage order for one JC.
+ *
+ *   Stage 1  → start = jobcarddt, end = start + shifts
+ *   Stage 2+ → start = previous stage end + 1 day, end = start + shifts
+ *              (maal stage1 se aata hai — stage2 pehle start nahi)
+ *
+ * Board PL.DT = COALESCE(mp_start, sys_start). Seeded / early mp on stage 2+
+ * (same day as stage 1) is cleared so cascaded sys_start shows.
+ */
+async function cascadePlanSysDates(card, client = null) {
+  const pjc = String(card?.pjobcardno || "").trim();
+  const jcDate = toDate(card?.jobcarddt);
+  if (!pjc || !jcDate) return;
+
+  const rows = await runQuery(
+    `SELECT docno, maccode, stage_no, mp_start, mp_end
+     FROM ${T.PLAN} WHERE pjobcardno = $1
+     ORDER BY stage_no NULLS LAST, docno`,
+    [pjc],
+    client
+  );
+  if (!rows.length) return;
+
+  const shiftsPerDay = await getShiftsPerDay();
+  let estimate = null;
+  try {
+    const prime = await findPrimeProcess(Number(card.itemdcode));
+    if (prime?.length) {
+      const maps = await loadProcessPlanMapsByJobCards([pjc], client);
+      estimate = calcJobCardProductionTime({
+        qty: Number(card.planqty) || 0,
+        stages: prime,
+        process_plan: maps.get(pjc) || [],
+      });
+    }
+  } catch (_) {
+    /* estimate optional */
+  }
+
+  const firstStageNo = Math.min(...rows.map((r) => Number(r.stage_no) || 1));
+  let start = jcDate;
+  let prevStage = null;
+  let stageEnd = null;
+  const now = new Date();
+
+  for (const row of rows) {
+    const stage = Number(row.stage_no) || 1;
+    if (prevStage != null && stage !== prevStage) {
+      start = stageEnd ? addCalendarDays(stageEnd, 1) : jcDate;
+      stageEnd = null;
+    }
+    prevStage = stage;
+
+    const shifts = machineEstForPlan(estimate, row.maccode, stage)?.shifts ?? estimate?.shifts;
+    const end = addShiftsToDate(start, shifts, shiftsPerDay);
+    if (end && (!stageEnd || end > stageEnd)) stageEnd = end;
+
+    const mp = toDate(row.mp_start);
+    const mpEnd = toDate(row.mp_end);
+    /** Stage 2+ mp before cascaded start = seed / invalid — drop so PL.DT uses sys_start. */
+    const wipeMp = stage > firstStageNo && !!mp && !!start && mp < start;
+    /**
+     * mp_end only when full stage hours are planned.
+     * Same-day start=end while many shifts still needed → clear premature end.
+     */
+    const wipeEnd =
+      wipeMp ||
+      (!!mp && !!mpEnd && mpEnd === mp && (Number(shifts) || 0) > Math.max(1, shiftsPerDay));
+
+    await runQuery(
+      `UPDATE ${T.PLAN}
+       SET sys_start = $2::date, sys_end = $3::date,
+           mp_start = CASE WHEN $4::boolean THEN NULL ELSE mp_start END,
+           mp_end   = CASE WHEN $5::boolean THEN NULL ELSE mp_end END,
+           updated_at = $6
+       WHERE docno = $1`,
+      [row.docno, start, end, wipeMp, wipeEnd, now],
+      client
+    );
+
+    /**
+     * Stage 2+ machine: operator booked before this stage can start
+     * (previous stage still running) → remove orphan manpower cells.
+     */
+    if (stage > firstStageNo && Number(row.maccode) > 0 && start) {
+      await runQuery(
+        `DELETE FROM ${T.PLAN_MANPOWER}
+         WHERE maccode = $1 AND plan_date < $2::date`,
+        [Number(row.maccode), start],
+        client
+      );
+    }
+  }
+}
+
 function getFirstStageNo(plan) {
   const nums = parseProcessPlan(plan)
     .map((s) => Number(s.stage_no))
@@ -118,7 +247,8 @@ export async function loadProcessPlanMapsByJobCards(pjobcardnos = [], client = n
   if (!nos.length) return result;
 
   const rows = await runQuery(
-    `SELECT p.pjobcardno, p.proccode, p.maccode, p.stage_no, p.status, p.rm_items,
+    `SELECT p.pjobcardno, p.proccode, p.maccode, p.stage_no, p.status,
+            p.itemdcode AS rm_itemdcode, p.qty AS rm_qty,
             pr.procname AS process_name, m.macname AS machine_name
      FROM ${T.PLAN} p ${JOIN}
      WHERE p.pjobcardno = ANY($1::text[])
@@ -184,11 +314,23 @@ export async function listPlanRows(jcDocno, filters = {}) {
   }
 
   const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
-  const rows = await runQuery(
-    `${LIST_SQL}${whereSql}
-     ORDER BY p.maccode NULLS LAST, ${effStart} ASC NULLS LAST, p.pjobcardno ASC, p.stage_no, p.proccode`,
-    params
-  );
+  const orderSql = `ORDER BY p.maccode NULLS LAST, ${effStart} ASC NULLS LAST, p.pjobcardno ASC, p.stage_no, p.proccode`;
+
+  let rows = await runQuery(`${LIST_SQL}${whereSql} ${orderSql}`, params);
+
+  // One pass: fix stage dates for each JC (idempotent).
+  const done = new Set();
+  for (const r of rows || []) {
+    const pjc = String(r.pjobcardno || "").trim();
+    if (!pjc || done.has(pjc)) continue;
+    done.add(pjc);
+    await cascadePlanSysDates(
+      { pjobcardno: pjc, jobcarddt: r.jobcarddt, planqty: r.qty, itemdcode: r.itemdcode },
+      null
+    );
+  }
+  if (done.size) rows = await runQuery(`${LIST_SQL}${whereSql} ${orderSql}`, params);
+
   return attachProcessPlan(rows);
 }
 
@@ -351,10 +493,8 @@ async function unlockNextStage(pjobcardno, doneStage, by, client = null) {
 }
 
 /**
- * Create / update plan rows from Maintain Job Card picks.
- * - New stage-1 rows → status planning
- * - Later stages → pending
- * - Existing rows: keep status (only refresh stage / dates / rm)
+ * Upsert plan rows from Maintain Job Card (structure only).
+ * Dates → cascadePlanSysDates at the end.
  */
 export async function syncPlanFromJobCard(card, client = null, planStages = null) {
   const pjc = String(card?.pjobcardno || "").trim();
@@ -368,31 +508,15 @@ export async function syncPlanFromJobCard(card, client = null, planStages = null
     plan = stripPlanStatuses(maps.get(pjc) || []);
   }
 
-  // No process plan → clear all plan lines for this JC.
   if (!plan.length) {
     await runQuery(`DELETE FROM ${T.PLAN} WHERE pjobcardno = $1`, [pjc], client);
     return;
   }
 
   const now = new Date();
-  const startDate = toDate(card.jobcarddt);
-  const shiftsPerDay = await getShiftsPerDay();
+  const jcDate = toDate(card.jobcarddt);
   const stage1 = getFirstStageNo(plan);
-
-  // Optional time estimate (for sys_end).
-  let estimate = null;
-  try {
-    const stages = await findPrimeProcess(Number(card.itemdcode));
-    if (stages?.length) {
-      estimate = calcJobCardProductionTime({
-        qty: Number(card.planqty) || 0,
-        stages,
-        process_plan: plan,
-      });
-    }
-  } catch (_) {
-    // ignore estimate errors
-  }
+  const rmQty = await rmQtyKgForCard(card);
 
   const existing = await runQuery(
     `SELECT docno, proccode, maccode FROM ${T.PLAN} WHERE pjobcardno = $1`,
@@ -406,20 +530,12 @@ export async function syncPlanFromJobCard(card, client = null, planStages = null
 
   for (const stage of parseProcessPlan(plan)) {
     const proccode = Number(stage.process_id);
-    const stageNo =
-      stage.stage_no != null && Number.isFinite(Number(stage.stage_no))
-        ? Number(stage.stage_no)
-        : stage1;
+    const stageNo = Number.isFinite(Number(stage.stage_no)) ? Number(stage.stage_no) : stage1;
     const status = stageNo === stage1 ? PROCESS_STATUS.PLANNING : PROCESS_STATUS.PENDING;
-    const rmJson = JSON.stringify(stage.rm_items || []);
-
+    const { itemdcode: rmItemdcode, qty: rmLineQty } = rmCols(stage.rm_items, rmQty);
     const machineIds = (stage.machines || []).length
       ? stage.machines.map((m) => Number(m.machine_id) || null)
       : [null];
-
-    const shiftsNeed =
-      machineEstForPlan(estimate, machineIds[0], stageNo)?.shifts ?? estimate?.shifts;
-    const endDate = addShiftsToDate(startDate, shiftsNeed, shiftsPerDay);
 
     for (const maccode of machineIds) {
       const key = `${proccode}:${maccode || 0}`;
@@ -427,36 +543,36 @@ export async function syncPlanFromJobCard(card, client = null, planStages = null
       const old = existingByKey.get(key);
 
       if (old) {
-        // Keep status / act_* / mp_* — only refresh structure dates.
+        // Keep status / act_* / mp_* — only structure + RM.
         await runQuery(
           `UPDATE ${T.PLAN}
-           SET stage_no = $2, sys_start = $3, sys_end = $4, rm_items = $5::jsonb,
-               updated_by = $6, updated_at = $7
+           SET stage_no = $2, itemdcode = $3, qty = $4, updated_by = $5, updated_at = $6
            WHERE docno = $1`,
-          [old.docno, stageNo, startDate, endDate, rmJson, "System", now],
+          [old.docno, stageNo, rmItemdcode, rmLineQty, "System", now],
           client
         );
       } else {
         await runQuery(
           `INSERT INTO ${T.PLAN}
-             (pjobcardno, proccode, maccode, stage_no, status, rm_items,
-              sys_start, sys_end, mp_start, mp_end,
-              created_by, created_at, updated_by, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$7,$8,'System',$9,'System',$9)`,
-          [pjc, proccode, maccode, stageNo, status, rmJson, startDate, endDate, now],
+             (pjobcardno, proccode, maccode, stage_no, status, itemdcode, qty,
+              sys_start, sys_end, created_by, created_at, updated_by, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,'System',$9,'System',$9)`,
+          [pjc, proccode, maccode, stageNo, status, rmItemdcode, rmLineQty, jcDate, now],
           client
         );
       }
     }
   }
 
-  // Remove plan lines no longer in the JC picks.
   for (const row of existing) {
     const key = `${row.proccode}:${Number(row.maccode) || 0}`;
     if (!keepKeys.has(key)) {
       await runQuery(`DELETE FROM ${T.PLAN} WHERE docno = $1`, [row.docno], client);
     }
   }
+
+  // Stage 1 = JC date; next stage = day after previous end.
+  await cascadePlanSysDates(card, client);
 }
 
 /** Super-admin can set machine status from JC screen. */
@@ -573,7 +689,8 @@ export async function updatePlanLine(docno, patch = {}) {
          updated_by = $8,
          updated_at = $9
      WHERE docno = $1
-     RETURNING docno, pjobcardno, proccode, maccode, stage_no, status, rm_items,
+     RETURNING docno, pjobcardno, proccode, maccode, stage_no, status,
+       itemdcode AS rm_itemdcode, qty AS rm_qty,
        sys_start, sys_end, act_start, act_end, mp_start, mp_end,
        created_by, created_at, updated_by, updated_at`,
     [Number(docno), mpStart, mpEnd, status, maccode, setActStart, setActEnd, user, now]

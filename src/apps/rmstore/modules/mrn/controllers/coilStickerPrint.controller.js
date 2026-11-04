@@ -137,7 +137,7 @@ export const renderSingleCoilSticker = async (req, res) => {
     const mrn = coil.mrn_uid ? (await resolveMrnForSticker(coil.mrn_uid)).mrn : null;
     const doc = await buildStickerDocs(coil, mrn || {}, {
       isQc: qc,
-      createdBy: coil.created_by || auditUserName(req),
+      createdBy: auditUserName(req),
     });
 
     await logDownload({
@@ -188,7 +188,7 @@ export const renderBatchQcSticker = async (req, res) => {
 
     const doc = await buildStickerDocs(batchCoil, mrn, {
       isQc: true,
-      createdBy: base.created_by || auditUserName(req),
+      createdBy: auditUserName(req),
     });
 
     await logDownload({

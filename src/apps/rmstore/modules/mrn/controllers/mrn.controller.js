@@ -739,7 +739,7 @@ export const deleteGeneratedMrn = async (req, res) => {
 
     return res.json({
       success: true,
-      message: `Permanently deleted MRN, ${deletedCoilCount} coil sticker(s), and related QC data. You can create stickers again from ERP when ready.`,
+      message: deletedCoilCount > 0 ? "Stickers deleted." : "Draft deleted.",
       deleted_coil_count: deletedCoilCount,
       deleted_qc_count: deletedQcCount,
       mrn_row_deleted: true,

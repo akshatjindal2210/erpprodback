@@ -5,6 +5,7 @@ import { RMSTORE_TABLES as T } from "../../../../../config/db/dbTables.js";
 import { buildNaiveTimestampUpdateParts } from "../../../lib/utils/sqlTimestampUpdate.js";
 import { findIssueRequestRegisterMetaByCoilUids, findIssueRequestRegisterMetaByPjobcardnos } from "../../issue-request/models/issueRequestJobCard.model.js";
 import { findProductionJcMetaByPjobcardnos, mergePendingJcDisplayMeta, productionJcMetaKey } from "../../production/utils/erpItems.js";
+import { loadReassignHistoryByCoilUids } from "../../coil/models/coil.model.js";
 
 const TABLE = T.IN_PROCESS_REQUEST;
 const REJECTION_TABLE = T.REJECTION;
@@ -692,6 +693,17 @@ function reassignTargetByCoilUid(historyByUid) {
   return map;
 }
 
+/** Prior approved reassign target for this coil (hops with ipr_uid < current). */
+function priorReassignTargetJc(historyByUid, coilUid, iprUid) {
+  const id = Number(iprUid);
+  let target = null;
+  for (const hop of historyByUid?.get(String(coilUid || "").trim().toLowerCase()) || []) {
+    if (Number.isFinite(id) && Number(hop?.ipr_uid) >= id) continue;
+    if (str(hop?.target_jc)) target = str(hop.target_jc);
+  }
+  return target;
+}
+
 /** Register list — JC, machine, FG, RM from Store Out Issue Request for the coil. */
 function resolveIprRegisterFromIssue(lines, coilIssueByUid) {
   // Lot rejection: first coil may be a store coil never issued — use first line with Issue history.
@@ -1026,8 +1038,12 @@ export const findInProcessRequests = async (options = {}) => {
   const applyRegisterEnrich = isRegisterList && listSurface !== "pending";
 
   let irByCoil = new Map();
+  let historyByUid = new Map();
   if (applyRegisterEnrich && allUids.length) {
-    irByCoil = await findIssueRequestRegisterMetaByCoilUids(allUids);
+    [irByCoil, historyByUid] = await Promise.all([
+      findIssueRequestRegisterMetaByCoilUids(allUids),
+      loadReassignHistoryByCoilUids(allUids),
+    ]);
   }
 
   const enrichedRows = pageRows.map((r) => {
@@ -1046,11 +1062,19 @@ export const findInProcessRequests = async (options = {}) => {
     let merged = applyRegisterReassignRow(summarized, row);
     const fromIssue = resolveIprRegisterFromIssue(lines, irByCoil);
     if (fromIssue) {
+      const prior =
+        merged.type !== IPR_TYPE.REASSIGN
+          ? priorReassignTargetJc(historyByUid, lines[0]?.coil_no_uid, row.ipr_uid)
+          : null;
+      const jc = prior || (merged.type !== IPR_TYPE.REASSIGN ? fromIssue.pjobcardno : null);
       merged = {
         ...merged,
-        ...(merged.type !== IPR_TYPE.REASSIGN && fromIssue.pjobcardno ? { pjobcardno: fromIssue.pjobcardno } : {}),
-        ...(merged.type !== IPR_TYPE.REASSIGN && fromIssue.macname ? { macname: fromIssue.macname } : {}),
-        ...(fromIssue.fg_item_code || fromIssue.fg_item_desc
+        ...(jc ? { pjobcardno: jc } : {}),
+        // No prior reassign → same as before (IR mac/FG). Prior → JC only; FG/mac from enrich below.
+        ...(!prior && merged.type !== IPR_TYPE.REASSIGN && fromIssue.macname
+          ? { macname: fromIssue.macname }
+          : {}),
+        ...(!prior && (fromIssue.fg_item_code || fromIssue.fg_item_desc)
           ? {
               fg_item_code: merged.fg_item_code ?? fromIssue.fg_item_code ?? null,
               fg_item_desc: merged.fg_item_desc ?? fromIssue.fg_item_desc ?? null,
@@ -1136,7 +1160,7 @@ export const findInProcessRequests = async (options = {}) => {
     }
   }
 
-  /** Pending tab — FG + RM from Issue Request for the job card shown on the row. */
+  /** Pending tab — FG/mac from JC; keep coil RM (do not overwrite from latest IR). */
   if (listSurface === "pending" && data.length) {
     const pendingDisplayJc = (row) => {
       if (row?.type === IPR_TYPE.REASSIGN && reassignJcNo(row.reassign_jc)) {
@@ -1155,14 +1179,7 @@ export const findInProcessRequests = async (options = {}) => {
         if (!jc) return row;
         const key = productionJcMetaKey(jc);
         const hit = mergePendingJcDisplayMeta(prodPending.get(key), irPending.get(key));
-        if (
-          !hit.macname &&
-          !hit.fg_item_code &&
-          !hit.fg_item_desc &&
-          !hit.rm_item_code
-        ) {
-          return row;
-        }
+        if (!hit.macname && !hit.fg_item_code && !hit.fg_item_desc) return row;
         return {
           ...row,
           pjobcardno: jc,
@@ -1171,12 +1188,6 @@ export const findInProcessRequests = async (options = {}) => {
             ? {
                 fg_item_code: hit.fg_item_code ?? row.fg_item_code ?? null,
                 fg_item_desc: hit.fg_item_desc ?? row.fg_item_desc ?? null,
-              }
-            : {}),
-          ...(hit.rm_item_code
-            ? {
-                item_code: hit.rm_item_code,
-                item_desc: hit.rm_item_desc ?? row.item_desc ?? null,
               }
             : {}),
         };

@@ -68,12 +68,15 @@ export async function resolvePackingStickerMetaForPrint(packing_number, hints = 
   let acc_name = hints.acc_name ?? null;
   let doc_dt = hints.doc_dt ?? hints.docdt ?? null;
 
+  let category_name = hints.category_name ?? hints.ims_category ?? null;
+
   const dp = await findDailyProdByDocNo(pn);
   if (dp) {
     itemdcode = itemdcode ?? dp.itemdcode ?? null;
     acc_code = acc_code ?? dp.acc_code ?? null;
     job_card_no = job_card_no ?? dp.job_card_no ?? null;
     doc_dt = doc_dt ?? dp.doc_dt ?? null;
+    category_name = category_name ?? dp.category_name ?? null;
   }
 
   const fy = await resolveFinancialYearForPrint(pn, hints);
@@ -157,5 +160,6 @@ export async function resolvePackingStickerMetaForPrint(packing_number, hints = 
       party_rate_cust_code != null && String(party_rate_cust_code).trim() !== ""
         ? String(party_rate_cust_code).trim()
         : null,
+    ...(category_name ? { category_name: String(category_name).trim() } : {}),
   };
 }

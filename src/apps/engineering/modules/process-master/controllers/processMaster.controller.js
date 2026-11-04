@@ -113,6 +113,7 @@ export const createProcess = handle("create", async (req, res) => {
     created_by: auditUserName(req),
   };
   for (const f of PROCESS_FLAGS) fields[f] = toBool(body[f]);
+  fields.is_active = body.is_active === undefined ? true : toBool(body.is_active);
 
   await assertUniqueName(procname, parent_id);
 
@@ -154,6 +155,7 @@ export const updateProcess = handle("update", async (req, res) => {
       : undefined,
   };
   for (const f of PROCESS_FLAGS) input[f] = body[f];
+  if (body.is_active !== undefined) input.is_active = body.is_active;
 
   const { hasChanges, fields } = prepareUpdateByRules({
     existing,
@@ -163,6 +165,7 @@ export const updateProcess = handle("update", async (req, res) => {
       { field: "stage", normalize: toStage },
       { field: "deptname", normalize: toDeptname },
       ...PROCESS_FLAGS.map((field) => ({ field, normalize: toBool })),
+      { field: "is_active", normalize: toBool },
     ],
   });
   if (fields.procname !== undefined && !fields.procname) {
@@ -244,7 +247,7 @@ export const listProcessViews = handle("helper", async (req, res) => {
 
   const excludeId = parsePositiveIntId(body.exclude_id);
   const { data, total } = await findProcesses({
-    filters: { approved: true, ...safeFilters },
+    filters: { approved: true, is_active: true, ...safeFilters },
     search: sanitizeSearch(search),
     sort: { by: "proccode", order: "ASC" },
     page: page || 1,

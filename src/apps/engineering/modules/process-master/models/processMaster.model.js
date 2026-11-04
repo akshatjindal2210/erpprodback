@@ -16,7 +16,7 @@ export const PROCESS_FLAGS = ["multi_jc", "rm_wire", "tooling", "fg", "prime", "
 /** Row → { multi_jc: true, rm_wire: false, … } — exactly as set in Process Master. */
 export const flagsOf = (row) => Object.fromEntries(PROCESS_FLAGS.map((f) => [f, row?.[f] === true]));
 
-const BOOL_FILTERS = new Set(["approved", ...PROCESS_FLAGS]);
+const BOOL_FILTERS = new Set(["approved", "is_active", ...PROCESS_FLAGS]);
 
 const FILTERS = {
   proccode: (i) => `pm.proccode = $${i}`,
@@ -25,21 +25,24 @@ const FILTERS = {
   stage: (i) => `pm.stage = $${i}`,
   depth: (i) => `pm.depth = $${i}`,
   approved: (i) => `pm.approved = $${i}`,
+  is_active: (i) => `pm.is_active = $${i}`,
   ...Object.fromEntries(PROCESS_FLAGS.map((f) => [f, (i) => `pm.${f} = $${i}`])),
   from_date: (i) => `pm.created_at::date >= $${i}::date`,
   to_date: (i) => `pm.created_at::date <= $${i}::date`,
 };
-const SORTS = ["proccode", "procname", "id", "name", "stage", "depth", "parent_id", "approved", "created_at", "updated_at"];
+const SORTS = ["proccode", "procname", "id", "name", "stage", "depth", "parent_id", "approved", "is_active", "created_at", "updated_at"];
 const SORT_COL = { proccode: "proccode", procname: "procname", id: "proccode", name: "procname" };
 const UPDATABLE = [
   "procname", "parent_id", "depth", "stage", "deptname",
   ...PROCESS_FLAGS,
+  "is_active",
   "approved", "approved_by", "approved_at", "updated_by", "updated_at",
 ];
 
 const DEFAULT_FIELDS = [
   "pm.proccode", "pm.procname", "pm.depth", "pm.parent_id", "pm.stage", "pm.deptname",
   ...PROCESS_FLAGS.map((f) => `pm.${f}`),
+  "pm.is_active",
   "parent.procname AS parent_name",
   "pm.approved", "pm.approved_by", "pm.approved_at",
   "pm.created_by", "pm.created_at", "pm.updated_by", "pm.updated_at",
@@ -65,10 +68,11 @@ function toDbFields(fields) {
   return out;
 }
 
-/** All active processes as a tree (Map proccode → { proccode, procname, parent_id, depth }). */
-export async function loadTree() {
+/** Tree for pickers (active only) or path labels (`activeOnly: false` = all non-deleted). */
+export async function loadTree({ activeOnly = true } = {}) {
+  const active = activeOnly ? " AND is_active = true" : "";
   const rows = await dbQuery(
-    `SELECT proccode, procname, parent_id, depth FROM ${TABLE} WHERE is_deleted = false`
+    `SELECT proccode, procname, parent_id, depth FROM ${TABLE} WHERE is_deleted = false${active}`
   );
   return new Map(rows.map((r) => [r.proccode, r]));
 }
@@ -76,7 +80,7 @@ export async function loadTree() {
 /** Adds `path_label` ("A > B > C") to each row. */
 async function withPath(rows) {
   if (!rows.length) return rows;
-  const tree = await loadTree();
+  const tree = await loadTree({ activeOnly: false });
   return rows.map((r) => ({ ...r, path_label: pathLabel(tree, r.proccode) || r.procname }));
 }
 
@@ -187,7 +191,7 @@ export async function softDeleteProcess(proccode) {
 
 /** Fix `depth` of every process whose stored level is wrong (after a move, and once on boot). */
 export async function syncProcessDepth() {
-  const tree = await loadTree();
+  const tree = await loadTree({ activeOnly: false });
   for (const node of tree.values()) {
     const level = levelOf(tree, node.proccode);
     if (Number(node.depth) !== level) {

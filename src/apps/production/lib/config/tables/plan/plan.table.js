@@ -1,7 +1,7 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { PRODUCTION_TABLES as T, ENGINEERING_TABLES as E } from "../../../../../../config/db/dbTables.js";
+import { ensureColumns, patchCol } from "../../../../../../config/db/ensureDbColumns.js";
 
-/** prod_plan — drop & recreate manually if needed. Hard delete. */
 export async function createProdPlanTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.PLAN} (
@@ -11,7 +11,8 @@ export async function createProdPlanTable() {
       maccode     INTEGER REFERENCES ${E.MACHINE_MASTER}(maccode),
       stage_no    INTEGER,
       status      VARCHAR(20) NOT NULL DEFAULT 'pending',
-      rm_items    JSONB NOT NULL DEFAULT '[]'::jsonb,
+      itemdcode   INTEGER,
+      qty         NUMERIC,
       sys_start   DATE,
       sys_end     DATE,
       act_start   TIMESTAMPTZ,
@@ -23,10 +24,15 @@ export async function createProdPlanTable() {
       updated_by  TEXT,
       updated_at  TIMESTAMP
     );
+
     CREATE UNIQUE INDEX IF NOT EXISTS prod_plan_uq
       ON ${T.PLAN} (pjobcardno, proccode, COALESCE(maccode, 0));
+
     CREATE INDEX IF NOT EXISTS prod_plan_pjc_idx ON ${T.PLAN} (pjobcardno);
   `);
-  // Cleanup if a prior build added queue_no (order is mp_start / sys_start only).
-  await dbQuery(`ALTER TABLE ${T.PLAN} DROP COLUMN IF EXISTS queue_no`);
+
+  await ensureColumns(dbQuery, T.PLAN, [
+    patchCol("itemdcode", "INTEGER"),
+    patchCol("qty", "NUMERIC"),
+  ]);
 }

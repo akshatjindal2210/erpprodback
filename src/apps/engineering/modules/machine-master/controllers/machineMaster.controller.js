@@ -113,6 +113,11 @@ async function assertApprovedProcess(macproccode) {
     err.statusCode = 400;
     throw err;
   }
+  if (process.is_active === false) {
+    const err = new Error("Process must be active before linking to a machine");
+    err.statusCode = 400;
+    throw err;
+  }
   return process;
 }
 
@@ -121,6 +126,8 @@ function normalizeApprovedBody(value) {
   if (value === "false") return false;
   return value;
 }
+
+const toBool = (v) => v === true || v === "true" || v === 1 || v === "1";
 
 /** Comma-separated labels, e.g. "one, two". */
 function normalizeIndustry40(raw) {
@@ -174,7 +181,7 @@ export const listMachineViews = async (req, res) => {
     const { page, limit, search, filters } = extractListParams(body);
     const safeFilters = sanitizeFilters(filters || {}, ["macproccode"]);
     const result = await findMachines({
-      filters: { ...safeFilters, approved: true },
+      filters: { ...safeFilters, approved: true, is_active: true },
       search: sanitizeSearch(search),
       sort: { by: "maccode", order: "ASC" },
       page: page || 1,
@@ -248,6 +255,7 @@ export const createMachine = async (req, res) => {
       model: model || null,
       remark: remark || null,
       industry_4_0,
+      is_active: req.body?.is_active === undefined ? true : toBool(req.body.is_active),
       created_by: auditUserName(req),
     });
 
@@ -328,6 +336,7 @@ export const updateMachine = async (req, res) => {
       remark: req.body?.remark,
       industry_4_0: req.body?.industry_4_0 !== undefined ? normalizeIndustry40(req.body.industry_4_0) : undefined,
     };
+    if (req.body?.is_active !== undefined) input.is_active = req.body.is_active;
 
     const { hasChanges: fieldChanges, fields: preparedFields } = prepareUpdateByRules({
       existing,
@@ -343,6 +352,7 @@ export const updateMachine = async (req, res) => {
         { field: "model", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
         { field: "remark", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
         { field: "industry_4_0", normalize: (v) => normalizeIndustry40(v) },
+        { field: "is_active", normalize: toBool },
       ],
     });
 

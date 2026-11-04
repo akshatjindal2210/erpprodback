@@ -1,6 +1,6 @@
 import dbQuery from "../../../../../../config/db/db.js";
 import { ENGINEERING_TABLES as T } from "../../../../../../config/db/dbTables.js";
-import { applyTablePatches, dropIndexesIfExist, ensureColumns, ensureUniqueIndex } from "../../../../../../config/db/ensureDbColumns.js";
+import { applyTablePatches, dropIndexesIfExist, ensureColumns, ensureUniqueIndex, patchCol, patchTableSchema } from "../../../../../../config/db/ensureDbColumns.js";
 
 export async function createMachineMasterTable() {
   await dbQuery(`
@@ -45,6 +45,10 @@ export async function createMachineMasterTable() {
     { name: "setup_time", addSql: "setup_time INTEGER NOT NULL DEFAULT 0" },
     { name: "industry_4_0", addSql: "industry_4_0 TEXT NOT NULL DEFAULT ''" },
   ]);
+
+  await patchTableSchema(dbQuery, T.MACHINE_MASTER, {
+    columns: [patchCol("is_active", "BOOLEAN NOT NULL DEFAULT true")],
+  });
 
   await dbQuery(`
     CREATE INDEX IF NOT EXISTS eng_machine_process_idx

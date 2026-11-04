@@ -78,7 +78,7 @@ function fromLine(line, index, m) {
 
 /** Process + Machine Master rows the lines use — live names and flags. `activeOnly` on save. */
 async function loadMasters(lines, { activeOnly = false } = {}) {
-  const active = activeOnly ? " AND is_deleted = false" : "";
+  const active = activeOnly ? " AND is_deleted = false AND is_active = true" : "";
   const [procs, machines] = await Promise.all([
     dbQuery(
       `SELECT proccode, procname, ${PROCESS_FLAGS.join(", ")} FROM ${E.PROCESS_MASTER} WHERE proccode = ANY($1::int[])${active}`,
@@ -271,6 +271,9 @@ export async function savePrime({ item_dcode, processJson, user }) {
   if (!connecting) throw httpError(400, "Select a connecting stage.");
   const connectingProc = (await loadMasters([{ process: connecting, machines: [] }], { activeOnly: true })).procById.get(connecting);
   if (!connectingProc?.connectivity) throw httpError(400, "Select a connecting stage.");
+  if (stages.some((st) => (st.processes || []).some((p) => Number(p.process) === connecting))) {
+    throw httpError(400, "Connecting process is already used in a stage.");
+  }
   const process = buildProcessJson({ type: PROCESS_TYPE.PRIME, stages, connecting });
   return withTransaction((client) => upsertPlan(client, { type: PROCESS_TYPE.PRIME, item_dcode: itemDcode, process, user }));
 }
@@ -313,6 +316,13 @@ export async function saveFg({ item_dcode, processJson, user }) {
   }
 
   const stages = await buildStages(processJson, PROCESS_TYPE.FG);
+  const primeUsed = new Set([
+    ...(primePlan.process?.stages || []).flatMap((st) => (st.processes || []).map((p) => Number(p.process))),
+    ...(Number(primePlan.process?.connecting) > 0 ? [Number(primePlan.process.connecting)] : []),
+  ]);
+  if (stages.some((st) => (st.processes || []).some((p) => primeUsed.has(Number(p.process))))) {
+    throw httpError(400, "Process already used on the prime plan.");
+  }
   const process = buildProcessJson({ type: PROCESS_TYPE.FG, stages });
   return withTransaction((client) => upsertPlan(client, { type: PROCESS_TYPE.FG, item_dcode: itemDcode, process, user }));
 }

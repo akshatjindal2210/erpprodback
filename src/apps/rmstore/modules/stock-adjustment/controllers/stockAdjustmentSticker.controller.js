@@ -221,7 +221,12 @@ async function renderSaCoilStickerHtml(coilUid, req, { bulk = false } = {}) {
   const mrn = coil.mrn_uid ? await findMrnByUid(coil.mrn_uid) : null;
   const { coil: coilSrc, mrn: mrnSrc } = enrichSaCoilSources(coil, mrn || {}, adjustment);
   const spec = await resolveSpecStickerFields(coilSrc, mrnSrc || {});
-  let printRow = buildCoilStickerPrintRow(coilSrc, mrnSrc || {}, { isQc: false, spec });
+  let printRow = buildCoilStickerPrintRow(coilSrc, mrnSrc || {}, {
+    isQc: false,
+    spec,
+    created_by: auditUserName(req),
+    printed_at: new Date().toISOString(),
+  });
   printRow = mergeSaStickerMeta(printRow, {
     adjustment,
     stickerMeta: req.body?.sticker_meta,
@@ -303,7 +308,12 @@ export const renderBulkSaCoilStickers = async (req, res) => {
       mrnNo = mrnNo ?? coilSrc.mrn_no ?? mrnSrc?.mrn_no;
       bulkMrnUid = bulkMrnUid ?? coil.mrn_uid;
       const spec = await resolveSpecStickerFields(coilSrc, mrnSrc || {});
-      let printRow = buildCoilStickerPrintRow(coilSrc, mrnSrc || {}, { isQc: false, spec });
+      let printRow = buildCoilStickerPrintRow(coilSrc, mrnSrc || {}, {
+        isQc: false,
+        spec,
+        created_by: auditUserName(req),
+        printed_at: new Date().toISOString(),
+      });
       printRow = mergeSaStickerMeta(printRow, { adjustment, stickerMeta, coil: coilSrc });
       bulkAccName = bulkAccName ?? pickFirstNonEmpty(printRow.acc_name, coilSrc.acc_name, mrnSrc?.acc_name, adjustment?.acc_name);
       cards.push(await buildCoilStickerCardHtml(printRow));

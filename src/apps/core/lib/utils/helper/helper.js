@@ -108,7 +108,7 @@ export const buildPrintDocument = (cards = [], { packing_number } = {}) => {
             width: 5.9in; 
             height: 3.8in;
             display: flex;
-            align-items: center;
+            align-items: flex-start;
             justify-content: center;
             box-sizing: border-box;
           }
@@ -136,18 +136,18 @@ export const buildStickerPreviewDocument = (cardHtml) => {
     margin: 0;
     padding: 0;
     width: 5.7in;
-    height: 3.6in;
+    height: 3.8in;
     overflow: hidden;
     background: #fff;
     box-sizing: border-box;
   }
   body {
     display: block;
-    line-height: 0;
+    line-height: normal;
   }
   body > div {
     width: 5.7in;
-    height: 3.6in;
+    height: 3.8in;
     box-sizing: border-box;
   }
 </style>
@@ -201,20 +201,17 @@ export const buildStickerCardHtml = async (sticker) => {
   const detailValueSize = hasCustCode ? 14 : 15;
   const topRowPadTop = hasCustCode ? 7 : 9;
   const topRowPadBottom = hasCustCode ? 3 : 5;
-  
+  // Audit footer: who is printing + print time (fallback create audit).
+  const _d = new Date(sticker.printed_at || Date.now());
+  const _p = (n) => String(n).padStart(2, "0");
+  const _h = Number.isNaN(_d.getTime()) ? null : _d.getHours();
+  const auditUser = String(sticker.printed_by || sticker.created_by_name || sticker.created_by || "").trim() || "—";
+  const auditTs = _h == null ? "—" : `${_p(_d.getDate())}/${_p(_d.getMonth() + 1)}/${_d.getFullYear()} ${_p(_h % 12 || 12)}:${_p(_d.getMinutes())} ${_h >= 12 ? "PM" : "AM"}`;
+  const cat = String(sticker.category_name || sticker.ims_category || "").trim().toUpperCase();
+  const auditLine = `${escapeHtmlText(auditUser)} || ${auditTs}${cat ? ` || ${escapeHtmlText(cat)}` : ""}`;
   return `
-  <div style="
-    width:5.7in;
-    height:3.6in;
-    font-family:Arial,sans-serif;
-    background:#fff;
-    color:#000;
-    box-sizing:border-box;
-    overflow:hidden;
-    display:flex;
-    flex-direction:column;
-    border: 1.5px solid #000;
-  ">
+  <div style="width:5.7in;height:3.8in;font-family:Arial,sans-serif;background:#fff;color:#000;box-sizing:border-box;overflow:hidden;display:flex;flex-direction:column;padding:10px 0 0;">
+  <div style="flex:1;min-height:0;display:flex;flex-direction:column;border:1.5px solid #000;overflow:hidden;box-sizing:border-box;">
 
     <div style="
       display:flex;
@@ -326,6 +323,8 @@ export const buildStickerCardHtml = async (sticker) => {
 
       </tbody>
     </table>
+  </div>
+  <div style="flex-shrink:0;height:14px;padding:2px 4px 3px;display:flex;align-items:flex-start;font-size:9px;font-weight:800;line-height:1.25;box-sizing:border-box;">${auditLine}</div>
   </div>
   `;
 };
@@ -589,7 +588,7 @@ export const buildForwardingNoteBillDocument = async (note, companyInfo = {}) =>
   <style>
     @page {
       size: A4 portrait;
-      margin: 8mm 10mm 14mm 10mm;
+      margin: 5mm 5mm 10mm 5mm;
       @bottom-right {
         content: "Page " counter(page) " of " counter(pages);
         font-family: "Times New Roman", Times, Georgia, serif;
@@ -610,12 +609,11 @@ export const buildForwardingNoteBillDocument = async (note, companyInfo = {}) =>
     }
     .fn-sheet {
       width: 100%;
-      max-width: 190mm;
-      margin: 0 auto;
+      margin: 0;
     }
     .fn-border {
       border: 3px double #000;
-      padding: 5mm 7mm 4mm;
+      padding: 5mm;
       background: #fff;
     }
     .fn-head-row {
@@ -676,7 +674,7 @@ export const buildForwardingNoteBillDocument = async (note, companyInfo = {}) =>
     }
     .fn-meta-cust .k { font-weight: 700; margin-right: 2mm; }
     .fn-cust-name { font-weight: 600; }
-    .fn-tbl-wrap { margin-top: 0; flex: 1; }
+    .fn-tbl-wrap { margin-top: 0; }
     .fn-tbl { width: 100%; border-collapse: collapse; font-size: 10pt; table-layout: fixed; }
     .fn-tbl thead { display: table-header-group; }
     .fn-page-head td {
