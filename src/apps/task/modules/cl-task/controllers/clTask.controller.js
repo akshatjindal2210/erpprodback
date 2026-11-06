@@ -1,4 +1,5 @@
 import ClTask from "../models/clTask.model.js";
+import Holiday from "../../holidays/models/holiday.model.js";
 import RedTicket from "../../red-ticket/models/redTicket.model.js";
 import MisScore from "../../reports/models/misScore.model.js";
 import { getISTDateString, normalizeDueTime, getClTaskFillBlockedReason, canSubmitPreviousTask, toYmd, getClTaskFillDeadlineYmd, isClTaskMissed } from "../helpers/time/clTaskTime.helper.js";
@@ -224,11 +225,12 @@ async function spawnOnActivate(master) {
     recurrence_month_dates: parseRecurrenceArray(master.recurrence_month_dates),
     recurrence_year_dates: parseRecurrenceArray(master.recurrence_year_dates),
   };
+  const holidaySet = await Holiday.getHolidaySet(cursor || today, today);
 
   let guard = 0;
   while (cursor && cursor <= today && guard < 60) {
     guard += 1;
-    await spawnInstancesForMasterDay(master, cursor);
+    await spawnInstancesForMasterDay(master, cursor, { holidaySet });
     cursor = computeClNextOccurrence(master.recurrence_type, recurrenceData, cursor);
   }
 
@@ -1141,8 +1143,9 @@ export async function updateClTask(req, res) {
         recurrence_month_dates: parseRecurrenceArray(refreshed.recurrence_month_dates),
         recurrence_year_dates: parseRecurrenceArray(refreshed.recurrence_year_dates),
       };
-      if (isClOccurrenceDay(refreshed.recurrence_type, recurrenceData, today, { includeSunday: refreshed.include_sunday === true })) {
-        await spawnInstancesForMasterDay(refreshed, today);
+      const holidaySet = await Holiday.getHolidaySet(today, today);
+      if (isClOccurrenceDay(refreshed.recurrence_type, recurrenceData, today, { includeSunday: refreshed.include_sunday === true, holidaySet })) {
+        await spawnInstancesForMasterDay(refreshed, today, { holidaySet });
       }
     }
 

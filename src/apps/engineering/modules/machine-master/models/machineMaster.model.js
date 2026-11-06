@@ -6,11 +6,12 @@ const MACHINE_MODULE = "eng_machine_master";
 
 const ALLOWED_FILTER_FIELDS = ["maccode", "macproccode", "macno", "approved", "is_active", "from_date", "to_date"];
 const ALLOWED_SORT_FIELDS = [
-  "maccode", "macname", "macno", "macproccode", "cavity", "maccycletime", "setup_time",
+  "maccode", "macname", "macno", "macproccode", "cavity", "maccycletime", "setup_time", "plan_pct", "prod_pct",
   "approved", "is_active", "created_at", "updated_at",
 ];
 const ALLOWED_UPDATE_FIELDS = [
-  "macname", "macno", "macproccode", "cavity", "maccycletime", "setup_time", "make", "model", "remark", "industry_4_0",
+  "macname", "macno", "macproccode", "cavity", "maccycletime", "setup_time", "plan_pct", "prod_pct",
+  "make", "model", "remark", "industry_4_0",
   "is_active", "approved", "approved_by", "approved_at", "updated_by", "updated_at",
 ];
 
@@ -20,7 +21,8 @@ const JOINS = `
 
 const DEFAULT_FIELDS = [
   "mm.maccode", "mm.macname", "mm.macno", "mm.macproccode",
-  "mm.cavity", "mm.maccycletime", "mm.setup_time", "mm.make", "mm.model", "mm.remark", "mm.industry_4_0",
+  "mm.cavity", "mm.maccycletime", "mm.setup_time", "mm.plan_pct", "mm.prod_pct",
+  "mm.make", "mm.model", "mm.remark", "mm.industry_4_0",
   `pm.procname AS process_name`, "pm.depth AS process_depth",
   "mm.is_active",
   "mm.approved", "mm.approved_by", "mm.approved_at",

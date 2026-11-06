@@ -1,4 +1,5 @@
 import ClTask from "../../cl-task/models/clTask.model.js";
+import Holiday from "../../holidays/models/holiday.model.js";
 import ReportReview from "../models/reportReview.model.js";
 import MisScore from "../models/misScore.model.js";
 import { getISTDateString, toYmd, isClTaskMissed } from "../../cl-task/helpers/time/clTaskTime.helper.js";
@@ -674,6 +675,8 @@ export async function getDailyReport(req, res) {
     });
 
     const date_columns = buildDateColumns(date_from, date_to);
+    const holiday_dates = await Holiday.getDatesBetween(date_from, date_to);
+    const holidaySet = new Set(holiday_dates);
 
     const instanceIds = instances.map((i) => i.instance_id);
     let reviews = [];
@@ -857,7 +860,7 @@ export async function getDailyReport(req, res) {
           || String(a.title).localeCompare(String(b.title)),
         );
         const { day_pct_by_date, day_pct_breakdown_by_date, period_score_pct } =
-          compileUserPeriodScores({ tasks: sortedTasks }, date_columns);
+          compileUserPeriodScores({ tasks: sortedTasks }, date_columns, { holidaySet });
         return {
           sno: idx + 1,
           person_id: u.person_id,
@@ -894,6 +897,7 @@ export async function getDailyReport(req, res) {
         date_from,
         date_to,
         date_columns,
+        holiday_dates,
         scope,
         users,
         days,

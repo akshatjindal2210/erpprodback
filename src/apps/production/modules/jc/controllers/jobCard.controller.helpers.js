@@ -160,7 +160,7 @@ export function buildProcessPlan(stages, picks) {
           : `Stage ${stage.stage_no}: select a machine.`
       );
     }
-    if (!process.multi_jc && machines.length > 1) {
+    if (!process.multi_jc && !process.default_mc && machines.length > 1) {
       throw httpError(400, `Stage ${stage.stage_no}: ${process.process_name} takes one machine.`);
     }
 
@@ -285,18 +285,70 @@ export async function loadRegisterList(approvedFilter) {
   return data;
 }
 
-/** Picker-only rows — JC + item code/desc only. */
+/**
+ * Returns all IMS item codes that share the same primary item as `rootDcode`
+ * (matches Product Master primary item linkage, including siblings).
+ */
+function itemdcodesByPrimary(itemMap, rootDcode) {
+  const root = canonicalCode(rootDcode);
+  if (!root || !itemMap?.size) return [];
+  const meta = itemMap.get(root) || {};
+  const primKey = canonicalCode(meta.primitemdcode) || root;
+  const primCode = String(meta.primitem_code || meta.item_code || "").trim().toUpperCase();
+  const out = [];
+  for (const [dcode, it] of itemMap.entries()) {
+    const itPrim = canonicalCode(it.primitemdcode) || dcode;
+    const itPrimCode = String(it.primitem_code || "").trim().toUpperCase();
+    const itCode = String(it.item_code || "").trim().toUpperCase();
+    const match =
+      dcode === root ||
+      dcode === primKey ||
+      itPrim === root ||
+      itPrim === primKey ||
+      (primCode && (itPrimCode === primCode || itCode === primCode));
+    if (match) {
+      const n = Number(dcode);
+      if (n > 0) out.push(n);
+    }
+  }
+  return out;
+}
+
+/** Lightweight register rows for pickers: job card, primary-item family, and shortage items. */
 export async function loadRegisterPickerList(approvedFilter) {
   const cards = await findAllJobCards({ approved: approvedFilter });
   const { itemMap } = await getImsMapsSafe();
+  const info = (dcode) => itemMap.get(canonicalCode(dcode)) || {};
+  const joined = await loadQtyItemsByShortageIds(cards);
   return (cards || [])
     .map((c) => {
       const pjobcardno = String(c.pjobcardno || "").trim();
       if (!pjobcardno) return null;
-      const info = itemMap.get(canonicalCode(c.itemdcode)) || {};
-      const item_code = String(info.item_code || c.itemdcode || "").trim() || null;
-      const item_desc = String(info.item_desc || "").trim() || null;
-      return { pjobcardno, item_code, item_desc };
+      const itemdcode = Number(c.itemdcode) > 0 ? Number(c.itemdcode) : null;
+      const prime = info(c.itemdcode);
+      const item_code = String(prime.item_code || c.itemdcode || "").trim() || null;
+      const item_desc = String(prime.item_desc || "").trim() || null;
+      const seen = new Set();
+      const items = [];
+      const pushItem = (dcode, extra = {}) => {
+        const id = Number(dcode);
+        if (!(id > 0) || seen.has(id)) return;
+        seen.add(id);
+        const meta = info(id);
+        items.push({
+          itemdcode: id,
+          item_code: String(meta.item_code || id).trim(),
+          item_desc: String(meta.item_desc || "").trim() || null,
+          ...extra,
+        });
+      };
+      if (itemdcode) pushItem(itemdcode, { is_prime: true });
+      /** Include every item in the same Product Master primary family. */
+      for (const id of itemdcodesByPrimary(itemMap, itemdcode)) {
+        pushItem(id, { is_prime: id === itemdcode });
+      }
+      for (const it of joined.get(c.docno)?.items || []) pushItem(it.itemdcode, { qty: it.qty });
+      return { pjobcardno, itemdcode, item_code, item_desc, items };
     })
     .filter(Boolean);
 }

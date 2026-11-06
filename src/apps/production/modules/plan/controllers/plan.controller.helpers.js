@@ -15,7 +15,7 @@ async function loggedHoursByJc(pjcList = []) {
   const list = [...new Set((pjcList || []).map((x) => String(x || "").trim()).filter(Boolean))];
   if (!list.length) return map;
   const rows = await dbQuery(
-    `SELECT jc, shift_start AS start_time, shift_end AS end_time
+    `SELECT jc, shift_start::time AS start_time, shift_end::time AS end_time
      FROM ${T.ENTRY}
      WHERE COALESCE(is_deleted, false) = false AND jc = ANY($1::text[])`,
     [list]

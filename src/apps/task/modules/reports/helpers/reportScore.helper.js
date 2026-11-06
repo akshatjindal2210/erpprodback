@@ -133,17 +133,19 @@ export function buildUserDayScoreMap(user) {
  *   period_score_pct: number,
  * }}
  */
-export function compileUserPeriodScores(user, dateColumns = []) {
+export function compileUserPeriodScores(user, dateColumns = [], options = {}) {
   const { pctMap, breakdown } = buildUserDayScoreMap(user);
   const day_pct_by_date = {};
   const day_pct_breakdown_by_date = {};
   const cols = (dateColumns || []).map(toYmd).filter(Boolean);
   const skipSun = userSkipsSundays(user);
+  const holidaySet = options.holidaySet;
   const today = getISTDateString();
   let sum = 0;
   let count = 0;
   for (const ymd of cols) {
     if (skipSun && isSundayYmd(ymd)) continue;
+    if (holidaySet?.has?.(ymd)) continue;
     if (!userHasScheduledDay(user, ymd, pctMap, today)) continue;
     const pct = Number(pctMap[ymd]) || 0;
     day_pct_by_date[ymd] = pct;
@@ -181,7 +183,8 @@ export const REPORT_SCORE_FORMULAS = {
   person_day:
     "Person day % = Σ(task day % × weightage) ÷ Σ(weightage) for that person's tasks on that day (missing score = 0)",
   day: "Day % = (sum of each user's person day %) ÷ (number of users)",
-  person: "Person period % = (sum of person day % in From–To) ÷ (number of days)",
+  person:
+    "Person period % = (sum of person day % in From–To) ÷ (number of counted days). Sundays (Include Sunday off) and holidays are excluded.",
   overall: "Score % = (sum of person period %) ÷ (number of persons)",
   no_verify: "No-verify / scoring-off completed task = full credit 10/10 (100%). Verified task = (rating ÷ 10) × 100%.",
 };

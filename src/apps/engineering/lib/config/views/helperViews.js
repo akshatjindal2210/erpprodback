@@ -25,12 +25,14 @@ const PICKER = [VIEW, ...FORM]; // list + form modes
  * eng_process_master       | view, add, edit, authorize  (parent picker)
  * eng_prime_item_master    | view, add, edit, authorize
  * eng_finish_process_master| view, add, edit, authorize
+ * production_entry         | view, add, edit, authorize  (Production Entry form)
  */
 const PROCESS_MASTER_HELPER = {
   eng_machine_master: PICKER,
   eng_process_master: PICKER,
   eng_prime_item_master: PICKER,
   eng_finish_process_master: PICKER,
+  production_entry: PICKER,
 };
 
 /**

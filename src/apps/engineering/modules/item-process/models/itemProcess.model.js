@@ -32,67 +32,100 @@ const idsOf = (list, key) => uniqNums((list || []).map((x) => x?.[key] ?? x?.id 
 
 /* ─────────── One process in the JSON — change the shape only in these two functions ─────────── */
 
-/**
- * SAVE: form process → JSON line.  e.g. { "process": 1, "machines": [1, 2], "rm": [1078] }
- * RM only when the process has RM wire ON in Process Master (`proc.rm_wire`).
- * New field? add it here, e.g.  cycle_time: Number(p.cycle_time) || null,
- */
-function toLine(p, proc) {
-  // Process Master "Machine" (inhouse) OFF → no machines (same idea as rm_wire OFF → no RM).
-  const machines = proc.inhouse ? idsOf(p.machines, "machine_id") : [];
+/** Form All pick (Default MC) → save as `all: true`, no machine ids. */
+function wantsAllMc(p, proc) {
+  if (!proc?.default_mc || !proc?.inhouse) return false;
+  if (p?.all_mc === true || p?.all === true) return true;
+  return (p?.machines || []).some((x) => String(x?.machine_id ?? x?.id ?? x).toLowerCase() === "all");
+}
+
+/** Read: `all: true` or Default MC + empty machines → All. */
+function isStoredAllMc(line, proc) {
+  return !!proc?.inhouse && (line?.all === true || (!!(proc?.default_mc) && !(line?.machines || []).length));
+}
+
+function mapMachine(mac) {
   return {
-    process: Number(p.process_id),
-    machines,
-    rm: proc.rm_wire ? idsOf(p.rm_items, "rm_item_dcode") : [], // order = priority
+    machine_id: Number(mac.maccode),
+    machine_label: `${mac.macno} — ${mac.macname}`,
+    macname: mac.macname,
+    macno: mac.macno,
+    cavity: mac.cavity ?? null,
+    maccycletime: Number(mac.maccycletime) || 0,
+    setup_time: Number(mac.setup_time) || 0,
   };
 }
 
-/**
- * READ: JSON line → process for the form / API / job card. Names and flags come live from Process / Machine Master.
- * New field? add it here too, e.g.  cycle_time: line.cycle_time ?? null,
- */
+/** SAVE: form process → JSON line. All → `{ all: true, machines: [] }`. */
+function toLine(p, proc) {
+  const allMc = wantsAllMc(p, proc);
+  const machines = !proc.inhouse || allMc ? [] : idsOf(p.machines, "machine_id");
+  const line = {
+    process: Number(p.process_id),
+    machines,
+    rm: proc.rm_wire ? idsOf(p.rm_items, "rm_item_dcode") : [],
+  };
+  if (allMc) line.all = true;
+  return line;
+}
+
+/** READ: JSON line → form/API process (live names/flags). All expands to Machine Master rows. */
 function fromLine(line, index, m) {
   const proc = m.procById.get(Number(line.process));
-  const flags = flagsOf(proc); // every Process Master flag: true / false exactly as set there
+  const flags = flagsOf(proc);
+  const allMc = isStoredAllMc(line, proc);
+  const machines = allMc
+    ? (m.macByProc.get(Number(line.process)) || []).map(mapMachine)
+    : (line.machines || []).map((id) => m.macById.get(Number(id))).filter(Boolean).map(mapMachine);
   return {
     process_id: Number(line.process),
     process_name: proc?.procname || `Process ${line.process}`,
     process_order: index + 1,
     flags,
     ...flags,
-    machines: (line.machines || [])
-      .map((id) => m.macById.get(Number(id)))
-      .filter(Boolean)
-      .map((mac) => ({
-        machine_id: Number(mac.maccode),
-        machine_label: `${mac.macno} — ${mac.macname}`,
-        macname: mac.macname,
-        macno: mac.macno,
-        cavity: mac.cavity ?? null,
-        maccycletime: Number(mac.maccycletime) || 0,
-        setup_time: Number(mac.setup_time) || 0,
-      })),
+    all_mc: allMc,
+    machines,
     rm_items: flags.rm_wire ? (line.rm || []).map((d) => ({ rm_item_dcode: Number(d) })) : [],
   };
 }
 
-/** Process + Machine Master rows the lines use — live names and flags. `activeOnly` on save. */
+/** Process + Machine Master for lines. `activeOnly` on save. */
 async function loadMasters(lines, { activeOnly = false } = {}) {
   const active = activeOnly ? " AND is_deleted = false AND is_active = true" : "";
-  const [procs, machines] = await Promise.all([
-    dbQuery(
-      `SELECT proccode, procname, ${PROCESS_FLAGS.join(", ")} FROM ${E.PROCESS_MASTER} WHERE proccode = ANY($1::int[])${active}`,
-      [uniqNums(lines.map((l) => l.process))]
-    ),
-    dbQuery(
-      `SELECT maccode, macname, macno, macproccode, cavity, maccycletime, setup_time FROM ${E.MACHINE_MASTER} WHERE maccode = ANY($1::int[])${active}`,
-      [uniqNums(lines.flatMap((l) => l.machines || []))]
-    ),
+  const processIds = uniqNums(lines.map((l) => l.process));
+  const machineIds = uniqNums(lines.flatMap((l) => l.machines || []));
+  const procs = processIds.length
+    ? await dbQuery(
+        `SELECT proccode, procname, ${PROCESS_FLAGS.join(", ")} FROM ${E.PROCESS_MASTER} WHERE proccode = ANY($1::int[])${active}`,
+        [processIds]
+      )
+    : [];
+  const procById = new Map(procs.map((p) => [Number(p.proccode), p]));
+  const allProcessIds = uniqNums(lines.filter((l) => isStoredAllMc(l, procById.get(Number(l.process)))).map((l) => l.process));
+  const [machines, allMachines] = await Promise.all([
+    machineIds.length
+      ? dbQuery(
+          `SELECT maccode, macname, macno, macproccode, cavity, maccycletime, setup_time FROM ${E.MACHINE_MASTER} WHERE maccode = ANY($1::int[])${active}`,
+          [machineIds]
+        )
+      : Promise.resolve([]),
+    allProcessIds.length
+      ? dbQuery(
+          `SELECT maccode, macname, macno, macproccode, cavity, maccycletime, setup_time FROM ${E.MACHINE_MASTER}
+           WHERE macproccode = ANY($1::int[])${active} ORDER BY macno, maccode`,
+          [allProcessIds]
+        )
+      : Promise.resolve([]),
   ]);
-  return {
-    procById: new Map(procs.map((p) => [Number(p.proccode), p])),
-    macById: new Map(machines.map((mac) => [Number(mac.maccode), mac])),
-  };
+  const macByProc = new Map();
+  for (const mac of allMachines) {
+    const pid = Number(mac.macproccode);
+    if (!macByProc.has(pid)) macByProc.set(pid, []);
+    macByProc.get(pid).push(mac);
+  }
+  const macById = new Map();
+  for (const mac of [...machines, ...allMachines]) macById.set(Number(mac.maccode), mac);
+  return { procById, macById, macByProc };
 }
 
 /** The `process` JSON stored on a row. Item is the row's item_dcode column. */
@@ -115,7 +148,11 @@ async function buildStages(processJson, type) {
   if (!formProcesses.length) throw httpError(400, "Add at least one process.");
 
   const m = await loadMasters(
-    formProcesses.map((p) => ({ process: Number(p.process_id), machines: idsOf(p.machines, "machine_id") })),
+    formProcesses.map((p) => ({
+      process: Number(p.process_id),
+      machines: idsOf(p.machines, "machine_id"),
+      all: p.all_mc === true || p.all === true || (p.machines || []).some((x) => String(x?.machine_id ?? x?.id ?? x).toLowerCase() === "all"),
+    })),
     { activeOnly: true }
   );
 
@@ -136,14 +173,20 @@ async function buildStages(processJson, type) {
 
       const line = toLine(p, proc);
       const where = `(Stage ${sIdx + 1})`;
-      // Machine (inhouse) ON → at least one machine; OFF → empty machines allowed (FG / Prime only).
+      // Inhouse ON → All or ≥1 machine required.
       if (proc.inhouse) {
-        if (!line.machines.length) throw httpError(400, `Select at least one machine for ${proc.procname} ${where}.`);
-        for (const id of line.machines) {
-          const mac = m.macById.get(id);
-          if (!mac) throw httpError(400, `Machine ${id} not found in Machine Master.`);
-          if (Number(mac.macproccode) !== Number(proc.proccode)) {
-            throw httpError(400, `Machine ${mac.macname} is not a ${proc.procname} machine ${where}.`);
+        if (line.all) {
+          if (!(m.macByProc.get(Number(proc.proccode)) || []).length) {
+            throw httpError(400, `No machines mapped to ${proc.procname} ${where}.`);
+          }
+        } else {
+          if (!line.machines.length) throw httpError(400, `Select at least one machine for ${proc.procname} ${where}.`);
+          for (const id of line.machines) {
+            const mac = m.macById.get(id);
+            if (!mac) throw httpError(400, `Machine ${id} not found in Machine Master.`);
+            if (Number(mac.macproccode) !== Number(proc.proccode)) {
+              throw httpError(400, `Machine ${mac.macname} is not a ${proc.procname} machine ${where}.`);
+            }
           }
         }
       }

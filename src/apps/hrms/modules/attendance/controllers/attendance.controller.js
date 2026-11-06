@@ -6,7 +6,7 @@ import { formatHrmsDate, formatHrmsDateTime, formatHrmsTime } from "../../../lib
 import { fetchEmpMaster } from "../../../lib/erpApi.js";
 import { applyApprovalUpdateFields, auditUserName, normalizeApprovedInput } from "../../../../core/lib/utils/auth/approval.js";
 import { logHrmsActivity } from "../../../lib/utils/activity/logHrmsActivity.js";
-import { istTs, normalizeShift, shiftDisplay, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, normalizeDayType, dayTypeDisplay, dayTypeValue, computeAttendanceDerived, buildLogDailyPunchSql, applyNightDefaultOut, buildDefaultInOutTimestamps, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate, parseEmpDcode, NIGHT_SHIFT_END, addDaysYmd, normalizeOtApprovedFlag, otDecisionLabel } from "../../../lib/attendanceCommon.js";
+import { istTs, normalizeShift, shiftDisplay, ymd, punchFingerprint, buildAttendanceParams, isApprovedStatus, entryTypeDisplay, resolveEntryTypeOnUpdate, normalizeEntryType, normalizeDayType, dayTypeDisplay, dayTypeValue, computeAttendanceDerived, buildLogDailyPunchSql, applyNightDefaultOut, buildDefaultInOutTimestamps, ATT_COL_IN, ATT_COL_OUT, rowInTime, rowOutTime, parseAttendanceInOut, isFutureAttendanceDate, parseEmpDcode, NIGHT_SHIFT_FROM, addDaysYmd, normalizeOtApprovedFlag, otDecisionLabel } from "../../../lib/attendanceCommon.js";
 
 const ENTITY = "hrms_attendance";
 const ATT = T.ATTENDANCE;
@@ -216,18 +216,20 @@ function addOneDayYmd(date) {
   return addDaysYmd(date, 1);
 }
 
-function isDateTimeAllowedForAttendanceDate(attendanceDate, inTime, outTime) {
+function isDateTimeAllowedForAttendanceDate(attendanceDate, inTime, outTime, shift = "A") {
   const date = ymd(attendanceDate);
   if (!date) return false;
+  const night = normalizeShift(shift) === "B";
   const start = Date.parse(`${date}T00:00:00+05:30`);
   const dayEnd = Date.parse(`${date}T23:59:59+05:30`);
-  const nextDayCutoff = Date.parse(`${addOneDayYmd(date)}T${NIGHT_SHIFT_END}:00+05:30`);
+  // Shift A: Out same day only. Shift B: Out until next day before NIGHT_SHIFT_FROM.
+  const outCap = night ? Date.parse(`${addOneDayYmd(date)}T${NIGHT_SHIFT_FROM}:00+05:30`) : dayEnd;
 
   const inMs = inTime ? Date.parse(inTime) : NaN;
   const outMs = outTime ? Date.parse(outTime) : NaN;
 
   if (inTime && (!Number.isFinite(inMs) || inMs < start || inMs > dayEnd)) return false;
-  if (outTime && (!Number.isFinite(outMs) || outMs < start || outMs > nextDayCutoff)) return false;
+  if (outTime && (!Number.isFinite(outMs) || outMs < start || outMs > outCap)) return false;
   if (inTime && outTime && Number.isFinite(inMs) && Number.isFinite(outMs) && outMs < inMs) return false;
   return true;
 }
@@ -606,7 +608,7 @@ export async function submitAttendance(req, res) {
       if (!inTime || !outTime) {
         return res.status(400).json({ success: false, message: `In and Out both required for ${empCode || empDcode}.` });
       }
-      if (!isDateTimeAllowedForAttendanceDate(date, inTime, outTime)) {
+      if (!isDateTimeAllowedForAttendanceDate(date, inTime, outTime, raw.shift)) {
         return res.status(400).json({ success: false, message: `Invalid in/out datetime for ${empCode || empDcode}.` });
       }
       const clientChanged = raw.edited === true || raw.edited === 1 || raw.edited === "true" || raw.edited === "1";
@@ -746,7 +748,7 @@ export async function updateAttendance(req, res) {
     if (!inTime || !outTime) {
       return res.status(400).json({ success: false, message: "In and Out both are required." });
     }
-    if (!isDateTimeAllowedForAttendanceDate(date, inTime, outTime)) {
+    if (!isDateTimeAllowedForAttendanceDate(date, inTime, outTime, shift)) {
       return res.status(400).json({ success: false, message: "Invalid in/out datetime for selected date." });
     }
     const changed =

@@ -43,7 +43,7 @@ export function masterSnapshotForInstance(master, scheduledDate, personOverride 
 }
 
 /** Spawn one pending instance per assignee for a scheduled day (idempotent). */
-export async function spawnInstancesForMasterDay(master, cursor, { onlyPersonId = null } = {}) {
+export async function spawnInstancesForMasterDay(master, cursor, { onlyPersonId = null, holidaySet = null } = {}) {
   const recurrenceData = {
     recurrence_weekdays: parseRecurrenceArray(master.recurrence_weekdays),
     recurrence_month_dates: parseRecurrenceArray(master.recurrence_month_dates),
@@ -53,6 +53,7 @@ export async function spawnInstancesForMasterDay(master, cursor, { onlyPersonId 
   if (
     !isClOccurrenceDay(master.recurrence_type, recurrenceData, ymd, {
       includeSunday: master.include_sunday === true,
+      holidaySet,
     })
   ) {
     return 0;

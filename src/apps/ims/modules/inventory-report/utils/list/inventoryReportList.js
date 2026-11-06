@@ -3,23 +3,32 @@
  */
 
 import dbQuery from "../../../../../../config/db/db.js";
-import { getImsMapsSafe } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
+import { getImsMapsSafe, canonicalCode } from "../../../../lib/utils/erp-api/lookup/imsLookup.js";
 import { resolvePackingCustomerName } from "../../../../lib/utils/packing-entry/customers/packingEntryCustomers.js";
 import { buildInventoryReportSql, sqlPageSlice } from "../sql/inventoryReportSql.js";
 
+/** Customer names + latest ERP item_code / item_desc (same IMS maps fetch). */
 async function enrichInventoryReportCustomerNames(rows = []) {
   if (!rows?.length) return rows;
-  const { ledgerMap, partyRateMap } = await getImsMapsSafe();
+  const { itemMap, ledgerMap } = await getImsMapsSafe();
   return rows.map((row) => {
-    const code = row?.customer_code != null ? String(row.customer_code).trim() : "";
-    if (!code) return row;
+    const item = itemMap.get(canonicalCode(row?.item_dcode));
+    let next = row;
+    if (item) {
+      next = {
+        ...row,
+        item_code: item.item_code || row.item_code,
+        item_desc: item.item_desc ?? row.item_desc,
+      };
+    }
+    const code = next?.customer_code != null ? String(next.customer_code).trim() : "";
+    if (!code) return next;
     const resolved = resolvePackingCustomerName(code, {
       ledgerMap,
-      partyRateMap,
-      itemDcode: row?.item_dcode,
+      itemDcode: next?.item_dcode,
     });
-    if (!resolved) return row;
-    return { ...row, customer_name: resolved };
+    if (!resolved) return next;
+    return { ...next, customer_name: resolved };
   });
 }
 

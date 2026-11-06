@@ -46,7 +46,11 @@ async function assertUniqueName(procname, parentId, exceptCode = null) {
   throw Object.assign(new Error(`Process "${procname}" already exists ${where}`), { statusCode: 409 });
 }
 
-/** Dropdown row (helper API). */
+/**
+ * Dropdown / helper row.
+ * `deptname` must stay here — Production Entry loadProcessDept() uses it to highlight
+ * operators whose emp dept matches the running process department.
+ */
 const toOption = (r) => ({
   proccode: r.proccode,
   procname: r.procname,
@@ -55,6 +59,7 @@ const toOption = (r) => ({
   depth: r.depth,
   stage: r.stage,
   parent_id: r.parent_id,
+  deptname: r.deptname != null && String(r.deptname).trim() !== "" ? String(r.deptname).trim() : null,
   flags: flagsOf(r),
   ...flagsOf(r),
 });

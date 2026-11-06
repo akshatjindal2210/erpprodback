@@ -11,7 +11,7 @@ const TABLE = T.PROCESS_MASTER;
 /**
  * Boolean process options — single list. New flag: add name here + DB column in process_master.table.js.
  */
-export const PROCESS_FLAGS = ["multi_jc", "rm_wire", "tooling", "fg", "prime", "rework", "inhouse", "jobwork", "connectivity"];
+export const PROCESS_FLAGS = ["multi_jc", "default_mc", "rm_wire", "tooling", "fg", "prime", "rework", "inhouse", "jobwork", "connectivity", "bd_map"];
 
 /** Row → { multi_jc: true, rm_wire: false, … } — exactly as set in Process Master. */
 export const flagsOf = (row) => Object.fromEntries(PROCESS_FLAGS.map((f) => [f, row?.[f] === true]));

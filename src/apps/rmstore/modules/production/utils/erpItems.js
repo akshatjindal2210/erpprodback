@@ -1,5 +1,5 @@
 import dbQuery from "../../../../../config/db/db.js";
-import { ENGINEERING_TABLES, IMS_TABLES, PRODUCTION_TABLES } from "../../../../../config/db/dbTables.js";
+import { IMS_TABLES, PRODUCTION_TABLES } from "../../../../../config/db/dbTables.js";
 import { fetchFromIMS } from "../../../../ims/lib/services/ims.service.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
 import { enrichProductionRow, normalizeRmItems } from "./productionRmHelpers.js";
@@ -45,111 +45,82 @@ export async function loadMappedItems(reqData, filter) {
 }
 
 /**
- * Overlay Maintain Job Card (prod_job_card) onto ERP prdrunjc rows — simple:
- *   Required Qty (rm_weight) = (prime gweight × planqty) + extra %
- *   RM wire + macname from prod_plan
+ * Overlay Maintain Job Card (prod_jc) + shortage qty onto ERP prdrunjc.
+ * Does NOT touch prod_plan — RM Store must not break while Planning module changes.
+ * Machine / RM wire stay from ERP (or Issue Request on Pending display).
  */
 async function enrichPrdRunJcFromProdJobCards(erpRows = []) {
   if (!erpRows.length) return erpRows;
 
-  const byNo = new Map();
-  for (const r of erpRows) {
-    const k = String(r.pjobcardno || "").trim().toUpperCase();
-    if (k) byNo.set(k, { ...r });
-  }
-  if (!byNo.size) return erpRows;
-
-  const cards = await dbQuery(
-    `SELECT pjobcardno, itemdcode, docno
-     FROM ${PRODUCTION_TABLES.JC}
-     WHERE is_deleted = false
-       AND UPPER(TRIM(pjobcardno)) = ANY($1::text[])`,
-    [[...byNo.keys()]]
-  );
-  if (!cards.length) return erpRows;
-
-  const docnos = [...new Set(cards.map((c) => Number(c.docno)).filter(Boolean))];
-  const lines = docnos.length
-    ? await dbQuery(
-        `SELECT docno, itemdcode, qty FROM ${IMS_TABLES.SHORTAGE}
-         WHERE docno = ANY($1::int[]) AND COALESCE(is_deleted, false) = false`,
-        [docnos]
-      )
-    : [];
-  const linesByDoc = new Map();
-  for (const r of lines) {
-    const d = Number(r.docno);
-    if (!linesByDoc.has(d)) linesByDoc.set(d, []);
-    linesByDoc.get(d).push(r);
-  }
-  const pjcList = cards.map((c) => String(c.pjobcardno || "").trim()).filter(Boolean);
-  const { itemMap } = await getImsMapsSafe();
-  const gweightOf = (dcode) => {
-    const n = Number(itemMap.get(canonicalCode(dcode))?.gweight);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  };
-
-  const planByJc = new Map();
-  if (pjcList.length) {
-    const rows = await dbQuery(
-      `SELECT p.pjobcardno, p.rm_items, m.macname AS machine_name
-       FROM ${PRODUCTION_TABLES.PLAN} p
-       LEFT JOIN ${ENGINEERING_TABLES.MACHINE_MASTER} m ON m.maccode = p.maccode AND COALESCE(m.is_deleted, false) = false
-       WHERE p.pjobcardno = ANY($1::text[])
-       ORDER BY p.stage_no NULLS LAST, p.docno`,
-      [pjcList]
-    );
-    for (const r of rows || []) {
+  try {
+    const byNo = new Map();
+    for (const r of erpRows) {
       const k = String(r.pjobcardno || "").trim().toUpperCase();
-      if (!planByJc.has(k)) planByJc.set(k, []);
-      planByJc.get(k).push(r);
+      if (k) byNo.set(k, { ...r });
     }
-  }
+    if (!byNo.size) return erpRows;
 
-  for (const c of cards) {
-    const key = String(c.pjobcardno || "").trim().toUpperCase();
-    const erp = byNo.get(key);
-    if (!erp) continue;
+    const cards = await dbQuery(
+      `SELECT pjobcardno, itemdcode, docno
+       FROM ${PRODUCTION_TABLES.JC}
+       WHERE is_deleted = false
+         AND UPPER(TRIM(pjobcardno)) = ANY($1::text[])`,
+      [[...byNo.keys()]]
+    );
+    if (!cards.length) return erpRows;
 
-    let planqty = 0;
-    for (const line of linesByDoc.get(Number(c.docno)) || []) {
-      planqty += Number(line.qty) || 0;
+    const docnos = [...new Set(cards.map((c) => Number(c.docno)).filter(Boolean))];
+    const lines = docnos.length
+      ? await dbQuery(
+          `SELECT docno, itemdcode, qty FROM ${IMS_TABLES.SHORTAGE}
+           WHERE docno = ANY($1::int[]) AND COALESCE(is_deleted, false) = false`,
+          [docnos]
+        )
+      : [];
+    const linesByDoc = new Map();
+    for (const r of lines) {
+      const d = Number(r.docno);
+      if (!linesByDoc.has(d)) linesByDoc.set(d, []);
+      linesByDoc.get(d).push(r);
     }
-    const rm_weight = issueQtyKg(gweightOf(c.itemdcode), planqty) || 0;
-    const part_weight =
-      planqty > 0 && rm_weight > 0 ? Math.round((rm_weight / planqty) * 1e6) / 1e6 : 0;
 
-    let rm_item_dcode = null;
-    let rm_item_code = null;
-    let macname = erp.macname;
-    for (const step of planByJc.get(key) || []) {
-      const rms = Array.isArray(step.rm_items) ? step.rm_items : [];
-      if (!rm_item_code && rms.length) {
-        const rm = rms[0];
-        rm_item_dcode = rm.rm_item_dcode ?? null;
-        rm_item_code = rm.rm_item_code ? String(rm.rm_item_code).trim() : null;
+    const { itemMap } = await getImsMapsSafe();
+    const gweightOf = (dcode) => {
+      const n = Number(itemMap.get(canonicalCode(dcode))?.gweight);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+
+    for (const c of cards) {
+      const key = String(c.pjobcardno || "").trim().toUpperCase();
+      const erp = byNo.get(key);
+      if (!erp) continue;
+
+      let planqty = 0;
+      for (const line of linesByDoc.get(Number(c.docno)) || []) {
+        planqty += Number(line.qty) || 0;
       }
-      if (!macname && step.machine_name) macname = step.machine_name;
-      if (rm_item_code && macname) break;
+      const rm_weight = issueQtyKg(gweightOf(c.itemdcode), planqty) || 0;
+      const part_weight =
+        planqty > 0 && rm_weight > 0 ? Math.round((rm_weight / planqty) * 1e6) / 1e6 : 0;
+
+      byNo.set(key, {
+        ...erp,
+        itemdcode: c.itemdcode || erp.itemdcode,
+        planqty: planqty > 0 ? planqty : erp.planqty,
+        rm_weight: rm_weight > 0 ? rm_weight : erp.rm_weight,
+        part_weight: part_weight > 0 ? part_weight : erp.part_weight,
+        from_prod_job_card: true,
+      });
     }
 
-    byNo.set(key, {
-      ...erp,
-      itemdcode: c.itemdcode || erp.itemdcode,
-      planqty: planqty > 0 ? planqty : erp.planqty,
-      rm_weight: rm_weight > 0 ? rm_weight : erp.rm_weight,
-      part_weight: part_weight > 0 ? part_weight : erp.part_weight,
-      macname: macname || erp.macname,
-      rm_item_dcode: rm_item_dcode ?? erp.rm_item_dcode ?? null,
-      rm_item_code: rm_item_code || erp.rm_item_code || null,
-      from_prod_job_card: true,
+    return erpRows.map((r) => {
+      const k = String(r.pjobcardno || "").trim().toUpperCase();
+      return byNo.get(k) || r;
     });
+  } catch {
+    /** JC/shortage overlay failed — keep ERP rows so RM Store pages still load. */
+    return erpRows;
   }
-
-  return erpRows.map((r) => {
-    const k = String(r.pjobcardno || "").trim().toUpperCase();
-    return byNo.get(k) || r;
-  });
 }
 
 export async function loadMappedPrdRunJc() {
@@ -241,20 +212,25 @@ export async function findProductionJcMetaByPjobcardnos(pjobcardnos = []) {
   const keys = new Set((pjobcardnos || []).map(productionJcMetaKey).filter(Boolean));
   if (!keys.size) return new Map();
 
-  const rows = await loadMappedPrdRunJc();
-  const map = new Map();
-  for (const r of rows) {
-    const key = productionJcMetaKey(r.pjobcardno);
-    if (!key || !keys.has(key) || map.has(key)) continue;
-    map.set(key, {
-      pjobcardno: r.pjobcardno,
-      macname: r.macname ? String(r.macname).trim() : null,
-      fg_item_code: r.item_code ? String(r.item_code).trim() : null,
-      fg_item_desc: r.itemdesc ? String(r.itemdesc).trim() : null,
-      itemdcode: r.itemdcode ?? null,
-    });
+  try {
+    const rows = await loadMappedPrdRunJc();
+    const map = new Map();
+    for (const r of rows) {
+      const key = productionJcMetaKey(r.pjobcardno);
+      if (!key || !keys.has(key) || map.has(key)) continue;
+      map.set(key, {
+        pjobcardno: r.pjobcardno,
+        macname: r.macname ? String(r.macname).trim() : null,
+        fg_item_code: r.item_code ? String(r.item_code).trim() : null,
+        fg_item_desc: r.itemdesc ? String(r.itemdesc).trim() : null,
+        itemdcode: r.itemdcode ?? null,
+      });
+    }
+    return map;
+  } catch {
+    /** IMS/JC meta failed — empty map; Pending/Register still load with IR/row data. */
+    return new Map();
   }
-  return map;
 }
 
 /** Pending display — production master wins for FG/mac; IR adds RM when issued. */

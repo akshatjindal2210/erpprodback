@@ -875,6 +875,8 @@ function remarkNum(v) {
  * Auto gate formula:
  *   check = FG + current packing − schedule balance
  *   Auto when excess ≥ 1 AND (item Max not set OR check ≤ Max)
+ *
+ * Docs: frontend/readme/module-flow/formula.md Section 2
  */
 export const autoPackingDeviation = async (req, res) => {
   try {

@@ -94,6 +94,8 @@ export function isClOccurrenceDay(recurrence_type, data = {}, ymd = null, option
   const includeSunday = options.includeSunday === true;
   const day = toYmd(ymd) || getISTDateString();
 
+  // Holiday / Sunday (when Include Sunday off) → no frequent spawn.
+  if (options.holidaySet?.has?.(day)) return false;
   if (!includeSunday && isSundayYmd(day)) return false;
 
   const weekdays = Array.isArray(data.recurrence_weekdays) ? data.recurrence_weekdays : [];

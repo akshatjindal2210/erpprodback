@@ -307,14 +307,13 @@ export async function receiveManageTray(req, res) {
     if (preview) {
       return res.json({ success: true, data, message: `Tray ${tray.code} is ready to receive.` });
     }
-    if (!remark) return res.status(400).json({ success: false, message: "A remark is required." });
 
     const result = await receiveTray({ trayId: tray.id, createdBy: auditUserName(req) });
     await logActivity(req, {
       action: "receive",
       entity: ENTITY,
       entity_id: tray.code,
-      details: { remark, cleared: result.cleared },
+      details: { ...(remark ? { remark } : {}), cleared: result.cleared },
     });
 
     return res.json({

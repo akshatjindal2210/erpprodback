@@ -219,17 +219,11 @@ async function cascadePlanSysDates(card, client = null) {
     );
 
     /**
-     * Stage 2+ machine: operator booked before this stage can start
-     * (previous stage still running) → remove orphan manpower cells.
+     * Do NOT delete prod_plan_manpower here.
+     * cascadePlanSysDates runs on every /plan/table read — wiping by maccode
+     * removed shared-machine bookings (and left the calendar showing stale UI).
+     * Stage gates stay in FIFO + shift-op save validation instead.
      */
-    if (stage > firstStageNo && Number(row.maccode) > 0 && start) {
-      await runQuery(
-        `DELETE FROM ${T.PLAN_MANPOWER}
-         WHERE maccode = $1 AND plan_date < $2::date`,
-        [Number(row.maccode), start],
-        client
-      );
-    }
   }
 }
 

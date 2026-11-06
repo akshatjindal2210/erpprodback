@@ -81,6 +81,16 @@ function normalizeCavity(raw) {
   return s || null;
 }
 
+/** Plan / production % — blank → 80; else 0–100. */
+function parsePct(raw) {
+  if (raw === undefined || raw === null || raw === "") return 80;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 100) {
+    throw Object.assign(new Error("Percentage must be 0–100"), { statusCode: 400 });
+  }
+  return Math.round(n);
+}
+
 function mergeAttachments(existing = [], uploaded = [], removeIds = []) {
   const removeSet = new Set(removeIds.map(String));
   const kept = normalizeAttachments(existing).filter((a) => a && !removeSet.has(String(a.id)));
@@ -169,6 +179,7 @@ export const listMachineViews = async (req, res) => {
       macproccode: r.macproccode,
       cavity: r.cavity ?? null,
       maccycletime: r.maccycletime ?? null,
+      industry_4_0: r.industry_4_0 != null ? String(r.industry_4_0).trim() : "",
       label: `${r.macno} — ${r.macname}`,
     });
 
@@ -215,6 +226,8 @@ export const createMachine = async (req, res) => {
     const cavity = normalizeCavity(req.body?.cavity ?? req.body?.speed);
     const maccycletime = parseSeconds(req.body, "maccycletime");
     const setup_time = parseSeconds(req.body, "setup_time");
+    const plan_pct = parsePct(req.body?.plan_pct);
+    const prod_pct = parsePct(req.body?.prod_pct);
     const make = req.body?.make != null ? String(req.body.make).trim() : null;
     const model = req.body?.model != null ? String(req.body.model).trim() : null;
     const remark = req.body?.remark != null ? String(req.body.remark).trim() : null;
@@ -251,6 +264,8 @@ export const createMachine = async (req, res) => {
       cavity,
       maccycletime,
       setup_time,
+      plan_pct,
+      prod_pct,
       make: make || null,
       model: model || null,
       remark: remark || null,
@@ -331,6 +346,8 @@ export const updateMachine = async (req, res) => {
         : undefined,
       maccycletime: hasTimeInput(req.body, "maccycletime") ? parseSeconds(req.body, "maccycletime") : undefined,
       setup_time: hasTimeInput(req.body, "setup_time") ? parseSeconds(req.body, "setup_time") : undefined,
+      plan_pct: req.body?.plan_pct !== undefined ? parsePct(req.body.plan_pct) : undefined,
+      prod_pct: req.body?.prod_pct !== undefined ? parsePct(req.body.prod_pct) : undefined,
       make: req.body?.make,
       model: req.body?.model,
       remark: req.body?.remark,
@@ -348,6 +365,8 @@ export const updateMachine = async (req, res) => {
         { field: "cavity", normalize: (v) => normalizeCavity(v) },
         { field: "maccycletime", normalize: (v) => Math.round(Number(v)) },
         { field: "setup_time", normalize: (v) => Math.round(Number(v)) },
+        { field: "plan_pct", normalize: (v) => parsePct(v) },
+        { field: "prod_pct", normalize: (v) => parsePct(v) },
         { field: "make", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
         { field: "model", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },
         { field: "remark", normalize: (v) => (v == null || v === "" ? null : String(v).trim()) },

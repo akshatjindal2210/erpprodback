@@ -1,5 +1,6 @@
 import config from "../../config/app/config.js";
 import ClTask from "../../apps/task/modules/cl-task/models/clTask.model.js";
+import Holiday from "../../apps/task/modules/holidays/models/holiday.model.js";
 import { parseRecurrenceArray, computeClNextOccurrence, isClOccurrenceDay } from "../../apps/task/modules/cl-task/helpers/recurrence/clTaskRecurrence.helper.js";
 import { getISTDateString, getISTHour, toYmd } from "../../apps/task/modules/cl-task/helpers/time/clTaskTime.helper.js";
 import { resolveClMasterAssignees } from "../../apps/task/modules/cl-task/helpers/assignee/clTaskAssignee.helper.js";
@@ -58,6 +59,13 @@ export async function processClFrequentTasks({ personId = null } = {}) {
     frequentTasks = scoped;
   }
 
+  let rangeFrom = today;
+  for (const ct of frequentTasks) {
+    const c = toYmd(ct.next_occurrence) || today;
+    if (c < rangeFrom) rangeFrom = c;
+  }
+  const holidaySet = await Holiday.getHolidaySet(rangeFrom, today);
+
   let created = 0;
   for (const ct of frequentTasks) {
     const recurrenceData = {
@@ -75,7 +83,12 @@ export async function processClFrequentTasks({ personId = null } = {}) {
           ? people.filter((p) => Number(p.id) === Number(personId))
           : people;
       let needsToday = false;
-      if (isClOccurrenceDay(ct.recurrence_type, recurrenceData, today, { includeSunday: ct.include_sunday === true })) {
+      if (
+        isClOccurrenceDay(ct.recurrence_type, recurrenceData, today, {
+          includeSunday: ct.include_sunday === true,
+          holidaySet,
+        })
+      ) {
         for (const person of targets) {
           const hasToday = await ClTask.hasPendingInstanceForDay(ct.cl_task_id, person.id, today);
           if (!hasToday) {
@@ -94,7 +107,7 @@ export async function processClFrequentTasks({ personId = null } = {}) {
     let guard = 0;
     while (cursor && cursor <= today && guard < 60) {
       guard += 1;
-      created += await spawnInstancesForMasterDay(ct, cursor, { onlyPersonId: personId });
+      created += await spawnInstancesForMasterDay(ct, cursor, { onlyPersonId: personId, holidaySet });
       cursor = computeClNextOccurrence(ct.recurrence_type, recurrenceData, cursor);
     }
 

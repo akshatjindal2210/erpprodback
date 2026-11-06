@@ -3,11 +3,12 @@
  *  HRMS ATTENDANCE — ALL FORMULAS (change HERE only)
  *  List / View / Approve / Save / Add live: computeAttendanceDerived()
  *  Frontend only displays those numbers (POST /attendance/calc while typing)
+ *  Docs: frontend/readme/module-flow/formula.md Section 5
  * ═══════════════════════════════════════════════════════════
  *
  * CUTOFFS (IST)
  *   Night start = 17:00   (NIGHT_SHIFT_FROM)
- *   Night end   = 08:00   (NIGHT_SHIFT_END)
+ *   Night end   = 08:00   (NIGHT_SHIFT_END) — forced Out when missing; early same-day ignore
  *   Lunch       = punch ≥ 4 hours → deduct 30 min
  *   OT buffer   = Settings → HRMS → hrms_overtime_buffer_minutes
  *                 (default 30, range 10–120) — Full day only
@@ -15,10 +16,12 @@
  * SHIFT / PUNCH
  *   First punch ≥ 17:00 → Shift B (Night)
  *     In  = that punch
- *     Out = next-day first punch before 08:00
- *           else force Out = next day 08:00 (HR can Edit)
+ *     Out = next-day first punch before next night start (NIGHT_SHIFT_FROM)
+ *           else force Out = next day NIGHT_SHIFT_END (HR can Edit)
+ *     That Out punch is NOT reused as next day's In
  *   First punch < 17:00 → Shift A (Day)
  *     In / Out = same calendar day (first / last punch)
+ *     Out must stay on attendance_date (next-day Out not allowed → blocks false ~24h OT)
  *   Same-day punch before 08:00 → ignore (belongs to previous night)
  *
  * HOURS
@@ -39,7 +42,10 @@
  *
  * DEFAULTS (TIMESTAMPTZ)
  *   default_in / default_out from emp master times + attendance_date
- *   Night Out date = next day when Out time < In time
+ *   Shift B: default_out always next calendar day (night crosses midnight)
+ *   Shift A: next day only when Out clock < In clock
+ *   Normal uses clock span (HH:MM), not timestamp distance — so day-pattern
+ *   master times on Shift B still cap Normal at e.g. 8.5h, not ~32h
  *
  * ── EXAMPLE (FD, buffer 30) ──
  *
@@ -73,7 +79,7 @@
  *
  * KEY FUNCTIONS
  *   buildLogDailyPunchSql      punch → In / Out / Shift
- *   applyNightDefaultOut       missing/late night Out → 08:00
+ *   applyNightDefaultOut       missing night Out → 08:00
  *   buildDefaultInOutTimestamps
  *   computeAttendanceDerived   total + lunch + worked + default + normal + OT
  *   computeOtMinutes           OT only (buffer / half-day)
@@ -265,32 +271,50 @@ function dateTimeKey(value) {
 
 /** Device log → In/Out/Shift ($1 = attendance_date) */
 export function buildLogDailyPunchSql(logTable) {
+  const tzTime = `(event_timestamp AT TIME ZONE '${HRMS_ATTENDANCE_TZ}')::time`;
   return `
-  WITH day_eligible AS (
-    SELECT employee_code, name, event_timestamp,
-      (event_timestamp AT TIME ZONE '${HRMS_ATTENDANCE_TZ}')::time AS punch_time
-    FROM ${logTable}
-    WHERE ${LOG_VALID}
-      AND ${LOG_DATE_SQL} = $1::date
-      AND (event_timestamp AT TIME ZONE '${HRMS_ATTENDANCE_TZ}')::time >= TIME '${NIGHT_SHIFT_END}'
-  ),
-  next_day_out AS (
+  WITH next_day_out AS (
     SELECT employee_code, MIN(event_timestamp) AS first_out
     FROM ${logTable}
     WHERE ${LOG_VALID}
       AND ${LOG_DATE_SQL} = ($1::date + 1)
-      AND (event_timestamp AT TIME ZONE '${HRMS_ATTENDANCE_TZ}')::time < TIME '${NIGHT_SHIFT_END}'
+      AND ${tzTime} < TIME '${NIGHT_SHIFT_FROM}'
     GROUP BY employee_code
   ),
+  day_eligible AS (
+    SELECT employee_code, name, event_timestamp, ${tzTime} AS punch_time
+    FROM ${logTable}
+    WHERE ${LOG_VALID}
+      AND ${LOG_DATE_SQL} = $1::date
+      AND ${tzTime} >= TIME '${NIGHT_SHIFT_END}'
+      /* if yesterday was night, drop today's first punch before FROM (that punch is yesterday's Out) */
+      AND (employee_code, event_timestamp) NOT IN (
+        SELECT employee_code, MIN(event_timestamp)
+        FROM ${logTable}
+        WHERE ${LOG_VALID}
+          AND ${LOG_DATE_SQL} = $1::date
+          AND ${tzTime} >= TIME '${NIGHT_SHIFT_END}'
+          AND ${tzTime} < TIME '${NIGHT_SHIFT_FROM}'
+          AND employee_code IN (
+            SELECT employee_code FROM ${logTable}
+            WHERE ${LOG_VALID}
+              AND ${LOG_DATE_SQL} = ($1::date - 1)
+              AND ${tzTime} >= TIME '${NIGHT_SHIFT_END}'
+            GROUP BY employee_code
+            HAVING MIN(${tzTime}) >= TIME '${NIGHT_SHIFT_FROM}'
+          )
+        GROUP BY employee_code
+      )
+  ),
   agg AS (
-    SELECT d.employee_code,
-      MAX(d.name) FILTER (WHERE NULLIF(TRIM(d.name), '') IS NOT NULL) AS name,
-      MIN(d.event_timestamp) AS first_punch,
-      MAX(d.event_timestamp) AS last_punch,
+    SELECT employee_code,
+      MAX(name) FILTER (WHERE NULLIF(TRIM(name), '') IS NOT NULL) AS name,
+      MIN(event_timestamp) AS first_punch,
+      MAX(event_timestamp) AS last_punch,
       COUNT(*)::int AS punch_n,
-      MIN(d.punch_time) AS first_time
-    FROM day_eligible d
-    GROUP BY d.employee_code
+      MIN(punch_time) AS first_time
+    FROM day_eligible
+    GROUP BY employee_code
   )
   SELECT a.employee_code, a.name,
     ${istTs("a.first_punch")} AS "in",
@@ -305,7 +329,7 @@ export function buildLogDailyPunchSql(logTable) {
 `;
 }
 
-/** Night B, no Out before 08:00 → next day 08:00 */
+/** Night B, no Out in next-day window → next day 08:00 */
 export function applyNightDefaultOut(punch, attendanceDate) {
   if (normalizeShift(punch?.shift) !== "B" || !rowInTime(punch) || rowOutTime(punch)) return punch;
   const date = ymd(attendanceDate);
@@ -348,17 +372,54 @@ export function buildDefaultInOutTimestamps(attendanceDate, shift, inRaw, outRaw
   const outMins = Number(dout.slice(0, 2)) * 60 + Number(dout.slice(3, 5));
   const night = normalizeShift(shift) === "B";
   const cross = inMins != null && outMins < inMins;
-  const sameDay = inMins != null && outMins >= inMins;
-  const outDate = cross || (night && !sameDay) ? addDaysYmd(date, 1) : date;
+  // Shift B: always next day (fixes OT when master is day times e.g. 08:30–17:00)
+  const outDate = night || cross ? addDaysYmd(date, 1) : date;
   return { default_in, default_out: `${outDate}T${dout}:00+05:30` };
 }
 
 export function defaultOutDateTime(row) {
-  return asIstTimestamp(row?.default_out)
-    || buildDefaultInOutTimestamps(row?.attendance_date, row?.shift, row?.default_in, row?.default_out).default_out;
+  return asIstTimestamp(row?.default_out) || buildDefaultInOutTimestamps(row?.attendance_date, row?.shift, row?.default_in, row?.default_out).default_out;
+}
+
+/**
+ * Default shift length from master In/Out clocks only (dates ignored).
+ * Feeds Normal via defaultSpanMinutes — needed when Shift B moves default_out to next day.
+ *
+ * Example 1 — same day (day master 08:30 → 17:00)
+ *   1) din  = "08:30"  → inMins  = 8*60 + 30  = 510
+ *   2) dout = "17:00"  → outMins = 17*60 + 0  = 1020
+ *   3) outMins > inMins → return 1020 − 510 = 510
+ *   4) result = 510 min = 8 hr 30 min
+ *
+ * Example 2 — overnight (night master 20:00 → 05:00)
+ *   1) din  = "20:00"  → inMins  = 20*60 + 0 = 1200
+ *   2) dout = "05:00"  → outMins = 5*60 + 0  = 300
+ *   3) outMins < inMins → (24*60 − inMins) + outMins = minutes to midnight + minutes after midnight
+ *   4) (1440 − 1200) + 300 = 240 + 300 = 540 min (9 hr)
+ *
+ * Example 3 — same clock (09:00 → 09:00)
+ *   1) inMins = outMins = 540
+ *   2) not > and not < → return 0
+ *
+ * Why (Shift B + day master):
+ *   default_out date = next day, e.g. 05/11 08:30 → 06/11 17:00
+ *   timestamp span ≈ 32 hr (wrong for Normal)
+ *   clock span stays 510 → Normal stays ~8 hr
+ */
+function defaultClockSpanMinutes(inRaw, outRaw) {
+  const din = hhmm(inRaw);
+  const dout = hhmm(outRaw);
+  if (!din || !dout) return null;
+  const inMins = Number(din.slice(0, 2)) * 60 + Number(din.slice(3, 5));
+  const outMins = Number(dout.slice(0, 2)) * 60 + Number(dout.slice(3, 5));
+  if (outMins > inMins) return outMins - inMins;
+  if (outMins < inMins) return 24 * 60 - inMins + outMins;
+  return 0;
 }
 
 export function defaultSpanMinutes(row) {
+  const clock = defaultClockSpanMinutes(row?.default_in, row?.default_out);
+  if (clock != null) return clock;
   const a = asIstTimestamp(row?.default_in)
     || buildDefaultInOutTimestamps(row?.attendance_date, row?.shift, row?.default_in, row?.default_out).default_in;
   const b = defaultOutDateTime(row);

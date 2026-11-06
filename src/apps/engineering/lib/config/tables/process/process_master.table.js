@@ -56,6 +56,7 @@ export async function createProcessMasterTable() {
       patchCol("depth", "INTEGER NOT NULL DEFAULT 0"),
       patchCol("deptname", "TEXT"),
       patchCol("multi_jc", "BOOLEAN NOT NULL DEFAULT false"),
+      patchCol("default_mc", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("rm_wire", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("tooling", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("fg", "BOOLEAN NOT NULL DEFAULT false"),
@@ -64,6 +65,7 @@ export async function createProcessMasterTable() {
       patchCol("connectivity", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("inhouse", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("jobwork", "BOOLEAN NOT NULL DEFAULT false"),
+      patchCol("bd_map", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("is_active", "BOOLEAN NOT NULL DEFAULT true"),
     ],
     indexes: [
