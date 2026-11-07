@@ -807,6 +807,7 @@ export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid
   // 2) Credit from IPR coils (reject + balance) — deleted IPR excluded
   const jcKeys = [...new Set(keys.map(normalizeJobCardKey).filter(Boolean))];
   const creditByJc = new Map();
+  const transferInByJc = new Map();
   if (jcKeys.length) {
     const jcSql = `UPPER(REGEXP_REPLACE(TRIM(COALESCE(
       NULLIF(TRIM(c->>'pjobcardno'), ''),
@@ -814,11 +815,20 @@ export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid
       NULLIF(TRIM(o.pjobcardno), ''),
       ''
     )), '^JC[[:space:]\\-]*', '', 'i'))`;
+    const tgtSql = `UPPER(REGEXP_REPLACE(TRIM(COALESCE(ipr.reassign_jc->>'pjobcardno', '')), '^JC[[:space:]\\-]*', '', 'i'))`;
 
     const lines = await dbQuery(
-      `SELECT ${jcSql} AS jc, ipr.type, ipr.remarks, c->>'reassign' AS reassign,
+      `SELECT ${jcSql} AS jc, ${tgtSql} AS target_jc, ipr.type, ipr.remarks, c->>'reassign' AS reassign,
               COALESCE((NULLIF(c->>'qty', ''))::float8, (NULLIF(c->>'original_qty', ''))::float8, 0) AS qty,
-              COALESCE((NULLIF(c->>'remaining_qty', ''))::float8, 0) AS remaining_qty
+              CASE
+                WHEN NULLIF(TRIM(c->>'remaining_qty'), '') IS NOT NULL
+                  THEN (NULLIF(TRIM(c->>'remaining_qty'), ''))::float8
+                WHEN ipr.type = 'reassign' OR c->>'reassign' = 'true'
+                  THEN COALESCE((NULLIF(TRIM(c->>'qty'), ''))::float8, 0)
+                WHEN ipr.type = 'return'
+                  THEN COALESCE((NULLIF(TRIM(c->>'qty'), ''))::float8, (NULLIF(TRIM(c->>'original_qty'), ''))::float8, 0)
+                ELSE 0
+              END AS balance_qty
        FROM ${IPR_TABLE} ipr
        CROSS JOIN LATERAL jsonb_array_elements(
          CASE WHEN jsonb_typeof(ipr.coils) = 'array' THEN ipr.coils ELSE '[]'::jsonb END
@@ -827,33 +837,38 @@ export const findIssuedQtyByJobCards = async (jobCardNos = [], { excludeIssueUid
          ON o.is_deleted = false AND o.out_uid = NULLIF(TRIM(c->>'out_uid'), '')::int
        WHERE ipr.is_deleted = false
          AND ipr.approved = true
-         AND ipr.type IN ('reject_coil', 'reject_lot', 'consume', 'return')
-         AND ${jcSql} = ANY($1::text[])`,
+         AND ipr.type IN ('reject_coil', 'reject_lot', 'consume', 'return', 'reassign')
+         AND (${jcSql} = ANY($1::text[]) OR ${tgtSql} = ANY($1::text[]))`,
       [jcKeys]
     );
 
     for (const line of lines || []) {
       const jc = String(line.jc || "");
       let add = 0;
-      // Reject → full coil qty
       if (line.type === "reject_coil" || line.type === "reject_lot") {
         add = Number(line.qty) || 0;
+      } else if ((line.type === "consume" || line.type === "return") && line.reassign !== "true" && !String(line.remarks || "").toUpperCase().startsWith("AUTO_FROM_")) {
+        add = Number(line.balance_qty) || 0;
+      } else if ((line.type === "reassign" || line.reassign === "true") && !String(line.remarks || "").toUpperCase().startsWith("AUTO_FROM_")) {
+        // Reassign moves balance qty only (not consumed)
+        add = Number(line.balance_qty) || 0;
+        const tgt = String(line.target_jc || "");
+        if (tgt && tgt !== jc && jcKeys.includes(tgt) && add > 0) {
+          transferInByJc.set(tgt, (transferInByJc.get(tgt) || 0) + add);
+        }
       }
-      // Balance leftover → remaining_qty (not reassign / not AUTO_FROM_*)
-      else if ((line.type === "consume" || line.type === "return") && line.reassign !== "true" && !String(line.remarks || "").toUpperCase().startsWith("AUTO_FROM_")) {
-        add = Number(line.remaining_qty) || 0;
-      }
-      if (jc && add > 0) creditByJc.set(jc, (creditByJc.get(jc) || 0) + add);
+      if (jc && add > 0 && jcKeys.includes(jc)) creditByJc.set(jc, (creditByJc.get(jc) || 0) + add);
     }
   }
 
   // 3) Net
   return (grossRows || []).map((r) => {
-    const credit = creditByJc.get(normalizeJobCardKey(r.pjobcardno)) || 0;
+    const nk = normalizeJobCardKey(r.pjobcardno);
+    const net = (creditByJc.get(nk) || 0) - (transferInByJc.get(nk) || 0);
     return {
       ...r,
-      issued_qty: Math.max(0, (Number(r.issued_qty) || 0) - credit),
-      approved_qty: Math.max(0, (Number(r.approved_qty) || 0) - credit),
+      issued_qty: Math.max(0, (Number(r.issued_qty) || 0) - net),
+      approved_qty: Math.max(0, (Number(r.approved_qty) || 0) - net),
     };
   });
 };
