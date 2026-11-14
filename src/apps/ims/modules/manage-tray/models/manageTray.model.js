@@ -715,7 +715,6 @@ async function insertTrayManageRow({
   type: rowType,
   links = [],
   listMeta = null,
-  tray_code = null,
   remark = null,
   approved,
   actor = null,
@@ -726,17 +725,15 @@ async function insertTrayManageRow({
   const linkCount = links.length;
   const [saved] = await dbQuery(
     `INSERT INTO ${T.TRAY_MANAGE} (
-       type, packing_number, link_count, data,
-       tray_code, remark,
+       type, packing_number, link_count, data, remark,
        approved, approved_by, approved_at, created_by, updated_by, updated_at
      )
      VALUES (
-       $1, $2, $3, $4::jsonb,
-       $5, $6,
-       $7,
-       CASE WHEN $7 THEN $8 ELSE NULL END,
-       CASE WHEN $7 THEN NOW() ELSE NULL END,
-       $8, $8, NOW()
+       $1, $2, $3, $4::jsonb, $5,
+       $6,
+       CASE WHEN $6 THEN $7 ELSE NULL END,
+       CASE WHEN $6 THEN NOW() ELSE NULL END,
+       $7, $7, NOW()
      )
      RETURNING id`,
     [
@@ -744,7 +741,6 @@ async function insertTrayManageRow({
       packing_number,
       linkCount,
       JSON.stringify(slimRegisterJson(links)),
-      tray_code,
       remark,
       ok,
       actor,
@@ -799,7 +795,7 @@ async function mapRegisterRow(row) {
     updated_at: row.updated_at ?? row.created_at ?? null,
     type,
     entry_type: type,
-    tray_code: row.tray_code ?? null,
+    tray_code: links[0]?.tray_code ?? null,
     remark: row.remark ?? null,
     links,
     is_deleted: row.is_deleted === true,
@@ -808,7 +804,7 @@ async function mapRegisterRow(row) {
   };
 }
 
-const REGISTER_COLS = `id, type, packing_number, link_count, data, tray_code, remark, approved, created_by, created_at, updated_by, updated_at, is_deleted, deleted_by, deleted_at`;
+const REGISTER_COLS = `id, type, packing_number, link_count, data, remark, approved, created_by, created_at, updated_by, updated_at, is_deleted, deleted_by, deleted_at`;
 
 export async function findManageTrayRegisterById(registerId, { includeDeleted = false } = {}) {
   const id = parseInt(String(registerId), 10);
@@ -868,7 +864,6 @@ export async function insertManageTrayOpSubmitRegister(
     type: built.type,
     links: built.links,
     listMeta,
-    tray_code: built.type === "receive" && n === 1 ? built.links[0]?.tray ?? built.tray : built.tray,
     remark: built.remark,
     approved,
     actor,
@@ -1318,8 +1313,13 @@ async function findRegisteredSnapshots(options = {}) {
        SELECT
          m.id,
          LOWER(COALESCE(NULLIF(TRIM(m.type), ''), 'assign')) AS type,
-         NULLIF(TRIM(m.tray_code), '') AS tray_code,
          NULLIF(TRIM(m.packing_number), '') AS packing_number,
+         (
+           SELECT NULLIF(TRIM(COALESCE(x->>'tray', x->>'t', '')), '')
+           FROM jsonb_array_elements(COALESCE(m.data->'links', '[]'::jsonb)) x
+           WHERE NULLIF(TRIM(COALESCE(x->>'tray', x->>'t', '')), '') IS NOT NULL
+           LIMIT 1
+         ) AS tray_code,
          ${REGISTER_ITEM_CODES_SQL} AS item_code,
          NULL AS qtys,
          0 AS total_qty,

@@ -35,7 +35,7 @@ export const getTrayTypes = async (_req, res) => {
   return res.json({ success: true, data: TRAY_TYPES });
 };
 
-const TRAY_VIEW_FIELDS = ["t.id", "t.code", "t.type", "t.serial_number", "t.batch_id"];
+const TRAY_VIEW_FIELDS = ["t.id", "t.code", "t.type", "t.serial_number", "t.batch_id", "t.box_uid"];
 
 function formatTrayViewRow(row) {
   if (!row) return null;
@@ -45,6 +45,7 @@ function formatTrayViewRow(row) {
     type: row.type ?? null,
     serial_number: row.serial_number ?? null,
     batch_id: row.batch_id ?? null,
+    box_uid: row.box_uid ?? null,
   };
 }
 

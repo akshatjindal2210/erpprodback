@@ -27,6 +27,7 @@ const DROP_COLS = [
   "tray_codes",
   "link_qtys",
   "from_tray_codes",
+  "tray_code",
 ];
 
 /** Keep only links[] in data JSON (drop cached item/qty/type/packing keys). */
@@ -87,11 +88,6 @@ async function normalizeTypeAndPacking() {
         NULLIF(TRIM(m.data->>'packings'), ''),
         NULLIF(TRIM(m.data->>'packing_numbers'), ''),
         NULLIF(TRIM(m.data->>'packing_number'), '')
-      ),
-      tray_code = COALESCE(
-        NULLIF(TRIM(m.tray_code), ''),
-        NULLIF(TRIM(m.data->>'tray'), ''),
-        NULLIF(TRIM(m.data->>'tray_code'), '')
       ),
       remark = COALESCE(
         NULLIF(TRIM(m.remark), ''),
@@ -271,7 +267,7 @@ async function needsSlimReorder() {
     WHERE table_schema = 'public' AND table_name = 'ims_tray_manage'
   `);
   const by = Object.fromEntries(rows.map((r) => [r.column_name, r.pos]));
-  if (by.item_codes || by.qtys || by.total_qty) return true;
+  if (by.item_codes || by.qtys || by.total_qty || by.tray_code) return true;
   return by.type !== 2 || by.packing_number !== 3 || by.link_count !== 4;
 }
 
@@ -287,7 +283,6 @@ async function rebuildSlimTable() {
         packing_number   TEXT,
         link_count       INTEGER NOT NULL DEFAULT 0,
         data             JSONB NOT NULL DEFAULT '{"links":[]}'::jsonb,
-        tray_code        TEXT,
         remark           TEXT,
         approved         BOOLEAN NOT NULL DEFAULT true,
         approved_by      TEXT,
@@ -304,7 +299,7 @@ async function rebuildSlimTable() {
 
     await client.query(`
       INSERT INTO ${STAGING} (
-        id, type, packing_number, link_count, data, tray_code, remark,
+        id, type, packing_number, link_count, data, remark,
         approved, approved_by, approved_at, created_by, created_at, updated_by, updated_at,
         is_deleted, deleted_by, deleted_at
       )
@@ -322,7 +317,6 @@ async function rebuildSlimTable() {
         jsonb_strip_nulls(jsonb_build_object(
           'links', COALESCE(m.data->'links', '[]'::jsonb)
         )),
-        m.tray_code,
         m.remark,
         COALESCE(m.approved, true),
         m.approved_by,
@@ -396,7 +390,6 @@ export default async function up() {
       patchCol("packing_number", "TEXT"),
       patchCol("link_count", "INTEGER NOT NULL DEFAULT 0"),
       patchCol("data", `JSONB NOT NULL DEFAULT '{"links":[]}'::jsonb`),
-      patchCol("tray_code", "TEXT"),
       patchCol("remark", "TEXT"),
     ],
     columnTypes: [{ name: "type", type: "text" }],
@@ -408,7 +401,7 @@ export default async function up() {
   const packed = await fillPackingFromLinks();
   const stripped = await stripHeavyDataKeys();
   const rebuilt = await rebuildSlimTable();
-  if (!rebuilt) await dropLegacyColumns();
+  await dropLegacyColumns();
   await refreshIndexes();
   // Rebuild already wrote links-only; strip again for DBs that skipped rebuild.
   const strippedAgain = rebuilt ? 0 : await stripHeavyDataKeys();

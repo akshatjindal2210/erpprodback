@@ -194,7 +194,7 @@ function fieldsForPackingStandard(mod, act) {
 }
 
 // ─── Trays (/trays/helper) ───────────────────────────────────────────────────
-const trayPicker = ["t.id", "t.code", "t.type", "t.serial_number", "t.batch_id"];
+const trayPicker = ["t.id", "t.code", "t.type", "t.serial_number", "t.batch_id", "t.box_uid"];
 const trayModal = [...trayPicker, "approved"];
 
 function fieldsForTrays(mod, act) {
@@ -214,6 +214,9 @@ function fieldsForTrays(mod, act) {
   if (mod === "audit" && (act === VIEW || isForm(act))) return [...trayPicker];
 
   if (mod === "tray_master" && act === VIEW) return [...trayPicker];
+
+  /** Box Finder — scan tray → linked box (or vacant). */
+  if (mod === "boxes" && act === VIEW) return [...trayPicker];
 
   return null;
 }
