@@ -35,6 +35,7 @@ export async function createLocationMasterTable() {
       patchCol("acc_codes", "INTEGER[] DEFAULT '{}'"),
       patchCol("item_dcodes", "INTEGER[] DEFAULT '{}'"),
       patchCol("rule", "VARCHAR(20) DEFAULT 'include'"),
+      patchCol("proccode", "INTEGER"),
     ],
   });
 
@@ -44,9 +45,19 @@ export async function createLocationMasterTable() {
   `);
 
   for (const sql of [
-    `CREATE UNIQUE INDEX IF NOT EXISTS location_master_rack_shelf_type_unique_active
-       ON ${T.LOCATION_MASTER} (trim(rack_no), UPPER(trim(COALESCE(shelf_no, ''))), lower(trim(COALESCE(type, 'ims'))))
-       WHERE is_deleted = false`,
+    `DROP INDEX IF EXISTS location_master_rack_shelf_type_unique_active`,
+    // Prod locations are unique by location_no (AREA_ZONE_NUMBER), not rack+zone alone —
+    // NF_A_1 and NT_A_1 share rack=1 / zone=A but are different areas.
+    `DROP INDEX IF EXISTS location_master_rack_slot_type_unique_active`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS location_master_rack_slot_type_unique_active
+       ON ${T.LOCATION_MASTER} (
+         trim(rack_no),
+         UPPER(trim(COALESCE(shelf_no, ''))),
+         lower(trim(COALESCE(type, 'ims'))),
+         COALESCE(proccode, 0)
+       )
+       WHERE is_deleted = false
+         AND lower(trim(COALESCE(type, 'ims'))) <> 'prod'`,
     `CREATE UNIQUE INDEX IF NOT EXISTS location_master_location_no_type_unique_active
        ON ${T.LOCATION_MASTER} (trim(location_no), lower(trim(COALESCE(type, 'ims'))))
        WHERE is_deleted = false AND location_no IS NOT NULL AND trim(location_no) <> ''`,

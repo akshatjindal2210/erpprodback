@@ -2,12 +2,19 @@ import dbQuery from "../../config/db/db.js";
 import { MST_TABLES as M } from "../../config/db/dbTables.js";
 import { getCachedPermissions, setCachedPermissions } from "../../config/auth/permissionCache.js";
 import { findUserAppAccess } from "../../apps/core/identity/permissions/models/permission.model.js";
-import { moduleSortOrderNumericExpr } from "../utils/config/moduleSortOrderSql.js";
-
-const MODULE_SORT_ORDER = moduleSortOrderNumericExpr("m");
+import { getEffectivePermissions } from "../../apps/core/identity/attributes/models/attribute.model.js";
 
 import { MODULE_DISABLED_MESSAGE, NO_ACCESS_MESSAGE } from "../constants/messages.js";
 import { APP_META } from "../../config/portal/portalModules.js";
+
+async function loadEffectivePermissions(userId) {
+  let permissions = getCachedPermissions(userId);
+  if (!permissions) {
+    permissions = await getEffectivePermissions(userId);
+    setCachedPermissions(userId, permissions || []);
+  }
+  return permissions || [];
+}
 
 /** Permission gate. Module notifications fire from activity log (`scheduleNotifyFromActivity`), not here. */
 export const accessControl = (moduleName, actions) => {
@@ -73,25 +80,21 @@ function checkModuleAccess(moduleName, actions) {
         });
       }
 
-      // Try to get permissions from cache
-      let permissions = getCachedPermissions(user.id);
+      const appAccess = await findUserAppAccess(user.id);
+      const moduleAppType = moduleRow.app_type;
 
-      // If not in cache, fetch from DB
-      if (!permissions) {
-        const perms = await dbQuery(
-          `SELECT up.can_view, up.can_view_days, up.can_add, up.can_edit, up.can_edit_days, up.can_delete, up.can_authorize, m.name as module_name, m.app_type as module_app_type, m.is_active as module_is_active
-           FROM ${M.USER_PERMISSIONS} up
-           JOIN ${M.MODULES} m ON m.id = up.module_id
-           WHERE up.user_id = $1
-             AND m.is_active = true
-             AND up.is_deleted = false
-           ORDER BY ${MODULE_SORT_ORDER} ASC, m.label ASC NULLS LAST, m.id ASC`,
-          [user.id]
-        );
-
-        permissions = perms || [];
-        setCachedPermissions(user.id, permissions); // Store in cache
+      // Explicit Allow-access OFF → block app APIs (module rows may still exist on purpose)
+      if (
+        moduleAppType &&
+        moduleAppType !== "core" &&
+        Object.prototype.hasOwnProperty.call(appAccess, moduleAppType) &&
+        appAccess[moduleAppType] !== true
+      ) {
+        return res.status(403).json({ success: false, message: NO_ACCESS_MESSAGE });
       }
+
+      // Direct user permissions + attribute permissions (runtime merge)
+      const permissions = await loadEffectivePermissions(user.id);
 
       // Find permissions for the requested module
       const modulePerm = permissions.find(p => p.module_name === moduleName);
@@ -116,8 +119,6 @@ function checkModuleAccess(moduleName, actions) {
       // --- Fallback: App Level Access ---
       // If granular permission check fails, check if user has access to the APP that this module belongs to.
       // For "view" actions on "core" modules (like users), we also allow if they have access to ANY other app (like task).
-      const appAccess = await findUserAppAccess(user.id);
-      const moduleAppType = moduleRow.app_type;
 
       // 1. Direct app access check — only when app has no granular module permissions
       if (appAccess[moduleAppType] && APP_META[moduleAppType]?.permissions === false) {
@@ -174,26 +175,9 @@ export const accessControlAny = (alternatives) => {
         return next();
       }
 
-      let permissions = getCachedPermissions(user.id);
-
-      if (!permissions) {
-        const perms = await dbQuery(
-          `SELECT up.can_view, up.can_view_days, up.can_add, up.can_edit, up.can_edit_days, up.can_delete, up.can_authorize, m.name as module_name, m.app_type as module_app_type, m.is_active as module_is_active
-           FROM ${M.USER_PERMISSIONS} up
-           JOIN ${M.MODULES} m ON m.id = up.module_id
-           WHERE up.user_id = $1
-             AND m.is_active = true
-             AND up.is_deleted = false
-           ORDER BY ${MODULE_SORT_ORDER} ASC, m.label ASC NULLS LAST, m.id ASC`,
-          [user.id]
-        );
-
-        if (!perms || perms.length === 0) {
-          return res.status(403).json({ success: false, message: NO_ACCESS_MESSAGE });
-        }
-
-        permissions = perms;
-        setCachedPermissions(user.id, permissions);
+      const permissions = await loadEffectivePermissions(user.id);
+      if (!permissions.length) {
+        return res.status(403).json({ success: false, message: NO_ACCESS_MESSAGE });
       }
 
       for (const alt of alternatives) {
@@ -208,6 +192,17 @@ export const accessControlAny = (alternatives) => {
 
         const modulePerm = permissions.find((p) => p.module_name === moduleName);
         const actionList = Array.isArray(actions) ? actions : [actions];
+        const appAccess = await findUserAppAccess(user.id);
+        const moduleAppType = moduleRow.app_type;
+
+        if (
+          moduleAppType &&
+          moduleAppType !== "core" &&
+          Object.prototype.hasOwnProperty.call(appAccess, moduleAppType) &&
+          appAccess[moduleAppType] !== true
+        ) {
+          continue;
+        }
 
         if (modulePerm && modulePerm.module_is_active !== false) {
           const isAllowed = actionList.some((action) => modulePerm[`can_${action}`]);
@@ -218,8 +213,7 @@ export const accessControlAny = (alternatives) => {
         }
 
         // Fallback: App Level Access for alternatives
-        const appAccess = await findUserAppAccess(user.id);
-        const moduleAppType = moduleRow.app_type;
+
 
         if (appAccess[moduleAppType] && APP_META[moduleAppType]?.permissions === false) {
           if (actionList.length === 1 && actionList[0] === "view") {

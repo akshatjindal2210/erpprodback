@@ -45,6 +45,7 @@ function allowErpHelper(mod, act) {
       mod === "eng_finish_process_master" ||
       mod === "rm_spec_master" ||
       mod === "rm_store_location_master" ||
+      mod === "production_location_master" ||
       mod === "rm_issue_request" ||
       mod === "rm_in_process_request" ||
       mod === "rm_stock_adjustment" ||

@@ -84,6 +84,7 @@ const ENTITY_LABELS = {
   rm_production_master: "production master",
   rm_spec_master: "RM spec",
   rm_store_location_master: "store location",
+  production_location_master: "production location",
 };
 
 const ACTION_VERBS = {
@@ -109,6 +110,9 @@ const ACTION_VERBS = {
   SAVE_DRAFT: "Saved draft for",
   REJECT: "Rejected",
   GENERATE_STORE_OUT: "Generated store out for",
+  ASSIGN: "Assigned",
+  REASSIGN: "Reassigned",
+  RECEIVE: "Received",
 };
 
 const STOCK_ADJUSTMENT_ENTITIES = new Set(["stock_adjustment", "rm_stock_adjustment"]);
@@ -152,6 +156,9 @@ const FIELD_LABELS = {
   total_stickers: "Sticker count",
   sticker_count: "Download count",
   item_count: "Item count",
+  from_tray_code: "From tray",
+  to_tray_code: "To tray",
+  tray_code: "Tray",
   employee_code: "Emp code",
   emp_code: "Emp code",
   emp_name: "Emp name",

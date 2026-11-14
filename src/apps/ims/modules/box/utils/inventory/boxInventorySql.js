@@ -28,13 +28,27 @@ export function sqlPackingIsTray(packingExpr) {
   )`;
 }
 
-/** Approved Manage Tray register exists for this packing number. */
+/** Latest register row for packing is complete and approved (Store In gate). */
 export function sqlManageTrayRegistered(packingExpr) {
   return `EXISTS (
-    SELECT 1 FROM ims_tray_manage m
-    WHERE m.is_deleted = false
-      AND m.approved = true
-      AND TRIM(m.data->>'packing_number') = TRIM(${packingExpr}::text)
+    SELECT 1
+    FROM (
+      SELECT
+        m.approved,
+        COALESCE(m.link_count, 0) AS link_count
+      FROM ims_tray_manage m
+      WHERE m.is_deleted = false
+        AND (
+          TRIM(COALESCE(m.packing_number, '')) = TRIM(${packingExpr}::text)
+          OR m.packing_number LIKE (TRIM(${packingExpr}::text) || ' |%')
+          OR m.packing_number LIKE ('% | ' || TRIM(${packingExpr}::text))
+        )
+        AND LOWER(COALESCE(NULLIF(TRIM(m.type), ''), 'assign')) = 'assign'
+      ORDER BY m.id DESC
+      LIMIT 1
+    ) latest
+    WHERE latest.approved = true
+      AND latest.link_count > 0
   )`;
 }
 
@@ -56,7 +70,7 @@ export function boxSourceSql(alias = "b") {
     WHEN ${sqlManageTrayPending(alias)} THEN 'TRAY PENDING'
     WHEN ${alias}.sa_id IS NOT NULL AND ${alias}.sa_entry_type = 'stock_in' THEN 'STOCK ADJUSTMENT'
     WHEN ${alias}.box_no_uid ~ '_QCH[0-9]+_' THEN 'QC HOLD'
-    WHEN ${sqlPackingIsTray(pn)} AND ${sqlManageTrayRegistered(pn)} THEN 'TRAY LINKED'
+    WHEN ${sqlPackingIsTray(pn)} AND ${sqlManageTrayRegistered(pn)} THEN 'TRAY ASSIGNED'
     ELSE 'PACKING ENTRY'
   END`;
 }

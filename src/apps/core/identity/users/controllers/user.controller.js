@@ -5,7 +5,8 @@ import { findUsers, findUser, findUserByUsernameInsensitive, insertUser, updateU
 import { fetchFromIMS, fetchImsDataRaw } from "../../../../ims/lib/services/ims.service.js";
 import { findModules } from "../../modules/models/module.model.js";
 import { findUserPermissions, findUserAppAccess, findActiveUserIdsWithAppAccess, upsertBulkPermissions, upsertBulkAppAccess, syncAppGateChildPermissions } from "../../permissions/models/permission.model.js";
-import { findUserAttributes, parseAttributeInput, syncUserAttributes } from "../../attributes/models/attribute.model.js";
+import { findUserAttributes, parseAttributeInput, syncUserAttributes, getEffectivePermissions, userAttributeMachineScope } from "../../attributes/models/attribute.model.js";
+import { mergeAppAccessWithPermissions } from "../../permissions/utils/effectivePermissions.js";
 import { resolveUserHelperAppKey } from "../../../lib/utils/auth/userHelperAppFilter.js";
 import { logActivity } from "../../../lib/utils/activity/logActivity.js";
 import { emitToUser } from "../../../lib/utils/realtime/socket.js";
@@ -81,7 +82,7 @@ function parseOptionalFkId(raw) {
   return Number.isFinite(n) ? n : NaN;
 }
 
-/** Keep only permission rows whose `module_id` exists in `modules` (client map keys must match DB). */
+/** Drop permission rows that do not map to an active module. */
 const normalizePermissionsForSave = async (permissions) => {
   if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) return [];
   const { data: rows = [] } = await findModules({
@@ -91,9 +92,9 @@ const normalizePermissionsForSave = async (permissions) => {
     fields: ["id", "name", "app_type", "is_active"],
     filters: { is_active: true },
   });
-  const byId = new Map(rows.map((r) => [r.id, r]));
+  const byId = new Map(rows.map((r) => [Number(r.id), r]));
   return formatPermissions(permissions).filter(
-    (p) => Number.isFinite(p.module_id) && byId.has(p.module_id)
+    (p) => Number.isFinite(p.module_id) && p.module_id > 0 && byId.has(p.module_id)
   );
 };
 
@@ -209,6 +210,7 @@ export const getUserById = async (req, res) => {
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
     const permissions = await findUserPermissions(id);
+    const cleanedPerms = permissions.map(cleanPermissionMap);
     const appAccess = await findUserAppAccess(id);
     const attributes = await findUserAttributes(id);
     const { password, ...safeUser } = user;
@@ -216,8 +218,9 @@ export const getUserById = async (req, res) => {
       success: true,
       data: {
         ...safeUser,
-        permissions: permissions.map(cleanPermissionMap),
-        app_access: appAccess,
+        permissions: cleanedPerms,
+        // Same rules as login: explicit OFF stays OFF; missing apps infer from modules
+        app_access: mergeAppAccessWithPermissions(appAccess, cleanedPerms),
         attributes,
       },
     });
@@ -472,7 +475,7 @@ export const updateUser = async (req, res) => {
       existing.attributes = await syncUserAttributes(Number(id), attributeInput);
     }
 
-    let permissionsChanged = false;
+    let permissionsChanged = Boolean(attributeInput);
 
     if (permissions && typeof permissions === "object" && !Array.isArray(permissions)) {
       const permRows = await normalizePermissionsForSave(permissions);
@@ -490,17 +493,21 @@ export const updateUser = async (req, res) => {
 
     if (permissionsChanged) {
       const targetId = Number(id);
-      const freshPermissions = await findUserPermissions(targetId);
+      const cleaned = await getEffectivePermissions(targetId);
       const freshAppAccess = await findUserAppAccess(targetId);
       const freshUser = await findUser({ id: targetId });
-      const cleaned = freshPermissions.map(cleanPermissionMap);
+      const mergedAppAccess = mergeAppAccessWithPermissions(freshAppAccess, cleaned);
       clearCachedPermissions(targetId);
       setCachedPermissions(targetId, cleaned);
       emitToUser(targetId, "permissions_updated", {
         user_id: targetId,
         permissions: cleaned,
-        app_access: freshAppAccess,
+        app_access: mergedAppAccess,
         special_permissions: freshUser?.special_permissions ?? {},
+        attribute_ids: Array.isArray(freshUser?.attribute_ids)
+          ? freshUser.attribute_ids.map(Number).filter((n) => n > 0)
+          : [],
+        attribute_machine_scope: await userAttributeMachineScope(targetId),
       });
     }
 
@@ -649,19 +656,23 @@ export const loginUser = async (req, res) => {
     });
     res.cookie(config.cookie_name, token, { ...config.cookie_options, maxAge });
 
-    const permissions = await findUserPermissions(user.id);
-    const appAccess = await findUserAppAccess(user.id);
-    const cleanedPermissions = permissions.map(cleanPermissionMap);
+    const cleanedPermissions = await getEffectivePermissions(user.id);
+    const appAccess = mergeAppAccessWithPermissions(
+      await findUserAppAccess(user.id),
+      cleanedPermissions
+    );
     setCachedPermissions(user.id, cleanedPermissions);
 
     const { id, name, username: dbUsername, type: role, email, special_permissions } = user;
-    const [default_list_view_span_days, inward_location_validation, location_capacity_validation, box_no_uid_prefix, hrms_overtime_buffer_minutes] =
+    const attribute_ids = Array.isArray(user.attribute_ids) ? user.attribute_ids.map(Number).filter((n) => n > 0) : [];
+    const [default_list_view_span_days, inward_location_validation, location_capacity_validation, box_no_uid_prefix, hrms_overtime_buffer_minutes, attribute_machine_scope] =
       await Promise.all([
       getDefaultListViewSpanDays(),
       isInwardLocationValidationEnabled(),
       isLocationCapacityValidationEnabled(),
       getBoxNoUidPrefix(),
       getHrmsOvertimeBufferMinutes(),
+      userAttributeMachineScope(user.id),
     ]);
 
     await logActivity(req, {
@@ -688,6 +699,8 @@ export const loginUser = async (req, res) => {
         designation: user.designation ?? null,
         designation_name: user.designation_name ?? user.designation?.name ?? null,
         special_permissions,
+        attribute_ids,
+        attribute_machine_scope: !!attribute_machine_scope,
         permissions: cleanedPermissions,
         app_access: appAccess,
         default_list_view_span_days,
@@ -749,24 +762,32 @@ export const getMe = async (req, res) => {
       return res.status(403).json({ success: false, message: "Account inactive" });
     }
 
-    const permissions = await findUserPermissions(req.user.id);
-    const appAccess = await findUserAppAccess(req.user.id);
-    const [default_list_view_span_days, inward_location_validation, location_capacity_validation, box_no_uid_prefix, hrms_overtime_buffer_minutes] =
+    const permissions = await getEffectivePermissions(req.user.id);
+    const appAccess = mergeAppAccessWithPermissions(
+      await findUserAppAccess(req.user.id),
+      permissions
+    );
+    setCachedPermissions(req.user.id, permissions);
+    const [default_list_view_span_days, inward_location_validation, location_capacity_validation, box_no_uid_prefix, hrms_overtime_buffer_minutes, attribute_machine_scope] =
       await Promise.all([
       getDefaultListViewSpanDays(),
       isInwardLocationValidationEnabled(),
       isLocationCapacityValidationEnabled(),
       getBoxNoUidPrefix(),
       getHrmsOvertimeBufferMinutes(),
+      userAttributeMachineScope(req.user.id),
     ]);
     const { password, ...safeUser } = user;
+    const attribute_ids = Array.isArray(user.attribute_ids) ? user.attribute_ids.map(Number).filter((n) => n > 0) : [];
     res.json({
       success: true,
       data: {
         ...safeUser,
         role: user.type,
         special_permissions: user.special_permissions ?? {},
-        permissions: permissions.map(cleanPermissionMap),
+        attribute_ids,
+        attribute_machine_scope: !!attribute_machine_scope,
+        permissions,
         app_access: appAccess,
         default_list_view_span_days,
         inward_location_validation,

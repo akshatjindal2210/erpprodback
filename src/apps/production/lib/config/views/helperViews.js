@@ -12,6 +12,37 @@ import { accessControl } from "../../../../core/lib/middleware/accessControl.js"
 const VIEW = "view";
 const FORM = ["add", "edit", "authorize"];
 const PICKER = [VIEW, ...FORM];
+const isForm = (act) => FORM.includes(act);
+
+const locPicker = [
+  "lm.location_id",
+  "lm.location_id AS id",
+  "lm.rack_no",
+  "lm.shelf_no AS row_no",
+  "lm.proccode",
+  `NULLIF(UPPER(BTRIM(split_part(COALESCE(lm.location_no::text, ''), '_', 1))), '') AS process_tag`,
+  "pr.procname AS process_name",
+  "COALESCE(lm.location_no, CONCAT(lm.rack_no, UPPER(COALESCE(lm.shelf_no, '')))) AS location_no",
+  "lm.type",
+  "lm.total_capacity",
+  "(COALESCE((SELECT COUNT(*)::int FROM ims_box_table b WHERE b.location_id = lm.location_id AND b.is_deleted = false AND (b.out_uid IS NULL OR NULLIF(TRIM(b.out_uid::text), '') IS NULL) AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')), 0) + COALESCE((SELECT COUNT(*)::int FROM rmstore_coil_table rc WHERE rc.location_id = lm.location_id AND COALESCE(rc.status, 'active') IN ('active', 'rejected')), 0)) AS occupied_capacity",
+  "GREATEST(COALESCE(lm.total_capacity, 0) - (COALESCE((SELECT COUNT(*)::int FROM ims_box_table b WHERE b.location_id = lm.location_id AND b.is_deleted = false AND (b.out_uid IS NULL OR NULLIF(TRIM(b.out_uid::text), '') IS NULL) AND (b.sa_entry_type IS DISTINCT FROM 'stock_out')), 0) + COALESCE((SELECT COUNT(*)::int FROM rmstore_coil_table rc WHERE rc.location_id = lm.location_id AND COALESCE(rc.status, 'active') IN ('active', 'rejected')), 0)), 0) AS available_capacity",
+];
+const locModal = [
+  ...locPicker,
+  "lm.location_description",
+  "COALESCE(lm.item_dcodes, '{}') AS item_dcodes",
+  "(COALESCE(lm.item_dcodes, '{}'))[1] AS item_dcode",
+  "NULL::text AS item_code",
+  "NULL::text AS item_desc",
+];
+
+function fieldsForLocations(mod, act) {
+  if (mod == null || act == null) return null;
+  if (mod === "production_location_master" && act === VIEW) return [...locPicker];
+  if (mod === "production_location_master" && isForm(act)) return [...locModal];
+  return null;
+}
 
 /**
  * /jc/register-helper · get-helper · update-helper
@@ -41,8 +72,18 @@ function fieldsForJobCard(mod, act) {
   return allowFromMap(JOB_CARD_HELPER, mod, act);
 }
 
+const binPicker = ["t.id", "t.code", "t.type", "t.serial_number", "t.batch_id", "t.weight"];
+
+function fieldsForBins(mod, act) {
+  if (mod == null || act == null) return null;
+  if (mod === "production_bin_master" && (act === VIEW || isForm(act))) return [...binPicker];
+  return null;
+}
+
 const BY_HELPER = {
   jobCard: fieldsForJobCard,
+  locations: fieldsForLocations,
+  bins: fieldsForBins,
 };
 
 function resolveHelperFields(helper, { permission_module, permission_action } = {}) {

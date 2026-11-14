@@ -126,6 +126,7 @@ export const getTrays = async (req, res) => {
         limit,
         fields: CFG.listFields,
         permission: req.permission,
+        typeScope: "ims",
       });
       return res.json({ success: true, ...result, data: result.data || [] });
     }
@@ -136,6 +137,7 @@ export const getTrays = async (req, res) => {
       sort: { by: sortBy, order },
       page,
       limit,
+      typeScope: "ims",
     });
 
     return res.json({ success: true, ...result, data: result.data || [] });
@@ -161,6 +163,8 @@ export const createTray = async (req, res) => {
     const created = await createTrayBatch({
       type,
       quantity,
+      letter: req.body?.letter ?? req.body?.class ?? req.body?.category,
+      class: req.body?.class ?? req.body?.letter ?? req.body?.category,
       created_by: auditUserName(req),
       approved: canAuthorize && normalizeApprovedInput(req.body?.approved) === true,
       remark,

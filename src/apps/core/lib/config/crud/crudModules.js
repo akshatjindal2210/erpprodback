@@ -35,12 +35,24 @@ export const CRUD_MODULES = {
     filterFields: ["id", "code", "type", "batch_id", "status", "approved", "from_date", "to_date"],
     searchFields: ["code", "type", "batch_id", "serial_number"],
   },
+  production_bin_master: {
+    idField: "id",
+    listFields: [],
+    filterFields: ["id", "code", "type", "category", "b_type", "class", "kind", "variant", "subtype", "material", "material_type", "batch_id", "status", "approved", "from_date", "to_date"],
+    searchFields: ["code", "type", "batch_id", "serial_number"],
+  },
   rm_store_location_master: {
     idField: "location_id",
     // list SQL lives in storeLocationMaster.model DEFAULT_FIELDS
     listFields: [],
     filterFields: ["location_id", "rack_no", "row_no", "location_no", "type", "approved", "from_date", "to_date"],
     searchFields: ["rack_no", "row_no", "location_no", "type", "location_description", "item_code", "item_desc"],
+  },
+  production_location_master: {
+    idField: "location_id",
+    listFields: [],
+    filterFields: ["location_id", "rack_no", "row_no", "location_no", "type", "approved", "from_date", "to_date"],
+    searchFields: ["rack_no", "row_no", "location_no", "type", "location_description", "item_code", "item_desc", "process_tag", "process_name"],
   },
   rm_production_master: {
     idField: "production_id",

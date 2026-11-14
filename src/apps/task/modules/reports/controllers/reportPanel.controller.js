@@ -675,8 +675,8 @@ export async function getDailyReport(req, res) {
     });
 
     const date_columns = buildDateColumns(date_from, date_to);
-    const holiday_dates = await Holiday.getDatesBetween(date_from, date_to);
-    const holidaySet = new Set(holiday_dates);
+    const holiday_dates = await Holiday.getBetween(date_from, date_to);
+    const holidaySet = new Set(holiday_dates.map((h) => h.date));
 
     const instanceIds = instances.map((i) => i.instance_id);
     let reviews = [];

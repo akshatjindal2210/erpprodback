@@ -1,4 +1,4 @@
-import { findPermissions, findUserPermissions, findPermission, findPermissionById, upsertPermission, upsertBulkPermissions, updatePermissionById, deletePermission, deletePermissionById, findUserAppAccess } from "../models/permission.model.js";
+import { findPermissions, findPermission, findPermissionById, upsertPermission, upsertBulkPermissions, updatePermissionById, deletePermission, deletePermissionById, findUserAppAccess } from "../models/permission.model.js";
 import User from "../../users/models/user.model.js";
 import { findModule } from "../../modules/models/module.model.js";
 import { getCrudModuleConfig } from "../../../lib/config/crud/crudModules.js";
@@ -6,7 +6,8 @@ import { extractListParams, sanitizeFilters } from "../../../lib/utils/query/que
 import { auditUserName } from "../../../lib/utils/auth/approval.js";
 import { clearCachedPermissions, setCachedPermissions } from "../../../../../config/auth/permissionCache.js";
 import { emitToUser } from "../../../lib/utils/realtime/socket.js";
-import { cleanPermissionMap } from "../../../lib/utils/helper/helper.js";
+import { getEffectivePermissions, userAttributeMachineScope } from "../../attributes/models/attribute.model.js";
+import { mergeAppAccessWithPermissions } from "../utils/effectivePermissions.js";
 
 const PERM_CFG = getCrudModuleConfig("user_permissions");
 
@@ -15,14 +16,21 @@ async function refreshUserPermissionCache(userId) {
   if (!Number.isFinite(targetId) || targetId <= 0) return;
   clearCachedPermissions(targetId);
   try {
-    const freshPermissions = await findUserPermissions(targetId);
-    const cleaned = (freshPermissions || []).map(cleanPermissionMap);
+    const [cleaned, user] = await Promise.all([
+      getEffectivePermissions(targetId),
+      User.getById(targetId),
+    ]);
     setCachedPermissions(targetId, cleaned);
-    const freshAppAccess = await findUserAppAccess(targetId);
+    const freshAppAccess = mergeAppAccessWithPermissions(
+      await findUserAppAccess(targetId),
+      cleaned
+    );
     emitToUser(targetId, "permissions_updated", {
       user_id: targetId,
       permissions: cleaned,
       app_access: freshAppAccess,
+      attribute_ids: Array.isArray(user?.attribute_ids) ? user.attribute_ids.map(Number).filter((n) => n > 0) : [],
+      attribute_machine_scope: await userAttributeMachineScope(targetId),
     });
   } catch (err) {
     console.error("[permissions] cache refresh failed:", err?.message || err);

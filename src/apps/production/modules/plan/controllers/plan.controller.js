@@ -10,6 +10,7 @@ import { toEmployeePickerRow } from "../../../../hrms/lib/config/views/employeeH
 import { deletePlanLine, findPlanLine, reorderMachinePlanQueue, updatePlanLine } from "../models/plan.model.js";
 import { getShiftOp, listActiveShiftCodes, listShiftOps, appendShiftOpSegment, deleteShiftOpSegments, updateShiftOpSegment, isShiftActiveOnDate } from "../models/planManpower.model.js";
 import { attachPlanLineEstimates, enrichPlanRows, listPlanningTableRows } from "./plan.controller.helpers.js";
+import Holiday from "../../../../task/modules/holidays/models/holiday.model.js";
 
 function positiveId(value) {
   const n = Number(value);
@@ -134,12 +135,15 @@ export async function getPlanningShiftOp(req, res) {
     const toDate = String(body.to_date || body.toDate || "").slice(0, 10);
 
     if (fromDate || toDate) {
-      const data = await listShiftOps({
-        from_date: fromDate || null,
-        to_date: toDate || null,
-        maccode: positiveId(body.maccode ?? body.machine_id),
-      });
-      return res.json({ success: true, data });
+      const [data, holidays] = await Promise.all([
+        listShiftOps({
+          from_date: fromDate || null,
+          to_date: toDate || null,
+          maccode: positiveId(body.maccode ?? body.machine_id),
+        }),
+        fromDate && toDate ? Holiday.getBetween(fromDate, toDate) : Promise.resolve([]),
+      ]);
+      return res.json({ success: true, data, holidays });
     }
 
     const maccode = positiveId(body.maccode ?? body.machine_id);

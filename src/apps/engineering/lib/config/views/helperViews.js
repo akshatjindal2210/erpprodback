@@ -33,6 +33,7 @@ const PROCESS_MASTER_HELPER = {
   eng_prime_item_master: PICKER,
   eng_finish_process_master: PICKER,
   production_entry: PICKER,
+  production_location_master: PICKER,
 };
 
 /**

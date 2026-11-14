@@ -1,8 +1,9 @@
 import dbQuery from "../../../../../config/db/db.js";
-import { ENGINEERING_TABLES as T } from "../../../../../config/db/dbTables.js";
+import { ENGINEERING_TABLES as T, MST_TABLES } from "../../../../../config/db/dbTables.js";
 import { attachmentsFromDocuments, deactivateModuleDocuments } from "../../../../../lib/documents/index.js";
 
 const MACHINE_MODULE = "eng_machine_master";
+const ATTR = MST_TABLES.ATTRIBUTES;
 
 const ALLOWED_FILTER_FIELDS = ["maccode", "macproccode", "macno", "approved", "is_active", "from_date", "to_date"];
 const ALLOWED_SORT_FIELDS = [
@@ -19,10 +20,14 @@ const JOINS = `
   LEFT JOIN ${T.PROCESS_MASTER} pm ON pm.proccode = mm.macproccode AND pm.is_deleted = false
 `;
 
+const ATTR_JSON = `(SELECT COALESCE(json_agg(json_build_object('id', a.id, 'name', a.name) ORDER BY a.name), '[]'::json)
+  FROM ${ATTR} a WHERE a.is_deleted = false AND a.id = ANY(mm.attribute_ids)) AS attributes`;
+
 const DEFAULT_FIELDS = [
   "mm.maccode", "mm.macname", "mm.macno", "mm.macproccode",
   "mm.cavity", "mm.maccycletime", "mm.setup_time", "mm.plan_pct", "mm.prod_pct",
   "mm.make", "mm.model", "mm.remark", "mm.industry_4_0",
+  "mm.attribute_ids", ATTR_JSON,
   `pm.procname AS process_name`, "pm.depth AS process_depth",
   "mm.is_active",
   "mm.approved", "mm.approved_by", "mm.approved_at",

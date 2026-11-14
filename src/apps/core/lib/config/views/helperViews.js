@@ -8,7 +8,7 @@ const okAction = (act) => act === "view" || act === "add" || act === "edit" || a
 /** Which pages may call each helper (permission_module in POST body). */
 const HELPERS = {
   attributes(mod, act) {
-    return mod === "users" && okAction(act);
+    return okAction(act) && (mod === "users" || mod === "eng_machine_master");
   },
   departments(mod, act) {
     return okAction(act) && (mod === "departments" || mod === "users" || isTaskVirtualModule(mod));

@@ -142,6 +142,8 @@ export const MODULE_PRIMARY_TABLE = {
   production_planning: "prod_plan",
   production_entry: "prod_entry",
   production_tooling: "prod_jc",
+  production_bin_master: "ims_tray_master",
+  tray_batch: "ims_tray_batch",
 };
 
 const ALL_TABLES = new Set([

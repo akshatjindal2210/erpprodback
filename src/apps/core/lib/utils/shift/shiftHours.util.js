@@ -42,8 +42,8 @@ function toMinutes(value) {
     return value.getHours() * 60 + value.getMinutes();
   }
   const s = String(value).trim();
-  const iso = s.match(/T(\d{2}):(\d{2})/);
-  const m = iso || s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  /** TIME `07:00` · ISO `T07:00` · TIMESTAMP `2026-11-11 07:00:00` (prod_entry). */
+  const m = s.match(/(?:T|\s|^)(\d{1,2}):(\d{2})(?::(\d{2}))?/);
   if (!m) return null;
   const h = Number(m[1]);
   const min = Number(m[2]);

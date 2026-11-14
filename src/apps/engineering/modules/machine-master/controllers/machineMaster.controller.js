@@ -12,6 +12,7 @@ import { stampRmstoreUploadedFiles } from "../../../../rmstore/lib/utils/stampRm
 import { resolveMachineQrPayload } from "../../../../core/lib/utils/qr/publicQrUrl.js";
 import logger from "../../../../core/lib/utils/logging/logger.js";
 import { assertErpSync, nextErpMasterCode } from "../../../../core/lib/services/erpSync.js";
+import { parseAttributeInput, syncMachineAttributes } from "../../../../core/identity/attributes/models/attribute.model.js";
 
 const MODULE = "eng_machine_master";
 const CFG = getCrudModuleConfig(MODULE);
@@ -97,6 +98,20 @@ function mergeAttachments(existing = [], uploaded = [], removeIds = []) {
   return [...kept, ...uploaded];
 }
 
+/** FormData may send attributes as JSON string. `undefined` = omit; `null` = invalid. */
+function parseAttributesBody(raw) {
+  if (raw === undefined) return undefined;
+  let value = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  return parseAttributeInput(value);
+}
+
 /** Store macname / macno as CAPS (simple). */
 const caps = (v) => String(v ?? "").trim().toUpperCase();
 
@@ -180,6 +195,7 @@ export const listMachineViews = async (req, res) => {
       cavity: r.cavity ?? null,
       maccycletime: r.maccycletime ?? null,
       industry_4_0: r.industry_4_0 != null ? String(r.industry_4_0).trim() : "",
+      attribute_ids: Array.isArray(r.attribute_ids) ? r.attribute_ids.map(Number).filter((n) => n > 0) : [],
       label: `${r.macno} — ${r.macname}`,
     });
 
@@ -233,6 +249,8 @@ export const createMachine = async (req, res) => {
     const remark = req.body?.remark != null ? String(req.body.remark).trim() : null;
     const industry_4_0 = normalizeIndustry40(req.body?.industry_4_0);
     const normalizedApproved = normalizeApprovedInput(normalizeApprovedBody(req.body?.approved));
+    const attributeInput = parseAttributesBody(req.body?.attributes);
+    if (attributeInput === null) return res.status(400).json({ success: false, message: "Invalid attributes" });
     await stampRmstoreUploadedFiles(req);
     const attachments = mapUploadedFiles(req);
 
@@ -273,6 +291,10 @@ export const createMachine = async (req, res) => {
       is_active: req.body?.is_active === undefined ? true : toBool(req.body.is_active),
       created_by: auditUserName(req),
     });
+
+    if (attributeInput !== undefined) {
+      await syncMachineAttributes(row.maccode, attributeInput);
+    }
 
     if (attachments.length) {
       await syncAttachmentList(MODULE, row.maccode, attachments, req);
@@ -375,12 +397,15 @@ export const updateMachine = async (req, res) => {
       ],
     });
 
+    const attributeInput = parseAttributesBody(req.body?.attributes);
+    if (attributeInput === null) return res.status(400).json({ success: false, message: "Invalid attributes" });
     const removeIds = parseRemoveAttachmentIds(req.body);
     await stampRmstoreUploadedFiles(req);
     const uploaded = mapUploadedFiles(req);
     const nextAttachments = mergeAttachments(existing.attachments, uploaded, removeIds);
     const hasAttachmentChanges = removeIds.length > 0 || uploaded.length > 0;
-    const hasBusinessChanges = fieldChanges || hasAttachmentChanges;
+    const hasAttrUpdate = attributeInput !== undefined;
+    const hasBusinessChanges = fieldChanges || hasAttachmentChanges || hasAttrUpdate;
 
     if (!hasBusinessChanges && normalizedApproved === undefined) {
       return res.status(400).json({ success: false, message: "No fields to update" });
@@ -426,6 +451,10 @@ export const updateMachine = async (req, res) => {
 
     if (Object.keys(fields).length) {
       await updateMachines(fields, { maccode });
+    }
+
+    if (hasAttrUpdate) {
+      await syncMachineAttributes(maccode, attributeInput);
     }
 
     if (hasAttachmentChanges) {

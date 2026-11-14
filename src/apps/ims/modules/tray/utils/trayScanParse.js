@@ -2,19 +2,9 @@
  * Tray scan — aligned with frontend `parseTrayScan` (qrScan.js).
  */
 import { normalizeScanInput } from "../../box/utils/stickers/stickerScanParse.js";
+import { TRAY_CODE_RE, normalizeTrayLookupCode } from "../config/trayCode.js";
 
-const TRAY_CODE_RE = /^(FG|RM)\d+$/i;
-
-/** DB `code` after pad migration (FG001); old QR / laser may still send FG1. */
-export function normalizeTrayLookupCode(code) {
-  const c = String(code ?? "").trim().toUpperCase();
-  if (!c) return c;
-  const m = /^(FG|RM)(\d+)$/.exec(c);
-  if (!m) return c;
-  const n = parseInt(m[2], 10);
-  if (!Number.isFinite(n)) return c;
-  return `${m[1]}${String(n).padStart(3, "0")}`;
-}
+export { normalizeTrayLookupCode };
 
 function queryParam(trimmed, name) {
   const m = trimmed.match(new RegExp(`[?&]${name}=([^&#\\s]+)`, "i"));

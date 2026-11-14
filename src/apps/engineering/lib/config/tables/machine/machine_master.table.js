@@ -46,6 +46,7 @@ export async function createMachineMasterTable() {
     { name: "industry_4_0", addSql: "industry_4_0 TEXT NOT NULL DEFAULT ''" },
     { name: "plan_pct", addSql: "plan_pct INTEGER NOT NULL DEFAULT 80" },
     { name: "prod_pct", addSql: "prod_pct INTEGER NOT NULL DEFAULT 80" },
+    { name: "attribute_ids", addSql: "attribute_ids INTEGER[] NOT NULL DEFAULT '{}'" },
   ]);
 
   await patchTableSchema(dbQuery, T.MACHINE_MASTER, {

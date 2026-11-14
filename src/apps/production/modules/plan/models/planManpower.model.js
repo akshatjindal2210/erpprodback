@@ -25,14 +25,29 @@ export async function listActiveShiftCodes() {
       id: index + 1,
       code: String(row.code || "").trim() || `S${index + 1}`,
       hours: hoursInfo.hours,
-      start_time: String(row.start_time || "").slice(0, 8),
-      end_time: String(row.end_time || "").slice(0, 8),
+      start_time: formatShiftClock(row.start_time),
+      end_time: formatShiftClock(row.end_time),
       setting_allow: !!row.setting_allow,
       active_days: normalizeActiveDays(row.active_days),
     };
     if (hoursInfo.overnight) shift.overnight = true;
     return shift;
   });
+}
+
+/** TIME / Date → HH:MM:SS for calendar + shift-end cron (never Date.toString()). */
+function formatShiftClock(value) {
+  if (value == null || value === "") return "";
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const hh = String(value.getHours()).padStart(2, "0");
+    const mm = String(value.getMinutes()).padStart(2, "0");
+    const ss = String(value.getSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+  }
+  const s = String(value).trim();
+  const m = s.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return s.slice(0, 8);
+  return `${String(Number(m[1])).padStart(2, "0")}:${m[2]}:${m[3] || "00"}`;
 }
 
 export async function getShiftsPerDay() {

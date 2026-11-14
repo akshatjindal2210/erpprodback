@@ -95,17 +95,27 @@ const Holiday = {
     return new Set((rows || []).map((r) => String(r.date || "").slice(0, 10)));
   },
 
-  /** YYYY-MM-DD dates in [dateFrom, dateTo] (inclusive). */
-  async getDatesBetween(dateFrom, dateTo) {
+  /** Holidays in [dateFrom, dateTo] — `{ date, name }` (date = YYYY-MM-DD). */
+  async getBetween(dateFrom, dateTo) {
     if (!dateFrom || !dateTo) return [];
     const rows = await dbQuery(
-      `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date
+      `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date, name
          FROM ${this.tableName}
         WHERE date BETWEEN ?::date AND ?::date
         ORDER BY date ASC`,
       [dateFrom, dateTo],
     );
-    return (rows || []).map((r) => String(r.date || "").slice(0, 10)).filter(Boolean);
+    return (rows || [])
+      .map((r) => ({
+        date: String(r.date || "").slice(0, 10),
+        name: String(r.name || "").trim(),
+      }))
+      .filter((r) => r.date);
+  },
+
+  /** YYYY-MM-DD dates in [dateFrom, dateTo] (inclusive). */
+  async getDatesBetween(dateFrom, dateTo) {
+    return (await this.getBetween(dateFrom, dateTo)).map((r) => r.date);
   },
 
   async getHolidaySet(dateFrom, dateTo) {

@@ -109,6 +109,8 @@ const PURCHASE_MODULE_ROUTES = {
 
 const PRODUCTION_MODULE_ROUTES = {
   production_master: `${PRODUCTION}/master`,
+  production_bin_master: `${PRODUCTION}/master/bin-master`,
+  production_location_master: `${PRODUCTION}/master/location`,
   production_shortage: `${PRODUCTION}/shortage`,
   production_job_card: `${PRODUCTION}/job-card`,
   production_planning: `${PRODUCTION}/production-planning/board`,

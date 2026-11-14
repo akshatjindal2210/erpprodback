@@ -1,6 +1,11 @@
-import { findAttributes, findAttribute, insertAttribute, updateAttribute, softDeleteAttribute, normalizeAttributeName, ATTRIBUTE_NAME_MAX_LENGTH } from "../models/attribute.model.js";
+import { findAttributes, findAttribute, insertAttribute, updateAttribute, softDeleteAttribute, normalizeAttributeName, ATTRIBUTE_NAME_MAX_LENGTH, findUserIdsWithAttribute, getEffectivePermissions, userAttributeMachineScope } from "../models/attribute.model.js";
 import { extractListParams } from "../../../lib/utils/query/queryHelper.js";
 import { sanitizeSearch } from "../../../lib/utils/helper/helper.js";
+import { normalizeAttributePermissions, mergeAppAccessWithPermissions } from "../../permissions/utils/effectivePermissions.js";
+import { findUserAppAccess } from "../../permissions/models/permission.model.js";
+import { findUser } from "../../users/models/user.model.js";
+import { clearCachedPermissions, setCachedPermissions } from "../../../../../config/auth/permissionCache.js";
+import { emitToUser } from "../../../lib/utils/realtime/socket.js";
 
 const PG_UNIQUE_VIOLATION = "23505";
 
@@ -13,10 +18,30 @@ const validateName = (raw) => {
   return { name };
 };
 
+async function refreshUsersEffectivePermissions(userIds = []) {
+  const unique = [...new Set(userIds.map(Number).filter((id) => Number.isFinite(id) && id > 0))];
+  for (const userId of unique) {
+    const [effective, appAccess, user] = await Promise.all([
+      getEffectivePermissions(userId),
+      findUserAppAccess(userId),
+      findUser({ id: userId }),
+    ]);
+    clearCachedPermissions(userId);
+    setCachedPermissions(userId, effective);
+    emitToUser(userId, "permissions_updated", {
+      user_id: userId,
+      permissions: effective,
+      app_access: mergeAppAccessWithPermissions(appAccess, effective),
+      special_permissions: user?.special_permissions ?? {},
+      attribute_ids: Array.isArray(user?.attribute_ids) ? user.attribute_ids.map(Number).filter((n) => n > 0) : [],
+      attribute_machine_scope: await userAttributeMachineScope(userId),
+    });
+  }
+}
+
 export const getAttributes = async (req, res) => {
   try {
     const { page, limit, filters, sortBy, order, search } = extractListParams(req.body, { sortBy: "name", order: "ASC" });
-
     const result = await findAttributes({
       filters,
       search: sanitizeSearch(search),
@@ -24,7 +49,6 @@ export const getAttributes = async (req, res) => {
       page,
       limit,
     });
-
     return res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -35,10 +59,8 @@ export const getAttributeById = async (req, res) => {
   try {
     const { id } = req.body;
     if (!id) return res.status(400).json({ success: false, message: "ID required" });
-
     const attribute = await findAttribute({ id });
     if (!attribute) return res.status(404).json({ success: false, message: "Attribute not found" });
-
     res.json({ success: true, data: attribute });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -50,7 +72,10 @@ export const createAttribute = async (req, res) => {
     const { name, error } = validateName(req.body?.name);
     if (error) return res.status(400).json({ success: false, message: error });
 
-    const attribute = await insertAttribute({ name });
+    const attribute = await insertAttribute({
+      name,
+      permissions: normalizeAttributePermissions(req.body?.permissions),
+    });
     if (!attribute) return res.status(409).json({ success: false, message: "Attribute already exists" });
 
     res.status(201).json({ success: true, data: attribute, message: "Attribute created successfully" });
@@ -66,8 +91,16 @@ export const updateAttributeData = async (req, res) => {
     const { name, error } = validateName(req.body?.name);
     if (error) return res.status(400).json({ success: false, message: error });
 
-    const rows = await updateAttribute({ name }, { id });
+    const fields = { name };
+    if (req.body?.permissions !== undefined) {
+      fields.permissions = normalizeAttributePermissions(req.body.permissions);
+    }
+
+    const rows = await updateAttribute(fields, { id });
     if (!rows.length) return res.status(404).json({ success: false, message: "Attribute not found" });
+
+    const userIds = await findUserIdsWithAttribute(id);
+    if (userIds.length) await refreshUsersEffectivePermissions(userIds);
 
     res.json({ success: true, data: rows[0], message: "Attribute updated successfully" });
   } catch (err) {
@@ -83,10 +116,20 @@ export const deleteAttributeData = async (req, res) => {
     const { id } = req.body;
     if (!id) return res.status(400).json({ success: false, message: "ID required" });
 
-    const rows = await softDeleteAttribute({ id });
-    if (!rows.length) return res.status(404).json({ success: false, message: "Attribute not found" });
+    const assignedBefore = await findUserIdsWithAttribute(id);
+    const { deleted, affectedUserIds } = await softDeleteAttribute({ id });
+    if (!deleted.length) return res.status(404).json({ success: false, message: "Attribute not found" });
 
-    res.json({ success: true, message: "Attribute deleted successfully" });
+    if (affectedUserIds.length) await refreshUsersEffectivePermissions(affectedUserIds);
+
+    const removedFrom = affectedUserIds.length || assignedBefore.length;
+    res.json({
+      success: true,
+      message: removedFrom
+        ? `Attribute deleted and removed from ${removedFrom} user(s)`
+        : "Attribute deleted successfully",
+      removed_from_users: removedFrom,
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

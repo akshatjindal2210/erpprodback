@@ -2,6 +2,7 @@ import dbQuery from "../../../../../config/db/db.js";
 
 export const LOCATION_APP_TYPE_IMS = "ims";
 export const LOCATION_APP_TYPE_RMSTORE = "rmstore";
+export const LOCATION_APP_TYPE_PRODUCTION = "prod";
 
 const ALLOWED_FILTER_FIELDS = ["location_id", "rack_no", "shelf_no", "location_no", "type", "approved", "from_date", "to_date"];
 

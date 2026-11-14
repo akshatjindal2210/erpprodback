@@ -30,12 +30,13 @@ export const findUserPermissions = async (user_id) => {
   );
 };
 
+/** Only real DB rows. Empty `{}` = no toggles saved yet (infer from module perms). */
 export const findUserAppAccess = async (user_id) => {
   const rows = await dbQuery(
     `SELECT app_key, can_access FROM ${M.USER_APP_ACCESS} WHERE user_id = $1`,
     [user_id]
   );
-  const out = Object.fromEntries(PORTAL_APP_KEYS.map((k) => [k, false]));
+  const out = {};
   for (const r of rows) {
     if (PORTAL_APP_KEYS.includes(r.app_key)) {
       out[r.app_key] = r.can_access === true;
@@ -57,6 +58,7 @@ export const upsertAppAccess = async (user_id, app_key, can_access, meta = {}) =
 
 export const upsertBulkAppAccess = async (user_id, app_access = {}, meta = {}) => {
   for (const [app_key, can_access] of Object.entries(app_access)) {
+    if (!PORTAL_APP_KEYS.includes(app_key)) continue;
     await upsertAppAccess(user_id, app_key, !!can_access, meta);
   }
 };

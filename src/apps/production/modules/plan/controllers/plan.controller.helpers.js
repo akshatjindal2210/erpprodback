@@ -9,13 +9,17 @@ import { findPrimeProcess } from "../../jc/models/jobCard.model.js";
 import { netShiftHours } from "../../../../core/lib/utils/shift/shiftHours.util.js";
 import { listPlanRows } from "../models/plan.model.js";
 
-/** Sum logged run hours from prod_entry (start/end) per JC. */
+/**
+ * Logged run hours from prod_entry (start/end).
+ * Key = `jc` (all machines) and `jc:mac` (this machine / stage only).
+ * Calendar + drawer must use per-machine — stage-2 time must not shrink stage-1 remain.
+ */
 async function loggedHoursByJc(pjcList = []) {
   const map = new Map();
   const list = [...new Set((pjcList || []).map((x) => String(x || "").trim()).filter(Boolean))];
   if (!list.length) return map;
   const rows = await dbQuery(
-    `SELECT jc, shift_start::time AS start_time, shift_end::time AS end_time
+    `SELECT jc, machine, shift_start::time AS start_time, shift_end::time AS end_time
      FROM ${T.ENTRY}
      WHERE COALESCE(is_deleted, false) = false AND jc = ANY($1::text[])`,
     [list]
@@ -23,8 +27,15 @@ async function loggedHoursByJc(pjcList = []) {
   for (const row of rows || []) {
     const jc = String(row.jc || "").trim();
     if (!jc) continue;
-    const h = Number(netShiftHours(row.start_time, row.end_time, false).hours) || 0;
+    /** Lunch on — match Settings net shift hours (e.g. 07:00–17:30 → 10h). */
+    const h = Number(netShiftHours(row.start_time, row.end_time, true).hours) || 0;
+    if (!(h > 0)) continue;
     map.set(jc, Math.round(((map.get(jc) || 0) + h) * 100) / 100);
+    const mac = Number(row.machine);
+    if (mac > 0) {
+      const k = `${jc}:${mac}`;
+      map.set(k, Math.round(((map.get(k) || 0) + h) * 100) / 100);
+    }
   }
   return map;
 }
@@ -84,7 +95,11 @@ export async function attachPlanLineEstimates(rows = []) {
 
     Object.assign(row, planLineEstimate(estimate, row.maccode, row.stage_no, row.qty));
     const jcNo = String(row.pjobcardno || row.job_card_no || "").trim();
-    row.logged_hours = jcNo ? Number(loggedMap.get(jcNo) || 0) : 0;
+    const mac = Number(row.maccode);
+    /** Prefer this machine's entries; fallback to JC-total only when mac missing. */
+    row.logged_hours = jcNo
+      ? Number(mac > 0 ? loggedMap.get(`${jcNo}:${mac}`) || 0 : loggedMap.get(jcNo) || 0)
+      : 0;
     if (!jcKey) row.est_error = "Missing job card.";
   }
 

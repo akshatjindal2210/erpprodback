@@ -105,12 +105,14 @@ export const MODULES = {
   ],
   production: [
     { name: "production_master", label: "Product Master" },
+    { name: "production_location_master", label: "Production Location Master" },
     { name: "production_shortage", label: "Shortage" },
     { name: "production_job_card", label: "Maintain Job Card" },
     { name: "production_planning", label: "Production Planning" },
     { name: "production_entry", label: "Production Entry" },
     { name: "production_manpower", label: "Manpower" },
     { name: "production_tooling", label: "Tooling" },
+    { name: "production_bin_master", label: "Bin Master" },
     { name: "production_activity_logs", label: "Activity Logs" },
   ],
   engineering: [
@@ -189,6 +191,7 @@ export const SEED_MODULES = [
   { name: "purchase_master",              label: "Product Master",                  sort_order: 52,       app_type: "purchase" },
   { name: "purchase_shortage",            label: "Shortage",                        sort_order: 53,       app_type: "purchase" },
   { name: "production_master",            label: "Product Master",                  sort_order: 54,       app_type: "production" },
+  { name: "production_location_master",   label: "Production Location Master",      sort_order: 55,     app_type: "production" },
   { name: "production_shortage",          label: "Shortage",                        sort_order: 55,       app_type: "production" },
   { name: "purchase_activity_logs",       label: "Activity Logs",                   sort_order: 56,       app_type: "purchase" },
   { name: "production_activity_logs",     label: "Activity Logs",                   sort_order: 57,       app_type: "production" },
@@ -201,4 +204,5 @@ export const SEED_MODULES = [
   { name: "production_entry",             label: "Production Entry",                 sort_order: 64,       app_type: "production" },
   { name: "production_manpower",          label: "Manpower",                         sort_order: 65,       app_type: "production" },
   { name: "production_tooling",           label: "Tooling",                         sort_order: 66,       app_type: "production" },
+  { name: "production_bin_master",        label: "Bin Master",                      sort_order: 67,       app_type: "production" },
 ];

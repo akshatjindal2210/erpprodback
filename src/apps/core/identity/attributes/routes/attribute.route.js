@@ -6,7 +6,7 @@ import { helperAccess } from "../../../lib/config/views/helperViews.js";
 
 const router = express.Router();
 
-// CRUD — no attributes menu yet; same as Users permissions.
+// CRUD — gated with Users permissions (Attributes lives under Settings identity).
 router.post("/list", authenticate, accessControl("users", "view"), getAttributes);
 router.post("/get", authenticate, accessControl("users", "view"), getAttributeById);
 router.post("/create", authenticate, accessControl("users", "add"), createAttribute);

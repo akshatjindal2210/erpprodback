@@ -23,12 +23,9 @@ const ALLOWED_UPDATE_FIELDS = [
   "auth_source", "department_id", "designation_id", "special_permissions", "password", "updated_by", "updated_at",
 ];
 const ALLOWED_DELETE_FILTERS = ["id"];
-const ALLOWED_SORT_FIELDS = [
-  "id", "name", "username", "email", "created_at", "updated_at", "status", "type",
-];
+const ALLOWED_SORT_FIELDS = ["id", "name", "username", "email", "created_at", "updated_at", "status", "type"];
 
-const FIND_USER_COLUMNS =
-  "id, name, username, usercode, email, phone, type, status, auth_source, password, special_permissions, created_at";
+const FIND_USER_COLUMNS = "id, name, username, usercode, email, phone, type, status, auth_source, password, special_permissions, attribute_ids, created_at";
 
 const assertField = (key, whitelist, context = "field") => {
   if (!whitelist.includes(key)) throw new Error(`Invalid ${context}: "${key}"`);
