@@ -321,10 +321,6 @@ export const submitAuditScan = async (req, res) => {
       }
     }
 
-    if (!audit.approved && req.user.type !== "super_admin") {
-      return res.status(403).json({ success: false, message: "Audit must be active before it can be started" });
-    }
-
     if (!isWithinAuditDateRange(audit) && req.user.type !== "super_admin") {
       return res.status(403).json({ success: false, message: "Audit is outside of allowed date range" });
     }
@@ -412,10 +408,6 @@ export const startAuditLocationController = async (req, res) => {
       }
     }
 
-    if (!audit.approved && req.user.type !== "super_admin") {
-      return res.status(403).json({ success: false, message: "Audit must be active before it can be started" });
-    }
-
     if (!isWithinAuditDateRange(audit) && req.user.type !== "super_admin") {
       return res.status(403).json({ success: false, message: "Audit is outside of allowed date range" });
     }
@@ -437,7 +429,7 @@ export const startAuditLocationController = async (req, res) => {
 
     return res.json({
       success: true,
-      message: "Expected coils locked from current inventory from current inventory",
+      message: "Expected coils locked from current inventory",
       data: {
         expected_coils: expectedBoxes,
         expected_count: expectedBoxes.length,

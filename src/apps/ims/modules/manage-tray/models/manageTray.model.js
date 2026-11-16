@@ -777,6 +777,7 @@ async function mapRegisterRow(row) {
     item_code: item_codes,
     item_codes,
     qtys: meta.qtys,
+    qty: meta.total_qty,
     total_qty: meta.total_qty,
     acc_code: cust.acc_code,
     acc_name: cust.acc_name,

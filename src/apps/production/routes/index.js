@@ -16,6 +16,7 @@ import jcRoutes from "../modules/jc/routes/jc.route.js";
 import planRoutes from "../modules/plan/routes/plan.route.js";
 import entryRoutes from "../modules/entry/routes/entry.route.js";
 import binRoutes from "../modules/bin/routes/binMaster.routes.js";
+import binManageRoutes from "../modules/bin-manage/routes/binManage.route.js";
 import locationRoutes from "../modules/location/routes/productionLocationMaster.routes.js";
 
 const router = Router();
@@ -28,5 +29,6 @@ router.use("/jc", jcRoutes);
 router.use("/plan", planRoutes);
 router.use("/entry", entryRoutes);
 router.use("/bins", binRoutes);
+router.use("/bin-manage", binManageRoutes);
 
 export default router;

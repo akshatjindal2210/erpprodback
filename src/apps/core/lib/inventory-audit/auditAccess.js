@@ -34,10 +34,15 @@ export function isAuditCreator(audit, user) {
   return stored === current;
 }
 
-/** Workers with add-only access: assigned + active + within date window. */
+/**
+ * Workers with add-only access can open audits they are assigned to.
+ * - Before activate: visible so they see upcoming work
+ * - After activate: visible while within scheduled dates (and history while still assigned)
+ * Execute/scan stays gated separately (assigned + date window; Activate freezes plan only).
+ */
 export function canAssignedWorkerAccessAudit(audit, userId, now = new Date()) {
   if (!isUserAssignedOnAudit(audit, userId)) return false;
-  if (!audit?.approved) return false;
+  if (!audit?.approved) return true;
   return isWithinAuditDateRange(audit, now);
 }
 
@@ -48,12 +53,13 @@ export function canAccessAuditRecord(audit, user, permission = {}) {
   return canAssignedWorkerAccessAudit(audit, user?.id);
 }
 
-/** Creator / managers see location rows before audit is activated; assigned workers do not. */
+/** Creator / managers / assigned workers see location rows before audit is activated. */
 export function canSeeInactiveAuditLocations(audit, user, permission = {}) {
   if (!audit || audit.approved) return true;
   if (user?.type === "super_admin") return true;
   if (permission.can_edit || permission.can_authorize) return true;
-  return isAuditCreator(audit, user);
+  if (isAuditCreator(audit, user)) return true;
+  return isUserAssignedOnAudit(audit, user?.id);
 }
 
 export function filterAuditLocationsForUser(audit, user, permission = {}) {

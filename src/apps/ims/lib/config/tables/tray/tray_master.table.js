@@ -5,6 +5,7 @@ import {
   dropColumnIfExists,
   patchCol,
   patchTableSchema,
+  renameColumnIfExists,
 } from "../../../../../../config/db/ensureDbColumns.js";
 
 async function ensureTrayMasterLetterColumn() {
@@ -54,6 +55,9 @@ export async function createTrayMasterTable() {
       weight         NUMERIC(14, 3),
       status         VARCHAR(20) NOT NULL DEFAULT 'active',
       box_uid        INTEGER REFERENCES ${T.BOX_TABLE}(box_uid) ON DELETE SET NULL,
+      pjobcardno     VARCHAR(50),
+      qty            NUMERIC(14, 3),
+      lid            INTEGER,
       updated_by     TEXT,
       updated_at     TIMESTAMP DEFAULT NOW()
     );
@@ -64,6 +68,20 @@ export async function createTrayMasterTable() {
   `);
 
   await ensureTrayMasterLetterColumn();
+
+  await renameColumnIfExists(dbQuery, T.TRAY_MASTER, "job_card_no", "pjobcardno");
+  await renameColumnIfExists(dbQuery, T.TRAY_MASTER, "location_id", "lid");
+  await patchTableSchema(dbQuery, T.TRAY_MASTER, {
+    columns: [
+      patchCol("pjobcardno", "VARCHAR(50)"),
+      patchCol("qty", "NUMERIC(14, 3)"),
+      patchCol("lid", "INTEGER"),
+    ],
+    indexes: [
+      `CREATE INDEX IF NOT EXISTS tray_master_pjobcardno_idx ON ${T.TRAY_MASTER} (pjobcardno) WHERE pjobcardno IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS tray_master_lid_idx ON ${T.TRAY_MASTER} (lid) WHERE lid IS NOT NULL`,
+    ],
+  });
 
   await dbQuery(`DROP INDEX IF EXISTS tray_master_owner_app_idx`);
   await dropColumnIfExists(dbQuery, T.TRAY_MASTER, "owner_app");

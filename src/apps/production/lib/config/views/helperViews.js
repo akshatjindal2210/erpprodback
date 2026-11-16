@@ -41,6 +41,7 @@ function fieldsForLocations(mod, act) {
   if (mod == null || act == null) return null;
   if (mod === "production_location_master" && act === VIEW) return [...locPicker];
   if (mod === "production_location_master" && isForm(act)) return [...locModal];
+  if (mod === "production_bin_manage" && (act === VIEW || isForm(act))) return [...locPicker];
   return null;
 }
 
@@ -58,6 +59,7 @@ const JOB_CARD_HELPER = {
   production_planning: [VIEW, "edit"],
   production_job_card: PICKER,
   production_entry: PICKER,
+  production_bin_manage: PICKER,
 };
 
 /** [] = allowed (access-only helpers). null = deny. */
@@ -77,6 +79,7 @@ const binPicker = ["t.id", "t.code", "t.type", "t.serial_number", "t.batch_id", 
 function fieldsForBins(mod, act) {
   if (mod == null || act == null) return null;
   if (mod === "production_bin_master" && (act === VIEW || isForm(act))) return [...binPicker];
+  if (mod === "production_bin_manage" && (act === VIEW || isForm(act))) return [...binPicker];
   return null;
 }
 

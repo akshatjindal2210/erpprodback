@@ -1,11 +1,47 @@
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
-import { PRODUCTION_TABLES as T, ENGINEERING_TABLES as E, IMS_TABLES } from "../../../../../config/db/dbTables.js";
+import { PRODUCTION_TABLES as T, ENGINEERING_TABLES as E, IMS_TABLES, RMSTORE_TABLES as R } from "../../../../../config/db/dbTables.js";
 import { findPrimeIdsByItems, loadStages, PROCESS_TYPE } from "../../../../engineering/modules/item-process/models/itemProcess.model.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
 import { rmItemMap, labelStageRm } from "../../../../rmstore/modules/production/utils/erpItems.js";
 import { sqlDocDtText } from "../../../../ims/modules/box/utils/inventory/boxInventorySql.js";
 import { formatPJobCardNo, JC_START, JOB_CARD_TYPE, JOB_CARD_TYPE_DEFAULT, JOB_CARD_TYPE_KEY } from "../jobCard.config.js";
 import { JC_SERIES_CODE, nextJobcardno, resolveFyidForJobCard } from "../jobCardErp.js";
+
+/** Item RM Master wires for a prime item — used when process has RM wire ON but saved plan `rm` is empty. */
+async function itemRmFallbackByPrime(itemDcodes = [], rmMap) {
+  const dcodes = [...new Set(itemDcodes.map(Number).filter(Boolean))];
+  if (!dcodes.length) return new Map();
+  const rows = await dbQuery(
+    `SELECT item_dcode, rm_items FROM ${R.MASTER_PRODUCTION} WHERE item_dcode = ANY($1::int[]) AND is_deleted = false`,
+    [dcodes]
+  );
+  return new Map(
+    rows.map((r) => [
+      Number(r.item_dcode),
+      (Array.isArray(r.rm_items) ? r.rm_items : []).map((rm) => {
+        const live = rmMap?.get(canonicalCode(rm.rm_item_dcode));
+        return {
+          rm_item_dcode: Number(rm.rm_item_dcode),
+          rm_item_code: live?.item_code || rm.rm_item_code || `RM ${rm.rm_item_dcode}`,
+          rm_item_desc: live?.item_desc ?? rm.rm_item_desc ?? null,
+        };
+      }).filter((rm) => Number.isFinite(rm.rm_item_dcode)),
+    ])
+  );
+}
+
+function fillEmptyProcessRm(stages = [], fallbackRm = []) {
+  if (!fallbackRm.length) return stages;
+  return stages.map((stage) => ({
+    ...stage,
+    processes: (stage.processes || []).map((p) => {
+      const wireOn = p?.rm_wire === true || p?.flags?.rm_wire === true;
+      if (!wireOn) return p;
+      if (Array.isArray(p.rm_items) && p.rm_items.length) return p;
+      return { ...p, rm_items: fallbackRm };
+    }),
+  }));
+}
 
 /**
  * Maintain Job Card — DB layer (prod_job_card).
@@ -494,9 +530,13 @@ export async function loadPrimeProcesses(itemDcodes = []) {
 
   const stageMap = await loadStages([...primeByItem.values()]);
   const rmMap = await rmItemMap();
+  const itemRmByPrime = await itemRmFallbackByPrime([...primeByItem.keys()], rmMap);
   for (const [itemDcode, primeId] of primeByItem) {
     const stages = stageMap.get(primeId)?.stages;
-    if (stages?.length) result.set(itemDcode, await labelStageRm(stages, rmMap));
+    if (!stages?.length) continue;
+    const labeled = await labelStageRm(stages, rmMap);
+    // Prime UI can show Item RM chips while saved process.rm is [] — fill for JC / plan.
+    result.set(itemDcode, fillEmptyProcessRm(labeled, itemRmByPrime.get(Number(itemDcode)) || []));
   }
   return result;
 }

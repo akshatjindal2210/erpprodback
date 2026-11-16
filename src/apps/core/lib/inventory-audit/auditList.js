@@ -117,6 +117,7 @@ export function createInventoryAuditList({
     const creatorName = user?.name != null ? String(user.name).trim() : "";
     const creatorIdx = nextParam(values, creatorName || null);
     const assigneeIdx = nextParam(values, user.id);
+    // Assignees see their audits even before Activate; after Activate only while in date window.
     conditions.push(`(
     am.created_by = $${creatorIdx}
     OR (
@@ -124,8 +125,10 @@ export function createInventoryAuditList({
         SELECT 1 FROM ${T.AUDIT_LOCATIONS} al_vis
         WHERE al_vis.audit_id = am.audit_id AND al_vis.assigned_user_id = $${assigneeIdx}
       )
-      AND am.approved = true
-      AND CURRENT_DATE BETWEEN am.start_date AND am.end_date
+      AND (
+        am.approved = false
+        OR CURRENT_DATE BETWEEN am.start_date AND am.end_date
+      )
     )
   )`);
   }

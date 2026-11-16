@@ -321,10 +321,6 @@ export const submitAuditScan = async (req, res) => {
       }
     }
 
-    if (!audit.approved && req.user.type !== "super_admin") {
-      return res.status(403).json({ success: false, message: "Audit must be active before it can be started" });
-    }
-
     if (!isWithinAuditDateRange(audit) && req.user.type !== "super_admin") {
       return res.status(403).json({ success: false, message: "Audit is outside of allowed date range" });
     }
@@ -410,10 +406,6 @@ export const startAuditLocationController = async (req, res) => {
       if (Number(locRow.assigned_user_id) !== Number(userId)) {
         return res.status(403).json({ success: false, message: "You are not assigned to this audit location" });
       }
-    }
-
-    if (!audit.approved && req.user.type !== "super_admin") {
-      return res.status(403).json({ success: false, message: "Audit must be active before it can be started" });
     }
 
     if (!isWithinAuditDateRange(audit) && req.user.type !== "super_admin") {

@@ -26,6 +26,7 @@ const PICKER = [VIEW, ...FORM]; // list + form modes
  * eng_prime_item_master    | view, add, edit, authorize
  * eng_finish_process_master| view, add, edit, authorize
  * production_entry         | view, add, edit, authorize  (Production Entry form)
+ * production_bin_manage    | view, add, edit, authorize  (Bin Assign: stage from process)
  */
 const PROCESS_MASTER_HELPER = {
   eng_machine_master: PICKER,
@@ -33,6 +34,7 @@ const PROCESS_MASTER_HELPER = {
   eng_prime_item_master: PICKER,
   eng_finish_process_master: PICKER,
   production_entry: PICKER,
+  production_bin_manage: PICKER,
   production_location_master: PICKER,
 };
 
@@ -47,6 +49,7 @@ const PROCESS_MASTER_HELPER = {
  * production_job_card      | view, add, edit, authorize  (Maintain JC)
  * production_planning      | view, edit                  (Job Card Board / Calendar)
  * production_entry         | view, add, edit, authorize  (Production Entry form)
+ * production_bin_manage    | view, add, edit, authorize  (Bin Assign: machine scan)
  */
 const MACHINE_MASTER_HELPER = {
   eng_prime_item_master: PICKER,
@@ -54,6 +57,7 @@ const MACHINE_MASTER_HELPER = {
   production_job_card: PICKER,
   production_planning: PICKER,
   production_entry: PICKER,
+  production_bin_manage: PICKER,
 };
 
 /** [] = allowed (access-only helpers; no SQL field lists yet). null = deny. */

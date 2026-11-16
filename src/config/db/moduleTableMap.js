@@ -72,6 +72,7 @@ export const OTHER_TABLE_TO_MODULE = {
   prod_plan: "production_planning",
   prod_plan_manpower: "production_planning",
   prod_entry: "production_entry",
+  prod_bin_manage: "production_bin_manage",
   // Tooling approval on prod_jc (legacy prod_shortage dropped)
   prod_shortage: "production_tooling",
   prod_tooling: "production_tooling",
@@ -141,6 +142,7 @@ export const MODULE_PRIMARY_TABLE = {
   production_job_card: "prod_jc",
   production_planning: "prod_plan",
   production_entry: "prod_entry",
+  production_bin_manage: "prod_bin_manage",
   production_tooling: "prod_jc",
   production_bin_master: "ims_tray_master",
   tray_batch: "ims_tray_batch",

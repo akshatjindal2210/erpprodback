@@ -327,9 +327,9 @@ export async function savePrime({ item_dcode, processJson, user, allowUpdate = t
   const connecting = Number(processJson?.connecting_process_id);
   if (!connecting) throw httpError(400, "Select a connecting stage.");
   const connectingProc = (await loadMasters([{ process: connecting, machines: [] }], { activeOnly: true })).procById.get(connecting);
-  if (!connectingProc?.prime) throw httpError(400, `${connectingProc?.procname || "Process"} is not a prime process.`);
+  // Connecting Stage = Process Master stage CONNECTIVITY only (Prime flag not required).
   if (Number(connectingProc?.stage) !== PROCESS_STAGE.CONNECTIVITY) {
-    throw httpError(400, "Select a connecting stage.");
+    throw httpError(400, `${connectingProc?.procname || "Process"} is not a connecting stage (need stage CONNECTIVITY).`);
   }
   if (stages.some((st) => (st.processes || []).some((p) => Number(p.process) === connecting))) {
     throw httpError(400, "Connecting process is already used in a stage.");

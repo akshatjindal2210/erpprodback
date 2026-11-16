@@ -115,6 +115,7 @@ const PRODUCTION_MODULE_ROUTES = {
   production_job_card: `${PRODUCTION}/job-card`,
   production_planning: `${PRODUCTION}/production-planning/board`,
   production_entry: `${PRODUCTION}/production-entry`,
+  production_bin_manage: `${PRODUCTION}/bin-management`,
   production_manpower: `${PRODUCTION}/manpower`,
   production_tooling: `${PRODUCTION}/tooling`,
   production_activity_logs: `${PRODUCTION}/logs`,

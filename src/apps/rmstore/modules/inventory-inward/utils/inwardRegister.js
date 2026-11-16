@@ -15,7 +15,7 @@ const TX = T.COIL_TRANSACTION;
 
 const REGISTER_COIL_SELECT = `
   c.coil_uid, c.coil_no_uid, c.mrn_uid, m.mrn_no, NULLIF((regexp_match(m.uid, '_([0-9]+)$'))[1], '')::integer AS serial_no, m.heat_no,
-  m.item_dcode, m.item_code, m.item_desc, c.qty, c.location_id, c.in_uid,
+  m.item_dcode, m.item_code, m.item_desc, c.qty, c.location_id, c.in_uid, c.ipr_uid,
   c.out_uid, c.status, ${COIL_QC_STATUS_EXPR} AS qc_check_status,
   lm.location_no, lm.rack_no, lm.shelf_no AS row_no
 `;
