@@ -1,12 +1,13 @@
 {
   "name": "backend",
-  "version": "5.2.7",
+  "version": "5.2.8",
   "description": "",
   "main": "app.js",
   "scripts": {
     "start": "node app",
     "dev": "nodemon app",
-    "backup": "node scripts/db-backup.js"
+    "backup": "node scripts/db-backup.js",
+    "attach-sa-docs": "node scripts/attach-sa-tc-rmtc.js"
   },
   "keywords": [],
   "author": "",

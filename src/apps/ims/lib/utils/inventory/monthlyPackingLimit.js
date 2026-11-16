@@ -406,13 +406,127 @@ export async function rowNeedsPackingDeviation(row = {}) {
   return !check.ok && !check.skipped;
 }
 
-/** Attach `needs_deviation` for packing-entry pending list (red row hint in UI). */
+/**
+ * Month-used qty per item+month (dailyprod and boxes separately) plus the share of each listed doc,
+ * so `used excluding doc` matches getItemMonthlyPackingUsed without one query per row.
+ */
+async function loadMonthlyUsedParts(codes, months, docNos) {
+  const monthExpr = `to_char(
+    COALESCE(dp.doc_dt, dp.system_generate_date::date, CURRENT_DATE),
+    'YYYY-MM'
+  )`;
+  const docKeyExpr = `CASE WHEN TRIM(dp.doc_no::text) = ANY($3::text[]) THEN TRIM(dp.doc_no::text) END`;
+  const grouped = (inner) => `
+    SELECT itemdcode, ym, doc_key, GROUPING(doc_key) AS is_total,
+           COALESCE(SUM(COALESCE(qty, 0)), 0)::float AS used_qty
+    FROM (${inner}) s
+    GROUP BY GROUPING SETS ((itemdcode, ym), (itemdcode, ym, doc_key))`;
+  const params = [codes, months, docNos];
+
+  const [dpRows, boxRows] = await Promise.all([
+    dbQuery(
+      grouped(`
+        SELECT TRIM(dp.item_dcode::text) AS itemdcode, ${monthExpr} AS ym, ${docKeyExpr} AS doc_key, dp.total_qty AS qty
+        FROM ims_dailyprod dp
+        WHERE dp.sticker_generated = true
+          AND TRIM(dp.item_dcode::text) = ANY($1::text[])
+          AND ${monthExpr} = ANY($2::text[])`),
+      params
+    ),
+    dbQuery(
+      grouped(`
+        SELECT TRIM(dp.item_dcode::text) AS itemdcode, ${monthExpr} AS ym, ${docKeyExpr} AS doc_key, b.qty AS qty
+        FROM ims_box_table b
+        INNER JOIN ims_dailyprod dp
+          ON TRIM(b.packing_number::text) = TRIM(dp.doc_no::text)
+        WHERE b.is_deleted = false
+          AND b.sa_id IS NULL
+          AND dp.sticker_generated = true
+          AND TRIM(dp.item_dcode::text) = ANY($1::text[])
+          AND ${monthExpr} = ANY($2::text[])`),
+      params
+    ),
+  ]);
+
+  const toMaps = (rows) => {
+    const totals = new Map();
+    const perDoc = new Map();
+    for (const r of rows || []) {
+      const key = `${r.itemdcode}|${r.ym}`;
+      if (Number(r.is_total) === 1) totals.set(key, Number(r.used_qty) || 0);
+      else if (r.doc_key != null) perDoc.set(`${key}|${r.doc_key}`, Number(r.used_qty) || 0);
+    }
+    return { totals, perDoc };
+  };
+  return { dp: toMaps(dpRows), box: toMaps(boxRows) };
+}
+
+async function loadApprovedShortageTotals(codes, months) {
+  const ids = [...new Set(codes.map((c) => parseInt(c, 10)).filter((n) => Number.isFinite(n)))];
+  const out = new Map();
+  if (!ids.length) return out;
+  const rows = await dbQuery(
+    `SELECT itemdcode, to_char(month, 'YYYY-MM') AS ym,
+            COALESCE(SUM(COALESCE(qty, 0)), 0)::float AS shortage_qty
+     FROM ${T.SHORTAGE}
+     WHERE is_deleted = false
+       AND approved = true
+       AND itemdcode = ANY($1::int[])
+       AND to_char(month, 'YYYY-MM') = ANY($2::text[])
+     GROUP BY 1, 2`,
+    [ids, months]
+  );
+  for (const r of rows || []) out.set(`${Number(r.itemdcode)}|${r.ym}`, Number(r.shortage_qty) || 0);
+  return out;
+}
+
+/**
+ * Attach `needs_deviation` for packing-entry pending list (red row hint in UI).
+ * Same rule as rowNeedsPackingDeviation, batched: a constant number of queries per page
+ * (per-row queries exhaust the DB pool on wide date ranges).
+ */
 export async function attachNeedsDeviationFlag(rows = []) {
   if (!Array.isArray(rows) || !rows.length) return rows;
-  return Promise.all(
-    rows.map(async (row) => ({
-      ...row,
-      needs_deviation: await rowNeedsPackingDeviation(row),
-    })),
-  );
+
+  const checks = rows.map((row) => {
+    if (row?.sticker_generated === true || row?.sticker_generated === "true") return null;
+    const itemdcode = row.item_dcode ?? row.itemdcode;
+    if (itemdcode == null || String(itemdcode).trim() === "") return null;
+    return {
+      code: String(itemdcode).trim(),
+      yearMonth: resolveLimitMonth({ doc_dt: row.doc_dt }).yearMonth,
+      docNo: row.doc_no != null ? String(row.doc_no).trim() : "",
+      requestedQty: resolveStickerRequestedQty({ total_qty: row.total_qty }),
+    };
+  });
+
+  const active = checks.filter(Boolean);
+  if (!active.length) return rows.map((row) => ({ ...row, needs_deviation: false }));
+
+  const codes = [...new Set(active.map((c) => c.code))];
+  const months = [...new Set(active.map((c) => c.yearMonth))];
+  const docNos = [...new Set(active.map((c) => c.docNo).filter(Boolean))];
+
+  const [used, shortageTotals, pct] = await Promise.all([
+    loadMonthlyUsedParts(codes, months, docNos),
+    loadApprovedShortageTotals(codes, months),
+    getShortageQtyPercentage(),
+  ]);
+
+  const usedExcludingDoc = ({ totals, perDoc }, key, docNo) => {
+    const total = totals.get(key) || 0;
+    const own = docNo ? perDoc.get(`${key}|${docNo}`) || 0 : 0;
+    return own ? total - own : total;
+  };
+
+  return rows.map((row, idx) => {
+    const c = checks[idx];
+    if (!c) return { ...row, needs_deviation: false };
+    const key = `${c.code}|${c.yearMonth}`;
+    const monthUsedQty = Math.max(usedExcludingDoc(used.dp, key, c.docNo), usedExcludingDoc(used.box, key, c.docNo));
+    const itemId = parseInt(c.code, 10);
+    const baseQty = Number.isFinite(itemId) ? shortageTotals.get(`${itemId}|${c.yearMonth}`) || 0 : 0;
+    const allowedLimit = baseQty + Math.floor(baseQty * (pct / 100));
+    return { ...row, needs_deviation: monthUsedQty + c.requestedQty > allowedLimit };
+  });
 }

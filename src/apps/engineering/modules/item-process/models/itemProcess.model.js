@@ -1,7 +1,7 @@
 import dbQuery, { withTransaction } from "../../../../../config/db/db.js";
 import { ENGINEERING_TABLES as E } from "../../../../../config/db/dbTables.js";
 import { getImsMapsSafe, canonicalCode } from "../../../../ims/lib/utils/erp-api/lookup/imsLookup.js";
-import { PROCESS_FLAGS, flagsOf } from "../../process-master/models/processMaster.model.js";
+import { PROCESS_FLAGS, PROCESS_STAGE, flagsOf } from "../../process-master/models/processMaster.model.js";
 
 /**
  * Item process — Prime / Finish process plans (eng_item_process). Engineering only: no Item RM (rmstore) link.
@@ -81,6 +81,7 @@ function fromLine(line, index, m) {
     process_id: Number(line.process),
     process_name: proc?.procname || `Process ${line.process}`,
     process_order: index + 1,
+    stage: Number(proc?.stage) || null,
     flags,
     ...flags,
     all_mc: allMc,
@@ -96,7 +97,7 @@ async function loadMasters(lines, { activeOnly = false } = {}) {
   const machineIds = uniqNums(lines.flatMap((l) => l.machines || []));
   const procs = processIds.length
     ? await dbQuery(
-        `SELECT proccode, procname, ${PROCESS_FLAGS.join(", ")} FROM ${E.PROCESS_MASTER} WHERE proccode = ANY($1::int[])${active}`,
+        `SELECT proccode, procname, stage, ${PROCESS_FLAGS.join(", ")} FROM ${E.PROCESS_MASTER} WHERE proccode = ANY($1::int[])${active}`,
         [processIds]
       )
     : [];
@@ -170,6 +171,10 @@ async function buildStages(processJson, type) {
       const proc = m.procById.get(Number(p.process_id));
       if (!proc) throw httpError(400, `Process ${p.process_id} not found in Process Master.`);
       if (!proc[needFlag]) throw httpError(400, `${proc.procname} is not a ${isPrime ? "Prime" : "finish"} process.`);
+      // CONNECTIVITY only via Prime Connecting Stage — not inside stages
+      if (Number(proc.stage) === PROCESS_STAGE.CONNECTIVITY) {
+        throw httpError(400, `${proc.procname} is a connecting stage — pick it under Connecting Stage.`);
+      }
 
       const line = toLine(p, proc);
       const where = `(Stage ${sIdx + 1})`;
@@ -271,8 +276,11 @@ export async function loadStages(ids = []) {
 const softDelete = (client, id, user) =>
   client.query(`UPDATE ${IP} SET is_deleted = true, deleted_by = $2, deleted_at = NOW() WHERE id = $1 AND is_deleted = false`, [id, user]);
 
-/** Insert / update the active row of (type, item_dcode). */
-async function upsertPlan(client, { type, item_dcode, process, user }) {
+/**
+ * Insert or update the active row of (type, item_dcode).
+ * `allowUpdate: false` → create only (Add). Existing row → 409 (do not edit via /create).
+ */
+async function upsertPlan(client, { type, item_dcode, process, user, allowUpdate = true }) {
   const { rows: found } = await client.query(
     `SELECT id FROM ${IP} WHERE type = $1 AND item_dcode = $2 AND is_deleted = false FOR UPDATE`,
     [type, item_dcode]
@@ -284,6 +292,9 @@ async function upsertPlan(client, { type, item_dcode, process, user }) {
     throw err;
   };
   if (found.length) {
+    if (!allowUpdate) {
+      throw httpError(409, "This item already has a process. Open Edit to change it.");
+    }
     await client.query(
       `UPDATE ${IP}
        SET process = $2, updated_by = $3, updated_at = NOW(),
@@ -292,6 +303,9 @@ async function upsertPlan(client, { type, item_dcode, process, user }) {
       [found[0].id, json, user]
     );
     return { id: Number(found[0].id), created: false };
+  }
+  if (allowUpdate) {
+    throw httpError(404, "Process not found. Use Add to create it.");
   }
   const { rows } = await client.query(
     `INSERT INTO ${IP} (type, item_dcode, process, created_by) VALUES ($1, $2, $3, $4) RETURNING id`,
@@ -303,7 +317,7 @@ async function upsertPlan(client, { type, item_dcode, process, user }) {
 /* ───────────────────────── Prime ───────────────────────── */
 
 /** Insert / update the prime of a PRIME item (IMS PrimItemdcode = itself). Every FG on it sees the change. */
-export async function savePrime({ item_dcode, processJson, user }) {
+export async function savePrime({ item_dcode, processJson, user, allowUpdate = true }) {
   const itemDcode = Number(item_dcode);
   if (!itemDcode) throw httpError(400, "Select a prime item.");
   if ((await resolvePrimeItemDcode(itemDcode)) !== itemDcode) {
@@ -313,12 +327,17 @@ export async function savePrime({ item_dcode, processJson, user }) {
   const connecting = Number(processJson?.connecting_process_id);
   if (!connecting) throw httpError(400, "Select a connecting stage.");
   const connectingProc = (await loadMasters([{ process: connecting, machines: [] }], { activeOnly: true })).procById.get(connecting);
-  if (!connectingProc?.connectivity) throw httpError(400, "Select a connecting stage.");
+  if (!connectingProc?.prime) throw httpError(400, `${connectingProc?.procname || "Process"} is not a prime process.`);
+  if (Number(connectingProc?.stage) !== PROCESS_STAGE.CONNECTIVITY) {
+    throw httpError(400, "Select a connecting stage.");
+  }
   if (stages.some((st) => (st.processes || []).some((p) => Number(p.process) === connecting))) {
     throw httpError(400, "Connecting process is already used in a stage.");
   }
   const process = buildProcessJson({ type: PROCESS_TYPE.PRIME, stages, connecting });
-  return withTransaction((client) => upsertPlan(client, { type: PROCESS_TYPE.PRIME, item_dcode: itemDcode, process, user }));
+  return withTransaction((client) =>
+    upsertPlan(client, { type: PROCESS_TYPE.PRIME, item_dcode: itemDcode, process, user, allowUpdate })
+  );
 }
 
 /** Remove a prime. Blocked while any FG still stands on it (no prime → no FG). */
@@ -348,7 +367,7 @@ export async function deletePrime({ id, user }) {
 /* ───────────────────────── FG ───────────────────────── */
 
 /** Insert / update the finish item's own process on its prime item's prime (IMS PrimItemdcode, else itself). */
-export async function saveFg({ item_dcode, processJson, user }) {
+export async function saveFg({ item_dcode, processJson, user, allowUpdate = true }) {
   const itemDcode = Number(item_dcode);
   if (!itemDcode) throw httpError(400, "Select a finish item.");
   const primeItem = await resolvePrimeItemDcode(itemDcode);
@@ -358,7 +377,33 @@ export async function saveFg({ item_dcode, processJson, user }) {
     throw httpError(400, "Prime process is pending approval. Approve it in Engineering → Prime Process Master first.");
   }
 
+  // FG: END in Stage 1…n (e.g. Packing) OR separate End Stage (connecting) — not both.
   const stages = await buildStages(processJson, PROCESS_TYPE.FG);
+  const stageProcIds = stages.flatMap((st) => (st.processes || []).map((p) => Number(p.process)));
+  const stageMasters = await loadMasters(
+    stageProcIds.map((id) => ({ process: id, machines: [] })),
+    { activeOnly: true }
+  );
+  const hasEndInStages = stageProcIds.some(
+    (id) => Number(stageMasters.procById.get(id)?.stage) === PROCESS_STAGE.END
+  );
+
+  let connecting = null;
+  if (hasEndInStages) {
+    connecting = null;
+  } else {
+    connecting = Number(processJson?.connecting_process_id);
+    if (!connecting) throw httpError(400, "Select an end stage.");
+    const connectingProc = (await loadMasters([{ process: connecting, machines: [] }], { activeOnly: true })).procById.get(connecting);
+    if (!connectingProc?.fg) throw httpError(400, `${connectingProc?.procname || "Process"} is not a finish process.`);
+    if (Number(connectingProc?.stage) !== PROCESS_STAGE.END) {
+      throw httpError(400, "Select an end stage.");
+    }
+    if (stageProcIds.includes(connecting)) {
+      throw httpError(400, "End process is already used in a stage.");
+    }
+  }
+
   const primeUsed = new Set([
     ...(primePlan.process?.stages || []).flatMap((st) => (st.processes || []).map((p) => Number(p.process))),
     ...(Number(primePlan.process?.connecting) > 0 ? [Number(primePlan.process.connecting)] : []),
@@ -366,8 +411,13 @@ export async function saveFg({ item_dcode, processJson, user }) {
   if (stages.some((st) => (st.processes || []).some((p) => primeUsed.has(Number(p.process))))) {
     throw httpError(400, "Process already used on the prime plan.");
   }
-  const process = buildProcessJson({ type: PROCESS_TYPE.FG, stages });
-  return withTransaction((client) => upsertPlan(client, { type: PROCESS_TYPE.FG, item_dcode: itemDcode, process, user }));
+  if (connecting && primeUsed.has(connecting)) {
+    throw httpError(400, "Process already used on the prime plan.");
+  }
+  const process = buildProcessJson({ type: PROCESS_TYPE.FG, stages, connecting });
+  return withTransaction((client) =>
+    upsertPlan(client, { type: PROCESS_TYPE.FG, item_dcode: itemDcode, process, user, allowUpdate })
+  );
 }
 
 /** Approve or revoke a plan row (Prime / Finish Process Master). */

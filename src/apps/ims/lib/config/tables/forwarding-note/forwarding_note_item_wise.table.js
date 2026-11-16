@@ -45,6 +45,7 @@ export async function createForwardingNoteItemWiseTable() {
       patchCol("bill_updated_at", "TIMESTAMP"),
     ],
     indexes: [
+      `CREATE INDEX IF NOT EXISTS idx_fn_item_fuid ON ${T.FORWARDING_NOTE_ITEM_WISE}(fuid) WHERE is_deleted = false`,
       `CREATE INDEX IF NOT EXISTS idx_fn_item_schno ON ${T.FORWARDING_NOTE_ITEM_WISE}(schno) WHERE schno IS NOT NULL`,
       `CREATE INDEX IF NOT EXISTS idx_fn_item_bill_no ON ${T.FORWARDING_NOTE_ITEM_WISE}(bill_no) WHERE bill_no IS NOT NULL AND is_deleted = false`,
     ],

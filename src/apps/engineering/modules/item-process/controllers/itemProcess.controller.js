@@ -135,15 +135,33 @@ function itemProcessController(type) {
     }
   };
 
-  /** Create + update — one active row per (type, item). Body `{ item_dcode, process: { stages } }`. */
-  const save = async (req, res) => {
+  /**
+   * Shared save. `allowUpdate` comes from the route (`/create` vs `/update`), not body.id —
+   * so add-only clients cannot forge an update via `/create`.
+   */
+  const save = (allowUpdate) => async (req, res) => {
     try {
       const { item_dcode } = req.body || {};
       const processJson = req.body?.process;
+      const planId = Number(req.body?.id);
       if (!Array.isArray(processJson?.stages) || !processJson.stages.length) {
         return res.status(400).json({ success: false, message: "Add at least one stage." });
       }
-      const input = { item_dcode, processJson, user: auditUserName(req) };
+
+      let saveItemDcode = item_dcode;
+      if (allowUpdate) {
+        if (!(Number.isFinite(planId) && planId > 0)) {
+          return res.status(400).json({ success: false, message: "id is required to update." });
+        }
+        const [existing] = await findPlans({ type, id: planId });
+        if (!existing) return res.status(404).json({ success: false, message: `${label} not found.` });
+        if (item_dcode != null && Number(item_dcode) !== Number(existing.item_dcode)) {
+          return res.status(400).json({ success: false, message: "Item cannot be changed on edit." });
+        }
+        saveItemDcode = existing.item_dcode;
+      }
+
+      const input = { item_dcode: saveItemDcode, processJson, user: auditUserName(req), allowUpdate };
       const out = isPrime ? await savePrime(input) : await saveFg(input);
       const [row] = await findPlans({ type, id: out.id });
       log(req, out.created ? "create" : "update", out.id, { item_dcode: row.item_dcode, process: row.process }, row);
@@ -198,7 +216,7 @@ function itemProcessController(type) {
     }
   };
 
-  return { list, get, save, remove, approve };
+  return { list, get, create: save(false), update: save(true), remove, approve };
 }
 
 export const primeProcess = itemProcessController(PROCESS_TYPE.PRIME);

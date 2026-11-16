@@ -63,7 +63,8 @@ async function fetchPackRecordsCached(imsPackFilter, bucket = "pending", forceRe
     }
   }
   const records = await fetchFromIMS("pack", imsPackFilter);
-  packListCache.set(key, { at: now, records: records || [] });
+  // fetchFromIMS returns [] on ERP timeout/failure too — never cache that as a real result.
+  if (records?.length) packListCache.set(key, { at: now, records });
   return records || [];
 }
 

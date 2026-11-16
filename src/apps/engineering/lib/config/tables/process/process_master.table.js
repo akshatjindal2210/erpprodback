@@ -3,7 +3,7 @@ import { ENGINEERING_TABLES as T } from "../../../../../../config/db/dbTables.js
 import { applyTablePatches, columnExists, ensureUniqueIndex, patchCol, patchTableSchema } from "../../../../../../config/db/ensureDbColumns.js";
 import { syncProcessDepth } from "../../../../modules/process-master/models/processMaster.model.js";
 
-/** Process tree: parent_id (null = master) + depth (0 master, 1 sub, 2 sub-sub …). */
+/** Process tree. stage int (1 START · 2 MID · 3 END · 4 CONNECTIVITY) — migrate: v5.2.8/processMasterConnectivityToStage.js */
 export async function createProcessMasterTable() {
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS ${T.PROCESS_MASTER} (
@@ -11,7 +11,7 @@ export async function createProcessMasterTable() {
       procname      VARCHAR(200) NOT NULL,
       parent_id     INTEGER REFERENCES ${T.PROCESS_MASTER}(proccode),
       depth         INTEGER NOT NULL DEFAULT 0,
-      stage         VARCHAR(10) NOT NULL DEFAULT 'MID',
+      stage         INTEGER NOT NULL DEFAULT 2,
       deptname      TEXT,
       multi_jc      BOOLEAN NOT NULL DEFAULT false,
       rm_wire       BOOLEAN NOT NULL DEFAULT false,
@@ -19,7 +19,6 @@ export async function createProcessMasterTable() {
       fg            BOOLEAN NOT NULL DEFAULT false,
       prime         BOOLEAN NOT NULL DEFAULT false,
       rework        BOOLEAN NOT NULL DEFAULT false,
-      connectivity  BOOLEAN NOT NULL DEFAULT false,
       approved      BOOLEAN DEFAULT false,
       approved_by   TEXT,
       approved_at   TIMESTAMP,
@@ -62,7 +61,6 @@ export async function createProcessMasterTable() {
       patchCol("fg", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("prime", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("rework", "BOOLEAN NOT NULL DEFAULT false"),
-      patchCol("connectivity", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("inhouse", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("jobwork", "BOOLEAN NOT NULL DEFAULT false"),
       patchCol("bd_map", "BOOLEAN NOT NULL DEFAULT false"),

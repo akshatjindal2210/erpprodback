@@ -11,8 +11,8 @@ const M = "eng_finish_process_master";
 
 router.post("/list", authenticate, accessControl(M, "view"), fgProcess.list);
 router.post("/get", authenticate, accessControl(M, "view"), fgProcess.get);
-router.post("/create", authenticate, accessControl(M, "add"), fgProcess.save);
-router.post("/update", authenticate, accessControl(M, "edit"), fgProcess.save);
+router.post("/create", authenticate, accessControl(M, "add"), fgProcess.create);
+router.post("/update", authenticate, accessControl(M, ["edit", "authorize"]), fgProcess.update);
 router.post("/delete", authenticate, accessControl(M, "delete"), fgProcess.remove);
 router.post("/approve", authenticate, accessControl(M, "authorize"), fgProcess.approve);
 

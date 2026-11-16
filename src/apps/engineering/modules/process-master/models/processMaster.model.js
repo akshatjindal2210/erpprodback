@@ -8,10 +8,18 @@ import { pathLabel, levelOf } from "../utils/processTree.js";
 
 const TABLE = T.PROCESS_MASTER;
 
+/** stage int — add next code as 5, 6, … */
+export const PROCESS_STAGE = { START: 1, MID: 2, END: 3, CONNECTIVITY: 4 };
+export const DEFAULT_STAGE = PROCESS_STAGE.MID;
+export const toStage = (v) => {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 1 ? n : DEFAULT_STAGE;
+};
+
 /**
  * Boolean process options — single list. New flag: add name here + DB column in process_master.table.js.
  */
-export const PROCESS_FLAGS = ["multi_jc", "default_mc", "rm_wire", "tooling", "fg", "prime", "rework", "inhouse", "jobwork", "connectivity", "bd_map"];
+export const PROCESS_FLAGS = ["multi_jc", "default_mc", "rm_wire", "tooling", "fg", "prime", "rework", "inhouse", "jobwork", "bd_map"];
 
 /** Row → { multi_jc: true, rm_wire: false, … } — exactly as set in Process Master. */
 export const flagsOf = (row) => Object.fromEntries(PROCESS_FLAGS.map((f) => [f, row?.[f] === true]));
@@ -23,6 +31,8 @@ const FILTERS = {
   id: (i) => `pm.proccode = $${i}`,
   parent_id: (i) => `pm.parent_id = $${i}`,
   stage: (i) => `pm.stage = $${i}`,
+  /** Multiple stage codes, e.g. [1, 2] for middle stages (exclude END / CONNECTIVITY). */
+  stages: (i) => `pm.stage = ANY($${i}::int[])`,
   depth: (i) => `pm.depth = $${i}`,
   approved: (i) => `pm.approved = $${i}`,
   is_active: (i) => `pm.is_active = $${i}`,
@@ -95,7 +105,15 @@ export async function findProcesses({ filters = {}, search, sort = {}, page = 1,
 
   for (const [key, val] of Object.entries(filters)) {
     if (val === undefined || val === null || val === "" || !FILTERS[key]) continue;
-    const next = BOOL_FILTERS.has(key) ? val === true || val === "true" || val === "1" : val;
+    let next = BOOL_FILTERS.has(key) ? val === true || val === "true" || val === "1" : val;
+    if (key === "stage") next = toStage(val);
+    if (key === "stages") {
+      const list = (Array.isArray(val) ? val : String(val).split(","))
+        .map((x) => toStage(x))
+        .filter((n, i, a) => a.indexOf(n) === i);
+      if (!list.length) continue;
+      next = list;
+    }
     add(next, FILTERS[key]);
   }
   if (search) {

@@ -95,11 +95,10 @@ function packingListSql({ onlyInHand = false, extraWhere = "", includeTotal = fa
       WHERE b.is_deleted = false AND ${PN("b")} = $1
     ),`
     : `tray_packings AS (
-      SELECT DISTINCT ${PN("b")} AS packing_number
-      FROM ${T.BOX_TABLE} b
-      INNER JOIN ${T.DAILYPROD} dp ON ${sqlDailyprodDocNoMatch("dp.doc_no", "b.packing_number")}
+      SELECT DISTINCT ${DOC} AS packing_number
+      FROM ${T.DAILYPROD} dp
       ${TRAY_JOINS}
-      WHERE b.is_deleted = false AND ${IS_TRAY}
+      WHERE ${IS_TRAY}
       ${traySearchSql}
     ),
     stickers AS (
@@ -632,16 +631,13 @@ function displayMetaFromLinks(links = []) {
   };
 }
 
-/** Item codes for register list/detail — join stickers → packing → dailyprod. */
+/** Item codes for register list — packing_number(s) → dailyprod. */
 const REGISTER_ITEM_CODES_SQL = `(
   SELECT NULLIF(string_agg(DISTINCT TRIM(dp.item_code::text), ' | '), '')
-  FROM jsonb_array_elements(COALESCE(m.data->'links', '[]'::jsonb)) x
-  INNER JOIN ${T.BOX_TABLE} b
-    ON b.is_deleted = false
-   AND TRIM(b.box_no_uid::text) = TRIM(COALESCE(x->>'sticker', x->>'s', ''))
+  FROM unnest(string_to_array(REPLACE(COALESCE(m.packing_number, ''), ' | ', '|'), '|')) AS part(raw)
   INNER JOIN ${T.DAILYPROD} dp
-    ON ${sqlDailyprodDocNoMatch("dp.doc_no", "b.packing_number")}
-  WHERE NULLIF(TRIM(COALESCE(x->>'sticker', x->>'s', '')), '') IS NOT NULL
+    ON ${sqlDailyprodDocNoMatch("dp.doc_no", "NULLIF(TRIM(part.raw), '')")}
+  WHERE NULLIF(TRIM(part.raw), '') IS NOT NULL
 )`;
 
 export async function enrichRegisterLinksWithTrayIds(links = []) {
@@ -1353,9 +1349,10 @@ async function findRegisteredSnapshots(options = {}) {
        )::int AS used_count
        FROM ${T.BOX_TABLE} b
        WHERE b.is_deleted = false
-         AND (
-           TRIM(b.packing_number::text) = TRIM(SPLIT_PART(REPLACE(r.packing_number, ' | ', '|'), '|', 1))
-           OR (POSITION(' | ' IN COALESCE(r.packing_number, '')) > 0 AND r.packing_number LIKE '%' || TRIM(b.packing_number::text) || '%')
+         AND NULLIF(TRIM(b.packing_number::text), '') = ANY (
+           SELECT NULLIF(TRIM(part), '')
+           FROM unnest(string_to_array(REPLACE(COALESCE(r.packing_number, ''), ' | ', '|'), '|')) AS part
+           WHERE NULLIF(TRIM(part), '') IS NOT NULL
          )
      ) u ON true
      WHERE ${where.join(" AND ")}

@@ -11,8 +11,8 @@ const M = "eng_prime_item_master";
 
 router.post("/list", authenticate, accessControl(M, "view"), primeProcess.list);
 router.post("/get", authenticate, accessControl(M, "view"), primeProcess.get);
-router.post("/create", authenticate, accessControl(M, "add"), primeProcess.save);
-router.post("/update", authenticate, accessControl(M, "edit"), primeProcess.save);
+router.post("/create", authenticate, accessControl(M, "add"), primeProcess.create);
+router.post("/update", authenticate, accessControl(M, ["edit", "authorize"]), primeProcess.update);
 router.post("/delete", authenticate, accessControl(M, "delete"), primeProcess.remove);
 router.post("/approve", authenticate, accessControl(M, "authorize"), primeProcess.approve);
 

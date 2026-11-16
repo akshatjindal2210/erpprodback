@@ -35,5 +35,8 @@ export async function createOutEntryTable() {
     columns: [
       patchCol("qc_hold_id", `INTEGER REFERENCES ${T.QC_HOLD_MATERIAL}(hold_id) ON DELETE SET NULL`),
     ],
+    indexes: [
+      `CREATE INDEX IF NOT EXISTS idx_out_entry_fuid_latest ON ${T.OUT_ENTRY} (fuid, out_uid DESC) WHERE is_deleted = false`,
+    ],
   });
 }

@@ -90,11 +90,11 @@ export const activityLogger = (appType) => {
 
           if (req.method === "POST") {
             const isApproval =
-              req.body.approved === true ||
-              req.body.approve === true ||
-              req.body.is_approved === true ||
-              req.body.status === "approved" ||
-              req.body.status === "authorized" ||
+              req.body?.approved === true ||
+              req.body?.approve === true ||
+              req.body?.is_approved === true ||
+              req.body?.status === "approved" ||
+              req.body?.status === "authorized" ||
               routeUrl.includes("/approve") ||
               routeUrl.includes("/authorize");
 

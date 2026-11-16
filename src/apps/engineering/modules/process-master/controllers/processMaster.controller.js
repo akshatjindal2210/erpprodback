@@ -1,6 +1,7 @@
 import {
   findProcesses, findProcess, insertProcess, updateProcess as updateProcessRow, softDeleteProcess,
-  countActiveChildren, countMachinesForProcess, syncProcessDepth, findSiblingByName, loadTree, PROCESS_DEFAULT_FIELDS, PROCESS_FLAGS, flagsOf,
+  countActiveChildren, countMachinesForProcess, syncProcessDepth, findSiblingByName, loadTree,
+  PROCESS_DEFAULT_FIELDS, PROCESS_FLAGS, flagsOf, toStage,
 } from "../models/processMaster.model.js";
 import { resolveParent, subtreeIds } from "../utils/processTree.js";
 import { logActivity } from "../../../../core/lib/utils/activity/logActivity.js";
@@ -16,16 +17,11 @@ import { fetchEmpMaster } from "../../../../hrms/lib/erpApi.js";
 
 const ENTITY = "eng_process_master";
 const CFG = getCrudModuleConfig(ENTITY);
-const STAGES = new Set(["START", "MID", "END"]);
-const HELPER_FILTER_KEYS = ["proccode", "id", "approved", "parent_id", "stage", "depth", ...PROCESS_FLAGS];
+const HELPER_FILTER_KEYS = ["proccode", "id", "approved", "parent_id", "stage", "stages", "depth", ...PROCESS_FLAGS];
 
 const log = (req, action, entity_id, details, record = null, existing = null) =>
   logActivity(req, { action, entity: ENTITY, entity_id, details, record, existing }).catch(() => {});
 
-const toStage = (v) => {
-  const s = String(v ?? "MID").trim().toUpperCase();
-  return STAGES.has(s) ? s : "MID";
-};
 const toBool = (v) => v === true || v === "true" || v === 1 || v === "1";
 const toName = (v) => String(v ?? "").trim();
 
@@ -77,15 +73,10 @@ const handle = (name, fn) => async (req, res) => {
   }
 };
 
-const withConnectivityQuery = (filters, query) => {
-  if (query?.connectivity == null || query.connectivity === "") return filters || {};
-  return { ...(filters || {}), connectivity: query.connectivity };
-};
-
 export const listProcesses = handle("list", async (req, res) => {
   const { page, limit, sortBy, order, search, filters } = extractListParams(req.body || {});
   const data = await findProcesses({
-    filters: sanitizeFilters(withConnectivityQuery(filters, req.query), CFG?.filterFields || []),
+    filters: sanitizeFilters(filters, CFG?.filterFields || []),
     search: sanitizeSearch(search),
     sort: { by: sortBy, order },
     page,
@@ -242,7 +233,7 @@ export const deleteProcess = handle("delete", async (req, res) => {
 export const listProcessViews = handle("helper", async (req, res) => {
   const body = req.body || {};
   const { page, limit, search, filters } = extractListParams(body);
-  const safeFilters = sanitizeFilters(withConnectivityQuery(filters, req.query), HELPER_FILTER_KEYS);
+  const safeFilters = sanitizeFilters(filters, HELPER_FILTER_KEYS);
 
   const byCode = parsePositiveIntId(body.proccode ?? body.id ?? safeFilters.proccode ?? safeFilters.id);
   if (byCode) {

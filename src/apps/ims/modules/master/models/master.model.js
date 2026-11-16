@@ -20,7 +20,8 @@ export const findItems = async ({ search, page = 1, limit = 10, sortBy = 'item_c
   const offset    = (safePage - 1) * safeLimit;
 
   const allowedColumns = ['itemdcode', 'item_code', 'itemdesc', 'grpname', 'minqty', 'reorderqty'];
-  const finalSortBy = allowedColumns.includes(sortBy.toLowerCase()) ? `i.${sortBy}` : 'i.itemdcode';
+  const sortKey = String(sortBy ?? '').toLowerCase();
+  const finalSortBy = allowedColumns.includes(sortKey) ? `i.${sortKey}` : 'i.itemdcode';
   const finalOrder = order.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
   const countRes = await dbQuery(`SELECT COUNT(*) AS count FROM Item i ${whereClause}`, values);
